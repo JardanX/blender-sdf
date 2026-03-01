@@ -26,6 +26,7 @@
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_sequence_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_volume_types.h"
 #include "DNA_world_types.h"
 
@@ -165,6 +166,7 @@ static void get_element_operation_type(
       case ID_CV:
       case ID_PT:
       case ID_VO:
+      case ID_SF:
       case ID_GP:
         is_standard_id = true;
         break;
@@ -319,6 +321,12 @@ static void unlink_material_fn(bContext * /*C*/,
       Volume *volume = (Volume *)tsep->id;
       totcol = volume->totcol;
       matar = volume->mat;
+      break;
+    }
+    case ID_SF: {
+      SDF *sdf = (SDF *)tsep->id;
+      totcol = sdf->totcol;
+      matar = sdf->mat;
       break;
     }
     default:

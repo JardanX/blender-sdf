@@ -1857,6 +1857,12 @@ void DepsgraphNodeBuilder::build_object_data_geometry_datablock(ID *obdata)
       op_node->set_as_entry();
       break;
     }
+    case ID_SF: {
+      /* SDF data-block: no geometry eval needed, just register the node. */
+      op_node = add_operation_node(obdata, NodeType::GEOMETRY, OperationCode::GEOMETRY_EVAL);
+      op_node->set_as_entry();
+      break;
+    }
     default:
       BLI_assert_msg(0, "Should not happen");
       break;
