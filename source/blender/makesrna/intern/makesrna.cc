@@ -4967,6 +4967,7 @@ static RNAProcessItem PROCESS_ITEMS[] = {
 #endif
     {"rna_userdef.cc", nullptr, RNA_def_userdef},
     {"rna_vfont.cc", "rna_vfont_api.cc", RNA_def_vfont},
+    {"rna_sdf.cc", nullptr, RNA_def_sdf},
     {"rna_volume.cc", nullptr, RNA_def_volume},
     {"rna_wm.cc", "rna_wm_api.cc", RNA_def_wm},
     {"rna_wm_gizmo.cc", "rna_wm_gizmo_api.cc", RNA_def_wm_gizmo},

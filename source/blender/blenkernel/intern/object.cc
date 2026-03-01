@@ -127,6 +127,7 @@
 #include "BKE_speaker.h"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_vfont.hh"
+#include "BKE_sdf.hh"
 #include "BKE_volume.hh"
 
 #include "DEG_depsgraph.hh"
@@ -1965,6 +1966,8 @@ static const char *get_obdata_defname(int type)
       return DATA_("LightProbe");
     case OB_GREASE_PENCIL:
       return DATA_("GreasePencil");
+    case OB_SDF:
+      return DATA_("SDF");
     default:
       CLOG_ERROR(&LOG, "Internal error, bad type: %d", type);
       return CTX_DATA_(BLT_I18NCONTEXT_ID_ID, "Empty");
@@ -2034,6 +2037,8 @@ void *BKE_object_obdata_add_from_type(Main *bmain, int type, const char *name)
       return BKE_volume_add(bmain, name);
     case OB_GREASE_PENCIL:
       return BKE_grease_pencil_add(bmain, name);
+    case OB_SDF:
+      return BKE_sdf_add(bmain, name);
     case OB_EMPTY:
       return nullptr;
     default:
@@ -2072,6 +2077,8 @@ int BKE_object_obdata_to_type(const ID *id)
       return OB_VOLUME;
     case ID_GP:
       return OB_GREASE_PENCIL;
+    case ID_SF:
+      return OB_SDF;
     default:
       return -1;
   }
@@ -2628,6 +2635,11 @@ Object *BKE_object_duplicate(Main *bmain,
       break;
     case OB_VOLUME:
       if (dupflag & USER_DUP_VOLUME) {
+        id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
+      }
+      break;
+    case OB_SDF:
+      if (dupflag & USER_DUP_SDF) {
         id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
       }
       break;

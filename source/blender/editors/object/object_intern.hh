@@ -150,6 +150,10 @@ void OBJECT_OT_convert(wmOperatorType *ot);
 /* `object_volume.cc` */
 
 void OBJECT_OT_volume_add(wmOperatorType *ot);
+
+/* `object_sdf.cc` */
+
+void OBJECT_OT_sdf_add(wmOperatorType *ot);
 /**
  * Called by other space types too.
  */

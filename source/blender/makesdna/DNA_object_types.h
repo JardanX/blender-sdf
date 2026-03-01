@@ -464,6 +464,8 @@ typedef enum ObjectType {
 
   OB_GREASE_PENCIL = 30,
 
+  OB_SDF = 31,
+
   /* Keep last. */
   OB_TYPE_MAX,
 } ObjectType;
@@ -523,7 +525,8 @@ typedef enum ObjectType {
         ID_CV, \
         ID_PT, \
         ID_VO, \
-        ID_GP))
+        ID_GP, \
+        ID_SF))
 
 #define OB_DATA_SUPPORT_ID_CASE \
   ID_ME: \
@@ -539,7 +542,8 @@ typedef enum ObjectType {
   case ID_CV: \
   case ID_PT: \
   case ID_VO: \
-  case ID_GP
+  case ID_GP: \
+  case ID_SF
 
 /** #Object.partype: first 4 bits: type. */
 enum {

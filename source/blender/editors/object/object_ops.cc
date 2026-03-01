@@ -100,6 +100,7 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_pointcloud_random_add);
   WM_operatortype_append(OBJECT_OT_volume_add);
   WM_operatortype_append(OBJECT_OT_volume_import);
+  WM_operatortype_append(OBJECT_OT_sdf_add);
   WM_operatortype_append(OBJECT_OT_add);
   WM_operatortype_append(OBJECT_OT_lattice_add_to_selected);
   WM_operatortype_append(OBJECT_OT_add_named);

@@ -191,6 +191,8 @@ bool VelocityModule::step_object_sync(ObjectKey &object_key,
         case OB_MESH:
           data.pos_buf = DRW_cache_mesh_surface_get(ob);
           break;
+        default:
+          break;
       }
       return data;
     };

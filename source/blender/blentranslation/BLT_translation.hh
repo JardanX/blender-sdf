@@ -135,6 +135,7 @@ blender::StringRef BLT_translate_do_new_dataname(blender::StringRef msgctxt,
 #define BLT_I18NCONTEXT_ID_POINTCLOUD "PointCloud"
 #define BLT_I18NCONTEXT_ID_SCENE "Scene"
 #define BLT_I18NCONTEXT_ID_SCREEN "Screen"
+#define BLT_I18NCONTEXT_ID_SDF "SDF"
 #define BLT_I18NCONTEXT_ID_SEQUENCE "Sequence"
 #define BLT_I18NCONTEXT_ID_SHAPEKEY "Key"
 #define BLT_I18NCONTEXT_ID_SIMULATION "Simulation"
@@ -213,6 +214,7 @@ struct BLT_i18n_contexts_descriptor {
         BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_POINTCLOUD, "id_pointcloud"), \
         BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_SCENE, "id_scene"), \
         BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_SCREEN, "id_screen"), \
+        BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_SDF, "id_sdf"), \
         BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_SEQUENCE, "id_sequence"), \
         BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_SHAPEKEY, "id_shapekey"), \
         BLT_I18NCONTEXTS_ITEM(BLT_I18NCONTEXT_ID_SIMULATION, "id_simulation"), \

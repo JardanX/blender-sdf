@@ -481,6 +481,10 @@ void drw_batch_cache_validate(Object *ob)
       break;
     case OB_GREASE_PENCIL:
       DRW_grease_pencil_batch_cache_validate(&DRW_object_get_data_for_drawing<GreasePencil>(*ob));
+      break;
+    case OB_SDF:
+      /* SDF objects have no batch cache yet. */
+      break;
     default:
       break;
   }
