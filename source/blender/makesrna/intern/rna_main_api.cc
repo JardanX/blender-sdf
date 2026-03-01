@@ -82,6 +82,7 @@
 #  include "DNA_node_types.h"
 #  include "DNA_particle_types.h"
 #  include "DNA_pointcloud_types.h"
+#  include "DNA_sdf_types.h"
 #  include "DNA_sound_types.h"
 #  include "DNA_speaker_types.h"
 #  include "DNA_text_types.h"
