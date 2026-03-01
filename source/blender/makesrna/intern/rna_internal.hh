@@ -206,6 +206,7 @@ void RNA_def_ui(BlenderRNA *brna);
 void RNA_def_usd(BlenderRNA *brna);
 void RNA_def_userdef(BlenderRNA *brna);
 void RNA_def_vfont(BlenderRNA *brna);
+void RNA_def_sdf(BlenderRNA *brna);
 void RNA_def_volume(BlenderRNA *brna);
 void RNA_def_wm(BlenderRNA *brna);
 void RNA_def_wm_gizmo(BlenderRNA *brna);
@@ -526,6 +527,7 @@ void RNA_def_main_lightprobes(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_hair_curves(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_pointclouds(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_volumes(BlenderRNA *brna, PropertyRNA *cprop);
+void RNA_def_main_sdfs(BlenderRNA *brna, PropertyRNA *cprop);
 
 /* ID Properties */
 

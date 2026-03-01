@@ -50,6 +50,7 @@
 #  include "BKE_particle.h"
 #  include "BKE_pointcloud.hh"
 #  include "BKE_scene.hh"
+#  include "BKE_sdf.hh"
 #  include "BKE_sound.h"
 #  include "BKE_speaker.h"
 #  include "BKE_text.h"
@@ -856,6 +857,19 @@ static Volume *rna_Main_volumes_new(Main *bmain, const char *name)
   return volume;
 }
 
+static SDF *rna_Main_sdfs_new(Main *bmain, const char *name)
+{
+  char safe_name[MAX_ID_NAME - 2];
+  rna_idname_validate(name, safe_name);
+
+  SDF *sdf = BKE_sdf_add(bmain, safe_name);
+  id_us_min(&sdf->id);
+
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+
+  return sdf;
+}
+
 /* tag functions, all the same */
 #  define RNA_MAIN_ID_TAG_FUNCS_DEF(_func_name, _listbase_name, _id_type) \
     static void rna_Main_##_func_name##_tag(Main *bmain, bool value) \
@@ -902,6 +916,7 @@ RNA_MAIN_ID_TAG_FUNCS_DEF(lightprobes, lightprobes, ID_LP)
 RNA_MAIN_ID_TAG_FUNCS_DEF(hair_curves, hair_curves, ID_CV)
 RNA_MAIN_ID_TAG_FUNCS_DEF(pointclouds, pointclouds, ID_PT)
 RNA_MAIN_ID_TAG_FUNCS_DEF(volumes, volumes, ID_VO)
+RNA_MAIN_ID_TAG_FUNCS_DEF(sdfs, sdfs, ID_SF)
 
 #  undef RNA_MAIN_ID_TAG_FUNCS_DEF
 
@@ -2493,6 +2508,50 @@ void RNA_def_main_volumes(BlenderRNA *brna, PropertyRNA *cprop)
       func, "do_ui_user", true, "", "Make sure interface does not reference this volume data");
 
   func = RNA_def_function(srna, "tag", "rna_Main_volumes_tag");
+  parm = RNA_def_boolean(func, "value", false, "Value", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
+
+void RNA_def_main_sdfs(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "BlendDataSDFs");
+  srna = RNA_def_struct(brna, "BlendDataSDFs", nullptr);
+  RNA_def_struct_sdna(srna, "Main");
+  RNA_def_struct_ui_text(srna, "Main SDFs", "Collection of SDF data-blocks");
+
+  func = RNA_def_function(srna, "new", "rna_Main_sdfs_new");
+  RNA_def_function_ui_description(func, "Add a new SDF to the main database");
+  parm = RNA_def_string(func, "name", "SDF", 0, "", "New name for the data-block");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* return type */
+  parm = RNA_def_pointer(func, "sdf", "SDF", "", "New SDF data-block");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_Main_ID_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove an SDF from the current blendfile");
+  parm = RNA_def_pointer(func, "sdf", "SDF", "", "SDF to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_boolean(func,
+                  "do_unlink",
+                  true,
+                  "",
+                  "Unlink all usages of this SDF before deleting it "
+                  "(WARNING: will also delete objects instancing that SDF data)");
+  RNA_def_boolean(func,
+                  "do_id_user",
+                  true,
+                  "",
+                  "Decrement user counter of all data-blocks used by this SDF data");
+  RNA_def_boolean(
+      func, "do_ui_user", true, "", "Make sure interface does not reference this SDF data");
+
+  func = RNA_def_function(srna, "tag", "rna_Main_sdfs_tag");
   parm = RNA_def_boolean(func, "value", false, "Value", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 }

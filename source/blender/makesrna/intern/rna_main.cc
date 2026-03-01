@@ -180,6 +180,7 @@ RNA_MAIN_LISTBASE_FUNCS_DEF(sounds)
 RNA_MAIN_LISTBASE_FUNCS_DEF(speakers)
 RNA_MAIN_LISTBASE_FUNCS_DEF(texts)
 RNA_MAIN_LISTBASE_FUNCS_DEF(textures)
+RNA_MAIN_LISTBASE_FUNCS_DEF(sdfs)
 RNA_MAIN_LISTBASE_FUNCS_DEF(volumes)
 RNA_MAIN_LISTBASE_FUNCS_DEF(wm)
 RNA_MAIN_LISTBASE_FUNCS_DEF(workspaces)
@@ -501,6 +502,12 @@ void RNA_def_main(BlenderRNA *brna)
        "Volumes",
        "Volume data-blocks",
        RNA_def_main_volumes},
+      {"sdfs",
+       "SDF",
+       "rna_Main_sdfs_begin",
+       "SDFs",
+       "SDF data-blocks",
+       RNA_def_main_sdfs},
       {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr},
   };
 

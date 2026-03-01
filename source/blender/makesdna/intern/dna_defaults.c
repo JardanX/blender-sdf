@@ -109,6 +109,7 @@
 #include "DNA_particle_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 #include "DNA_speaker_types.h"
 #include "DNA_texture_types.h"
@@ -142,6 +143,7 @@
 #include "DNA_particle_defaults.h"
 #include "DNA_pointcloud_defaults.h"
 #include "DNA_scene_defaults.h"
+#include "DNA_sdf_defaults.h"
 #include "DNA_space_defaults.h"
 #include "DNA_speaker_defaults.h"
 #include "DNA_texture_defaults.h"
@@ -238,6 +240,9 @@ SDNA_DEFAULT_DECL_STRUCT(Sculpt);
 
 /* DNA_space_defaults.h */
 SDNA_DEFAULT_DECL_STRUCT(SpaceClip);
+
+/* DNA_sdf_defaults.h */
+SDNA_DEFAULT_DECL_STRUCT(SDF);
 
 /* DNA_speaker_defaults.h */
 SDNA_DEFAULT_DECL_STRUCT(Speaker);
@@ -541,6 +546,9 @@ const void *DNA_default_table[SDNA_TYPE_MAX] = {
     SDNA_DEFAULT_DECL_EX(View3DOverlay, View3D.overlay),
     SDNA_DEFAULT_DECL_EX(View3DShading, View3D.shading),
     SDNA_DEFAULT_DECL_EX(View3DCursor, Scene.cursor),
+
+    /* DNA_sdf_defaults.h */
+    SDNA_DEFAULT_DECL(SDF),
 
     /* DNA_volume_defaults.h */
     SDNA_DEFAULT_DECL(Volume),
