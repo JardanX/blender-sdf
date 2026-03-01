@@ -1020,6 +1020,7 @@ MainListsArray BKE_main_lists_get(Main &bmain)
   lb[INDEX_ID_CV] = &bmain.hair_curves;
   lb[INDEX_ID_PT] = &bmain.pointclouds;
   lb[INDEX_ID_VO] = &bmain.volumes;
+  lb[INDEX_ID_SF] = &bmain.sdfs;
 
   lb[INDEX_ID_LT] = &bmain.lattices;
   lb[INDEX_ID_LA] = &bmain.lights;
