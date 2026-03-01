@@ -2472,6 +2472,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
         return ICON_OUTLINER_OB_POINTCLOUD;
       case OB_VOLUME:
         return ICON_OUTLINER_OB_VOLUME;
+      case OB_SDF:
+        return ICON_OUTLINER_OB_VOLUME;
       case OB_EMPTY:
         if (ob->instance_collection && (ob->transflag & OB_DUPLICOLLECTION)) {
           return ICON_OUTLINER_OB_GROUP_INSTANCE;
@@ -2567,6 +2569,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
     case ID_PT:
       return ICON_OUTLINER_DATA_POINTCLOUD;
     case ID_VO:
+      return ICON_OUTLINER_DATA_VOLUME;
+    case ID_SF:
       return ICON_OUTLINER_DATA_VOLUME;
     case ID_LI:
       if (id->tag & ID_TAG_MISSING) {
