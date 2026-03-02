@@ -31,6 +31,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 #include "DNA_world_types.h"
 
@@ -4407,6 +4408,25 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
       LISTBASE_FOREACH (bPoseChannel *, pose_bone, &obj->pose->chanbase) {
         /* Those flags were previously unused, so to be safe we clear them. */
         pose_bone->flag &= ~(POSE_SELECTED_ROOT | POSE_SELECTED_TIP);
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 124)) {
+    /* Initialize SDF draw engine defaults for View3DShading. */
+    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
+      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
+        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
+          if (sl->spacetype == SPACE_VIEW3D) {
+            View3D *v3d = (View3D *)sl;
+            if (v3d->shading.sdf_resolution == 0) {
+              v3d->shading.sdf_resolution = 256;
+            }
+            if (v3d->shading.sdf_surface_margin == 0) {
+              v3d->shading.sdf_surface_margin = 100;
+            }
+          }
+        }
       }
     }
   }
