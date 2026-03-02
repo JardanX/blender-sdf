@@ -8,6 +8,7 @@
 #include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/pointcloud.h"
+#include "scene/sdf.h"
 #include "scene/volume.h"
 
 #include "blender/sync.h"
@@ -21,6 +22,10 @@ static Geometry::Type determine_geom_type(BObjectInfo &b_ob_info, bool use_parti
 {
   if (b_ob_info.object_data.is_a(&RNA_Light)) {
     return Geometry::LIGHT;
+  }
+
+  if (b_ob_info.object_data.is_a(&RNA_SDF)) {
+    return Geometry::SDF;
   }
 
   if (b_ob_info.object_data.is_a(&RNA_Curves) || use_particle_hair) {
@@ -53,7 +58,8 @@ array<Node *> BlenderSync::find_used_shaders(BL::Object &b_ob)
 
   BL::Material material_override = view_layer.material_override;
   Shader *default_shader = (b_ob.type() == BL::Object::type_VOLUME) ? scene->default_volume :
-                                                                      scene->default_surface;
+                            (b_ob.type() == BL::Object::type_SDF) ? scene->default_surface :
+                                                                     scene->default_surface;
 
   for (BL::MaterialSlot &b_slot : b_ob.material_slots) {
     if (material_override) {
@@ -116,6 +122,9 @@ Geometry *BlenderSync::sync_geometry(BObjectInfo &b_ob_info,
     }
     else if (geom_type == Geometry::POINTCLOUD) {
       geom = scene->create_node<PointCloud>();
+    }
+    else if (geom_type == Geometry::SDF) {
+      geom = scene->create_node<SDFGeometry>();
     }
     else {
       geom = scene->create_node<Mesh>();
@@ -184,6 +193,10 @@ Geometry *BlenderSync::sync_geometry(BObjectInfo &b_ob_info,
     else if (geom_type == Geometry::POINTCLOUD) {
       PointCloud *pointcloud = static_cast<PointCloud *>(geom);
       sync_pointcloud(pointcloud, b_ob_info);
+    }
+    else if (geom_type == Geometry::SDF) {
+      SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
+      sync_sdf(b_ob_info, sdf);
     }
     else {
       Mesh *mesh = static_cast<Mesh *>(geom);
@@ -263,6 +276,9 @@ void BlenderSync::sync_geometry_motion(BObjectInfo &b_ob_info,
              object_fluid_gas_domain_find(b_ob_info.real_object))
     {
       /* No volume motion blur support yet. */
+    }
+    else if (b_ob_info.object_data.is_a(&RNA_SDF)) {
+      /* No SDF motion blur support yet. */
     }
     else if (b_ob_info.object_data.is_a(&RNA_PointCloud)) {
       PointCloud *pointcloud = static_cast<PointCloud *>(geom);

@@ -339,7 +339,9 @@ set(GLSL_SRC
 
   engines/workbench/workbench_shader_shared.hh
 
+  engines/sdf/shaders/sdf_classify_comp.glsl
   engines/sdf/shaders/sdf_bake_comp.glsl
+  engines/sdf/shaders/sdf_grid_blend_comp.glsl
   engines/sdf/shaders/sdf_march_frag.glsl
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/sdf_shader_shared.hh
@@ -636,6 +638,13 @@ if(WITH_TBB)
     # that will collide with the STL versions.
     add_definitions(-DNOMINMAX)
   endif()
+endif()
+
+# SDF engine uses GL timestamp queries for performance overlay.
+if(WITH_OPENGL_BACKEND)
+  list(APPEND INC_SYS
+    ${Epoxy_INCLUDE_DIRS}
+  )
 endif()
 
 blender_add_lib(bf_draw "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")

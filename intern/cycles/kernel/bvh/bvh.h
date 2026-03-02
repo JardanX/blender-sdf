@@ -12,6 +12,7 @@
 #include "kernel/geom/motion_triangle_intersect.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/point_intersect.h"
+#include "kernel/geom/sdf.h"
 #include "kernel/geom/triangle_intersect.h"
 
 /* Device specific acceleration structures for ray tracing. */
@@ -101,11 +102,13 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     return false;
   }
 
+  bool hit = false;
+
 #  ifdef __EMBREE__
   IF_USING_EMBREE
   {
     if (kernel_data.device_bvh) {
-      return kernel_embree_intersect(kg, ray, visibility, isect);
+      hit = kernel_embree_intersect(kg, ray, visibility, isect);
     }
   }
 #  endif
@@ -116,25 +119,37 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     if (kernel_data.bvh.have_motion) {
 #    ifdef __HAIR__
       if (kernel_data.bvh.have_curves) {
-        return bvh_intersect_hair_motion(kg, ray, isect, visibility);
+        hit = bvh_intersect_hair_motion(kg, ray, isect, visibility);
       }
+      else
 #    endif /* __HAIR__ */
-
-      return bvh_intersect_motion(kg, ray, isect, visibility);
+      {
+        hit = bvh_intersect_motion(kg, ray, isect, visibility);
+      }
     }
+    else
 #  endif /* __OBJECT_MOTION__ */
-
+    {
 #  ifdef __HAIR__
-    if (kernel_data.bvh.have_curves) {
-      return bvh_intersect_hair(kg, ray, isect, visibility);
-    }
+      if (kernel_data.bvh.have_curves) {
+        hit = bvh_intersect_hair(kg, ray, isect, visibility);
+      }
+      else
 #  endif /* __HAIR__ */
-
-    return bvh_intersect(kg, ray, isect, visibility);
+      {
+        hit = bvh_intersect(kg, ray, isect, visibility);
+      }
+    }
   }
 
-  kernel_assert(false);
-  return false;
+  /* SDF intersection: march all SDF objects, only find closer hits. */
+  if (kernel_data.sdf.num_sdfs > 0) {
+    if (sdf_intersect_all(kg, ray, isect, visibility)) {
+      hit = true;
+    }
+  }
+
+  return hit;
 }
 
 ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,

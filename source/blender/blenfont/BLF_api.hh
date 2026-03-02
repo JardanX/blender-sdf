@@ -22,10 +22,10 @@
 #define BLF_DATAFILES_FONTS_DIR "fonts"
 
 /** File name of the default variable-width font. */
-#define BLF_DEFAULT_PROPORTIONAL_FONT "Inter.woff2"
+#define BLF_DEFAULT_PROPORTIONAL_FONT "Ra-Mono.otf"
 
 /** File name of the default fixed-pitch font. */
-#define BLF_DEFAULT_MONOSPACED_FONT "DejaVuSansMono.woff2"
+#define BLF_DEFAULT_MONOSPACED_FONT "Ra-Mono.otf"
 
 struct ListBase;
 struct ResultBLF;

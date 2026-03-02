@@ -5,14 +5,23 @@
 /** \file
  * \ingroup draw_engine
  *
- * SDF draw engine: bakes SDF objects into a 3D atlas, then ray-marches it.
+ * SDF draw engine: bakes SDF objects into a sparse brick atlas, then ray-marches it.
  */
 
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 
+#include "BKE_geometry_set.hh"
+#include "BKE_idprop.hh"
+#include "BKE_object.hh"
+#include "BKE_object_types.hh"
 #include "BKE_studiolight.h"
+#include "BKE_volume.hh"
+#include "BKE_volume_render.hh"
 
+#include "DNA_modifier_types.h"
+#include "DNA_node_tree_interface_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_view3d_enums.h"
@@ -20,15 +29,19 @@
 
 #include "IMB_imbuf_types.hh"
 
+#include "MEM_guardedalloc.h"
+
 #include "GPU_batch.hh"
 #include "GPU_compute.hh"
 #include "GPU_framebuffer.hh"
 #include "GPU_shader.hh"
+#include "GPU_shader_builtin.hh"
 #include "GPU_state.hh"
 #include "GPU_storage_buffer.hh"
 #include "GPU_texture.hh"
 #include "GPU_uniform_buffer.hh"
 
+#include "draw_defines.hh"
 #include "draw_manager.hh"
 #include "draw_view.hh"
 #include "draw_view_data.hh"
@@ -37,12 +50,32 @@
 
 #include "sdf_engine.h" /* Own include. */
 
+#include "BLI_time.h"
+
+#include "GPU_context.hh"
+
+#include <epoxy/gl.h>
+
+#include <cmath>
 #include <cstdio>
 #include <string>
 
 namespace blender::draw::sdf {
 
 using namespace draw;
+
+/* ---- Performance overlay static state ---- */
+
+/** Number of timestamp stamps per frame: before classify, after classify,
+ *  after bake, after grid blend, after march. */
+static constexpr int PERF_STAMP_COUNT = 5;
+/** Number of FPS samples for smoothing. */
+static constexpr int PERF_FPS_SAMPLES = 8;
+
+/** Formatted performance text, shared with the overlay drawing code. */
+static char s_perf_text[SDF_PERF_BUF_SIZE] = "";
+/** Whether the performance data is valid for display. */
+static bool s_perf_active = false;
 
 class Instance : public DrawEngine {
  private:
@@ -53,21 +86,54 @@ class Instance : public DrawEngine {
   float3 scene_min_ = float3(1e30f);
   float3 scene_max_ = float3(-1e30f);
 
-  /** Dense 3D atlas (R16F). */
-  gpu::Texture *atlas_tx_ = nullptr;
+  /** Brick grid indirection texture (R32I, grid_res^3). */
+  gpu::Texture *indirection_tx_ = nullptr;
+  /** Compact atlas (RGBA16F, sized for active bricks only). */
+  gpu::Texture *compact_atlas_tx_ = nullptr;
+  /** Brick counter SSBO (1 uint + padding). */
+  gpu::StorageBuf *brick_counter_ = nullptr;
 
   /** Atlas parameters. */
   float3 atlas_origin_ = float3(0.0f);
   float3 atlas_extent_ = float3(1.0f);
-  float voxel_size_ = 1.0f / SDF_ATLAS_RES;
+  float voxel_size_ = 1.0f / 256.0f;
+
+  /** Grid resolution in bricks per axis (sdf_resolution / BRICK_SIZE). */
+  int grid_res_ = 32;
+  /** Total voxel resolution from UI. */
+  int sdf_resolution_ = 256;
+  /** Active brick count after classify pass. */
+  int active_brick_count_ = 0;
+  /** Bricks per axis in compact atlas layout. */
+  int bricks_per_axis_ = 1;
+  /** Debug grid mode from UI. */
+  int debug_grid_ = 0;
 
   /** Dirty tracking: hash of object data for the current frame. */
   uint64_t scene_hash_ = 0;
   bool needs_bake_ = true;
 
+  /** Mesh-to-SDF grid objects pending processing. */
+  struct PendingGridObject {
+    const Object *ob;
+  };
+  Vector<PendingGridObject> pending_grid_objects_;
+
+  /** Processed grid objects ready for GPU dispatch. */
+  struct GridObject {
+    gpu::Texture *texture = nullptr; /* R32F 3D texture */
+    float4x4 world_to_texture;      /* Combined transform: world -> [0,1]^3 */
+    float4 color;                    /* Object display color */
+    float blend;                     /* Blend amount from modifier */
+    float grid_voxel_size;           /* Grid voxel size in world units (for index→world scaling) */
+  };
+  Vector<GridObject> grid_objects_;
+
   /** Cached shaders. */
+  gpu::Shader *classify_sh_ = nullptr;
   gpu::Shader *bake_sh_ = nullptr;
   gpu::Shader *march_sh_ = nullptr;
+  gpu::Shader *grid_blend_sh_ = nullptr;
 
   /** Object SSBO. */
   gpu::StorageBuf *object_ssbo_ = nullptr;
@@ -75,6 +141,11 @@ class Instance : public DrawEngine {
 
   /** Fullscreen triangle batch (cached). */
   gpu::Batch *fullscreen_batch_ = nullptr;
+
+  /** Debug grid wireframe batch (GPU_PRIM_LINES). */
+  gpu::Batch *grid_batch_ = nullptr;
+  int grid_batch_mode_ = 0;
+  int grid_batch_res_ = 0;
 
   const DRWContext *draw_ctx_ = nullptr;
 
@@ -91,6 +162,31 @@ class Instance : public DrawEngine {
   float4 studio_light_spec_[4] = {};
   float3 studio_ambient_ = float3(0.0f);
 
+  /** Performance overlay state. */
+  bool perf_enabled_ = false;
+  bool perf_queries_created_ = false;
+  /** Double-buffered GL timestamp queries: [frame_idx][stamp_idx]. */
+  GLuint perf_queries_[2][PERF_STAMP_COUNT] = {};
+  /** Whether queries have been issued for each frame slot. */
+  bool perf_queries_valid_[2] = {false, false};
+  /** Current frame index (alternates 0/1). */
+  int perf_frame_idx_ = 0;
+  /** Whether bake passes ran on the frame whose results we're reading. */
+  bool perf_prev_baked_ = false;
+  /** Timing results (from previous frame's queries). */
+  double perf_classify_ms_ = 0.0;
+  double perf_bake_ms_ = 0.0;
+  double perf_grid_ms_ = 0.0;
+  double perf_march_ms_ = 0.0;
+  double perf_frame_ms_ = 0.0;
+  double perf_fps_ = 0.0;
+  /** Wall-clock time of last draw() call for FPS. */
+  double perf_last_draw_time_ = 0.0;
+  /** Circular buffer for FPS smoothing. */
+  double perf_fps_samples_[PERF_FPS_SAMPLES] = {};
+  int perf_fps_sample_idx_ = 0;
+  int perf_fps_sample_count_ = 0;
+
  public:
   blender::StringRefNull name_get() final
   {
@@ -105,6 +201,7 @@ class Instance : public DrawEngine {
   void begin_sync() final
   {
     objects_.clear();
+    pending_grid_objects_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
   }
@@ -112,6 +209,34 @@ class Instance : public DrawEngine {
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
   {
     Object *ob = ob_ref.object;
+
+    /* Detect mesh objects with volume grids (from "Mesh to SDF Grid" modifier). */
+    if (ob->type == OB_MESH && ob->runtime && ob->runtime->geometry_set_eval) {
+      const bke::GeometrySet &geo = *ob->runtime->geometry_set_eval;
+      if (geo.has_volume()) {
+        const Volume *volume = geo.get_volume();
+        if (volume && BKE_volume_num_grids(volume) > 0) {
+          pending_grid_objects_.append({ob});
+
+          /* Accumulate AABB from the object's local bounds transformed to world. */
+          const std::optional<Bounds<float3>> bounds = BKE_object_boundbox_get(ob);
+          if (bounds) {
+            /* Transform all 8 corners of the local AABB to world space. */
+            const float3 &lo = bounds->min;
+            const float3 &hi = bounds->max;
+            for (int c = 0; c < 8; c++) {
+              float3 corner = float3((c & 1) ? hi.x : lo.x,
+                                     (c & 2) ? hi.y : lo.y,
+                                     (c & 4) ? hi.z : lo.z);
+              float3 wc = math::transform_point(ob->object_to_world(), corner);
+              scene_min_ = math::min(scene_min_, wc);
+              scene_max_ = math::max(scene_max_, wc);
+            }
+          }
+        }
+      }
+    }
+
     if (ob->type != OB_SDF) {
       return;
     }
@@ -192,15 +317,20 @@ class Instance : public DrawEngine {
 
   void end_sync() final
   {
-    if (objects_.is_empty()) {
+    /* Process pending grid objects: extract dense floats and create GPU textures. */
+    free_grid_objects();
+    for (const PendingGridObject &pending : pending_grid_objects_) {
+      process_grid_object(pending.ob);
+    }
+
+    if (objects_.is_empty() && grid_objects_.is_empty()) {
       needs_bake_ = false;
       return;
     }
 
     /* Compute scene hash for dirty tracking. */
-    uint64_t hash = uint64_t(objects_.size());
+    uint64_t hash = uint64_t(objects_.size()) + uint64_t(grid_objects_.size()) * 997;
     for (const SDFObjectGPU &obj : objects_) {
-      /* Hash the essential fields that affect the baked atlas. */
       hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&obj.position.x);
       hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&obj.position.y);
       hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&obj.position.z);
@@ -216,6 +346,18 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL +
              *reinterpret_cast<const uint32_t *>(&obj.inverse_matrix[2][2]);
     }
+    /* Include grid objects in hash. */
+    for (const GridObject &grid : grid_objects_) {
+      hash = hash * 6364136223846793005ULL +
+             *reinterpret_cast<const uint32_t *>(&grid.world_to_texture[0][0]);
+      hash = hash * 6364136223846793005ULL +
+             *reinterpret_cast<const uint32_t *>(&grid.world_to_texture[1][1]);
+      hash = hash * 6364136223846793005ULL +
+             *reinterpret_cast<const uint32_t *>(&grid.world_to_texture[2][2]);
+      hash = hash * 6364136223846793005ULL +
+             *reinterpret_cast<const uint32_t *>(&grid.world_to_texture[3][0]);
+      hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&grid.blend);
+    }
 
     if (hash != scene_hash_) {
       scene_hash_ = hash;
@@ -225,75 +367,190 @@ class Instance : public DrawEngine {
       needs_bake_ = false;
     }
 
-    /* Compute atlas parameters. */
+    /* Compute atlas parameters from total voxel resolution. */
+    int total_res = grid_res_ * SDF_BRICK_SIZE;
+
     float3 scene_center = (scene_min_ + scene_max_) * 0.5f;
     float3 scene_size = scene_max_ - scene_min_;
-    /* Add margin so objects at the boundary are fully captured. */
     float margin = math::reduce_max(scene_size) * 0.1f;
     margin = math::max(margin, 0.5f);
     scene_size += float3(margin * 2.0f);
 
-    /* Use uniform voxel size based on the largest axis. */
     float max_axis = math::reduce_max(scene_size);
-    voxel_size_ = max_axis / float(SDF_ATLAS_RES);
+    voxel_size_ = max_axis / float(total_res);
     atlas_origin_ = scene_center - float3(max_axis * 0.5f);
     atlas_extent_ = float3(max_axis);
   }
 
   void draw(Manager & /*manager*/) final
   {
-    if (objects_.is_empty()) {
+    if (objects_.is_empty() && grid_objects_.is_empty()) {
       return;
     }
 
+    sync_sdf_settings();
     sync_shading();
     ensure_shaders();
 
-    /* Bail if shader compilation failed. */
-    if (bake_sh_ == nullptr || march_sh_ == nullptr) {
-      std::printf("[SDF] Shader compilation FAILED: bake=%p march=%p\n",
-                  (void *)bake_sh_,
-                  (void *)march_sh_);
-      return;
+    /* Check if perf overlay is enabled. Only issue GL queries when active. */
+    perf_enabled_ = draw_ctx_->v3d &&
+                    (draw_ctx_->v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) &&
+                    !(draw_ctx_->v3d->flag2 & V3D_HIDE_OVERLAYS);
+    if (perf_enabled_) {
+      perf_ensure_queries();
+      perf_begin_frame();
     }
 
-    if (needs_bake_) {
-      std::printf("[SDF] draw(): %d objects, voxel=%.4f, "
-                  "origin=(%.2f,%.2f,%.2f), extent=(%.2f,%.2f,%.2f)\n",
-                  int(objects_.size()),
-                  voxel_size_,
-                  atlas_origin_.x,
-                  atlas_origin_.y,
-                  atlas_origin_.z,
-                  atlas_extent_.x,
-                  atlas_extent_.y,
-                  atlas_extent_.z);
+    /* Bail if critical shaders failed. */
+    if (march_sh_ == nullptr) {
+      std::printf("[SDF] March shader compilation FAILED\n");
+      return;
+    }
+    if (!objects_.is_empty() && (classify_sh_ == nullptr || bake_sh_ == nullptr)) {
+      std::printf("[SDF] Classify/Bake shader compilation FAILED\n");
+      return;
+    }
+    if (!grid_objects_.is_empty() && grid_blend_sh_ == nullptr) {
+      std::printf("[SDF] Grid blend shader compilation FAILED\n");
+      return;
     }
 
     DRW_submission_start();
 
-    ensure_atlas();
-    upload_objects();
+    ensure_indirection();
+    if (!objects_.is_empty()) {
+      upload_objects();
+    }
+
+    /* Stamp 0: before classify/bake passes. */
+    if (perf_enabled_) {
+      perf_stamp(0);
+    }
 
     if (needs_bake_) {
-      dispatch_bake();
-      std::printf("[SDF] Bake dispatched (%d x %d x %d)\n",
-                  SDF_ATLAS_RES,
-                  SDF_ATLAS_RES,
-                  SDF_ATLAS_RES);
+      /* Invalidate debug grid batch: atlas geometry may have changed. */
+      if (grid_batch_) {
+        GPU_batch_discard(grid_batch_);
+        grid_batch_ = nullptr;
+      }
+
+      /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
+      if (!objects_.is_empty()) {
+        dispatch_classify();
+      }
+      else {
+        /* No analytic objects: start with empty indirection. */
+        clear_indirection();
+      }
+
+      /* Phase 2: Augment indirection with bricks overlapping grid objects.
+       * Reads back indirection, marks additional bricks active, re-uploads. */
+      if (!grid_objects_.is_empty()) {
+        augment_indirection_for_grids();
+      }
+
+      /* Stamp 1: after classify. */
+      if (perf_enabled_) {
+        perf_stamp(1);
+      }
+
+      ensure_compact_atlas();
+
+      /* Phase 3: Bake analytic SDFs into all active bricks. */
+      if (!objects_.is_empty()) {
+        dispatch_bake();
+      }
+      else {
+        /* Grid-only scene: init atlas to large distance so grid blend's
+         * min-union works correctly. */
+        clear_compact_atlas();
+      }
+
+      /* Stamp 2: after bake. */
+      if (perf_enabled_) {
+        perf_stamp(2);
+      }
+
+      /* Phase 4: Blend grid objects into atlas. */
+      if (!grid_objects_.is_empty()) {
+        dispatch_grid_blends();
+      }
+
+      /* Stamp 3: after grid blend. */
+      if (perf_enabled_) {
+        perf_stamp(3);
+      }
+    }
+    else {
+      /* No bake: stamps 1-3 equal stamp 0 (zero time for bake passes). */
+      if (perf_enabled_) {
+        perf_stamp(1);
+        perf_stamp(2);
+        perf_stamp(3);
+      }
     }
 
     draw_march();
 
+    /* Stamp 4: after march. */
+    if (perf_enabled_) {
+      perf_stamp(4);
+    }
+
+    draw_debug_grid();
+
     DRW_submission_end();
+
+    if (perf_enabled_) {
+      perf_end_frame(needs_bake_);
+    }
+    else {
+      s_perf_active = false;
+    }
   }
 
  private:
+  void sync_sdf_settings()
+  {
+    const View3D *v3d = draw_ctx_->v3d;
+    if (v3d == nullptr) {
+      return;
+    }
+
+    const View3DShading &shading = v3d->shading;
+
+    /* Read resolution setting. Default to 256 if unset (0). */
+    int new_res = int(shading.sdf_resolution);
+    if (new_res == 0) {
+      new_res = 256;
+    }
+    new_res = math::clamp(new_res, 64, 512);
+
+    int new_grid_res = new_res / SDF_BRICK_SIZE;
+
+    if (new_grid_res != grid_res_) {
+      grid_res_ = new_grid_res;
+      sdf_resolution_ = new_res;
+      /* Resolution changed: free resources and force rebake. */
+      if (indirection_tx_) {
+        GPU_texture_free(indirection_tx_);
+        indirection_tx_ = nullptr;
+      }
+      if (compact_atlas_tx_) {
+        GPU_texture_free(compact_atlas_tx_);
+        compact_atlas_tx_ = nullptr;
+      }
+      needs_bake_ = true;
+      scene_hash_ = 0;
+    }
+
+    debug_grid_ = int(shading.sdf_debug_grid);
+  }
+
   void sync_shading()
   {
     const View3D *v3d = draw_ctx_->v3d;
     if (v3d == nullptr) {
-      /* No 3D viewport (e.g. final render): default to flat. */
       lighting_type_ = V3D_LIGHTING_FLAT;
       use_specular_ = 0;
       use_matcap_flip_ = 0;
@@ -309,9 +566,6 @@ class Instance : public DrawEngine {
     }
 
     if (lighting_type_ == V3D_LIGHTING_STUDIO) {
-      /* STUDIO: extract 4 directional lights + ambient from studio light.
-       * Light directions (sl->vec) are in view space (camera-relative). The
-       * shader transforms the world-space normal to view space to match. */
       StudioLight *sl = BKE_studiolight_find(shading.studio_light, STUDIOLIGHT_TYPE_STUDIO);
       if (sl == nullptr) {
         sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_STUDIO);
@@ -325,7 +579,6 @@ class Instance : public DrawEngine {
           const SolidLight &light = sl->light[i];
           if (light.flag) {
             studio_light_dir_[i] = float4(light.vec[0], light.vec[1], light.vec[2], 0.0f);
-            /* Pack wrap factor (smooth) into color.w for the shader. */
             studio_light_col_[i] = float4(
                 light.col[0], light.col[1], light.col[2], light.smooth);
             studio_light_spec_[i] = float4(light.spec[0], light.spec[1], light.spec[2], 0.0f);
@@ -340,7 +593,6 @@ class Instance : public DrawEngine {
             sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
       }
       else {
-        /* No studio light: use a reasonable default. */
         studio_light_dir_[0] = float4(math::normalize(float3(0.5f, 0.7f, 1.0f)), 0.0f);
         studio_light_col_[0] = float4(0.8f, 0.8f, 0.8f, 0.0f);
         studio_light_spec_[0] = float4(1.0f, 1.0f, 1.0f, 0.0f);
@@ -353,7 +605,6 @@ class Instance : public DrawEngine {
       }
     }
     else {
-      /* MATCAP: find matcap studio light and build 2-layer array texture. */
       StudioLight *sl = BKE_studiolight_find(shading.matcap, STUDIOLIGHT_TYPE_MATCAP);
       if (sl == nullptr) {
         sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_MATCAP);
@@ -369,7 +620,6 @@ class Instance : public DrawEngine {
                           0;
       use_matcap_flip_ = (shading.flag & V3D_SHADING_MATCAP_FLIP_X) ? 1 : 0;
 
-      /* Build matcap texture if the matcap changed. */
       if (std::string(sl->name) != current_matcap_) {
         BKE_studiolight_ensure_flag(
             sl, STUDIOLIGHT_MATCAP_DIFFUSE_GPUTEXTURE | STUDIOLIGHT_MATCAP_SPECULAR_GPUTEXTURE);
@@ -392,7 +642,6 @@ class Instance : public DrawEngine {
             layers = 2;
           }
 
-          /* Free old texture. */
           if (matcap_tx_) {
             GPU_texture_free(matcap_tx_);
           }
@@ -413,7 +662,6 @@ class Instance : public DrawEngine {
         current_matcap_ = sl->name;
       }
 
-      /* Ensure a fallback texture exists for matcap mode. */
       if (matcap_tx_ == nullptr) {
         float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         matcap_tx_ = GPU_texture_create_2d_array("sdf_matcap_fallback",
@@ -430,29 +678,85 @@ class Instance : public DrawEngine {
 
   void ensure_shaders()
   {
+    if (classify_sh_ == nullptr) {
+      classify_sh_ = GPU_shader_create_from_info_name("sdf_classify");
+    }
     if (bake_sh_ == nullptr) {
       bake_sh_ = GPU_shader_create_from_info_name("sdf_bake");
     }
     if (march_sh_ == nullptr) {
       march_sh_ = GPU_shader_create_from_info_name("sdf_march");
     }
+    if (grid_blend_sh_ == nullptr) {
+      grid_blend_sh_ = GPU_shader_create_from_info_name("sdf_grid_blend");
+    }
   }
 
-  void ensure_atlas()
+  void ensure_indirection()
   {
-    if (atlas_tx_ != nullptr) {
+    if (indirection_tx_ != nullptr) {
       return;
     }
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
-    atlas_tx_ = GPU_texture_create_3d("sdf_atlas",
-                                      SDF_ATLAS_RES,
-                                      SDF_ATLAS_RES,
-                                      SDF_ATLAS_RES,
-                                      1,
-                                      gpu::TextureFormat::SFLOAT_16_16_16_16,
-                                      usage,
-                                      nullptr);
-    GPU_texture_filter_mode(atlas_tx_, true);
+    indirection_tx_ = GPU_texture_create_3d("sdf_indirection",
+                                            grid_res_,
+                                            grid_res_,
+                                            grid_res_,
+                                            1,
+                                            gpu::TextureFormat::SINT_32,
+                                            usage,
+                                            nullptr);
+  }
+
+  void ensure_compact_atlas()
+  {
+    /* Free old atlas if it exists. */
+    if (compact_atlas_tx_) {
+      GPU_texture_free(compact_atlas_tx_);
+      compact_atlas_tx_ = nullptr;
+    }
+
+    if (active_brick_count_ <= 0) {
+      active_brick_count_ = 0;
+      bricks_per_axis_ = 1;
+      eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+      compact_atlas_tx_ = GPU_texture_create_3d("sdf_compact_atlas",
+                                                SDF_BRICK_STORAGE,
+                                                SDF_BRICK_STORAGE,
+                                                SDF_BRICK_STORAGE,
+                                                1,
+                                                gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                usage,
+                                                nullptr);
+      GPU_texture_filter_mode(compact_atlas_tx_, true);
+      return;
+    }
+
+    bricks_per_axis_ = int(std::ceil(std::cbrt(double(active_brick_count_))));
+    if (bricks_per_axis_ < 1) {
+      bricks_per_axis_ = 1;
+    }
+    int atlas_dim = bricks_per_axis_ * SDF_BRICK_STORAGE;
+
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    compact_atlas_tx_ = GPU_texture_create_3d("sdf_compact_atlas",
+                                              atlas_dim,
+                                              atlas_dim,
+                                              atlas_dim,
+                                              1,
+                                              gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                              usage,
+                                              nullptr);
+    GPU_texture_filter_mode(compact_atlas_tx_, true);
+
+    int total_bricks = grid_res_ * grid_res_ * grid_res_;
+    float pct = (total_bricks > 0) ? 100.0f * float(active_brick_count_) / float(total_bricks) :
+                                     0.0f;
+    std::printf("[SDF] Classify: %d/%d bricks active (%.1f%%), compact atlas %d^3\n",
+                active_brick_count_,
+                total_bricks,
+                pct,
+                atlas_dim);
   }
 
   void upload_objects()
@@ -460,7 +764,6 @@ class Instance : public DrawEngine {
     const int count = int(objects_.size());
     const size_t buf_size = count * sizeof(SDFObjectGPU);
 
-    /* Recreate SSBO if count changed (update only works within same size). */
     if (object_ssbo_ != nullptr && object_ssbo_count_ != count) {
       GPU_storagebuf_free(object_ssbo_);
       object_ssbo_ = nullptr;
@@ -476,33 +779,102 @@ class Instance : public DrawEngine {
     }
   }
 
+  void dispatch_classify()
+  {
+    /* Create / reset brick counter SSBO. */
+    BrickCounter zero_counter = {};
+    zero_counter.count = 0;
+    zero_counter._pad0 = 0;
+    zero_counter._pad1 = 0;
+    zero_counter._pad2 = 0;
+
+    if (brick_counter_ == nullptr) {
+      brick_counter_ = GPU_storagebuf_create_ex(
+          sizeof(BrickCounter), &zero_counter, GPU_USAGE_DYNAMIC, "sdf_brick_counter");
+    }
+    else {
+      GPU_storagebuf_update(brick_counter_, &zero_counter);
+    }
+
+    GPU_shader_bind(classify_sh_);
+
+    /* Bind SSBOs. */
+    int obj_slot = GPU_shader_get_ssbo_binding(classify_sh_, "objects");
+    GPU_storagebuf_bind(object_ssbo_, obj_slot);
+
+    int counter_slot = GPU_shader_get_ssbo_binding(classify_sh_, "brick_counter");
+    GPU_storagebuf_bind(brick_counter_, counter_slot);
+
+    /* Bind indirection texture as image. */
+    GPU_texture_image_bind(indirection_tx_, 0);
+
+    /* Push constants. */
+    GPU_shader_uniform_1i(classify_sh_, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1f(classify_sh_, "voxel_size", voxel_size_);
+    GPU_shader_uniform_3fv(classify_sh_, "atlas_origin", atlas_origin_);
+    int3 grid_res_v = int3(grid_res_);
+    GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", grid_res_v);
+
+    /* Brick half-diagonal: conservative surface test distance. */
+    float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
+    GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
+
+    /* Dispatch: one thread per brick, local group size is 4x4x4. */
+    GPU_compute_dispatch(classify_sh_,
+                         divide_ceil_u(grid_res_, 4),
+                         divide_ceil_u(grid_res_, 4),
+                         divide_ceil_u(grid_res_, 4));
+
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
+    GPU_texture_image_unbind(indirection_tx_);
+    GPU_shader_unbind();
+
+    /* Readback active brick count from SSBO. */
+    BrickCounter readback = {};
+    GPU_storagebuf_read(brick_counter_, &readback);
+    active_brick_count_ = int(readback.count);
+  }
+
   void dispatch_bake()
   {
+    if (active_brick_count_ <= 0) {
+      return;
+    }
+
     GPU_shader_bind(bake_sh_);
 
     /* Bind object SSBO. */
     int ssbo_slot = GPU_shader_get_ssbo_binding(bake_sh_, "objects");
     GPU_storagebuf_bind(object_ssbo_, ssbo_slot);
 
-    /* Bind atlas as image (slot 0 from ShaderCreateInfo). */
-    GPU_texture_image_bind(atlas_tx_, 0);
+    /* Bind indirection as sampler. */
+    int indir_slot = GPU_shader_get_sampler_binding(bake_sh_, "indirection_tx");
+    GPU_texture_bind(indirection_tx_, indir_slot);
+
+    /* Bind compact atlas as image. */
+    GPU_texture_image_bind(compact_atlas_tx_, 0);
 
     /* Push constants. */
     GPU_shader_uniform_1i(bake_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(bake_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
-    int3 res = int3(SDF_ATLAS_RES);
-    GPU_shader_uniform_3iv(bake_sh_, "atlas_resolution", res);
+    int3 grid_res_v = int3(grid_res_);
+    GPU_shader_uniform_3iv(bake_sh_, "grid_resolution", grid_res_v);
+    GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
 
-    /* Dispatch. */
-    GPU_compute_dispatch(bake_sh_,
-                         divide_ceil_u(SDF_ATLAS_RES, 8),
-                         divide_ceil_u(SDF_ATLAS_RES, 8),
-                         divide_ceil_u(SDF_ATLAS_RES, 4));
+    /* Dispatch: one workgroup per brick in the grid. */
+    GPU_compute_dispatch(bake_sh_, grid_res_, grid_res_, grid_res_);
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    GPU_texture_image_unbind(atlas_tx_);
+    GPU_texture_image_unbind(compact_atlas_tx_);
+    GPU_texture_unbind(indirection_tx_);
     GPU_shader_unbind();
+
+    std::printf("[SDF] Bake dispatched (%d x %d x %d grid, %d active bricks)\n",
+                grid_res_,
+                grid_res_,
+                grid_res_,
+                active_brick_count_);
   }
 
   void draw_march()
@@ -510,16 +882,12 @@ class Instance : public DrawEngine {
     DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
 
     if (draw_ctx_->is_depth()) {
-      /* Depth-only mode (3D cursor, orbit pivot, etc.): write depth only.
-       * Uses the same viewport depth texture as default_fb. */
       GPU_framebuffer_bind(dfbl->depth_only_fb);
     }
     else {
-      /* Normal rendering: write both color and depth. */
       GPU_framebuffer_bind(dfbl->default_fb);
     }
 
-    /* Explicitly reset all GPU state that Workbench may have left dirty. */
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(true);
     GPU_blend(GPU_BLEND_NONE);
@@ -528,26 +896,29 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(march_sh_);
 
-    /* Bind atlas as sampler. */
-    int atlas_slot = GPU_shader_get_sampler_binding(march_sh_, "sdf_atlas");
-    GPU_texture_bind(atlas_tx_, atlas_slot);
+    /* Bind compact atlas as sampler. */
+    int atlas_slot = GPU_shader_get_sampler_binding(march_sh_, "compact_atlas");
+    if (compact_atlas_tx_) {
+      GPU_texture_bind(compact_atlas_tx_, atlas_slot);
+    }
 
-    /* NOTE: We intentionally don't bind depth_tx for reading because the
-     * framebuffer's depth attachment IS the same texture — simultaneous
-     * read+write is a texture feedback loop (UB in OpenGL).
-     * TODO: Copy depth to a separate texture for proper occlusion. */
+    /* Bind indirection as sampler. */
+    int indir_slot = GPU_shader_get_sampler_binding(march_sh_, "indirection_tx");
+    if (indirection_tx_) {
+      GPU_texture_bind(indirection_tx_, indir_slot);
+    }
 
     /* Push constants. */
     GPU_shader_uniform_1f(march_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_extent", atlas_extent_);
-    int3 res = int3(SDF_ATLAS_RES);
-    GPU_shader_uniform_3iv(march_sh_, "atlas_resolution", res);
+    int3 grid_res_v = int3(grid_res_);
+    GPU_shader_uniform_3iv(march_sh_, "grid_resolution", grid_res_v);
+    GPU_shader_uniform_1i(march_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
 
-    /* Studio light data (used when lighting_type == STUDIO). */
     GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
     GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
     GPU_shader_uniform_4fv(march_sh_, "studio_light2", studio_light_dir_[2]);
@@ -562,7 +933,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_4fv(march_sh_, "studio_spec3", studio_light_spec_[3]);
     GPU_shader_uniform_3fv(march_sh_, "studio_ambient", studio_ambient_);
 
-    /* Bind matcap texture (used when lighting_type == MATCAP). */
+    /* Bind matcap texture. */
     if (matcap_tx_) {
       int matcap_slot = GPU_shader_get_sampler_binding(march_sh_, "matcap_tx");
       GPU_texture_bind(matcap_tx_, matcap_slot);
@@ -571,37 +942,639 @@ class Instance : public DrawEngine {
     /* Bind the view UBO so the fragment shader can access camera matrices.
      * Must call push_update() before binding — this uploads the current frame's
      * matrices to the GPU. Without it, the GPU-side UBO contains stale data from
-     * the previous frame, causing incorrect gl_FragDepth during camera movement
-     * (grid-on-top-during-zoom bug). View::bind() does this internally but is
-     * protected; we call push_update() directly on the public UBO reference. */
+     * the previous frame, causing incorrect gl_FragDepth during camera movement.
+     * View::bind() does this internally but is protected; we call push_update()
+     * directly on the public UBO reference. */
     View &view = View::default_get();
     view.matrices_ubo_get().push_update();
     GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
 
-    /* Draw fullscreen triangle (3 vertices, vertex shader generates positions from gl_VertexID). */
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
     }
     GPU_batch_set_shader(fullscreen_batch_, march_sh_);
     GPU_batch_draw(fullscreen_batch_);
 
-    /* NOTE: No GPU sync needed here. gl_FragDepth framebuffer writes are
-     * automatically coherent with subsequent texture reads in OpenGL.
-     * GPU_flush() and GPU_finish() were both tested and did NOT fix the
-     * grid-on-top-during-zoom issue — root cause is not synchronization. */
-
-    GPU_texture_unbind(atlas_tx_);
+    if (compact_atlas_tx_) {
+      GPU_texture_unbind(compact_atlas_tx_);
+    }
+    if (indirection_tx_) {
+      GPU_texture_unbind(indirection_tx_);
+    }
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
     }
     GPU_shader_unbind();
   }
 
+  /* ---- Debug grid wireframe ---- */
+
+  gpu::Batch *create_line_batch(const float3 *positions, int vert_count)
+  {
+    if (vert_count <= 0) {
+      return nullptr;
+    }
+
+    GPUVertFormat format = {};
+    GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
+    gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
+    GPU_vertbuf_data_alloc(*vbo, uint(vert_count));
+    GPU_vertbuf_attr_fill(vbo, 0, positions);
+
+    return GPU_batch_create_ex(GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+  }
+
+  void rebuild_grid_batch_active()
+  {
+    if (!indirection_tx_) {
+      return;
+    }
+
+    /* Read back indirection texture to find active bricks. */
+    int32_t *data = static_cast<int32_t *>(
+        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+    if (!data) {
+      return;
+    }
+
+    int n = grid_res_;
+    float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
+
+    /* Count active bricks. */
+    int total = n * n * n;
+    int active_count = 0;
+    for (int i = 0; i < total; i++) {
+      if (data[i] >= 0) {
+        active_count++;
+      }
+    }
+
+    if (active_count == 0) {
+      MEM_freeN(data);
+      return;
+    }
+
+    /* 12 edges per cube, 2 vertices per edge = 24 vertices per active brick. */
+    Vector<float3> positions(active_count * 24);
+    int vi = 0;
+
+    for (int z = 0; z < n; z++) {
+      for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+          int idx = z * n * n + y * n + x;
+          if (data[idx] < 0) {
+            continue;
+          }
+
+          float3 lo = atlas_origin_ + float3(float(x), float(y), float(z)) * brick_world;
+          float3 hi = lo + float3(brick_world);
+
+          /* Bottom face edges. */
+          positions[vi++] = float3(lo.x, lo.y, lo.z);
+          positions[vi++] = float3(hi.x, lo.y, lo.z);
+          positions[vi++] = float3(hi.x, lo.y, lo.z);
+          positions[vi++] = float3(hi.x, hi.y, lo.z);
+          positions[vi++] = float3(hi.x, hi.y, lo.z);
+          positions[vi++] = float3(lo.x, hi.y, lo.z);
+          positions[vi++] = float3(lo.x, hi.y, lo.z);
+          positions[vi++] = float3(lo.x, lo.y, lo.z);
+
+          /* Top face edges. */
+          positions[vi++] = float3(lo.x, lo.y, hi.z);
+          positions[vi++] = float3(hi.x, lo.y, hi.z);
+          positions[vi++] = float3(hi.x, lo.y, hi.z);
+          positions[vi++] = float3(hi.x, hi.y, hi.z);
+          positions[vi++] = float3(hi.x, hi.y, hi.z);
+          positions[vi++] = float3(lo.x, hi.y, hi.z);
+          positions[vi++] = float3(lo.x, hi.y, hi.z);
+          positions[vi++] = float3(lo.x, lo.y, hi.z);
+
+          /* Vertical edges. */
+          positions[vi++] = float3(lo.x, lo.y, lo.z);
+          positions[vi++] = float3(lo.x, lo.y, hi.z);
+          positions[vi++] = float3(hi.x, lo.y, lo.z);
+          positions[vi++] = float3(hi.x, lo.y, hi.z);
+          positions[vi++] = float3(hi.x, hi.y, lo.z);
+          positions[vi++] = float3(hi.x, hi.y, hi.z);
+          positions[vi++] = float3(lo.x, hi.y, lo.z);
+          positions[vi++] = float3(lo.x, hi.y, hi.z);
+        }
+      }
+    }
+
+    MEM_freeN(data);
+    grid_batch_ = create_line_batch(positions.data(), vi);
+  }
+
+  void rebuild_grid_batch()
+  {
+    if (grid_batch_) {
+      GPU_batch_discard(grid_batch_);
+      grid_batch_ = nullptr;
+    }
+
+    grid_batch_mode_ = debug_grid_;
+    grid_batch_res_ = grid_res_;
+
+    if (debug_grid_ != 0) {
+      rebuild_grid_batch_active();
+    }
+  }
+
+  void draw_debug_grid()
+  {
+    if (debug_grid_ == 0) {
+      return;
+    }
+
+    /* Rebuild batch if settings changed. */
+    if (grid_batch_ == nullptr || grid_batch_mode_ != debug_grid_ ||
+        grid_batch_res_ != grid_res_)
+    {
+      rebuild_grid_batch();
+    }
+    if (grid_batch_ == nullptr) {
+      return;
+    }
+
+    /* Use builtin 3D uniform color shader. */
+    gpu::Shader *shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_UNIFORM_COLOR);
+    GPU_shader_bind(shader);
+
+    /* MVP = persmat (lines are in world space, no model transform). */
+    View &view = View::default_get();
+    float4x4 mvp = view.persmat();
+    GPU_shader_uniform_mat4(shader, "ModelViewProjectionMatrix", mvp.ptr());
+
+    GPU_blend(GPU_BLEND_ALPHA);
+    GPU_depth_mask(false); /* Grid lines don't write depth. */
+
+    GPU_batch_set_shader(grid_batch_, shader);
+
+    /* --- Pass 1: Occluded lines (behind SDF surface) ---
+     * Drawn first so front lines overdraw on top. Faint ghost
+     * lines give spatial context without visual clutter. */
+    GPU_depth_test(GPU_DEPTH_GREATER);
+    GPU_line_width(1.0f);
+    GPU_shader_uniform_4f(shader, "color", 0.0f, 0.6f, 0.0f, 0.1f);
+    GPU_batch_draw(grid_batch_);
+
+    /* --- Pass 2: Front lines (in front of SDF surface) ---
+     * Bright and slightly thicker for clear readability. */
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_line_width(1.5f);
+    GPU_shader_uniform_4f(shader, "color", 0.0f, 1.0f, 0.0f, 0.8f);
+    GPU_batch_draw(grid_batch_);
+
+    /* Restore state. */
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
+    GPU_line_width(1.0f);
+    GPU_shader_unbind();
+  }
+
+  void process_grid_object(const Object *ob)
+  {
+    if (!ob->runtime || !ob->runtime->geometry_set_eval) {
+      return;
+    }
+
+    const bke::GeometrySet &geo = *ob->runtime->geometry_set_eval;
+    const Volume *volume = geo.get_volume();
+    if (!volume || BKE_volume_num_grids(volume) == 0) {
+      return;
+    }
+
+    const bke::VolumeGridData *vgrid = BKE_volume_grid_get(volume, 0);
+    if (!vgrid) {
+      return;
+    }
+
+    /* Extract dense float voxels. */
+    DenseFloatVolumeGrid dense = {};
+    if (!BKE_volume_grid_dense_floats(volume, vgrid, &dense)) {
+      return;
+    }
+
+    int w = dense.resolution[0];
+    int h = dense.resolution[1];
+    int d = dense.resolution[2];
+    if (w <= 0 || h <= 0 || d <= 0) {
+      BKE_volume_dense_float_grid_clear(&dense);
+      return;
+    }
+
+    /* Copy the texture-to-object matrix before we free the dense data. */
+    float4x4 tex_to_obj;
+    for (int i = 0; i < 4; i++) {
+      for (int j = 0; j < 4; j++) {
+        tex_to_obj[i][j] = dense.texture_to_object[i][j];
+      }
+    }
+
+    /* Create GPU 3D texture from dense data (R32F for full precision). */
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ;
+    gpu::Texture *tex = GPU_texture_create_3d(
+        "sdf_grid", w, h, d, 1, gpu::TextureFormat::SFLOAT_32, usage, dense.voxels);
+    BKE_volume_dense_float_grid_clear(&dense);
+
+    if (!tex) {
+      return;
+    }
+    GPU_texture_filter_mode(tex, true);
+
+    /* Compute world_to_texture transform.
+     * DenseFloatVolumeGrid::texture_to_object maps normalized [0,1]^3 -> object space.
+     * We need: world_to_texture = inverse(object_to_world * texture_to_object) */
+    float4x4 tex_to_world = ob->object_to_world() * tex_to_obj;
+    float4x4 world_to_tex = math::invert(tex_to_world);
+
+    /* Compute grid voxel size in world units.
+     * OpenVDB stores SDF values in index space (voxel units).
+     * The tex_to_world matrix maps [0,1]^3 -> world. One texel = 1/w in texture space.
+     * The world-space size of one voxel = length(tex_to_world column) / resolution. */
+    float gvs = math::length(float3(tex_to_world[0])) / float(w);
+
+    /* Expand scene AABB to cover the grid's full world-space extent.
+     * The grid covers [0,1]^3 in texture space; transform all 8 corners to world. */
+    for (int c = 0; c < 8; c++) {
+      float3 tc = float3((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
+      float3 wc = math::transform_point(tex_to_world, tc);
+      scene_min_ = math::min(scene_min_, wc);
+      scene_max_ = math::max(scene_max_, wc);
+    }
+
+    std::printf("[SDF] Grid '%s': res %dx%dx%d, voxel_size=%.4f\n",
+                ob->id.name + 2,
+                w,
+                h,
+                d,
+                gvs);
+
+    /* Read blend from the "Mesh to SDF Grid" modifier's IDProperties. */
+    float blend_val = 0.0f;
+    LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+      if (md->type != eModifierType_Nodes) {
+        continue;
+      }
+      NodesModifierData *nmd = reinterpret_cast<NodesModifierData *>(md);
+      if (!nmd->node_group) {
+        continue;
+      }
+      /* Check if this is our "Mesh to SDF Grid" node group. */
+      const char *group_name = nmd->node_group->id.name + 2; /* Skip "NT" prefix. */
+      if (std::strcmp(group_name, "Mesh to SDF Grid") != 0) {
+        continue;
+      }
+      /* Find the "Blend" socket and read its value from IDProperties. */
+      if (nmd->settings.properties) {
+        /* The socket identifier for the Blend input. We iterate interface_inputs
+         * to find it, but as a simpler approach, just search all properties for
+         * one named with the identifier that has a float type. The Blend socket
+         * is the 4th input (index 3), but socket identifiers are assigned by
+         * Blender and may vary. Search by iterating all float properties and
+         * matching the node group's interface. */
+        const bNodeTreeInterface &iface = nmd->node_group->tree_interface;
+        iface.foreach_item([&](const bNodeTreeInterfaceItem &item) {
+          if (item.item_type != NODE_INTERFACE_SOCKET) {
+            return true; /* Continue iteration. */
+          }
+          const auto &socket = reinterpret_cast<const bNodeTreeInterfaceSocket &>(item);
+          if (StringRef(socket.name) == "Blend" &&
+              StringRef(socket.socket_type) == "NodeSocketFloat")
+          {
+            IDProperty *prop = IDP_GetPropertyFromGroup(nmd->settings.properties,
+                                                        socket.identifier);
+            if (prop && prop->type == IDP_FLOAT) {
+              blend_val = IDP_float_get(prop);
+            }
+            else if (prop && prop->type == IDP_DOUBLE) {
+              blend_val = float(IDP_double_get(prop));
+            }
+            return false; /* Stop iteration. */
+          }
+          return true; /* Continue iteration. */
+        });
+      }
+      break;
+    }
+
+    /* Read object color. */
+    float4 color = float4(ob->color[0], ob->color[1], ob->color[2], ob->color[3]);
+
+    GridObject grid_obj = {};
+    grid_obj.texture = tex;
+    grid_obj.world_to_texture = world_to_tex;
+    grid_obj.color = color;
+    grid_obj.blend = blend_val;
+    grid_obj.grid_voxel_size = gvs;
+    grid_objects_.append(grid_obj);
+  }
+
+  void free_grid_objects()
+  {
+    for (GridObject &grid : grid_objects_) {
+      if (grid.texture) {
+        GPU_texture_free(grid.texture);
+      }
+    }
+    grid_objects_.clear();
+  }
+
+  void clear_indirection()
+  {
+    /* Initialize all bricks as outside (-1). */
+    int total = grid_res_ * grid_res_ * grid_res_;
+    Vector<int32_t> data(total, -1);
+    GPU_texture_update(indirection_tx_, GPU_DATA_INT, data.data());
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    active_brick_count_ = 0;
+  }
+
+  void augment_indirection_for_grids()
+  {
+    /* Read back indirection texture, mark bricks overlapping grid objects
+     * as active, re-upload. This preserves analytic classify results. */
+    int total = grid_res_ * grid_res_ * grid_res_;
+    int32_t *data = static_cast<int32_t *>(
+        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+
+    float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
+
+    for (const GridObject &grid : grid_objects_) {
+      /* Compute grid's world AABB from the inverse of world_to_texture. */
+      float4x4 tex_to_world = math::invert(grid.world_to_texture);
+      float3 gmin = float3(1e30f);
+      float3 gmax = float3(-1e30f);
+      for (int c = 0; c < 8; c++) {
+        float3 tc = float3(
+            (c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
+        float3 wc = math::transform_point(tex_to_world, tc);
+        gmin = math::min(gmin, wc);
+        gmax = math::max(gmax, wc);
+      }
+
+      /* Convert world AABB to brick coordinates. */
+      int3 bmin = int3(math::floor((gmin - atlas_origin_) / brick_world));
+      int3 bmax = int3(math::floor((gmax - atlas_origin_) / brick_world));
+      bmin = math::max(bmin, int3(0));
+      bmax = math::min(bmax, int3(grid_res_ - 1));
+
+      /* Mark overlapping bricks as active. */
+      for (int z = bmin.z; z <= bmax.z; z++) {
+        for (int y = bmin.y; y <= bmax.y; y++) {
+          for (int x = bmin.x; x <= bmax.x; x++) {
+            int idx = x + y * grid_res_ + z * grid_res_ * grid_res_;
+            if (data[idx] < 0) {
+              data[idx] = active_brick_count_++;
+            }
+          }
+        }
+      }
+    }
+
+    /* Re-upload modified indirection. */
+    GPU_texture_update(indirection_tx_, GPU_DATA_INT, data);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+
+    std::printf("[SDF] Grid augment: %d active bricks (grid bricks: %d-%d x %d-%d x %d-%d)\n",
+                active_brick_count_,
+                0,
+                grid_res_,
+                0,
+                grid_res_,
+                0,
+                grid_res_);
+
+    MEM_freeN(data);
+  }
+
+  void clear_compact_atlas()
+  {
+    /* For grid-only scenes, initialize the compact atlas to large distance (1e10)
+     * so that grid blend's min-union works correctly. */
+    if (!compact_atlas_tx_) {
+      return;
+    }
+
+    int atlas_dim = bricks_per_axis_ * SDF_BRICK_STORAGE;
+    int total_voxels = atlas_dim * atlas_dim * atlas_dim;
+    Vector<float> clear_data(total_voxels * 4);
+    for (int i = 0; i < total_voxels; i++) {
+      clear_data[i * 4 + 0] = 1e10f;  /* distance */
+      clear_data[i * 4 + 1] = 0.0f;   /* color.r */
+      clear_data[i * 4 + 2] = 0.0f;   /* color.g */
+      clear_data[i * 4 + 3] = 0.0f;   /* color.b */
+    }
+    GPU_texture_update(compact_atlas_tx_, GPU_DATA_FLOAT, clear_data.data());
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+  }
+
+  void dispatch_grid_blends()
+  {
+    if (grid_blend_sh_ == nullptr || compact_atlas_tx_ == nullptr || indirection_tx_ == nullptr) {
+      return;
+    }
+
+    GPU_shader_bind(grid_blend_sh_);
+
+    for (const GridObject &grid : grid_objects_) {
+      /* Bind compact atlas as read-write image. */
+      GPU_texture_image_bind(compact_atlas_tx_, 0);
+
+      /* Bind indirection as sampler. */
+      int indir_slot = GPU_shader_get_sampler_binding(grid_blend_sh_, "indirection_tx");
+      GPU_texture_bind(indirection_tx_, indir_slot);
+
+      /* Bind grid texture as sampler. */
+      int grid_slot = GPU_shader_get_sampler_binding(grid_blend_sh_, "sdf_grid");
+      GPU_texture_bind(grid.texture, grid_slot);
+
+      /* Push constants. */
+      GPU_shader_uniform_1f(grid_blend_sh_, "voxel_size", voxel_size_);
+      GPU_shader_uniform_3fv(grid_blend_sh_, "atlas_origin", atlas_origin_);
+      int3 grid_res_v = int3(grid_res_);
+      GPU_shader_uniform_3iv(grid_blend_sh_, "grid_resolution", grid_res_v);
+      GPU_shader_uniform_1i(grid_blend_sh_, "bricks_per_axis", bricks_per_axis_);
+      GPU_shader_uniform_mat4(
+          grid_blend_sh_, "grid_world_to_texture", grid.world_to_texture.ptr());
+      GPU_shader_uniform_4fv(grid_blend_sh_, "grid_color", grid.color);
+      GPU_shader_uniform_1f(grid_blend_sh_, "grid_blend", grid.blend);
+      GPU_shader_uniform_1f(grid_blend_sh_, "grid_voxel_size", grid.grid_voxel_size);
+
+      /* Dispatch: one workgroup per brick in the grid. */
+      GPU_compute_dispatch(grid_blend_sh_, grid_res_, grid_res_, grid_res_);
+
+      /* Barrier between dispatches so next grid reads the updated atlas. */
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+
+      GPU_texture_unbind(grid.texture);
+      GPU_texture_unbind(indirection_tx_);
+      GPU_texture_image_unbind(compact_atlas_tx_);
+    }
+
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_shader_unbind();
+
+    std::printf("[SDF] Grid blend dispatched (%d grid objects)\n", int(grid_objects_.size()));
+  }
+
+  /* ---- Performance overlay helpers ---- */
+
+  /** Lazily create GL timestamp query objects. Only on OpenGL backend. */
+  void perf_ensure_queries()
+  {
+    if (perf_queries_created_) {
+      return;
+    }
+    if (GPU_backend_get_type() != GPU_BACKEND_OPENGL) {
+      return;
+    }
+    for (int f = 0; f < 2; f++) {
+      glGenQueries(PERF_STAMP_COUNT, perf_queries_[f]);
+    }
+    perf_queries_created_ = true;
+  }
+
+  /** Read back the previous frame's query results (non-blocking). */
+  void perf_begin_frame()
+  {
+    /* Compute wall-clock FPS. */
+    double now = BLI_time_now_seconds();
+    if (perf_last_draw_time_ > 0.0) {
+      double dt = now - perf_last_draw_time_;
+      if (dt > 0.0) {
+        double instant_fps = 1.0 / dt;
+        perf_fps_samples_[perf_fps_sample_idx_] = instant_fps;
+        perf_fps_sample_idx_ = (perf_fps_sample_idx_ + 1) % PERF_FPS_SAMPLES;
+        if (perf_fps_sample_count_ < PERF_FPS_SAMPLES) {
+          perf_fps_sample_count_++;
+        }
+        /* Average the samples. */
+        double sum = 0.0;
+        for (int i = 0; i < perf_fps_sample_count_; i++) {
+          sum += perf_fps_samples_[i];
+        }
+        perf_fps_ = sum / double(perf_fps_sample_count_);
+        perf_frame_ms_ = dt * 1000.0;
+      }
+    }
+    perf_last_draw_time_ = now;
+
+    if (!perf_queries_created_) {
+      return;
+    }
+
+    /* Read back previous frame's results (non-blocking). */
+    int prev = 1 - perf_frame_idx_;
+    if (!perf_queries_valid_[prev]) {
+      return;
+    }
+
+    /* Check if the last query of the previous frame is ready. */
+    GLint available = 0;
+    glGetQueryObjectiv(
+        perf_queries_[prev][PERF_STAMP_COUNT - 1], GL_QUERY_RESULT_AVAILABLE, &available);
+    if (!available) {
+      return; /* Not ready yet — skip this frame's readback. */
+    }
+
+    GLuint64 timestamps[PERF_STAMP_COUNT];
+    for (int i = 0; i < PERF_STAMP_COUNT; i++) {
+      glGetQueryObjectui64v(perf_queries_[prev][i], GL_QUERY_RESULT, &timestamps[i]);
+    }
+
+    /* Convert nanosecond deltas to milliseconds. */
+    perf_classify_ms_ = double(timestamps[1] - timestamps[0]) * 1e-6;
+    perf_bake_ms_ = double(timestamps[2] - timestamps[1]) * 1e-6;
+    perf_grid_ms_ = double(timestamps[3] - timestamps[2]) * 1e-6;
+    perf_march_ms_ = double(timestamps[4] - timestamps[3]) * 1e-6;
+  }
+
+  /** Issue a GL timestamp query at the given stamp index. */
+  void perf_stamp(int index)
+  {
+    if (!perf_queries_created_) {
+      return;
+    }
+    glQueryCounter(perf_queries_[perf_frame_idx_][index], GL_TIMESTAMP);
+  }
+
+  /** Format results and swap frame index. */
+  void perf_end_frame(bool baked)
+  {
+    perf_queries_valid_[perf_frame_idx_] = true;
+    perf_prev_baked_ = baked;
+    perf_frame_idx_ = 1 - perf_frame_idx_;
+
+    /* Format the text. */
+    int total_bricks = grid_res_ * grid_res_ * grid_res_;
+    float brick_pct = (total_bricks > 0) ?
+                          100.0f * float(active_brick_count_) / float(total_bricks) :
+                          0.0f;
+
+    char classify_str[32], bake_str[32], grid_str[32];
+    if (perf_prev_baked_) {
+      std::snprintf(classify_str, sizeof(classify_str), "%.1f ms", perf_classify_ms_);
+      std::snprintf(bake_str, sizeof(bake_str), "%.1f ms", perf_bake_ms_);
+      std::snprintf(grid_str, sizeof(grid_str), "%.1f ms", perf_grid_ms_);
+    }
+    else {
+      std::snprintf(classify_str, sizeof(classify_str), "%s", "\xe2\x80\x94");
+      std::snprintf(bake_str, sizeof(bake_str), "%s", "\xe2\x80\x94");
+      std::snprintf(grid_str, sizeof(grid_str), "%s", "\xe2\x80\x94");
+    }
+
+    std::snprintf(s_perf_text,
+                  SDF_PERF_BUF_SIZE,
+                  "SDF Performance\n"
+                  "  fps: %.1f  frame: %.1f ms\n"
+                  "  classify: %s\n"
+                  "  bake: %s\n"
+                  "  grid blend: %s\n"
+                  "  march: %.1f ms\n"
+                  "  bricks: %d / %d (%.1f%%)",
+                  perf_fps_,
+                  perf_frame_ms_,
+                  classify_str,
+                  bake_str,
+                  grid_str,
+                  perf_march_ms_,
+                  active_brick_count_,
+                  total_bricks,
+                  brick_pct);
+    s_perf_active = true;
+  }
+
+  /** Delete GL query objects. */
+  void perf_cleanup()
+  {
+    if (!perf_queries_created_) {
+      return;
+    }
+    for (int f = 0; f < 2; f++) {
+      glDeleteQueries(PERF_STAMP_COUNT, perf_queries_[f]);
+    }
+    perf_queries_created_ = false;
+    s_perf_active = false;
+    s_perf_text[0] = '\0';
+  }
+
  public:
   ~Instance() override
   {
-    if (atlas_tx_) {
-      GPU_texture_free(atlas_tx_);
+    perf_cleanup();
+    free_grid_objects();
+    if (indirection_tx_) {
+      GPU_texture_free(indirection_tx_);
+    }
+    if (compact_atlas_tx_) {
+      GPU_texture_free(compact_atlas_tx_);
+    }
+    if (brick_counter_) {
+      GPU_storagebuf_free(brick_counter_);
     }
     if (matcap_tx_) {
       GPU_texture_free(matcap_tx_);
@@ -612,8 +1585,23 @@ class Instance : public DrawEngine {
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);
     }
+    if (grid_batch_) {
+      GPU_batch_discard(grid_batch_);
+    }
   }
 };
+
+/* ---- Public perf API ---- */
+
+const char *sdf_perf_info_get()
+{
+  return s_perf_active ? s_perf_text : nullptr;
+}
+
+bool sdf_perf_active()
+{
+  return s_perf_active;
+}
 
 DrawEngine *Engine::create_instance()
 {

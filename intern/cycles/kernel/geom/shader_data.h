@@ -14,6 +14,7 @@
 #include "kernel/geom/motion_triangle_shader.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/point_intersect.h"
+#include "kernel/geom/sdf.h"
 #include "kernel/geom/triangle_intersect.h"
 
 #include "kernel/util/differential.h"
@@ -64,6 +65,33 @@ ccl_device_inline void shader_setup_from_ray(KernelGlobals kg,
 
   /* Read ray data into shader globals. */
   sd->wi = -ray->D;
+
+  if (sd->type & PRIMITIVE_SDF) {
+    /* SDF surface primitive. */
+    sdf_shader_setup(kg, sd, ray, isect);
+
+    sd->flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
+
+    /* Backfacing test. */
+    const bool backfacing = (dot(sd->Ng, sd->wi) < 0.0f);
+    if (backfacing) {
+      sd->flag |= SD_BACKFACING;
+      sd->Ng = -sd->Ng;
+      sd->N = -sd->N;
+#ifdef __DPDU__
+      sd->dPdu = -sd->dPdu;
+      sd->dPdv = -sd->dPdv;
+#endif
+    }
+
+#ifdef __RAY_DIFFERENTIALS__
+    sd->dP = differential_make_compact(ray->dP);
+    sd->dI = differential_make_compact(ray->dD);
+    sd->du = differential_make_compact(differential_zero());
+    sd->dv = differential_make_compact(differential_zero());
+#endif
+    return;
+  }
 
 #ifdef __HAIR__
   if (sd->type & PRIMITIVE_CURVE) {

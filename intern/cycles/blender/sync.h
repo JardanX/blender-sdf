@@ -30,6 +30,7 @@ class Mesh;
 class Object;
 class ParticleSystem;
 class Scene;
+class SDFGeometry;
 class Shader;
 class ShaderGraph;
 class TaskPool;
@@ -152,6 +153,9 @@ class BlenderSync {
 
   /* Volume */
   void sync_volume(BObjectInfo &b_ob_info, Volume *volume);
+
+  /* SDF */
+  void sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf);
 
   /* Mesh */
   void sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh);

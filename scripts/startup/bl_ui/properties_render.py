@@ -102,7 +102,18 @@ class RENDER_PT_proximity_raymarcher(Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="MathOPS ray marcher settings will appear here.")
+        # Shading lives on View3D, not the Properties editor's space_data.
+        # Find the first 3D viewport in the screen.
+        shading = None
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                shading = area.spaces.active.shading
+                break
+        if shading is None:
+            layout.label(text="No 3D Viewport found.")
+            return
+        layout.prop(shading, "sdf_resolution", text="Resolution")
+        layout.prop(shading, "sdf_debug_grid", text="3D Voxel Grid")
 
 
 # ---------------------------------------------------------------------------

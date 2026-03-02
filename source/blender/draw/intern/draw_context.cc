@@ -1065,8 +1065,21 @@ void DRW_draw_region_engine_info(int xoffset, int *yoffset, int line_height)
   });
 }
 
+void DRW_sdf_perf_info_get(const char **r_text, bool *r_active)
+{
+  const char *text = blender::draw::sdf::sdf_perf_info_get();
+  bool active = blender::draw::sdf::sdf_perf_active();
+  if (r_text) {
+    *r_text = text;
+  }
+  if (r_active) {
+    *r_active = active;
+  }
+}
+
 void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *render_engine_type)
 {
+  UNUSED_VARS(gpencil_engine_needed);
   DRWViewData &view_data = *this->view_data_active;
 
   SpaceLink *space_data = this->space_data;
@@ -1114,7 +1127,6 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
   /* Regular V3D drawing. */
   {
     const eDrawType drawtype = eDrawType(this->v3d->shading.type);
-    const bool use_xray = XRAY_ENABLED(this->v3d);
 
     /* Base engine. */
     switch (drawtype) {
@@ -1203,9 +1215,6 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
   RegionView3D *rv3d = draw_ctx.rv3d;
   ARegion *region = draw_ctx.region;
   View3D *v3d = draw_ctx.v3d;
-  Depsgraph *depsgraph = draw_ctx.depsgraph;
-
-  const bool do_annotations = draw_show_annotation();
 
   /* State has been reset at the end `draw_ctx.engines_draw_scene()`. */
 
@@ -1334,7 +1343,6 @@ static void drw_callbacks_pre_scene_2D(DRWContext &draw_ctx)
 
 static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
 {
-  const bool do_annotations = draw_show_annotation();
   const bool do_draw_gizmos = (draw_ctx.space_data->spacetype != SPACE_IMAGE);
 
   /* State has been reset at the end `draw_ctx.engines_draw_scene()`. */

@@ -31,23 +31,41 @@ struct SDFObjectGPU {
 };
 /* Total: 64 + 16 + 16 + 16 + 16 + 16 + 16 = 160 bytes, 16-byte aligned. */
 
+/** Brick counter SSBO (used by classify pass). */
+struct BrickCounter {
+  uint count;
+  uint _pad0;
+  uint _pad1;
+  uint _pad2;
+};
+
+/** Push constants for the classify compute shader. */
+struct SDFClassifyParams {
+  float4 atlas_origin;
+  int4 grid_resolution;
+  float voxel_size;
+  int object_count;
+  float brick_half_diag;
+  float _pad0;
+};
+
 /** Push constants for the bake compute shader. */
 struct SDFBakeParams {
   float4 atlas_origin;
-  int4 atlas_resolution;
+  int4 grid_resolution;
   float voxel_size;
   int object_count;
+  int bricks_per_axis;
   float _pad0;
-  float _pad1;
 };
 
 /** Push constants for the ray-march fragment shader. */
 struct SDFMarchParams {
   float4 atlas_origin;
   float4 atlas_extent;
-  int4 atlas_resolution;
+  int4 grid_resolution;
   float voxel_size;
   int object_count;
-  float _pad0;
-  float _pad1;
+  int bricks_per_axis;
+  int debug_grid;
 };

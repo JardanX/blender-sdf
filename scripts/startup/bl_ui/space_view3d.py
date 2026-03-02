@@ -2519,6 +2519,8 @@ class VIEW3D_MT_sdf_add(Menu):
         layout = self.layout
         layout.operator_context = 'EXEC_REGION_WIN'
         layout.operator("object.sdf_add", text="SDF Cube", icon='SDF_PRIMITIVE').type = 'BOX'
+        layout.separator()
+        layout.operator("object.mesh_to_sdf_grid", text="Mesh to SDF Grid", icon='MESH_GRID')
 
 
 class VIEW3D_MT_volume_add(Menu):
@@ -6907,6 +6909,7 @@ class VIEW3D_PT_overlay_guides(Panel):
         sub = split.column()
         sub.prop(overlay, "show_text", text="Text Info")
         sub.prop(overlay, "show_stats", text="Statistics")
+        sub.prop(overlay, "show_sdf_perf", text="SDF Performance")
         if view.region_3d.view_perspective == 'CAMERA':
             sub.prop(overlay, "show_camera_guides", text="Camera Guides")
 

@@ -706,3 +706,118 @@ VRAM increase: R16F 256³ = ~32 MB → RGBA16F 256³ = ~128 MB. Acceptable for m
 | `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Accumulates blended color alongside distance using same smooth union weighting. `imageStore(sdf_atlas, voxel, float4(acc_dist, acc_color))`. |
 | `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Removed `find_blended_color()`. Color read from atlas: `textureLod(sdf_atlas, hit_uv, 0.0).gba` — one texture read, hardware trilinear interpolation, O(1). |
 | `draw/engines/sdf/sdf_engine.cc` | Atlas format `SFLOAT_16` → `SFLOAT_16_16_16_16`. Removed SSBO binding and `object_count` push constant from `draw_march()`. |
+
+### Sparse Brick-Based Voxel Grid (Phase 9 — 85-95% VRAM savings)
+
+Replaced the dense 256³ atlas (~128 MB VRAM) with a sparse brick-based system. The volume
+is subdivided into 8³ bricks. A classify pass identifies which bricks contain surface (typically
+5-15%), and only those bricks are baked into a compact atlas. The march shader uses two-level
+DDA (brick-level → voxel-level) to skip empty space efficiently.
+
+**Benefits:**
+- 85-95% VRAM reduction for typical scenes (only surface-containing bricks stored)
+- Faster bake (fewer voxels to evaluate)
+- Configurable resolution (64/128/256/512) via View3DShading properties
+- Debug grid overlay shows brick boundaries and occupancy heatmap
+
+### New Files (1)
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Classify compute shader: one thread per brick, evaluates SDF at brick center, writes slot index or void marker (-1/-2) to indirection texture, atomically counts active bricks |
+
+### Modified Files (DNA)
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Added `sdf_resolution` (int), `sdf_debug_grid` (short), `_sdf_pad` (short) to `View3DShading` struct |
+
+### Modified Files (RNA)
+
+| File | Change |
+|------|--------|
+| `makesrna/intern/rna_space.cc` | Added RNA enum properties `sdf_resolution` (64/128/256/512) and `sdf_debug_grid` (Off/Grid Lines/Occupancy) in `rna_def_space_view3d_shading()` |
+
+### Modified Files (Editor/UI)
+
+| File | Change |
+|------|--------|
+| `scripts/startup/bl_ui/properties_render.py` | Updated `RENDER_PT_proximity_raymarcher` panel to show `sdf_resolution` and `sdf_debug_grid` controls from `View3DShading` |
+
+### Modified Files (Draw)
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_private.hh` | Replaced `SDF_ATLAS_RES = 256` with brick constants: `SDF_BRICK_SIZE = 8`, `SDF_BRICK_STORAGE = 10`, `SDF_MAX_BRICKS = 8192` |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `BrickCounter` SSBO struct, `SDFClassifyParams` push constants. Updated `SDFBakeParams` and `SDFMarchParams` with `bricks_per_axis`, `grid_resolution`, `debug_grid` |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_classify` shader info. Updated `sdf_bake` to use `indirection_tx` sampler + `compact_atlas` image + `bricks_per_axis` push constant (workgroup 10×10×1). Updated `sdf_march` to use `compact_atlas` + `indirection_tx` samplers + `bricks_per_axis`/`debug_grid` push constants |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Rewritten: each workgroup = one brick, reads indirection to skip void bricks, writes 10³ voxels (8 inner + 1 overlap each side) to compact atlas at slot-indexed origin |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Rewritten: two-level DDA (brick-level traversal + voxel-level DDA within active bricks). `fetchCornersCompact()` reads from slot-indexed compact atlas. `computeDualVoxelNormalCompact()` uses brick-local 3×3×3 neighborhood. Debug grid overlay (mode 1: cyan brick boundary lines, mode 2: green→red occupancy heatmap) |
+| `draw/engines/sdf/sdf_engine.cc` | Major rewrite: added `indirection_tx_` (R32I), `compact_atlas_tx_` (RGBA16F), `brick_counter_` (SSBO), `classify_sh_`. New methods: `sync_sdf_settings()`, `ensure_indirection()`, `dispatch_classify()`, `ensure_compact_atlas()`. Pipeline: classify → ensure_compact_atlas → bake → march. GPU readback of active brick count. Console logging of brick statistics |
+| `draw/CMakeLists.txt` | Added `sdf_classify_comp.glsl` to shader file list |
+
+### Pipeline (3-pass)
+
+1. **Classify** (new): One thread per brick (4×4×4 workgroup). Evaluates SDF at brick center; if `|distance| < brick_half_diagonal`, brick is active. Active bricks get atomic counter slot, written to R32I indirection texture. Void bricks marked -1 (outside) or -2 (inside).
+2. **Bake** (modified): One workgroup per brick (10×10×1 threads, loop over Z). Skips void bricks via indirection lookup. Writes 10³ voxels (including overlap border) to compact atlas at `slot_origin + local_voxel`.
+3. **March** (modified): Brick-level DDA through grid_res³ grid, then voxel-level DDA within active bricks. Two-level approach eliminates sphere-trace skip (brick DDA is already O(grid_res) vs O(total_res)).
+
+---
+
+## Mesh to SDF Grid — Convert Meshes to SDF via Geometry Nodes
+
+Adds a "Mesh to SDF Grid" operator that converts mesh objects into SDF volume grids
+via Blender's Geometry Nodes, then blends them into the SDF draw engine's atlas alongside
+analytic SDF objects. Supports per-object blend control and 100+ mesh grid objects.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/startup/bl_operators/mesh_to_sdf.py` | Python operator `OBJECT_OT_mesh_to_sdf_grid`. Creates/reuses a "Mesh to SDF Grid" GN node group with `GeometryNodeMeshToSDFGrid` + `GeometryNodeStoreNamedGrid`. Interface sockets: Geometry (in/out), Voxel Size (0.3), Band Width (3), Blend (0.0). Blend socket is unconnected — it's a parameter read by the SDF engine from modifier IDProperties |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Compute shader that blends one grid SDF into the compact brick atlas. Same layout as bake shader (10×10×1 workgroup per brick). Reads indirection, skips void bricks. For each voxel: transforms world position to grid UVW via `grid_world_to_texture` matrix, samples `sdf_grid` texture, blends into `compact_atlas` via smooth union (imageLoad/imageStore) |
+
+### Modified Files (Python)
+
+| File | Change |
+|------|--------|
+| `scripts/startup/bl_operators/__init__.py` | Added `"mesh_to_sdf"` to `_modules` list for operator registration |
+| `scripts/startup/bl_ui/space_view3d.py` | Added separator + "Mesh to SDF Grid" menu entry in `VIEW3D_MT_sdf_add` |
+
+### Modified Files (Draw)
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_grid_blend` shader create info: `indirection_tx` + `sdf_grid` samplers, `compact_atlas` read-write image, push constants for `grid_world_to_texture` (mat4), `grid_color`, `grid_blend` |
+| `draw/engines/sdf/sdf_engine.cc` | Added mesh volume detection in `object_sync()` via `ObjectRuntime::geometry_set_eval`. New structs: `PendingGridObject`, `GridObject`. New methods: `process_grid_object()` (extracts dense floats via `BKE_volume_grid_dense_floats`, creates R16F GPU 3D texture, computes `world_to_texture` transform, reads Blend from modifier IDProperties), `dispatch_grid_blends()` (one compute dispatch per grid object with memory barriers), `fill_indirection_for_grids()` (grid-only scenes), `clear_compact_atlas()`. Grid objects included in dirty-tracking hash |
+| `draw/CMakeLists.txt` | Added `sdf_grid_blend_comp.glsl` to shader file list |
+
+### Pipeline (updated)
+
+1. **Classify** — unchanged (analytic SDF objects only)
+2. **Bake** — unchanged (analytic SDF objects only)
+3. **Grid Blend** (new) — one compute dispatch per grid object. Each dispatch reads the current atlas value (imageLoad), samples the grid's 3D texture at the transformed world position, blends distances via smooth union, writes back (imageStore). Memory barrier between dispatches. For grid-only scenes (no analytic objects), all bricks are marked active and atlas is initialized to large distance (1e10)
+4. **March** — unchanged (reads same compact atlas)
+
+---
+
+## Session 7: Fix Surface Artifacts + 3D Wireframe Debug Grid
+
+### Bug Fix: Voxel DDA Off-by-One
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Fixed off-by-one in voxel-level DDA: changed `BRICK_SIZE - 2` to `BRICK_SIZE - 1` in initial vcell clamp (line 245) and loop boundary check (line 270). This allows voxel cell 7 (the last interior cell) to be traversed. Previously, surfaces at the last voxel of each brick were missed, causing black streak artifacts on flat SDF surfaces |
+
+### Feature: 3D Voxel Grid Debug Overlay
+
+Replaced the shader-overlay debug grid (which painted on the SDF surface) with a single "3D Voxel Grid" mode: real 3D wireframe cubes around active bricks, drawn as `GPU_PRIM_LINES` after the march pass. Two-pass rendering: bright green lines in front of the SDF, faint ghosted lines behind.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Removed debug grid overlay section and `debug_grid` variable usage |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed `debug_grid` push constant from `sdf_march` shader info |
+| `draw/engines/sdf/sdf_engine.cc` | Added `draw_debug_grid()` with two-pass front/back rendering via `GPU_SHADER_3D_UNIFORM_COLOR`. Removed unused `rebuild_grid_batch_full()` (uniform grid) — only active-brick wireframes remain. Removed `debug_grid` uniform upload to march shader. New members: `grid_batch_`, `grid_batch_mode_`, `grid_batch_res_`. Helpers: `create_line_batch()`, `rebuild_grid_batch()`, `rebuild_grid_batch_active()`. Batch invalidated on rebake. Cleanup in destructor. Added includes for `MEM_guardedalloc.h` and `GPU_shader_builtin.hh` |
+| `makesrna/intern/rna_space.cc` | Consolidated enum to 2 items: Off, "3D Voxel Grid" (value 1). Removed old "Grid Lines" (1) and "Occupancy Heatmap" (2) |
+| `makesdna/DNA_view3d_types.h` | Updated `sdf_debug_grid` comment |
+| `scripts/startup/bl_ui/properties_render.py` | Renamed UI label to "3D Voxel Grid" |
