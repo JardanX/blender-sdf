@@ -527,7 +527,6 @@ ID *ui_template_id_liboverride_hierarchy_make(
       break;
     case ID_ME:
     case ID_CU_LEGACY:
-    case ID_MB:
     case ID_LT:
     case ID_LA:
     case ID_CA:
@@ -803,8 +802,6 @@ static StringRef template_id_browse_tip(const StructRNA *type)
         return N_("Browse Mesh Data to be linked");
       case ID_CU_LEGACY:
         return N_("Browse Curve Data to be linked");
-      case ID_MB:
-        return N_("Browse Metaball Data to be linked");
       case ID_MA:
         return N_("Browse Material to be linked");
       case ID_TE:

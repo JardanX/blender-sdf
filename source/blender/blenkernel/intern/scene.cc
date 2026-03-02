@@ -217,7 +217,7 @@ static void scene_init_data(ID *id)
     pset->brush[PE_BRUSH_CUT].strength = 1.0f;
   }
 
-  STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_EEVEE);
+  STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
 
   STRNCPY(scene->r.pic, U.renderdir);
 
@@ -1631,7 +1631,7 @@ double Scene::frames_per_second() const
 
 const char *RE_engine_id_BLENDER_EEVEE = "BLENDER_EEVEE";
 const char *RE_engine_id_BLENDER_EEVEE_NEXT = "BLENDER_EEVEE_NEXT";
-const char *RE_engine_id_BLENDER_WORKBENCH = "BLENDER_WORKBENCH";
+const char *RE_engine_id_BLENDER_WORKBENCH = "BLENDER_PROXIMITY";
 const char *RE_engine_id_CYCLES = "CYCLES";
 
 static void remove_sequencer_fcurves(Scene *sce)
@@ -2875,7 +2875,7 @@ bool BKE_scene_use_spherical_stereo(Scene *scene)
 
 bool BKE_scene_uses_blender_eevee(const Scene *scene)
 {
-  return STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE);
+  return STREQ(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
 }
 
 bool BKE_scene_uses_blender_workbench(const Scene *scene)
@@ -2890,7 +2890,7 @@ bool BKE_scene_uses_cycles(const Scene *scene)
 
 bool BKE_scene_uses_shader_previews(const Scene *scene)
 {
-  return BKE_scene_uses_blender_eevee(scene) || BKE_scene_uses_cycles(scene);
+  return BKE_scene_uses_blender_workbench(scene) || BKE_scene_uses_cycles(scene);
 }
 
 /* This enumeration has to match the one defined in the Cycles addon. */

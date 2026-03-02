@@ -27,7 +27,6 @@
 #include "BKE_editmesh.hh"
 #include "BKE_layer.hh"
 #include "BKE_main.hh"
-#include "BKE_mball.hh"
 #include "BKE_object.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -1154,22 +1153,6 @@ bool ED_view3d_minmax_verts(const Scene *scene, Object *obedit, float r_min[3], 
   TransVert *tv;
   float centroid[3], vec[3], bmat[3][3];
 
-  /* Meta-balls are an exception. */
-  if (obedit->type == OB_MBALL) {
-    float ob_min[3], ob_max[3];
-    bool changed;
-
-    changed = BKE_mball_minmax_ex(static_cast<const MetaBall *>(obedit->data),
-                                  ob_min,
-                                  ob_max,
-                                  obedit->object_to_world().ptr(),
-                                  SELECT);
-    if (changed) {
-      minmax_v3v3_v3(r_min, r_max, ob_min);
-      minmax_v3v3_v3(r_min, r_max, ob_max);
-    }
-    return changed;
-  }
   if (obedit->type == OB_POINTCLOUD) {
     const Object &ob_orig = *DEG_get_original(obedit);
     const PointCloud &pointcloud = *static_cast<const PointCloud *>(ob_orig.data);

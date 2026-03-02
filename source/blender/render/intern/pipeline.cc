@@ -105,6 +105,8 @@ static CLG_LogRef LOG = {"render"};
 
 namespace path_templates = blender::bke::path_templates;
 
+static void change_renderdata_engine(Render *re, const char *new_engine);
+
 /* render flow
  *
  * 1) Initialize state
@@ -1072,7 +1074,22 @@ static void do_render_engine(Render *re)
   RE_SetCamera(re, camera);
 
   re->display->current_scene_update(re->scene);
+
+  /* MATHOPS: F12 render delegates to Cycles when engine is Proximity. */
+  const bool delegate_to_cycles =
+      STREQ(re->r.engine, RE_engine_id_BLENDER_WORKBENCH) &&
+      RE_engines_find(RE_engine_id_CYCLES) != nullptr &&
+      RE_engines_find(RE_engine_id_CYCLES)->render != nullptr;
+
+  if (delegate_to_cycles) {
+    change_renderdata_engine(re, RE_engine_id_CYCLES);
+  }
+
   RE_engine_render(re, false);
+
+  if (delegate_to_cycles) {
+    change_renderdata_engine(re, RE_engine_id_BLENDER_WORKBENCH);
+  }
 
   /* when border render, check if we have to insert it in black */
   render_result_uncrop(re);
@@ -2044,9 +2061,6 @@ void RE_RenderFrame(Render *re,
   G.is_rendering = false;
 }
 
-#ifdef WITH_FREESTYLE
-
-/* Not freestyle specific, currently only used by free-style. */
 static void change_renderdata_engine(Render *re, const char *new_engine)
 {
   if (!STREQ(re->r.engine, new_engine)) {
@@ -2057,6 +2071,8 @@ static void change_renderdata_engine(Render *re, const char *new_engine)
     STRNCPY(re->r.engine, new_engine);
   }
 }
+
+#ifdef WITH_FREESTYLE
 
 static bool use_eevee_for_freestyle_render(Render *re)
 {
@@ -2071,7 +2087,7 @@ void RE_RenderFreestyleStrokes(Render *re, Main *bmain, Scene *scene, const bool
       char scene_engine[32];
       STRNCPY(scene_engine, re->r.engine);
       if (use_eevee_for_freestyle_render(re)) {
-        change_renderdata_engine(re, RE_engine_id_BLENDER_EEVEE);
+        change_renderdata_engine(re, RE_engine_id_BLENDER_WORKBENCH);
       }
 
       RE_engine_render(re, false);

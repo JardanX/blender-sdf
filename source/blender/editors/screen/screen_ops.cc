@@ -731,12 +731,8 @@ bool ED_operator_editlattice(bContext *C)
   return false;
 }
 
-bool ED_operator_editmball(bContext *C)
+bool ED_operator_editmball(bContext * /*C*/)
 {
-  Object *obedit = CTX_data_edit_object(C);
-  if (obedit && obedit->type == OB_MBALL) {
-    return nullptr != ((MetaBall *)obedit->data)->editelems;
-  }
   return false;
 }
 

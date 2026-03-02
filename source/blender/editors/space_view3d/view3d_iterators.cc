@@ -697,32 +697,6 @@ void nurbs_foreachScreenVert(const ViewContext *vc,
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Edit-Meta: For Each Screen Meta-Element
- * \{ */
-
-void mball_foreachScreenElem(const ViewContext *vc,
-                             void (*func)(void *user_data,
-                                          MetaElem *ml,
-                                          const float screen_co_b[2]),
-                             void *user_data,
-                             const eV3DProjTest clip_flag)
-{
-  MetaBall *mb = (MetaBall *)vc->obedit->data;
-
-  ED_view3d_check_mats_rv3d(vc->rv3d);
-
-  LISTBASE_FOREACH (MetaElem *, ml, mb->editelems) {
-    float screen_co[2];
-    if (ED_view3d_project_float_object(vc->region, &ml->x, screen_co, clip_flag) ==
-        V3D_PROJ_RET_OK)
-    {
-      func(user_data, ml, screen_co);
-    }
-  }
-}
-
-/** \} */
-
 /* -------------------------------------------------------------------- */
 /** \name Edit-Lattice: For Each Screen Vertex
  * \{ */

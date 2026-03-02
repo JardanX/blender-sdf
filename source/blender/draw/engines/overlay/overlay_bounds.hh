@@ -8,8 +8,6 @@
 
 #pragma once
 
-#include "BKE_mball.hh"
-
 #include "BLI_bounds_types.hh"
 #include "BLI_utildefines.h"
 
@@ -68,8 +66,7 @@ class Bounds : Overlay {
     const Object *ob = ob_ref.object;
     const bool from_dupli = is_from_dupli_or_set(ob);
     const bool has_bounds =
-        !ELEM(ob->type, OB_LAMP, OB_CAMERA, OB_EMPTY, OB_SPEAKER, OB_LIGHTPROBE) &&
-        (ob->type != OB_MBALL || BKE_mball_is_basis(ob));
+        !ELEM(ob->type, OB_LAMP, OB_CAMERA, OB_EMPTY, OB_SPEAKER, OB_LIGHTPROBE);
     const bool show_extras = !from_dupli && state.show_extras();
 
     /* Ignore `show_extras` when the objects draw-type is already bound-box,
@@ -183,11 +180,6 @@ class Bounds : Overlay {
           Curve &cu = DRW_object_get_data_for_drawing<Curve>(*ob);
           BKE_curve_texspace_ensure(&cu);
           add_bounds_ex(cu.texspace_location, cu.texspace_size, OB_BOUND_BOX);
-          break;
-        }
-        case ID_MB: {
-          MetaBall &mb = DRW_object_get_data_for_drawing<MetaBall>(*ob);
-          add_bounds_ex(mb.texspace_location, mb.texspace_size, OB_BOUND_BOX);
           break;
         }
         case ID_CV:

@@ -384,8 +384,6 @@ class ObjectRef {
           return ctx_mode == CTX_MODE_EDIT_SURFACE;
         case OB_LATTICE:
           return ctx_mode == CTX_MODE_EDIT_LATTICE;
-        case OB_MBALL:
-          return ctx_mode == CTX_MODE_EDIT_METABALL;
         case OB_FONT:
           return ctx_mode == CTX_MODE_EDIT_TEXT;
         case OB_CURVES:

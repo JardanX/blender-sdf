@@ -69,7 +69,7 @@ void depsgraph_geometry_tag_to_component(const ID *id, NodeType *component_type)
 
 bool is_selectable_data_id_type(const ID_Type id_type)
 {
-  return ELEM(id_type, ID_ME, ID_CU_LEGACY, ID_MB, ID_LT, ID_GD_LEGACY, ID_CV, ID_PT, ID_VO);
+  return ELEM(id_type, ID_ME, ID_CU_LEGACY, ID_LT, ID_GD_LEGACY, ID_CV, ID_PT, ID_VO);
 }
 
 void depsgraph_select_tag_to_component_opcode(const ID *id,
@@ -608,7 +608,6 @@ NodeType geometry_tag_to_component(const ID *id)
         case OB_SURF:
         case OB_FONT:
         case OB_LATTICE:
-        case OB_MBALL:
         case OB_CURVES:
         case OB_POINTCLOUD:
         case OB_VOLUME:
@@ -623,7 +622,6 @@ NodeType geometry_tag_to_component(const ID *id)
     case ID_ME:
     case ID_CU_LEGACY:
     case ID_LT:
-    case ID_MB:
     case ID_CV:
     case ID_PT:
     case ID_VO:

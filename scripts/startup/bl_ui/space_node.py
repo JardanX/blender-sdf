@@ -23,9 +23,6 @@ from bl_ui.space_toolsystem_common import (
     ToolActivePanelHelper,
 )
 from bl_ui.properties_material import (
-    EEVEE_MATERIAL_PT_settings,
-    EEVEE_MATERIAL_PT_settings_surface,
-    EEVEE_MATERIAL_PT_settings_volume,
     MATERIAL_PT_viewport,
 )
 from bl_ui.properties_world import (
@@ -33,7 +30,6 @@ from bl_ui.properties_world import (
 )
 from bl_ui.properties_data_light import (
     DATA_PT_light,
-    DATA_PT_EEVEE_light,
 )
 
 
@@ -863,7 +859,7 @@ class NODE_PT_texture_mapping(Panel):
     bl_options = {'DEFAULT_CLOSED'}
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     @classmethod
@@ -1231,13 +1227,9 @@ classes = (
     NODE_PT_gizmo_display,
     NODE_AST_compositor,
 
-    node_panel(EEVEE_MATERIAL_PT_settings),
-    node_panel(EEVEE_MATERIAL_PT_settings_surface),
-    node_panel(EEVEE_MATERIAL_PT_settings_volume),
     node_panel(MATERIAL_PT_viewport),
     node_panel(WORLD_PT_viewport_display),
     node_panel(DATA_PT_light),
-    node_panel(DATA_PT_EEVEE_light),
 )
 
 

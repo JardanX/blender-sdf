@@ -99,8 +99,6 @@
 #include "RE_engine.h"
 #include "RE_pipeline.h"
 
-#include "engines/eevee/eevee_lightcache.hh"
-
 #include "render_intern.hh" /* own include */
 
 using blender::Vector;
@@ -1534,23 +1532,9 @@ static wmOperatorStatus lightprobe_cache_bake_invoke(bContext *C,
   data->scene = scene;
   data->report = "";
 
-  wmJob *wm_job = EEVEE_lightbake_job_create(
-      wm, win, bmain, view_layer, scene, probes, data->report, scene->r.cfra, 0);
-  if (wm_job == nullptr) {
-    MEM_delete(data);
-    BKE_report(op->reports, RPT_WARNING, "Cannot bake light probe while rendering");
-    return OPERATOR_CANCELLED;
-  }
-
-  WM_event_add_modal_handler(C, op);
-
-  op->customdata = static_cast<void *>(data);
-
-  WM_jobs_start(wm, wm_job);
-
-  WM_cursor_wait(false);
-
-  return OPERATOR_RUNNING_MODAL;
+  MEM_delete(data);
+  BKE_report(op->reports, RPT_WARNING, "Light probe baking not available (EEVEE removed)");
+  return OPERATOR_CANCELLED;
 }
 
 static wmOperatorStatus lightprobe_cache_bake_modal(bContext *C,
@@ -1605,22 +1589,8 @@ static wmOperatorStatus lightprobe_cache_bake_exec(bContext *C, wmOperator *op)
 
   blender::Vector<Object *> probes = lightprobe_cache_irradiance_volume_subset_get(C, op);
 
-  std::string report;
-  void *rj = EEVEE_lightbake_job_data_alloc(
-      bmain, view_layer, scene, probes, report, scene->r.cfra);
-  /* Do the job. */
-  wmJobWorkerStatus worker_status = {};
-  EEVEE_lightbake_job(rj, &worker_status);
-  /* Move baking data to original object and then free it. */
-  EEVEE_lightbake_update(rj);
-  EEVEE_lightbake_job_data_free(rj);
-
-  if (!report.empty()) {
-    BKE_report(op->reports, RPT_ERROR, report.c_str());
-    return OPERATOR_CANCELLED;
-  }
-
-  return OPERATOR_FINISHED;
+  BKE_report(op->reports, RPT_WARNING, "Light probe baking not available (EEVEE removed)");
+  return OPERATOR_CANCELLED;
 }
 
 void OBJECT_OT_lightprobe_cache_bake(wmOperatorType *ot)

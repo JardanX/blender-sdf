@@ -1156,13 +1156,10 @@ static wmOperatorStatus screenshot_preview_exec(bContext *C, wmOperator *op)
   if (area_p1 == area_p2 && area_p1 != nullptr && area_p1->spacetype == SPACE_VIEW3D) {
     Scene *scene = CTX_data_scene(C);
     View3D *v3d = static_cast<View3D *>(area_p1->spacedata.first);
-    /* For #ED_view3d_draw_offscreen_imbuf only EEVEE only produces a good result. See #141732. */
+    /* For #ED_view3d_draw_offscreen_imbuf only internal engines produce a good result. */
     if (eDrawType(v3d->shading.type) == OB_RENDER) {
       const char *engine_name = scene->r.engine;
-      render_offscreen = STR_ELEM(engine_name,
-                                  RE_engine_id_BLENDER_EEVEE,
-                                  RE_engine_id_BLENDER_EEVEE_NEXT,
-                                  RE_engine_id_BLENDER_WORKBENCH);
+      render_offscreen = STR_ELEM(engine_name, RE_engine_id_BLENDER_WORKBENCH);
     }
     else {
       render_offscreen = true;

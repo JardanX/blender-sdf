@@ -63,7 +63,6 @@ bool transdata_check_local_center(const TransInfo *t, short around)
                 OB_CURVES_LEGACY,
                 OB_CURVES,
                 OB_GREASE_PENCIL,
-                OB_MBALL,
                 OB_ARMATURE) ||
            (t->spacetype == SPACE_GRAPH) ||
            (t->options & (CTX_MOVIECLIP | CTX_MASK | CTX_PAINT_CURVE | CTX_SEQUENCER_IMAGE))));

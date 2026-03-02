@@ -1943,7 +1943,7 @@ class SEQUENCER_PT_annotation_onion(AnnotationOnionSkin, SequencerButtonsPanel_O
 class SEQUENCER_PT_custom_props(SequencerButtonsPanel, PropertyPanel, Panel):
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
     _context_path = "active_strip"
     _property_type = (bpy.types.Strip,)

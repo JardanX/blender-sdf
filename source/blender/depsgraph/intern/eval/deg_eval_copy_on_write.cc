@@ -517,15 +517,6 @@ void update_curve_edit_mode_pointers(const Depsgraph * /*depsgraph*/,
   curve_cow->editfont = curve_orig->editfont;
 }
 
-void update_mball_edit_mode_pointers(const Depsgraph * /*depsgraph*/,
-                                     const ID *id_orig,
-                                     ID *id_cow)
-{
-  const MetaBall *mball_orig = (const MetaBall *)id_orig;
-  MetaBall *mball_cow = (MetaBall *)id_cow;
-  mball_cow->editelems = mball_orig->editelems;
-}
-
 void update_lattice_edit_mode_pointers(const Depsgraph * /*depsgraph*/,
                                        const ID *id_orig,
                                        ID *id_cow)
@@ -559,9 +550,6 @@ void update_edit_mode_pointers(const Depsgraph *depsgraph, const ID *id_orig, ID
       break;
     case ID_CU_LEGACY:
       update_curve_edit_mode_pointers(depsgraph, id_orig, id_cow);
-      break;
-    case ID_MB:
-      update_mball_edit_mode_pointers(depsgraph, id_orig, id_cow);
       break;
     case ID_LT:
       update_lattice_edit_mode_pointers(depsgraph, id_orig, id_cow);
@@ -901,12 +889,6 @@ void discard_curve_edit_mode_pointers(ID *id_cow)
   curve_cow->editfont = nullptr;
 }
 
-void discard_mball_edit_mode_pointers(ID *id_cow)
-{
-  MetaBall *mball_cow = (MetaBall *)id_cow;
-  mball_cow->editelems = nullptr;
-}
-
 void discard_lattice_edit_mode_pointers(ID *id_cow)
 {
   Lattice *lt_cow = (Lattice *)id_cow;
@@ -939,9 +921,6 @@ void discard_edit_mode_pointers(ID *id_cow)
       break;
     case ID_CU_LEGACY:
       discard_curve_edit_mode_pointers(id_cow);
-      break;
-    case ID_MB:
-      discard_mball_edit_mode_pointers(id_cow);
       break;
     case ID_LT:
       discard_lattice_edit_mode_pointers(id_cow);

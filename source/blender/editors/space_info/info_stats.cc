@@ -308,17 +308,6 @@ static void stats_object_edit(Object *obedit, SceneStats *stats)
       }
     }
   }
-  else if (obedit->type == OB_MBALL) {
-    /* MetaBall Edit */
-    MetaBall *mball = static_cast<MetaBall *>(obedit->data);
-
-    LISTBASE_FOREACH (MetaElem *, ml, mball->editelems) {
-      stats->totvert++;
-      if (ml->flag & SELECT) {
-        stats->totvertsel++;
-      }
-    }
-  }
   else if (obedit->type == OB_LATTICE) {
     /* Lattice Edit */
     Lattice *lt = static_cast<Lattice *>(obedit->data);

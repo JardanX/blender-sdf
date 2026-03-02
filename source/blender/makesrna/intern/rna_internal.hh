@@ -170,7 +170,7 @@ void RNA_def_blendfile_import(BlenderRNA *brna);
 void RNA_def_main(BlenderRNA *brna);
 void RNA_def_material(BlenderRNA *brna);
 void RNA_def_mesh(BlenderRNA *brna);
-void RNA_def_meta(BlenderRNA *brna);
+
 void RNA_def_modifier(BlenderRNA *brna);
 void RNA_def_nla(BlenderRNA *brna);
 void RNA_def_nodetree(BlenderRNA *brna);
@@ -464,7 +464,7 @@ void RNA_api_keymapitems(StructRNA *srna);
 void RNA_api_main(StructRNA *srna);
 void RNA_api_material(StructRNA *srna);
 void RNA_api_mesh(StructRNA *srna);
-void RNA_api_meta(StructRNA *srna);
+
 void RNA_api_object(StructRNA *srna);
 void RNA_api_pose(StructRNA *srna);
 void RNA_api_pose_channel(StructRNA *srna);
@@ -502,7 +502,7 @@ void RNA_def_main_window_managers(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_images(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_lattices(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_curves(BlenderRNA *brna, PropertyRNA *cprop);
-void RNA_def_main_metaballs(BlenderRNA *brna, PropertyRNA *cprop);
+
 void RNA_def_main_fonts(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_textures(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_brushes(BlenderRNA *brna, PropertyRNA *cprop);

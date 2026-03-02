@@ -5734,10 +5734,6 @@ static void rna_def_userdef_edit(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Duplicate Text", "Causes text data to be duplicated with the object");
 
-  prop = RNA_def_property(srna, "use_duplicate_metaball", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "dupflag", USER_DUP_MBALL);
-  RNA_def_property_ui_text(
-      prop, "Duplicate Metaball", "Causes metaball data to be duplicated with the object");
 
   prop = RNA_def_property(srna, "use_duplicate_armature", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "dupflag", USER_DUP_ARM);

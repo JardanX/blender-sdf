@@ -38,7 +38,6 @@
 #include "BKE_lattice.hh"
 #include "BKE_layer.hh"
 #include "BKE_main.hh"
-#include "BKE_mball.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_modifier.hh"
@@ -59,7 +58,8 @@
 #include "DNA_view3d_types.h"
 #include "DNA_world_types.h"
 
-#include "ED_gpencil_legacy.hh"
+/* MATHOPS: Removed — Grease Pencil editor */
+// #include "ED_gpencil_legacy.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_view3d.hh"
@@ -76,6 +76,7 @@
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
+#include "RE_engine.h"
 #include "WM_api.hh"
 
 #include "DRW_render.hh"
@@ -94,9 +95,9 @@
 #include "draw_cache_impl.hh"
 
 #include "engines/compositor/compositor_engine.h"
-#include "engines/eevee/eevee_engine.h"
 #include "engines/external/external_engine.h"
-#include "engines/gpencil/gpencil_engine.hh"
+/* MATHOPS: Removed — Grease Pencil draw engine */
+// #include "engines/gpencil/gpencil_engine.hh"
 #include "engines/image/image_engine.h"
 #include "engines/overlay/overlay_engine.h"
 #include "engines/select/select_engine.hh"
@@ -1090,7 +1091,8 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
   }
 
   if (ELEM(this->mode, DRWContext::SELECT_OBJECT, DRWContext::SELECT_OBJECT_MATERIAL)) {
-    view_data.grease_pencil.set_used(gpencil_engine_needed);
+    /* MATHOPS: Removed — Grease Pencil draw engine */
+    // view_data.grease_pencil.set_used(gpencil_engine_needed);
     view_data.object_select.set_used(true);
     return;
   }
@@ -1101,7 +1103,8 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
   }
 
   if (ELEM(this->mode, DRWContext::DEPTH, DRWContext::DEPTH_ACTIVE_OBJECT)) {
-    view_data.grease_pencil.set_used(gpencil_engine_needed);
+    /* MATHOPS: Removed — Grease Pencil draw engine */
+    // view_data.grease_pencil.set_used(gpencil_engine_needed);
     view_data.overlay.set_used(true);
     return;
   }
@@ -1120,10 +1123,7 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
       case OB_MATERIAL:
       case OB_RENDER:
       default:
-        if (render_engine_type == &DRW_engine_viewport_eevee_type) {
-          view_data.eevee.set_used(true);
-        }
-        else if (render_engine_type == &DRW_engine_viewport_workbench_type) {
+        if (render_engine_type == &DRW_engine_viewport_workbench_type) {
           view_data.workbench.set_used(true);
         }
         else if ((render_engine_type->flag & RE_INTERNAL) == 0) {
@@ -1135,9 +1135,10 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
         break;
     }
 
-    if ((drawtype >= OB_SOLID) || !use_xray) {
-      view_data.grease_pencil.set_used(gpencil_engine_needed);
-    }
+    /* MATHOPS: Removed — Grease Pencil draw engine */
+    // if ((drawtype >= OB_SOLID) || !use_xray) {
+    //   view_data.grease_pencil.set_used(gpencil_engine_needed);
+    // }
 
     view_data.compositor.set_used(is_viewport_compositor_enabled());
 
@@ -1156,26 +1157,20 @@ void DRWContext::engines_data_validate()
   DRW_view_data_free_unused(this->view_data_active);
 }
 
-static bool gpencil_object_is_excluded(View3D *v3d)
+/* MATHOPS: Removed — Grease Pencil draw engine. Stubs always return false. */
+static bool gpencil_object_is_excluded(View3D * /*v3d*/)
 {
-  if (v3d) {
-    return ((v3d->object_type_exclude_viewport & (1 << OB_GREASE_PENCIL)) != 0);
-  }
+  return true;
+}
+
+static bool gpencil_any_exists(Depsgraph * /*depsgraph*/)
+{
   return false;
 }
 
-static bool gpencil_any_exists(Depsgraph *depsgraph)
+bool DRW_gpencil_engine_needed_viewport(Depsgraph * /*depsgraph*/, View3D * /*v3d*/)
 {
-  return (DEG_id_type_any_exists(depsgraph, ID_GD_LEGACY) ||
-          DEG_id_type_any_exists(depsgraph, ID_GP));
-}
-
-bool DRW_gpencil_engine_needed_viewport(Depsgraph *depsgraph, View3D *v3d)
-{
-  if (gpencil_object_is_excluded(v3d)) {
-    return false;
-  }
-  return gpencil_any_exists(depsgraph);
+  return false;
 }
 
 /* -------------------------------------------------------------------- */
@@ -1219,14 +1214,7 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
     GPU_matrix_projection_set(rv3d->winmat);
     GPU_matrix_set(rv3d->viewmat);
 
-    /* annotations - temporary drawing buffer (3d space) */
-    /* XXX: Or should we use a proper draw/overlay engine for this case? */
-    if (do_annotations) {
-      GPU_depth_test(GPU_DEPTH_NONE);
-      /* XXX: as `scene->gpd` is not copied for copy-on-eval yet. */
-      ED_annotation_draw_view3d(DEG_get_input_scene(depsgraph), depsgraph, v3d, region, true);
-      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-    }
+    /* MATHOPS: Removed — annotations (grease pencil legacy) */
 
     GPU_depth_test(GPU_DEPTH_NONE);
     /* Apply state for callbacks. */
@@ -1268,13 +1256,7 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
     GPU_depth_test(GPU_DEPTH_NONE);
     DRW_draw_region_info(draw_ctx.evil_C, region);
 
-    /* Annotations - temporary drawing buffer (screen-space). */
-    /* XXX: Or should we use a proper draw/overlay engine for this case? */
-    if (((v3d->flag2 & V3D_HIDE_OVERLAYS) == 0) && (do_annotations)) {
-      GPU_depth_test(GPU_DEPTH_NONE);
-      /* XXX: as `scene->gpd` is not copied for copy-on-eval yet */
-      ED_annotation_draw_view3d(DEG_get_input_scene(depsgraph), depsgraph, v3d, region, false);
-    }
+    /* MATHOPS: Removed — annotations (grease pencil legacy) */
 
     if ((v3d->gizmo_flag & V3D_GIZMO_HIDE) == 0) {
       /* Draw 2D after region info so we can draw on top of the camera passepartout overlay.
@@ -1286,12 +1268,7 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
   }
   else {
-    if (v3d && ((v3d->flag2 & V3D_SHOW_ANNOTATION) != 0)) {
-      GPU_depth_test(GPU_DEPTH_NONE);
-      /* XXX: as `scene->gpd` is not copied for copy-on-eval yet */
-      ED_annotation_draw_view3d(DEG_get_input_scene(depsgraph), depsgraph, v3d, region, true);
-      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-    }
+    /* MATHOPS: Removed — annotations (grease pencil legacy) */
 
 #ifdef WITH_XR_OPENXR
     if ((v3d->flag & V3D_XR_SESSION_SURFACE) != 0) {
@@ -1369,9 +1346,7 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
 
     wmOrtho2(v2d.cur.xmin, v2d.cur.xmax, v2d.cur.ymin, v2d.cur.ymax);
 
-    if (do_annotations) {
-      ED_annotation_draw_view2d(draw_ctx.evil_C, true);
-    }
+    /* MATHOPS: Removed — annotations (grease pencil legacy) */
 
     GPU_depth_test(GPU_DEPTH_NONE);
 
@@ -1383,10 +1358,6 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
     blender::draw::command::StateSet::set();
 
     GPU_depth_test(GPU_DEPTH_NONE);
-
-    if (do_annotations) {
-      ED_annotation_draw_view2d(draw_ctx.evil_C, false);
-    }
   }
 
   ED_region_pixelspace(draw_ctx.region);
@@ -1606,78 +1577,16 @@ void DRW_draw_render_loop_offscreen(Depsgraph *depsgraph,
   }
 }
 
-bool DRW_render_check_grease_pencil(Depsgraph *depsgraph)
+/* MATHOPS: Removed — Grease Pencil draw engine. Stub always returns false. */
+bool DRW_render_check_grease_pencil(Depsgraph * /*depsgraph*/)
 {
-  if (gpencil_any_exists(depsgraph)) {
-    return true;
-  }
-
-  DEGObjectIterSettings deg_iter_settings = {nullptr};
-  deg_iter_settings.depsgraph = depsgraph;
-  deg_iter_settings.flags = DEG_OBJECT_ITER_FOR_RENDER_ENGINE_FLAGS;
-  DEG_OBJECT_ITER_BEGIN (&deg_iter_settings, ob) {
-    if (ob->type == OB_GREASE_PENCIL) {
-      if (BKE_object_visibility(ob, DAG_EVAL_RENDER) & OB_VISIBLE_SELF) {
-        return true;
-      }
-    }
-  }
-  DEG_OBJECT_ITER_END;
-
   return false;
 }
 
-void DRW_render_gpencil(RenderEngine *engine, Depsgraph *depsgraph)
+/* MATHOPS: Removed — Grease Pencil draw engine. No-op stub. */
+void DRW_render_gpencil(RenderEngine * /*engine*/, Depsgraph * /*depsgraph*/)
 {
-  using namespace blender::draw;
-  /* This function should only be called if there are grease pencil objects,
-   * especially important to avoid failing in background renders without GPU context. */
-  BLI_assert(DRW_render_check_grease_pencil(depsgraph));
-
-  Scene *scene = DEG_get_evaluated_scene(depsgraph);
-  ViewLayer *view_layer = DEG_get_evaluated_view_layer(depsgraph);
-  RenderResult *render_result = RE_engine_get_result(engine);
-  RenderLayer *render_layer = RE_GetRenderLayer(render_result, view_layer->name);
-  if (render_layer == nullptr) {
-    return;
-  }
-
-  Render *render = engine->re;
-
-  DRW_render_context_enable(render);
-
-  DRWContext draw_ctx(DRWContext::RENDER, depsgraph, {engine->resolution_x, engine->resolution_y});
-  draw_ctx.acquire_data();
-  draw_ctx.options.draw_background = scene->r.alphamode == R_ADDSKY;
-
-  /* Main rendering. */
-  rctf view_rect;
-  rcti render_rect;
-  RE_GetViewPlane(render, &view_rect, &render_rect);
-  if (BLI_rcti_is_empty(&render_rect)) {
-    BLI_rcti_init(&render_rect, 0, draw_ctx.size[0], 0, draw_ctx.size[1]);
-  }
-
-  for (RenderView *render_view = static_cast<RenderView *>(render_result->views.first);
-       render_view != nullptr;
-       render_view = render_view->next)
-  {
-    RE_SetActiveRenderView(render, render_view->name);
-    gpencil::Engine::render_to_image(engine, render_layer, render_rect);
-  }
-
-  command::StateSet::set();
-
-  GPU_depth_test(GPU_DEPTH_NONE);
-
-  blender::gpu::TexturePool::get().reset(true);
-
-  draw_ctx.release_data();
-
-  /* Restore Drawing area. */
-  GPU_framebuffer_restore();
-
-  DRW_render_context_disable(render);
+  /* GP engine removed — nothing to render. */
 }
 
 void DRW_render_to_image(
@@ -1891,11 +1800,7 @@ void DRW_draw_select_loop(Depsgraph *depsgraph,
   if (obedit != nullptr) {
     object_type = obedit->type;
     object_mode = eObjectMode(obedit->mode);
-    if (obedit->type == OB_MBALL) {
-      use_obedit = true;
-      // obedit_ctx_mode = CTX_MODE_EDIT_METABALL;
-    }
-    else if (obedit->type == OB_ARMATURE) {
+    if (obedit->type == OB_ARMATURE) {
       use_obedit = true;
       // obedit_ctx_mode = CTX_MODE_EDIT_ARMATURE;
     }
@@ -2221,15 +2126,14 @@ bool DRWContext::is_viewport_compositor_enabled() const
 
 void DRW_engines_register()
 {
-  RE_engines_register(&DRW_engine_viewport_eevee_type);
   RE_engines_register(&DRW_engine_viewport_workbench_type);
 }
 
 void DRW_engines_free()
 {
-  blender::eevee::Engine::free_static();
   blender::workbench::Engine::free_static();
-  blender::draw::gpencil::Engine::free_static();
+  /* MATHOPS: Removed — Grease Pencil draw engine */
+  // blender::draw::gpencil::Engine::free_static();
   blender::image_engine::Engine::free_static();
   blender::draw::overlay::Engine::free_static();
   blender::draw::edit_select::Engine::free_static();

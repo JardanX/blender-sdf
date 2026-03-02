@@ -81,7 +81,7 @@ int BIF_snappingSupported(Object *obedit)
 
   /* Only support object mesh, armature, curves. */
   if (obedit == nullptr ||
-      ELEM(obedit->type, OB_MESH, OB_ARMATURE, OB_CURVES_LEGACY, OB_LATTICE, OB_MBALL))
+      ELEM(obedit->type, OB_MESH, OB_ARMATURE, OB_CURVES_LEGACY, OB_LATTICE))
   {
     status = 1;
   }
@@ -791,9 +791,8 @@ static eSnapTargetOP snap_target_select_from_spacetype_and_tool_settings(TransIn
           target_operation |= SCE_SNAP_TARGET_NOT_SELECTED;
         }
       }
-      else if (ELEM(obedit_type, OB_ARMATURE, OB_CURVES_LEGACY, OB_SURF, OB_LATTICE, OB_MBALL)) {
-        /* Temporary limited to edit mode armature, curves, surfaces, lattices, and meta-balls.
-         */
+      else if (ELEM(obedit_type, OB_ARMATURE, OB_CURVES_LEGACY, OB_SURF, OB_LATTICE)) {
+        /* Temporary limited to edit mode armature, curves, surfaces, and lattices. */
         target_operation |= SCE_SNAP_TARGET_NOT_SELECTED;
       }
     }

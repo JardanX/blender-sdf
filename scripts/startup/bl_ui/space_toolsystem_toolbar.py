@@ -4031,90 +4031,13 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
     }
 
 
-class SEQUENCER_PT_tools_active(ToolSelectPanelHelper, Panel):
-    bl_space_type = 'SEQUENCE_EDITOR'
-    bl_region_type = 'TOOLS'
-    bl_label = "Tools"  # not visible
-    bl_options = {'HIDE_HEADER'}
-
-    # Satisfy the `ToolSelectPanelHelper` API.
-    keymap_prefix = "Sequence Editor Tool:"
-
-    # Default group to use as a fallback.
-    tool_fallback_id = "builtin.select"
-
-    @classmethod
-    def tools_from_context(cls, context, mode=None):
-        if mode is None:
-            if context.space_data:
-                mode = context.space_data.view_type
-        for tools in (cls._tools[None], cls._tools.get(mode, ())):
-            for item in tools:
-                if not (type(item) is ToolDef) and callable(item):
-                    yield from item(context)
-                else:
-                    yield item
-
-    @classmethod
-    def tools_all(cls):
-        yield from cls._tools.items()
-
-    # Private tool lists for convenient reuse in `_tools`.
-    _tools_annotate = (
-        (
-            _defs_annotate.scribble,
-            _defs_annotate.line,
-            _defs_annotate.poly,
-            _defs_annotate.eraser,
-        ),
-    )
-
-    # Private tools dictionary, store data to implement `tools_all` & `tools_from_context`.
-    # The keys match sequence editors view type: `context.space_data.view_type`.
-    # The values represent the tools, see `ToolSelectPanelHelper` for details.
-    _tools = {
-        None: [
-        ],
-        'PREVIEW': [
-            (
-                _defs_sequencer_select.select_preview,
-                _defs_sequencer_select.box_preview,
-                _defs_sequencer_select.lasso_preview,
-                _defs_sequencer_select.circle_preview,
-            ),
-            _defs_sequencer_generic.cursor,
-            None,
-            _defs_sequencer_generic.translate,
-            _defs_sequencer_generic.rotate,
-            _defs_sequencer_generic.scale,
-            _defs_sequencer_generic.transform,
-            None,
-            _defs_sequencer_generic.sample,
-            *_tools_annotate,
-        ],
-        'SEQUENCER': [
-            (
-                _defs_sequencer_select.box_timeline,
-                _defs_sequencer_select.lasso_timeline,
-                _defs_sequencer_select.circle_timeline,
-            ),
-            _defs_sequencer_generic.blade,
-            _defs_sequencer_generic.slip
-        ],
-        'SEQUENCER_PREVIEW': [
-            _defs_sequencer_select.box_timeline,
-            *_tools_annotate,
-            None,
-            _defs_sequencer_generic.blade,
-        ],
-    }
+# MATHOPS: Removed — SEQUENCER_PT_tools_active (sequencer space type not registered)
 
 
 classes = (
     IMAGE_PT_tools_active,
     NODE_PT_tools_active,
     VIEW3D_PT_tools_active,
-    SEQUENCER_PT_tools_active,
 )
 
 if __name__ == "__main__":  # only for live edit.

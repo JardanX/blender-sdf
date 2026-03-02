@@ -1377,7 +1377,7 @@ void ED_view3d_xr_shading_update(wmWindowManager *wm, const View3D *v3d, const S
     BLI_assert(WM_xr_session_exists(&wm->xr));
 
     if (v3d->shading.type == OB_RENDER) {
-      if (!(BKE_scene_uses_blender_workbench(scene) || BKE_scene_uses_blender_eevee(scene))) {
+      if (!BKE_scene_uses_blender_workbench(scene)) {
         /* Keep old shading while using Cycles or another engine, they are typically not usable in
          * VR. */
         return;

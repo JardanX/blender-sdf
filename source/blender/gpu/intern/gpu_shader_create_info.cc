@@ -534,12 +534,6 @@ void gpu_shader_create_info_init()
 #  include "glsl_osd_infos_list.hh"
 #endif
 
-  if (GPU_stencil_clasify_buffer_workaround()) {
-    /* WORKAROUND: Adding a dummy buffer that isn't used fixes a bug inside the Qualcomm driver. */
-    eevee_deferred_tile_classify.storage_buf(
-        12, Qualifier::read_write, "uint", "dummy_workaround_buf[]");
-  }
-
   for (ShaderCreateInfo *info : g_create_infos->values()) {
     info->is_generated_ = false;
 
@@ -549,9 +543,7 @@ void gpu_shader_create_info_init()
     info->builtins_ |= gpu_shader_dependency_get_builtins(info->compute_source_);
 
 #if GPU_SHADER_PRINTF_ENABLE
-    const bool is_material_shader = info->name_.startswith("eevee_surf_");
-    if ((info->builtins_ & BuiltinBits::USE_PRINTF) == BuiltinBits::USE_PRINTF ||
-        (gpu_shader_dependency_force_gpu_print_injection() && is_material_shader))
+    if ((info->builtins_ & BuiltinBits::USE_PRINTF) == BuiltinBits::USE_PRINTF)
     {
       info->additional_info("gpu_print");
     }

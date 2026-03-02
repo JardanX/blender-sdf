@@ -57,7 +57,6 @@
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
 #include "BKE_material.hh"
-#include "BKE_mball.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_mapping.hh"
 #include "BKE_mesh_runtime.hh"
@@ -126,9 +125,6 @@ static void object_force_modifier_update_for_bind(Depsgraph *depsgraph, Object *
   }
   else if (ob->type == OB_LATTICE) {
     BKE_lattice_modifiers_calc(depsgraph, scene_eval, ob_eval);
-  }
-  else if (ob->type == OB_MBALL) {
-    BKE_mball_data_update(depsgraph, scene_eval, ob_eval);
   }
   else if (ELEM(ob->type, OB_CURVES_LEGACY, OB_SURF, OB_FONT)) {
     BKE_displist_make_curveTypes(depsgraph, scene_eval, ob_eval, false);

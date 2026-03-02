@@ -25,19 +25,21 @@
 #include "ED_anim_api.hh"
 #include "ED_armature.hh"
 #include "ED_asset.hh"
-#include "ED_clip.hh"
+/* MATHOPS: Removed — Movie clip editor */
+// #include "ED_clip.hh"
 #include "ED_curve.hh"
 #include "ED_curves.hh"
 #include "ED_curves_sculpt.hh"
 #include "ED_fileselect.hh"
 #include "ED_geometry.hh"
 #include "ED_gizmo_library.hh"
-#include "ED_gpencil_legacy.hh"
-#include "ED_grease_pencil.hh"
+#include "ED_gpencil_legacy.hh" /* Annotations still needed */
+/* MATHOPS: Removed — Grease Pencil drawing */
+// #include "ED_grease_pencil.hh"
 #include "ED_lattice.hh"
 #include "ED_markers.hh"
-#include "ED_mask.hh"
-#include "ED_mball.hh"
+/* MATHOPS: Removed — Mask editor */
+// #include "ED_mask.hh"
 #include "ED_mesh.hh"
 #include "ED_node.hh"
 #include "ED_object.hh"
@@ -48,8 +50,9 @@
 #include "ED_scene.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
-#include "ED_sequencer.hh"
-#include "ED_sound.hh"
+/* MATHOPS: Removed — Video Sequence Editor / Sound */
+// #include "ED_sequencer.hh"
+// #include "ED_sound.hh"
 #include "ED_space_api.hh"
 #include "ED_transform.hh"
 #include "ED_userpref.hh"
@@ -77,10 +80,12 @@ void ED_spacetypes_init()
   ED_spacetype_nla();
   ED_spacetype_script();
   ED_spacetype_text();
-  vse::ED_spacetype_sequencer();
+  /* MATHOPS: Removed — Video Sequence Editor */
+  // vse::ED_spacetype_sequencer();
   ED_spacetype_console();
   ED_spacetype_userpref();
-  ED_spacetype_clip();
+  /* MATHOPS: Removed — Movie clip editor */
+  // ED_spacetype_clip();
   ED_spacetype_statusbar();
   ED_spacetype_topbar();
   spreadsheet::register_spacetype();
@@ -93,8 +98,9 @@ void ED_spacetypes_init()
   ED_operatortypes_anim();
   ED_operatortypes_animchannels();
   asset::operatortypes_asset();
-  ED_operatortypes_gpencil_legacy();
-  ED_operatortypes_grease_pencil();
+  ED_operatortypes_gpencil_legacy(); /* Annotations still needed */
+  /* MATHOPS: Removed — Grease Pencil drawing */
+  // ED_operatortypes_grease_pencil();
   object::operatortypes_object();
   ED_operatortypes_lattice();
   ED_operatortypes_mesh();
@@ -109,10 +115,11 @@ void ED_spacetypes_init()
   pointcloud::operatortypes_pointcloud();
   ED_operatortypes_armature();
   ED_operatortypes_marker();
-  ED_operatortypes_metaball();
-  ED_operatortypes_sound();
+  /* MATHOPS: Removed — Sound editor */
+  // ED_operatortypes_sound();
   ED_operatortypes_render();
-  ED_operatortypes_mask();
+  /* MATHOPS: Removed — Mask editor */
+  // ED_operatortypes_mask();
   ED_operatortypes_io();
   ED_operatortypes_edutils();
 
@@ -155,20 +162,22 @@ void ED_spacemacros_init()
   ED_operatormacros_armature();
   ED_operatormacros_mesh();
   ED_operatormacros_uvedit();
-  ED_operatormacros_metaball();
   ED_operatormacros_node();
   object::operatormacros_object();
   ED_operatormacros_file();
   ED_operatormacros_graph();
   ED_operatormacros_action();
-  ED_operatormacros_clip();
+  /* MATHOPS: Removed — Movie clip editor */
+  // ED_operatormacros_clip();
   ED_operatormacros_curve();
   curves::operatormacros_curves();
   pointcloud::operatormacros_pointcloud();
-  ED_operatormacros_mask();
-  vse::ED_operatormacros_sequencer();
+  /* MATHOPS: Removed — Mask / Video Sequence Editor */
+  // ED_operatormacros_mask();
+  // vse::ED_operatormacros_sequencer();
   ED_operatormacros_paint();
-  ED_operatormacros_grease_pencil();
+  /* MATHOPS: Removed — Grease Pencil */
+  // ED_operatormacros_grease_pencil();
   ED_operatormacros_nla();
 
   /* Register dropboxes (can use macros). */
@@ -186,8 +195,9 @@ void ED_spacetypes_keymap(wmKeyConfig *keyconf)
   ED_keymap_screen(keyconf);
   ED_keymap_anim(keyconf);
   ED_keymap_animchannels(keyconf);
-  ED_keymap_gpencil_legacy(keyconf);
-  ED_keymap_grease_pencil(keyconf);
+  ED_keymap_gpencil_legacy(keyconf); /* Annotations still needed */
+  /* MATHOPS: Removed — Grease Pencil drawing */
+  // ED_keymap_grease_pencil(keyconf);
   object::keymap_object(keyconf);
   ED_keymap_lattice(keyconf);
   ED_keymap_mesh(keyconf);
@@ -197,9 +207,9 @@ void ED_spacetypes_keymap(wmKeyConfig *keyconf)
   pointcloud::keymap_pointcloud(keyconf);
   ED_keymap_armature(keyconf);
   ED_keymap_physics(keyconf);
-  ED_keymap_metaball(keyconf);
   ED_keymap_paint(keyconf);
-  ED_keymap_mask(keyconf);
+  /* MATHOPS: Removed — Mask editor */
+  // ED_keymap_mask(keyconf);
   ED_keymap_marker(keyconf);
   sculpt_paint::keymap_sculpt(keyconf);
 

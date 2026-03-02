@@ -57,8 +57,7 @@ class PHYSICS_PT_add(PhysicButtonsPanel, Panel):
     bl_options = {'HIDE_HEADER'}
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw(self, context):

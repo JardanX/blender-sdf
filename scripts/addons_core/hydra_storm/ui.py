@@ -258,7 +258,7 @@ def get_panels():
                 'BLENDER_RENDER' in compat_engines and
                 panel_cls.__name__ not in exclude_panels
             ) or (
-                'BLENDER_EEVEE' in compat_engines and
+                'BLENDER_PROXIMITY' in compat_engines and
                 panel_cls.__name__ in include_eevee_panels
             )
         ):

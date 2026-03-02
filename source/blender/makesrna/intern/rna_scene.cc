@@ -1817,6 +1817,10 @@ static const EnumPropertyItem *rna_RenderSettings_engine_itemf(bContext * /*C*/,
   int a = 0, totitem = 0;
 
   for (type = static_cast<RenderEngineType *>(R_engines.first); type; type = type->next, a++) {
+    /* MATHOPS: Hide Cycles and Hydra Storm — Proximity delegates to Cycles transparently. */
+    if (STREQ(type->idname, "CYCLES") || STREQ(type->idname, "HYDRA_STORM")) {
+      continue;
+    }
     tmp.value = a;
     tmp.identifier = type->idname;
     tmp.name = type->name;
@@ -1856,7 +1860,14 @@ static void rna_Scene_update_render_engine(Main *bmain)
 
 static bool rna_RenderSettings_multiple_engines_get(PointerRNA * /*ptr*/)
 {
-  return (BLI_listbase_count(&R_engines) > 1);
+  /* MATHOPS: Count only visible engines (Cycles and Hydra Storm are hidden). */
+  int visible = 0;
+  LISTBASE_FOREACH (RenderEngineType *, type, &R_engines) {
+    if (!STREQ(type->idname, "CYCLES") && !STREQ(type->idname, "HYDRA_STORM")) {
+      visible++;
+    }
+  }
+  return visible > 1;
 }
 
 static bool rna_RenderSettings_use_spherical_stereo_get(PointerRNA *ptr)
@@ -1886,7 +1897,7 @@ static void rna_Scene_mesh_quality_update(Main *bmain, Scene * /*scene*/, Pointe
   Scene *scene = (Scene *)ptr->owner_id;
 
   FOREACH_SCENE_OBJECT_BEGIN (scene, ob) {
-    if (ELEM(ob->type, OB_MESH, OB_CURVES_LEGACY, OB_VOLUME, OB_MBALL)) {
+    if (ELEM(ob->type, OB_MESH, OB_CURVES_LEGACY, OB_VOLUME)) {
       DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
     }
   }
@@ -6856,7 +6867,7 @@ static void rna_def_scene_render_data(BlenderRNA *brna)
   };
 
   static const EnumPropertyItem engine_items[] = {
-      {0, "BLENDER_EEVEE", 0, "EEVEE", ""},
+      {0, "BLENDER_PROXIMITY", 0, "Proximity", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

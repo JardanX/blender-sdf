@@ -36,7 +36,6 @@
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
-#include "BKE_mball.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_mesh_wrapper.hh"
@@ -754,25 +753,6 @@ static Mesh *mesh_new_from_curve_type_object(const Object *object)
   return mesh;
 }
 
-static Mesh *mesh_new_from_mball_object(Object *object)
-{
-  /* NOTE: We can only create mesh for a polygonized meta ball. This figures out all original meta
-   * balls and all evaluated child meta balls (since polygonization is only stored in the mother
-   * ball).
-   *
-   * Create empty mesh so script-authors don't run into None objects. */
-  if (!DEG_is_evaluated(object)) {
-    return BKE_id_new_nomain<Mesh>(((ID *)object->data)->name + 2);
-  }
-
-  const Mesh *mesh_eval = BKE_object_get_evaluated_mesh(object);
-  if (mesh_eval == nullptr) {
-    return BKE_id_new_nomain<Mesh>(((ID *)object->data)->name + 2);
-  }
-
-  return BKE_mesh_copy_for_eval(*mesh_eval);
-}
-
 static Mesh *mesh_new_from_mesh(Object *object, const Mesh *mesh, const bool ensure_subdivision)
 {
   /* While we could copy this into the new mesh,
@@ -884,9 +864,6 @@ Mesh *BKE_mesh_new_from_object(Depsgraph *depsgraph,
     case OB_SURF:
       new_mesh = mesh_new_from_curve_type_object(object);
       break;
-    case OB_MBALL:
-      new_mesh = mesh_new_from_mball_object(object);
-      break;
     case OB_MESH:
       new_mesh = mesh_new_from_mesh_object(
           depsgraph, object, preserve_all_data_layers, preserve_origindex, ensure_subdivision);
@@ -952,7 +929,7 @@ Mesh *BKE_mesh_new_from_object_to_bmain(Main *bmain,
                                         Object *object,
                                         bool preserve_all_data_layers)
 {
-  BLI_assert(ELEM(object->type, OB_FONT, OB_CURVES_LEGACY, OB_SURF, OB_MBALL, OB_MESH));
+  BLI_assert(ELEM(object->type, OB_FONT, OB_CURVES_LEGACY, OB_SURF, OB_MESH));
 
   Mesh *mesh = BKE_mesh_new_from_object(depsgraph, object, preserve_all_data_layers, false, true);
   if (mesh == nullptr) {

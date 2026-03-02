@@ -34,7 +34,6 @@ std::unique_ptr<ObjectData> ObjectData::create(HydraSceneDelegate *scene_delegat
     case OB_SURF:
     case OB_FONT:
     case OB_CURVES_LEGACY:
-    case OB_MBALL:
       if (VolumeModifierData::is_volume_modifier(object)) {
         obj_data = std::make_unique<VolumeModifierData>(scene_delegate, object, prim_id);
         break;
@@ -66,7 +65,6 @@ bool ObjectData::is_supported(const Object *object)
     case OB_FONT:
     case OB_CURVES:
     case OB_CURVES_LEGACY:
-    case OB_MBALL:
     case OB_LAMP:
     case OB_VOLUME:
       return true;
@@ -84,7 +82,6 @@ bool ObjectData::is_mesh(const Object *object)
     case OB_SURF:
     case OB_FONT:
     case OB_CURVES_LEGACY:
-    case OB_MBALL:
       if (VolumeModifierData::is_volume_modifier(object)) {
         return false;
       }

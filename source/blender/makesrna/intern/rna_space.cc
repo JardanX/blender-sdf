@@ -1416,10 +1416,7 @@ static int rna_3DViewShading_type_get(PointerRNA *ptr)
   RenderEngineType *type = (scene) ? RE_engines_find(scene->r.engine) : nullptr;
   View3DShading *shading = (View3DShading *)ptr->data;
 
-  if (scene == nullptr || BKE_scene_uses_blender_eevee(scene)) {
-    return shading->type;
-  }
-  else if (BKE_scene_uses_blender_workbench(scene)) {
+  if (scene == nullptr || BKE_scene_uses_blender_workbench(scene)) {
     return (shading->type == OB_MATERIAL) ? int(OB_SOLID) : shading->type;
   }
   else {
@@ -1455,11 +1452,7 @@ static const EnumPropertyItem *rna_3DViewShading_type_itemf(bContext * /*C*/,
   RNA_enum_items_add_value(&item, &totitem, rna_enum_shading_type_items, OB_WIRE);
   RNA_enum_items_add_value(&item, &totitem, rna_enum_shading_type_items, OB_SOLID);
 
-  if (scene == nullptr || BKE_scene_uses_blender_eevee(scene)) {
-    RNA_enum_items_add_value(&item, &totitem, rna_enum_shading_type_items, OB_MATERIAL);
-    RNA_enum_items_add_value(&item, &totitem, rna_enum_shading_type_items, OB_RENDER);
-  }
-  else if (BKE_scene_uses_blender_workbench(scene)) {
+  if (scene == nullptr || BKE_scene_uses_blender_workbench(scene)) {
     RNA_enum_items_add_value(&item, &totitem, rna_enum_shading_type_items, OB_RENDER);
   }
   else {
@@ -1611,7 +1604,7 @@ static const EnumPropertyItem *rna_3DViewShading_render_pass_itemf(bContext *C,
   ViewLayer *view_layer = CTX_data_view_layer(C);
 
   const bool aov_available = BKE_view_layer_has_valid_aov(view_layer);
-  const bool eevee_active = STREQ(scene->r.engine, "BLENDER_EEVEE");
+  const bool eevee_active = false; /* EEVEE removed, Proximity engine replaces it */
 
   int totitem = 0;
   EnumPropertyItem *result = nullptr;
@@ -3808,12 +3801,12 @@ static IDFilterEnumPropertyItem rna_enum_space_file_id_filter_categories[] = {
      ICON_OUTLINER_COLLECTION,
      "Objects & Collections",
      "Show objects and collections"},
-    {FILTER_ID_AR | FILTER_ID_CU_LEGACY | FILTER_ID_LT | FILTER_ID_MB | FILTER_ID_ME |
+    {FILTER_ID_AR | FILTER_ID_CU_LEGACY | FILTER_ID_LT | FILTER_ID_ME |
          FILTER_ID_CV | FILTER_ID_PT | FILTER_ID_VO,
      "category_geometry",
      ICON_GEOMETRY_NODES,
      "Geometry",
-     "Show meshes, curves, lattice, armatures and metaballs data"},
+     "Show meshes, curves, lattice, and armatures data"},
     {FILTER_ID_LS | FILTER_ID_MA | FILTER_ID_NT | FILTER_ID_TE,
      "category_shading",
      ICON_MATERIAL_DATA,

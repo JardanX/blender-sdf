@@ -672,11 +672,11 @@ static bool bake_objects_check(Main *bmain,
         continue;
       }
 
-      if (ELEM(ob_iter->type, OB_MESH, OB_FONT, OB_CURVES_LEGACY, OB_SURF, OB_MBALL) == false) {
+      if (ELEM(ob_iter->type, OB_MESH, OB_FONT, OB_CURVES_LEGACY, OB_SURF) == false) {
         BKE_reportf(reports,
                     RPT_ERROR,
                     "Object \"%s\" is not a mesh or cannot be converted to a mesh (Curve, Text, "
-                    "Surface or Metaball)",
+                    "or Surface)",
                     ob_iter->id.name + 2);
         return false;
       }

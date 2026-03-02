@@ -25,13 +25,13 @@
 #include "overlay_fade.hh"
 #include "overlay_fluid.hh"
 #include "overlay_force_field.hh"
-#include "overlay_grease_pencil.hh"
+/* MATHOPS: Removed — Grease Pencil overlay */
+// #include "overlay_grease_pencil.hh"
 #include "overlay_grid.hh"
 #include "overlay_lattice.hh"
 #include "overlay_light.hh"
 #include "overlay_lightprobe.hh"
 #include "overlay_mesh.hh"
-#include "overlay_metaball.hh"
 #include "overlay_mode_transfer.hh"
 #include "overlay_motion_path.hh"
 #include "overlay_name.hh"
@@ -88,13 +88,13 @@ class Instance : public DrawEngine {
     Fade fade;
     Fluids fluids = {selection_type_};
     ForceFields force_fields = {selection_type_};
-    GreasePencil grease_pencil;
+    /* MATHOPS: Removed — Grease Pencil overlay */
+    // GreasePencil grease_pencil;
     Lattices lattices;
     Lights lights = {selection_type_};
     LightProbes light_probes = {selection_type_};
     Meshes meshes;
     MeshUVs mesh_uvs;
-    Metaballs metaballs = {selection_type_};
     ModeTransfer mode_transfer;
     Names names;
     Paints paints;

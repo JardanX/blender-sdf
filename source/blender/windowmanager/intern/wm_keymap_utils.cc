@@ -112,9 +112,6 @@ wmKeyMap *WM_keymap_guess_from_context(const bContext *C)
       case CTX_MODE_EDIT_ARMATURE:
         km_id = "Armature";
         break;
-      case CTX_MODE_EDIT_METABALL:
-        km_id = "Metaball";
-        break;
       case CTX_MODE_EDIT_LATTICE:
         km_id = "Lattice";
         break;
@@ -330,14 +327,6 @@ wmKeyMap *WM_keymap_guess_opname(const bContext *C, const char *opname)
   }
   else if (STRPREFIX(opname, "SCULPT_CURVES_OT")) {
     km = WM_keymap_find_all(wm, "Sculpt Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  }
-  else if (STRPREFIX(opname, "MBALL_OT")) {
-    km = WM_keymap_find_all(wm, "Metaball", SPACE_EMPTY, RGN_TYPE_WINDOW);
-
-    /* Some meta-ball operators are active in object mode too, like add-primitive. */
-    if (km && !WM_keymap_poll((bContext *)C, km)) {
-      km = WM_keymap_find_all(wm, "Object Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
-    }
   }
   else if (STRPREFIX(opname, "LATTICE_OT")) {
     km = WM_keymap_find_all(wm, "Lattice", SPACE_EMPTY, RGN_TYPE_WINDOW);

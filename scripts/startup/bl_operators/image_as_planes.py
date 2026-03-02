@@ -37,7 +37,7 @@ from bpy_extras.io_utils import ImportHelper
 # -----------------------------------------------------------------------------
 # Constants
 
-COMPATIBLE_ENGINES = {'CYCLES', 'BLENDER_EEVEE', 'BLENDER_WORKBENCH'}
+COMPATIBLE_ENGINES = {'CYCLES', 'BLENDER_PROXIMITY'}
 
 # -----------------------------------------------------------------------------
 # Image loading
@@ -843,10 +843,10 @@ class IMAGE_OT_import_as_mesh_planes(
             self.report({'ERROR'}, rpt_("Cannot generate materials for unknown {:s} render engine").format(engine))
             return {'CANCELLED'}
 
-        if engine == 'BLENDER_WORKBENCH':
+        if engine == 'BLENDER_PROXIMITY':
             self.report(
                 {'WARNING'},
-                rpt_("Generating Cycles/EEVEE compatible material, but won't be visible with {:s} engine").format(
+                rpt_("Generating Cycles compatible material, but won't be visible with {:s} engine").format(
                     engine,
                 ))
 
@@ -1119,10 +1119,10 @@ class IMAGE_OT_convert_to_mesh_plane(MaterialProperties_MixIn, TextureProperties
             self.report({'ERROR'}, rpt_("Cannot generate materials for unknown {:s} render engine").format(engine))
             return {'CANCELLED'}
 
-        if engine == 'BLENDER_WORKBENCH':
+        if engine == 'BLENDER_PROXIMITY':
             self.report(
                 {'WARNING'},
-                rpt_("Generating Cycles/EEVEE compatible material, but won't be visible with {:s} engine").format(
+                rpt_("Generating Cycles compatible material, but won't be visible with {:s} engine").format(
                     engine,
                 ))
 

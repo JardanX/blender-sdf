@@ -2030,53 +2030,6 @@ static void v3d_editarmature_buts(uiLayout *layout, Object *ob)
   col->prop(&eboneptr, "envelope_distance", UI_ITEM_NONE, IFACE_("Envelope"), ICON_NONE);
 }
 
-static void v3d_editmetaball_buts(uiLayout *layout, Object *ob)
-{
-  MetaBall *mball = static_cast<MetaBall *>(ob->data);
-  uiLayout *col;
-
-  if (!mball || !(mball->lastelem)) {
-    layout->label(IFACE_("Nothing selected"), ICON_NONE);
-    return;
-  }
-
-  PointerRNA ptr = RNA_pointer_create_discrete(&mball->id, &RNA_MetaElement, mball->lastelem);
-
-  col = &layout->column(false);
-  col->prop(&ptr, "co", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-
-  col->prop(&ptr, "radius", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  col->prop(&ptr, "stiffness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-
-  col->prop(&ptr, "type", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-
-  col = &layout->column(true);
-  switch (RNA_enum_get(&ptr, "type")) {
-    case MB_BALL:
-      break;
-    case MB_CUBE:
-      col->label(IFACE_("Size:"), ICON_NONE);
-      col->prop(&ptr, "size_x", UI_ITEM_NONE, IFACE_("X"), ICON_NONE);
-      col->prop(&ptr, "size_y", UI_ITEM_NONE, IFACE_("Y"), ICON_NONE);
-      col->prop(&ptr, "size_z", UI_ITEM_NONE, IFACE_("Z"), ICON_NONE);
-      break;
-    case MB_TUBE:
-      col->label(IFACE_("Size:"), ICON_NONE);
-      col->prop(&ptr, "size_x", UI_ITEM_NONE, IFACE_("X"), ICON_NONE);
-      break;
-    case MB_PLANE:
-      col->label(IFACE_("Size:"), ICON_NONE);
-      col->prop(&ptr, "size_x", UI_ITEM_NONE, IFACE_("X"), ICON_NONE);
-      col->prop(&ptr, "size_y", UI_ITEM_NONE, IFACE_("Y"), ICON_NONE);
-      break;
-    case MB_ELIPSOID:
-      col->label(IFACE_("Size:"), ICON_NONE);
-      col->prop(&ptr, "size_x", UI_ITEM_NONE, IFACE_("X"), ICON_NONE);
-      col->prop(&ptr, "size_y", UI_ITEM_NONE, IFACE_("Y"), ICON_NONE);
-      col->prop(&ptr, "size_z", UI_ITEM_NONE, IFACE_("Z"), ICON_NONE);
-      break;
-  }
-}
 
 static void do_view3d_region_buttons(bContext *C, void * /*index*/, int event)
 {
@@ -2135,9 +2088,6 @@ static void view3d_panel_transform(const bContext *C, Panel *panel)
   if (ob == obedit) {
     if (ob->type == OB_ARMATURE) {
       v3d_editarmature_buts(col, ob);
-    }
-    else if (ob->type == OB_MBALL) {
-      v3d_editmetaball_buts(col, ob);
     }
     else {
       View3D *v3d = CTX_wm_view3d(C);

@@ -15,7 +15,8 @@
 #include "draw_sculpt.hh"
 
 #include "overlay_base.hh"
-#include "overlay_grease_pencil.hh"
+/* MATHOPS: Removed — Grease Pencil overlay */
+// #include "overlay_grease_pencil.hh"
 #include "overlay_particle.hh"
 
 namespace blender::draw::overlay {
@@ -66,7 +67,8 @@ class Prepass : Overlay {
   PassMain::Sub *hair_ps_ = nullptr;
   PassMain::Sub *curves_ps_ = nullptr;
   PassMain::Sub *pointcloud_ps_ = nullptr;
-  PassMain::Sub *grease_pencil_ps_ = nullptr;
+  /* MATHOPS: Removed — Grease Pencil */
+  // PassMain::Sub *grease_pencil_ps_ = nullptr;
 
   bool use_material_slot_selection_ = false;
 
@@ -121,11 +123,12 @@ class Prepass : Overlay {
       sub.shader_set(res.shaders->depth_pointcloud.get());
       pointcloud_ps_ = &sub;
     }
-    {
-      auto &sub = ps_.sub("GreasePencil");
-      sub.shader_set(res.shaders->depth_grease_pencil.get());
-      grease_pencil_ps_ = &sub;
-    }
+    /* MATHOPS: Removed — Grease Pencil */
+    // {
+    //   auto &sub = ps_.sub("GreasePencil");
+    //   sub.shader_set(res.shaders->depth_grease_pencil.get());
+    //   grease_pencil_ps_ = &sub;
+    // }
   }
 
   void particle_sync(Manager &manager, const ObjectRef &ob_ref, Resources &res, const State &state)
@@ -263,19 +266,9 @@ class Prepass : Overlay {
         pass = curves_ps_;
         break;
       }
-      case OB_GREASE_PENCIL:
-        if (!res.is_selection() && state.is_render_depth_available) {
-          /* Disable during display, only enable for selection.
-           * The grease pencil engine already renders it properly. */
-          return;
-        }
-        GreasePencil::draw_grease_pencil(res,
-                                         *grease_pencil_ps_,
-                                         state.scene,
-                                         ob_ref.object,
-                                         manager.unique_handle(ob_ref),
-                                         res.select_id(ob_ref));
-        return;
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // case OB_GREASE_PENCIL:
+      //   ...
       default:
         break;
     }

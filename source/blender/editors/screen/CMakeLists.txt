@@ -47,6 +47,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   bf_editor_datafiles
+  # MATHOPS: Kept — library needed by screen module
   bf_editor_space_sequencer
   PRIVATE bf::gpu
   PRIVATE bf::imbuf

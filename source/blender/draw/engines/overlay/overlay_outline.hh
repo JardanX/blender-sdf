@@ -9,7 +9,8 @@
 #pragma once
 
 #include "overlay_base.hh"
-#include "overlay_grease_pencil.hh"
+/* MATHOPS: Removed — Grease Pencil overlay */
+// #include "overlay_grease_pencil.hh"
 
 #include "draw_common.hh"
 
@@ -27,7 +28,8 @@ class Outline : Overlay {
   PassMain outline_prepass_ps_ = {"Prepass"};
   PassMain::Sub *prepass_curves_ps_ = nullptr;
   PassMain::Sub *prepass_pointcloud_ps_ = nullptr;
-  PassMain::Sub *prepass_gpencil_ps_ = nullptr;
+  /* MATHOPS: Removed — Grease Pencil */
+  // PassMain::Sub *prepass_gpencil_ps_ = nullptr;
   PassMain::Sub *prepass_mesh_ps_ = nullptr;
   PassMain::Sub *prepass_volume_ps_ = nullptr;
   PassMain::Sub *prepass_wire_ps_ = nullptr;
@@ -81,12 +83,13 @@ class Outline : Overlay {
         sub.push_constant("is_transform", is_transform);
         prepass_pointcloud_ps_ = &sub;
       }
-      {
-        auto &sub = pass.sub("GreasePencil");
-        sub.shader_set(res.shaders->outline_prepass_gpencil.get());
-        sub.push_constant("is_transform", is_transform);
-        prepass_gpencil_ps_ = &sub;
-      }
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // {
+      //   auto &sub = pass.sub("GreasePencil");
+      //   sub.shader_set(res.shaders->outline_prepass_gpencil.get());
+      //   sub.push_constant("is_transform", is_transform);
+      //   prepass_gpencil_ps_ = &sub;
+      // }
       {
         auto &sub = pass.sub("Mesh");
         sub.shader_set(res.shaders->outline_prepass_mesh.get());
@@ -149,10 +152,10 @@ class Outline : Overlay {
         prepass_curves_ps_->draw(geom, manager.unique_handle(ob_ref));
         break;
       }
-      case OB_GREASE_PENCIL:
-        GreasePencil::draw_grease_pencil(
-            res, *prepass_gpencil_ps_, state.scene, ob_ref.object, manager.unique_handle(ob_ref));
-        break;
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // case OB_GREASE_PENCIL:
+      //   GreasePencil::draw_grease_pencil(...);
+      //   break;
       case OB_MESH:
         if (state.xray_enabled_and_not_wire) {
           geom = DRW_cache_mesh_edge_detection_get(ob_ref.object, nullptr);

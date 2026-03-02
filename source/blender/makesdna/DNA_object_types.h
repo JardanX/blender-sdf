@@ -442,6 +442,7 @@ typedef enum ObjectType {
   OB_CURVES_LEGACY = 2,
   OB_SURF = 3,
   OB_FONT = 4,
+  /** Deprecated: MetaBall removed, replaced by SDF. Kept as tombstone for .blend file compat. */
   OB_MBALL = 5,
 
   OB_LAMP = 10,
@@ -472,8 +473,8 @@ typedef enum ObjectType {
 
 /* check if the object type supports materials */
 #define OB_TYPE_SUPPORT_MATERIAL(_type) \
-  (((_type) >= OB_MESH && (_type) <= OB_MBALL) || \
-   ((_type) >= OB_CURVES && (_type) <= OB_GREASE_PENCIL))
+  (((_type) >= OB_MESH && (_type) <= OB_FONT) || \
+   ((_type) >= OB_CURVES && (_type) <= OB_GREASE_PENCIL) || ((_type) == OB_SDF))
 /**
  * Does the object have some render-able geometry (unlike empties, cameras, etc.). True for
  * #OB_CURVES_LEGACY, since these often evaluate to objects with geometry.
@@ -483,7 +484,6 @@ typedef enum ObjectType {
         OB_MESH, \
         OB_SURF, \
         OB_FONT, \
-        OB_MBALL, \
         OB_CURVES_LEGACY, \
         OB_CURVES, \
         OB_POINTCLOUD, \
@@ -496,7 +496,6 @@ typedef enum ObjectType {
         OB_FONT, \
         OB_CURVES_LEGACY, \
         OB_SURF, \
-        OB_MBALL, \
         OB_LATTICE, \
         OB_ARMATURE, \
         OB_CURVES, \
@@ -507,14 +506,13 @@ typedef enum ObjectType {
 
 /** Matches #OB_TYPE_SUPPORT_EDITMODE. */
 #define OB_DATA_SUPPORT_EDITMODE(_type) \
-  (ELEM(_type, ID_ME, ID_CU_LEGACY, ID_MB, ID_LT, ID_AR, ID_CV, ID_GP))
+  (ELEM(_type, ID_ME, ID_CU_LEGACY, ID_LT, ID_AR, ID_CV, ID_GP))
 
 /* is this ID type used as object data */
 #define OB_DATA_SUPPORT_ID(_id_type) \
   (ELEM(_id_type, \
         ID_ME, \
         ID_CU_LEGACY, \
-        ID_MB, \
         ID_LA, \
         ID_SPK, \
         ID_LP, \
@@ -531,7 +529,6 @@ typedef enum ObjectType {
 #define OB_DATA_SUPPORT_ID_CASE \
   ID_ME: \
   case ID_CU_LEGACY: \
-  case ID_MB: \
   case ID_LA: \
   case ID_SPK: \
   case ID_LP: \

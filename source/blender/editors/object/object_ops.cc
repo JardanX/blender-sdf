@@ -109,7 +109,6 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_collection_instance_add);
   WM_operatortype_append(OBJECT_OT_collection_external_asset_drop);
   WM_operatortype_append(OBJECT_OT_data_instance_add);
-  WM_operatortype_append(OBJECT_OT_metaball_add);
   WM_operatortype_append(OBJECT_OT_duplicates_make_real);
   WM_operatortype_append(OBJECT_OT_duplicate);
   WM_operatortype_append(OBJECT_OT_join);

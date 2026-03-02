@@ -1016,7 +1016,7 @@ class STRIP_PT_adjust_color(StripButtonsPanel, Panel):
 class STRIP_PT_custom_props(StripButtonsPanel, PropertyPanel, Panel):
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
     _context_path = "active_strip"
     _property_type = (bpy.types.Strip,)

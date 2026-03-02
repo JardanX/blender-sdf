@@ -2147,8 +2147,10 @@ static int arg_handle_engine_set(int argc, const char **argv, void *data)
       Scene *scene = CTX_data_scene(C);
       if (scene) {
         /* Backwards compatibility. */
-        if (STREQ(engine_name, "BLENDER_EEVEE_NEXT")) {
-          engine_name = "BLENDER_EEVEE";
+        if (STREQ(engine_name, "BLENDER_EEVEE_NEXT") || STREQ(engine_name, "BLENDER_EEVEE") ||
+            STREQ(engine_name, "BLENDER_WORKBENCH"))
+        {
+          engine_name = "BLENDER_PROXIMITY";
         }
 
         if (BLI_findstring(&R_engines, engine_name, offsetof(RenderEngineType, idname))) {

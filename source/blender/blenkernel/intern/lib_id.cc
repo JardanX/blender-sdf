@@ -2399,13 +2399,6 @@ IDNewNameResult BKE_id_rename(Main &bmain,
   auto deg_tag_id = [](ID &id) -> void {
     DEG_id_tag_update(&id, ID_RECALC_SYNC_TO_EVAL);
     switch (GS(id.name)) {
-      case ID_OB: {
-        Object &ob = reinterpret_cast<Object &>(id);
-        if (ob.type == OB_MBALL) {
-          DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
-        }
-        break;
-      }
       default:
         break;
     }

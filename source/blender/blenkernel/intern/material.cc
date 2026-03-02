@@ -346,10 +346,6 @@ Material ***BKE_object_material_array_p(Object *ob)
     Curve *cu = static_cast<Curve *>(ob->data);
     return &(cu->mat);
   }
-  if (ob->type == OB_MBALL) {
-    MetaBall *mb = static_cast<MetaBall *>(ob->data);
-    return &(mb->mat);
-  }
   if (ob->type == OB_CURVES) {
     Curves *curves = static_cast<Curves *>(ob->data);
     return &(curves->mat);
@@ -378,10 +374,6 @@ short *BKE_object_material_len_p(Object *ob)
   if (ELEM(ob->type, OB_CURVES_LEGACY, OB_FONT, OB_SURF)) {
     Curve *cu = static_cast<Curve *>(ob->data);
     return &(cu->totcol);
-  }
-  if (ob->type == OB_MBALL) {
-    MetaBall *mb = static_cast<MetaBall *>(ob->data);
-    return &(mb->totcol);
   }
   if (ob->type == OB_CURVES) {
     Curves *curves = static_cast<Curves *>(ob->data);

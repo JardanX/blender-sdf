@@ -696,25 +696,6 @@ static int gizmo_3d_foreach_selected(const bContext *C,
       }
       FOREACH_EDIT_OBJECT_END();
     }
-    else if (obedit->type == OB_MBALL) {
-      FOREACH_EDIT_OBJECT_BEGIN (ob_iter, use_mat_local) {
-        MetaBall *mb = (MetaBall *)ob_iter->data;
-
-        float mat_local[4][4];
-        if (use_mat_local) {
-          mul_m4_m4m4(
-              mat_local, obedit->world_to_object().ptr(), ob_iter->object_to_world().ptr());
-        }
-
-        LISTBASE_FOREACH (MetaElem *, ml, mb->editelems) {
-          if (ml->flag & SELECT) {
-            run_coord_with_matrix(&ml->x, use_mat_local, mat_local);
-            totsel++;
-          }
-        }
-      }
-      FOREACH_EDIT_OBJECT_END();
-    }
     else if (obedit->type == OB_LATTICE) {
       FOREACH_EDIT_OBJECT_BEGIN (ob_iter, use_mat_local) {
         Lattice *lt = ((Lattice *)ob_iter->data)->editlatt->latt;

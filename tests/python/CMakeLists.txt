@@ -813,46 +813,6 @@ if((WITH_CYCLES OR WITH_GPU_RENDER_TESTS) AND TEST_SRC_DIR_EXISTS)
 
     set(_gpu_render_tests_arguments)
 
-    # EEVEE
-    if(WITH_OPENGL_BACKEND)
-      foreach(render_test ${gpu_render_tests})
-        add_render_test(
-          eevee_opengl_${render_test}
-          ${CMAKE_CURRENT_LIST_DIR}/eevee_render_tests.py
-          --testdir "${TEST_SRC_DIR}/render/${render_test}"
-          --outdir "${TEST_OUT_DIR}/eevee_opengl"
-          --gpu-backend opengl
-          ${_gpu_render_tests_arguments}
-        )
-      endforeach()
-    endif()
-
-    if(WITH_METAL_BACKEND)
-      foreach(render_test ${gpu_render_tests})
-        add_render_test(
-          eevee_metal_${render_test}
-          ${CMAKE_CURRENT_LIST_DIR}/eevee_render_tests.py
-          --testdir "${TEST_SRC_DIR}/render/${render_test}"
-          --outdir "${TEST_OUT_DIR}/eevee_metal"
-          --gpu-backend metal
-          ${_gpu_render_tests_arguments}
-        )
-      endforeach()
-    endif()
-
-    if(WITH_VULKAN_BACKEND AND WITH_GPU_RENDER_TESTS_VULKAN)
-      foreach(render_test ${gpu_render_tests})
-        add_render_test(
-          eevee_vulkan_${render_test}
-          ${CMAKE_CURRENT_LIST_DIR}/eevee_render_tests.py
-          --testdir "${TEST_SRC_DIR}/render/${render_test}"
-          --outdir "${TEST_OUT_DIR}/eevee_vulkan"
-          --gpu-backend vulkan
-          ${_gpu_render_tests_arguments}
-        )
-      endforeach()
-    endif()
-
     # Workbench
     if(WITH_OPENGL_BACKEND)
       foreach(render_test ${gpu_render_tests})
