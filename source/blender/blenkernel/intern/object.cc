@@ -2621,17 +2621,8 @@ Object *BKE_object_duplicate(Main *bmain,
       }
       break;
     case OB_SDF:
-      printf("[SDF_DUP] OB_SDF hit: dupflag=0x%x, USER_DUP_SDF=0x%x, test=%d, id_old=%p\n",
-             (unsigned)dupflag,
-             (unsigned)USER_DUP_SDF,
-             (int)((dupflag & USER_DUP_SDF) != 0),
-             id_old);
       if (dupflag & USER_DUP_SDF) {
         id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
-        printf("[SDF_DUP] Copied: id_new=%p\n", id_new);
-      }
-      else {
-        printf("[SDF_DUP] SKIPPED copy (flag not set)\n");
       }
       break;
   }
