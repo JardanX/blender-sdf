@@ -105,6 +105,7 @@ set(SRC
   engines/workbench/workbench_shadow.cc
   engines/workbench/workbench_state.cc
   engines/workbench/workbench_volume.cc
+  engines/sdf/sdf_engine.cc
   engines/external/external_engine.cc
   # gpencil draw engine sources removed (not needed for SDF)
   # but shader files kept for overlay system dependencies
@@ -225,6 +226,9 @@ set(SRC
   engines/select/select_defines.hh
   engines/select/select_engine.hh
   engines/select/select_instance.hh
+  engines/sdf/sdf_engine.h
+  engines/sdf/sdf_private.hh
+  engines/sdf/sdf_shader_shared.hh
   engines/workbench/workbench_defines.hh
   engines/workbench/workbench_engine.h
   engines/workbench/workbench_enums.hh
@@ -283,6 +287,8 @@ set(GLSL_SRC
   engines/overlay/shaders/infos/overlay_volume_infos.hh
   engines/overlay/shaders/infos/overlay_wireframe_infos.hh
 
+  engines/sdf/shaders/infos/sdf_shader_infos.hh
+
   engines/select/shaders/infos/select_id_infos.hh
 
   engines/workbench/shaders/infos/workbench_composite_infos.hh
@@ -332,6 +338,11 @@ set(GLSL_SRC
   engines/workbench/shaders/workbench_world_light_lib.glsl
 
   engines/workbench/workbench_shader_shared.hh
+
+  engines/sdf/shaders/sdf_bake_comp.glsl
+  engines/sdf/shaders/sdf_march_frag.glsl
+  engines/sdf/shaders/sdf_lib.glsl
+  engines/sdf/sdf_shader_shared.hh
 
   intern/shaders/subdiv_custom_data_interp_comp.glsl
   intern/shaders/subdiv_ibo_lines_comp.glsl

@@ -1,0 +1,9 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff" fill-rule="evenodd">
+    <!-- Outer wave (rounded) -->
+    <path d="M 480,100 H 1120 A 380,380 0 0 1 1500,480 V 1120 A 380,380 0 0 1 1120,1500 H 480 A 380,380 0 0 1 100,1120 V 480 A 380,380 0 0 1 480,100 Z
+             M 520,200 H 1080 A 320,320 0 0 1 1400,520 V 1080 A 320,320 0 0 1 1080,1400 H 520 A 320,320 0 0 1 200,1080 V 520 A 320,320 0 0 1 520,200 Z"/>
+    <!-- Inner hollow square (outline only) -->
+    <path d="M 430,430 H 1170 V 1170 H 430 Z M 530,530 V 1070 H 1070 V 530 Z"/>
+  </g>
+</svg>

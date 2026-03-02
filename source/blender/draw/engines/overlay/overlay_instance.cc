@@ -69,10 +69,11 @@ void Instance::init()
     state.vignette_enabled = ctx->mode == DRWContext::VIEWPORT_XR &&
                              state.v3d->vignette_aperture < M_SQRT1_2;
 
+    /* MATHOPS: Solid/Wireframe viewport uses Workbench (matching depth buffer).
+     * Rendered viewport uses Cycles (external engine, depth prepass needed). */
     const bool viewport_uses_workbench = state.v3d->shading.type <= OB_SOLID ||
-                                         BKE_scene_uses_blender_workbench(state.scene);
-    /* Only workbench/proximity ensures the depth buffer is matching overlays.
-     * Force depth prepass for other render engines. */
+                                         (BKE_scene_uses_blender_workbench(state.scene) &&
+                                          state.v3d->shading.type != OB_RENDER);
     state.is_render_depth_available = viewport_uses_workbench;
 
     /* For depth only drawing, no other render engine is expected. Except for Grease Pencil which

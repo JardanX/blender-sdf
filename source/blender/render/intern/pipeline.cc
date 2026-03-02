@@ -1075,21 +1075,7 @@ static void do_render_engine(Render *re)
 
   re->display->current_scene_update(re->scene);
 
-  /* MATHOPS: F12 render delegates to Cycles when engine is Proximity. */
-  const bool delegate_to_cycles =
-      STREQ(re->r.engine, RE_engine_id_BLENDER_WORKBENCH) &&
-      RE_engines_find(RE_engine_id_CYCLES) != nullptr &&
-      RE_engines_find(RE_engine_id_CYCLES)->render != nullptr;
-
-  if (delegate_to_cycles) {
-    change_renderdata_engine(re, RE_engine_id_CYCLES);
-  }
-
   RE_engine_render(re, false);
-
-  if (delegate_to_cycles) {
-    change_renderdata_engine(re, RE_engine_id_BLENDER_WORKBENCH);
-  }
 
   /* when border render, check if we have to insert it in black */
   render_result_uncrop(re);

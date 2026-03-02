@@ -178,14 +178,15 @@ _km_hierarchy = [
 
     ('Spreadsheet Generic', 'SPREADSHEET', 'WINDOW', []),
 
-    ('Video Sequence Editor', 'SEQUENCE_EDITOR', 'WINDOW', [
-        ('Sequencer', 'SEQUENCE_EDITOR', 'WINDOW', [
-            _km_expand_from_toolsystem('SEQUENCE_EDITOR', 'SEQUENCER'),
-        ]),
-        ('Preview', 'SEQUENCE_EDITOR', 'WINDOW', [
-            _km_expand_from_toolsystem('SEQUENCE_EDITOR', 'PREVIEW'),
-        ]),
-    ]),
+    # MATHOPS: Removed — VSE toolsystem panels removed in fork
+    # ('Video Sequence Editor', 'SEQUENCE_EDITOR', 'WINDOW', [
+    #     ('Sequencer', 'SEQUENCE_EDITOR', 'WINDOW', [
+    #         _km_expand_from_toolsystem('SEQUENCE_EDITOR', 'SEQUENCER'),
+    #     ]),
+    #     ('Preview', 'SEQUENCE_EDITOR', 'WINDOW', [
+    #         _km_expand_from_toolsystem('SEQUENCE_EDITOR', 'PREVIEW'),
+    #     ]),
+    # ]),
 
     ('File Browser', 'FILE_BROWSER', 'WINDOW', [
         ('File Browser Main', 'FILE_BROWSER', 'WINDOW', []),
