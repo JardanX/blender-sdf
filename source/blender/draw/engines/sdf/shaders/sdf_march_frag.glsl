@@ -471,6 +471,6 @@ void main()
 
   out_color = float4(shaded_color, 1.0f);
 
-  /* ---- 9. Write depth using Blender's canonical world-to-screen transform ---- */
+  /* ---- 9. Write depth ---- */
   gl_FragDepth = drw_point_world_to_screen(hit_pos).z;
 }

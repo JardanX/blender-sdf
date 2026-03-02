@@ -568,8 +568,14 @@ class Instance : public DrawEngine {
       GPU_texture_bind(matcap_tx_, matcap_slot);
     }
 
-    /* Bind the view UBO so the fragment shader can access camera matrices. */
+    /* Bind the view UBO so the fragment shader can access camera matrices.
+     * Must call push_update() before binding — this uploads the current frame's
+     * matrices to the GPU. Without it, the GPU-side UBO contains stale data from
+     * the previous frame, causing incorrect gl_FragDepth during camera movement
+     * (grid-on-top-during-zoom bug). View::bind() does this internally but is
+     * protected; we call push_update() directly on the public UBO reference. */
     View &view = View::default_get();
+    view.matrices_ubo_get().push_update();
     GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
 
     /* Draw fullscreen triangle (3 vertices, vertex shader generates positions from gl_VertexID). */
