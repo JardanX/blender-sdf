@@ -66,9 +66,12 @@ using namespace draw;
 
 /* ---- Performance overlay static state ---- */
 
-/** Number of timestamp stamps per frame: before classify, after classify,
- *  after bake, after grid blend, after march. */
-static constexpr int PERF_STAMP_COUNT = 5;
+/** Number of per-pass elapsed-time queries: classify, bake, grid blend, march. */
+static constexpr int PERF_PASS_COUNT = 4;
+static constexpr int PERF_PASS_CLASSIFY = 0;
+static constexpr int PERF_PASS_BAKE = 1;
+static constexpr int PERF_PASS_GRID = 2;
+static constexpr int PERF_PASS_MARCH = 3;
 /** Number of FPS samples for smoothing. */
 static constexpr int PERF_FPS_SAMPLES = 8;
 
@@ -170,10 +173,12 @@ class Instance : public DrawEngine {
   /** Performance overlay state. */
   bool perf_enabled_ = false;
   bool perf_queries_created_ = false;
-  /** Double-buffered GL timestamp queries: [frame_idx][stamp_idx]. */
-  GLuint perf_queries_[2][PERF_STAMP_COUNT] = {};
+  /** Double-buffered GL_TIME_ELAPSED queries: [frame_idx][pass_idx]. */
+  GLuint perf_queries_[2][PERF_PASS_COUNT] = {};
   /** Whether queries have been issued for each frame slot. */
   bool perf_queries_valid_[2] = {false, false};
+  /** Which passes were active (issued) on each frame slot. */
+  bool perf_pass_active_[2][PERF_PASS_COUNT] = {};
   /** Current frame index (alternates 0/1). */
   int perf_frame_idx_ = 0;
   /** Whether bake passes ran on the frame whose results we're reading. */
@@ -401,6 +406,15 @@ class Instance : public DrawEngine {
     }
     /* Include surface margin so changes trigger rebake. */
     hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&surface_margin_);
+    /* Include scene AABB so any bounding box change triggers rebake.
+     * This catches cases where object bounds differ between frames
+     * (e.g., modifier evaluation changes, object added/removed). */
+    hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&scene_min_.x);
+    hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&scene_min_.y);
+    hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&scene_min_.z);
+    hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&scene_max_.x);
+    hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&scene_max_.y);
+    hash = hash * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&scene_max_.z);
 
     if (hash != scene_hash_) {
       scene_hash_ = hash;
@@ -465,9 +479,11 @@ class Instance : public DrawEngine {
       upload_objects();
     }
 
-    /* Stamp 0: before classify/bake passes. */
+    /* Reset per-frame pass activity flags. */
     if (perf_enabled_) {
-      perf_stamp(0);
+      for (int i = 0; i < PERF_PASS_COUNT; i++) {
+        perf_pass_active_[perf_frame_idx_][i] = false;
+      }
     }
 
     if (needs_bake_) {
@@ -478,6 +494,9 @@ class Instance : public DrawEngine {
       }
 
       /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
+      if (perf_enabled_) {
+        perf_begin_pass(PERF_PASS_CLASSIFY);
+      }
       if (!objects_.is_empty()) {
         dispatch_classify();
       }
@@ -491,15 +510,16 @@ class Instance : public DrawEngine {
       if (!grid_objects_.is_empty()) {
         augment_indirection_for_grids();
       }
-
-      /* Stamp 1: after classify. */
       if (perf_enabled_) {
-        perf_stamp(1);
+        perf_end_pass(PERF_PASS_CLASSIFY);
       }
 
       ensure_compact_atlas();
 
       /* Phase 3: Bake analytic SDFs into all active bricks. */
+      if (perf_enabled_) {
+        perf_begin_pass(PERF_PASS_BAKE);
+      }
       if (!objects_.is_empty()) {
         dispatch_bake();
       }
@@ -508,36 +528,29 @@ class Instance : public DrawEngine {
          * min-union works correctly. */
         clear_compact_atlas();
       }
-
-      /* Stamp 2: after bake. */
       if (perf_enabled_) {
-        perf_stamp(2);
+        perf_end_pass(PERF_PASS_BAKE);
       }
 
       /* Phase 4: Blend grid objects into atlas. */
+      if (perf_enabled_) {
+        perf_begin_pass(PERF_PASS_GRID);
+      }
       if (!grid_objects_.is_empty()) {
         dispatch_grid_blends();
       }
-
-      /* Stamp 3: after grid blend. */
       if (perf_enabled_) {
-        perf_stamp(3);
-      }
-    }
-    else {
-      /* No bake: stamps 1-3 equal stamp 0 (zero time for bake passes). */
-      if (perf_enabled_) {
-        perf_stamp(1);
-        perf_stamp(2);
-        perf_stamp(3);
+        perf_end_pass(PERF_PASS_GRID);
       }
     }
 
-    draw_march();
-
-    /* Stamp 4: after march. */
+    /* Ray march (runs every frame, even when cached). */
     if (perf_enabled_) {
-      perf_stamp(4);
+      perf_begin_pass(PERF_PASS_MARCH);
+    }
+    draw_march();
+    if (perf_enabled_) {
+      perf_end_pass(PERF_PASS_MARCH);
     }
 
     draw_debug_grid();
@@ -1263,14 +1276,10 @@ class Instance : public DrawEngine {
     float4x4 tex_to_world = ob->object_to_world() * tex_to_obj;
     float4x4 world_to_tex = math::invert(tex_to_world);
 
-    /* Expand scene AABB to cover the grid's full world-space extent.
-     * The grid covers [0,1]^3 in texture space; transform all 8 corners to world. */
-    for (int c = 0; c < 8; c++) {
-      float3 tc = float3((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
-      float3 wc = math::transform_point(tex_to_world, tc);
-      scene_min_ = math::min(scene_min_, wc);
-      scene_max_ = math::max(scene_max_, wc);
-    }
+    /* Scene AABB is accumulated in object_sync() via BKE_object_boundbox_get().
+     * Do NOT expand it here — this function only runs when grids change,
+     * so expanding here creates AABB inconsistency between bake frames (larger)
+     * and cached frames (smaller), causing objects to appear at wrong sizes. */
 
     std::printf("[SDF] Grid '%s': res %dx%dx%d, background=%.4f\n",
                 ob->id.name + 2,
@@ -1487,7 +1496,7 @@ class Instance : public DrawEngine {
 
   /* ---- Performance overlay helpers ---- */
 
-  /** Lazily create GL timestamp query objects. Only on OpenGL backend. */
+  /** Lazily create GL elapsed-time query objects. Only on OpenGL backend. */
   void perf_ensure_queries()
   {
     if (perf_queries_created_) {
@@ -1497,12 +1506,12 @@ class Instance : public DrawEngine {
       return;
     }
     for (int f = 0; f < 2; f++) {
-      glGenQueries(PERF_STAMP_COUNT, perf_queries_[f]);
+      glGenQueries(PERF_PASS_COUNT, perf_queries_[f]);
     }
     perf_queries_created_ = true;
   }
 
-  /** Read back the previous frame's query results (non-blocking). */
+  /** Read back the previous frame's query results (non-blocking) and update FPS. */
   void perf_begin_frame()
   {
     /* Compute wall-clock FPS. */
@@ -1516,7 +1525,6 @@ class Instance : public DrawEngine {
         if (perf_fps_sample_count_ < PERF_FPS_SAMPLES) {
           perf_fps_sample_count_++;
         }
-        /* Average the samples. */
         double sum = 0.0;
         for (int i = 0; i < perf_fps_sample_count_; i++) {
           sum += perf_fps_samples_[i];
@@ -1531,39 +1539,54 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Read back previous frame's results (non-blocking). */
+    /* Read back previous frame's elapsed-time results (non-blocking). */
     int prev = 1 - perf_frame_idx_;
     if (!perf_queries_valid_[prev]) {
       return;
     }
 
-    /* Check if the last query of the previous frame is ready. */
+    /* Check if the march query (always issued) is ready. */
     GLint available = 0;
     glGetQueryObjectiv(
-        perf_queries_[prev][PERF_STAMP_COUNT - 1], GL_QUERY_RESULT_AVAILABLE, &available);
+        perf_queries_[prev][PERF_PASS_MARCH], GL_QUERY_RESULT_AVAILABLE, &available);
     if (!available) {
-      return; /* Not ready yet — skip this frame's readback. */
+      return;
     }
 
-    GLuint64 timestamps[PERF_STAMP_COUNT];
-    for (int i = 0; i < PERF_STAMP_COUNT; i++) {
-      glGetQueryObjectui64v(perf_queries_[prev][i], GL_QUERY_RESULT, &timestamps[i]);
-    }
-
-    /* Convert nanosecond deltas to milliseconds. */
-    perf_classify_ms_ = double(timestamps[1] - timestamps[0]) * 1e-6;
-    perf_bake_ms_ = double(timestamps[2] - timestamps[1]) * 1e-6;
-    perf_grid_ms_ = double(timestamps[3] - timestamps[2]) * 1e-6;
-    perf_march_ms_ = double(timestamps[4] - timestamps[3]) * 1e-6;
+    /* Read each pass that was active on the previous frame. */
+    auto read_pass = [&](int pass, double &out_ms) {
+      if (perf_pass_active_[prev][pass]) {
+        GLuint64 elapsed_ns = 0;
+        glGetQueryObjectui64v(perf_queries_[prev][pass], GL_QUERY_RESULT, &elapsed_ns);
+        out_ms = double(elapsed_ns) * 1e-6;
+      }
+      else {
+        out_ms = 0.0;
+      }
+    };
+    read_pass(PERF_PASS_CLASSIFY, perf_classify_ms_);
+    read_pass(PERF_PASS_BAKE, perf_bake_ms_);
+    read_pass(PERF_PASS_GRID, perf_grid_ms_);
+    read_pass(PERF_PASS_MARCH, perf_march_ms_);
   }
 
-  /** Issue a GL timestamp query at the given stamp index. */
-  void perf_stamp(int index)
+  /** Begin a GL_TIME_ELAPSED query for the given pass. */
+  void perf_begin_pass(int pass)
   {
     if (!perf_queries_created_) {
       return;
     }
-    glQueryCounter(perf_queries_[perf_frame_idx_][index], GL_TIMESTAMP);
+    glBeginQuery(GL_TIME_ELAPSED, perf_queries_[perf_frame_idx_][pass]);
+    perf_pass_active_[perf_frame_idx_][pass] = true;
+  }
+
+  /** End the current GL_TIME_ELAPSED query. */
+  void perf_end_pass(int /*pass*/)
+  {
+    if (!perf_queries_created_) {
+      return;
+    }
+    glEndQuery(GL_TIME_ELAPSED);
   }
 
   /** Format results and swap frame index. */
@@ -1581,9 +1604,9 @@ class Instance : public DrawEngine {
 
     char classify_str[32], bake_str[32], grid_str[32];
     if (perf_prev_baked_) {
-      std::snprintf(classify_str, sizeof(classify_str), "%.1f ms", perf_classify_ms_);
-      std::snprintf(bake_str, sizeof(bake_str), "%.1f ms", perf_bake_ms_);
-      std::snprintf(grid_str, sizeof(grid_str), "%.1f ms", perf_grid_ms_);
+      std::snprintf(classify_str, sizeof(classify_str), "%.2f ms", perf_classify_ms_);
+      std::snprintf(bake_str, sizeof(bake_str), "%.2f ms", perf_bake_ms_);
+      std::snprintf(grid_str, sizeof(grid_str), "%.2f ms", perf_grid_ms_);
     }
     else {
       std::snprintf(classify_str, sizeof(classify_str), "%s", "\xe2\x80\x94");
@@ -1598,7 +1621,7 @@ class Instance : public DrawEngine {
                   "  classify: %s\n"
                   "  bake: %s\n"
                   "  grid blend: %s\n"
-                  "  march: %.1f ms\n"
+                  "  march: %.2f ms\n"
                   "  bricks: %d / %d (%.1f%%)",
                   perf_fps_,
                   perf_frame_ms_,
@@ -1619,7 +1642,7 @@ class Instance : public DrawEngine {
       return;
     }
     for (int f = 0; f < 2; f++) {
-      glDeleteQueries(PERF_STAMP_COUNT, perf_queries_[f]);
+      glDeleteQueries(PERF_PASS_COUNT, perf_queries_[f]);
     }
     perf_queries_created_ = false;
     s_perf_active = false;
