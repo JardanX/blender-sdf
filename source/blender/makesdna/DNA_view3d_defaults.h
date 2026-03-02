@@ -34,6 +34,8 @@
     .studiolight_intensity = 1.0f, \
     .render_pass = SCE_PASS_COMBINED, \
     .wire_color_type = V3D_SHADING_SINGLE_COLOR, \
+    .sdf_resolution = 256, \
+    .sdf_surface_margin = 100, \
   }
 
 #define _DNA_DEFAULT_View3DOverlay \
