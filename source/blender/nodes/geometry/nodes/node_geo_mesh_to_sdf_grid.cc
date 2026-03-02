@@ -23,10 +23,13 @@ static void node_declare(NodeDeclarationBuilder &b)
       .max(FLT_MAX)
       .subtype(PROP_DISTANCE);
   b.add_input<decl::Int>("Band Width")
-      .default_value(3)
+      .default_value(2)
       .min(1)
-      .max(100)
-      .description("Width of the active voxel surface, in voxels");
+      .max(10)
+      .description(
+          "Width of the narrow band in voxels. 2 is sufficient for rendering "
+          "(surface + interpolation margin). Higher values allow larger "
+          "blend radii but increase memory and computation proportionally");
   b.add_output<decl::Float>("SDF Grid").structure_type(StructureType::Grid);
 }
 

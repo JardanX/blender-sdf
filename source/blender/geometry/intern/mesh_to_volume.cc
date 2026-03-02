@@ -13,6 +13,7 @@
 
 #ifdef WITH_OPENVDB
 #  include <algorithm>
+#  include <cstring>
 #  include <openvdb/openvdb.h>
 #  include <openvdb/tools/GridTransformer.h>
 #  include <openvdb/tools/LevelSetUtil.h>
@@ -176,17 +177,15 @@ bke::VolumeGrid<float> mesh_to_sdf_grid(const Span<float3> positions,
     return {};
   }
 
+  /* Both float3 and Vec3s are 12-byte POD — use a single memcpy instead of
+   * spawning threads for a trivial data copy. */
+  static_assert(sizeof(float3) == sizeof(openvdb::Vec3s));
   std::vector<openvdb::Vec3s> points(positions.size());
+  std::memcpy(points.data(), positions.data(), positions.size() * sizeof(float3));
+
+  /* Triangle indices need corner_verts indirection, so keep the parallel loop. */
   std::vector<openvdb::Vec3I> triangles(corner_tris.size());
-
-  threading::parallel_for(positions.index_range(), 2048, [&](const IndexRange range) {
-    for (const int i : range) {
-      const float3 &co = positions[i];
-      points[i] = openvdb::Vec3s(co.x, co.y, co.z);
-    }
-  });
-
-  threading::parallel_for(corner_tris.index_range(), 2048, [&](const IndexRange range) {
+  threading::parallel_for(corner_tris.index_range(), 4096, [&](const IndexRange range) {
     for (const int i : range) {
       const int3 &tri = corner_tris[i];
       triangles[i] = openvdb::Vec3I(

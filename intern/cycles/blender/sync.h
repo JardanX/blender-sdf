@@ -225,6 +225,7 @@ class BlenderSync {
   BL::BlendData b_data;
   BL::Scene b_scene;
   BL::Object b_bake_target;
+  BL::Depsgraph *b_depsgraph_ptr = nullptr; /* Set during sync_objects for SDF iteration. */
 
   enum ShaderFlags { SHADER_WITH_LAYER_ATTRS };
 

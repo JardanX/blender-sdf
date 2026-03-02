@@ -251,6 +251,8 @@ set(SRC_KERNEL_GEOM_HEADERS
   geom/motion_triangle_shader.h
   geom/object.h
   geom/point.h
+  geom/sdf.h
+  geom/sdf_lib.h
   geom/point_intersect.h
   geom/primitive.h
   geom/shader_data.h

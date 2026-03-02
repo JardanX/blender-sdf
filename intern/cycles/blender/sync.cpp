@@ -150,8 +150,11 @@ void BlenderSync::sync_recalc(BL::Depsgraph &b_depsgraph,
                                            Mesh::SUBDIVISION_NONE;
 
           /* Need to recompute geometry if the geometry changed, or the transform changed
-           * and using adaptive subdivision. */
-          if (updated_geometry || (updated_transform && use_adaptive_subdiv)) {
+           * and using adaptive subdivision, or this is an SDF object (world-space baked atlas
+           * must be rebuilt when any SDF transform changes). */
+          const bool is_sdf_object = (b_ob.type() == BL::Object::type_SDF);
+          if (updated_geometry || (updated_transform && use_adaptive_subdiv) ||
+              (updated_transform && is_sdf_object)) {
             BL::ID const key = BKE_object_is_modified(b_ob) ?
                                    b_ob :
                                    object_get_data(b_ob, use_adaptive_subdiv);
@@ -217,6 +220,14 @@ void BlenderSync::sync_recalc(BL::Depsgraph &b_depsgraph,
     else if (b_id.is_a(&RNA_Volume)) {
       const BL::Volume b_volume(b_id);
       geometry_map.set_recalc(b_volume);
+    }
+    /* SDF */
+    else if (b_id.is_a(&RNA_SDF)) {
+      /* SDF data changed (size, bevel, blend, type, etc.).
+       * All SDF objects share one world-space atlas, so mark this data block
+       * for geometry recalc. The sync_sdf will re-bake the entire atlas
+       * and propagate it to all SDFGeometry instances. */
+      geometry_map.set_recalc(b_id);
     }
     /* Camera */
     else if (b_id.is_a(&RNA_Camera)) {

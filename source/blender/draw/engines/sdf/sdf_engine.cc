@@ -133,7 +133,6 @@ class Instance : public DrawEngine {
     float4x4 world_to_texture;      /* Combined transform: world -> [0,1]^3 */
     float4 color;                    /* Object display color */
     float blend;                     /* Blend amount from modifier */
-    float background_value;          /* OpenVDB background value (band boundary) */
   };
   Vector<GridObject> grid_objects_;
 
@@ -142,6 +141,22 @@ class Instance : public DrawEngine {
   gpu::Shader *bake_sh_ = nullptr;
   gpu::Shader *march_sh_ = nullptr;
   gpu::Shader *grid_blend_sh_ = nullptr;
+
+  /** Dirty brick flags (R8UI, grid_res^3, 0=clean 1=dirty). */
+  gpu::Texture *dirty_bricks_tx_ = nullptr;
+
+  /** Per-object change detection for incremental baking. */
+  struct ObjectSnapshot {
+    float4 bbox_min;
+    float4 bbox_max;
+  };
+  Map<uintptr_t, ObjectSnapshot> prev_snapshots_;
+  Vector<uintptr_t> object_uids_;
+
+  /** Whether incremental baking is possible this frame. */
+  bool incremental_possible_ = false;
+  /** Dirty world AABBs (union of old + new AABB per changed object). */
+  Vector<std::pair<float3, float3>> dirty_aabbs_;
 
   /** Object SSBO. */
   gpu::StorageBuf *object_ssbo_ = nullptr;
@@ -211,6 +226,9 @@ class Instance : public DrawEngine {
   void begin_sync() final
   {
     objects_.clear();
+    object_uids_.clear();
+    dirty_aabbs_.clear();
+    incremental_possible_ = false;
     pending_grid_objects_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
@@ -325,6 +343,10 @@ class Instance : public DrawEngine {
     scene_max_ = math::max(scene_max_, world_max);
 
     objects_.append(gpu_obj);
+    /* Use original object pointer as stable key for incremental change detection.
+     * session_uid can be 0 for SDF objects; orig_id is always unique and stable. */
+    uintptr_t obj_key = uintptr_t(ob->id.orig_id ? ob->id.orig_id : &ob->id);
+    object_uids_.append(obj_key);
   }
 
   void end_sync() final
@@ -424,6 +446,47 @@ class Instance : public DrawEngine {
       needs_bake_ = false;
     }
 
+    /* Detect dirty objects for incremental baking.
+     * Compare current object bboxes to previous frame's snapshots.
+     * Only attempt incremental when the same set of objects exists. */
+    if (needs_bake_ && !prev_snapshots_.is_empty() && !objects_.is_empty()) {
+      incremental_possible_ = true;
+
+      for (int i = 0; i < objects_.size(); i++) {
+        uintptr_t uid = object_uids_[i];
+        const ObjectSnapshot *prev = prev_snapshots_.lookup_ptr(uid);
+
+        if (prev == nullptr) {
+          /* New object (uid not seen before): can't do incremental. */
+          incremental_possible_ = false;
+          break;
+        }
+
+        /* Compare bbox (covers position, size, bevel, blend, rotation changes). */
+        const SDFObjectGPU &obj = objects_[i];
+        if (prev->bbox_min != obj.bbox_min || prev->bbox_max != obj.bbox_max) {
+          /* Object changed: compute dirty AABB (union of old + new). */
+          float3 dmin = math::min(float3(prev->bbox_min), float3(obj.bbox_min));
+          float3 dmax = math::max(float3(prev->bbox_max), float3(obj.bbox_max));
+          dirty_aabbs_.append({dmin, dmax});
+        }
+      }
+
+      /* Check if any objects were removed (prev had UIDs not in current). */
+      if (incremental_possible_ && int(prev_snapshots_.size()) != int(objects_.size())) {
+        incremental_possible_ = false;
+      }
+    }
+
+    /* Update snapshots for next frame. */
+    prev_snapshots_.clear();
+    for (int i = 0; i < objects_.size(); i++) {
+      ObjectSnapshot snap;
+      snap.bbox_min = objects_[i].bbox_min;
+      snap.bbox_max = objects_[i].bbox_max;
+      prev_snapshots_.add(object_uids_[i], snap);
+    }
+
     /* Compute atlas parameters from total voxel resolution. */
     int total_res = grid_res_ * SDF_BRICK_SIZE;
 
@@ -434,9 +497,34 @@ class Instance : public DrawEngine {
     scene_size += float3(margin * 2.0f);
 
     float max_axis = math::reduce_max(scene_size);
-    voxel_size_ = max_axis / float(total_res);
-    atlas_origin_ = scene_center - float3(max_axis * 0.5f);
-    atlas_extent_ = float3(max_axis);
+
+    /* For incremental baking, keep atlas params stable if all objects still fit
+     * within the existing grid. Changing atlas_origin or voxel_size would
+     * invalidate all cached brick data (world-space positions would mismatch). */
+    if (incremental_possible_ && !dirty_aabbs_.is_empty() && voxel_size_ > 0.0f) {
+      float3 atlas_max = atlas_origin_ + atlas_extent_;
+      /* Use an inner margin: if scene bounds are within 90% of atlas,
+       * keep the existing atlas. This avoids thrashing on small movements. */
+      float3 inner_margin = atlas_extent_ * 0.05f;
+      if (math::reduce_min(scene_min_ - atlas_origin_ + inner_margin) >= 0.0f &&
+          math::reduce_min(atlas_max - scene_max_ + inner_margin) >= 0.0f)
+      {
+        /* Objects fit within existing atlas — keep params stable. */
+      }
+      else {
+        /* Scene grew beyond atlas — must do full rebake with new params. */
+        incremental_possible_ = false;
+        dirty_aabbs_.clear();
+        voxel_size_ = max_axis / float(total_res);
+        atlas_origin_ = scene_center - float3(max_axis * 0.5f);
+        atlas_extent_ = float3(max_axis);
+      }
+    }
+    else {
+      voxel_size_ = max_axis / float(total_res);
+      atlas_origin_ = scene_center - float3(max_axis * 0.5f);
+      atlas_extent_ = float3(max_axis);
+    }
   }
 
   void draw(Manager & /*manager*/) final
@@ -460,21 +548,17 @@ class Instance : public DrawEngine {
 
     /* Bail if critical shaders failed. */
     if (march_sh_ == nullptr) {
-      std::printf("[SDF] March shader compilation FAILED\n");
       return;
     }
     if (!objects_.is_empty() && (classify_sh_ == nullptr || bake_sh_ == nullptr)) {
-      std::printf("[SDF] Classify/Bake shader compilation FAILED\n");
       return;
     }
     if (!grid_objects_.is_empty() && grid_blend_sh_ == nullptr) {
-      std::printf("[SDF] Grid blend shader compilation FAILED\n");
       return;
     }
 
     DRW_submission_start();
 
-    ensure_indirection();
     if (!objects_.is_empty()) {
       upload_objects();
     }
@@ -493,46 +577,71 @@ class Instance : public DrawEngine {
         grid_batch_ = nullptr;
       }
 
-      /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
-      if (perf_enabled_) {
-        perf_begin_pass(PERF_PASS_CLASSIFY);
-      }
-      if (!objects_.is_empty()) {
-        dispatch_classify();
-      }
-      else {
-        /* No analytic objects: start with empty indirection. */
-        clear_indirection();
+      /* Determine if in-place incremental baking is possible.
+       * Requires: previous atlas exists, same objects, no grids, dirty regions exist. */
+      bool do_incremental = incremental_possible_ && compact_atlas_tx_ && indirection_tx_ &&
+                            grid_objects_.is_empty() && !dirty_aabbs_.is_empty();
+
+      if (do_incremental) {
+        /* In-place path: keep existing atlas + indirection, bake dirty bricks only.
+         * No classify, no copy — clean brick data is already at the correct atlas positions. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_CLASSIFY);
+          perf_end_pass(PERF_PASS_CLASSIFY);
+        }
+
+        bool ok = prepare_incremental_bake();
+        if (ok) {
+          if (perf_enabled_) {
+            perf_begin_pass(PERF_PASS_BAKE);
+          }
+          dispatch_bake(/*incremental=*/true);
+          if (perf_enabled_) {
+            perf_end_pass(PERF_PASS_BAKE);
+          }
+        }
+        else {
+          /* Atlas full or other failure — fall through to full bake. */
+          do_incremental = false;
+        }
       }
 
-      /* Phase 2: Augment indirection with bricks overlapping grid objects.
-       * Reads back indirection, marks additional bricks active, re-uploads. */
-      if (!grid_objects_.is_empty()) {
-        augment_indirection_for_grids();
-      }
-      if (perf_enabled_) {
-        perf_end_pass(PERF_PASS_CLASSIFY);
+      if (!do_incremental) {
+        /* Full bake path. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_CLASSIFY);
+        }
+        ensure_indirection();
+        if (!objects_.is_empty()) {
+          dispatch_classify();
+        }
+        else {
+          clear_indirection();
+        }
+        if (!grid_objects_.is_empty()) {
+          augment_indirection_for_grids();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_CLASSIFY);
+        }
+
+        ensure_compact_atlas();
+
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_BAKE);
+        }
+        if (!objects_.is_empty()) {
+          dispatch_bake(/*incremental=*/false);
+        }
+        else {
+          clear_compact_atlas();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_BAKE);
+        }
       }
 
-      ensure_compact_atlas();
-
-      /* Phase 3: Bake analytic SDFs into all active bricks. */
-      if (perf_enabled_) {
-        perf_begin_pass(PERF_PASS_BAKE);
-      }
-      if (!objects_.is_empty()) {
-        dispatch_bake();
-      }
-      else {
-        /* Grid-only scene: init atlas to large distance so grid blend's
-         * min-union works correctly. */
-        clear_compact_atlas();
-      }
-      if (perf_enabled_) {
-        perf_end_pass(PERF_PASS_BAKE);
-      }
-
-      /* Phase 4: Blend grid objects into atlas. */
+      /* Blend grid objects into atlas. */
       if (perf_enabled_) {
         perf_begin_pass(PERF_PASS_GRID);
       }
@@ -553,7 +662,11 @@ class Instance : public DrawEngine {
       perf_end_pass(PERF_PASS_MARCH);
     }
 
-    draw_debug_grid();
+    /* Skip debug grid in Cycles rendered view — it draws on top of the
+     * path-traced image since the SDF draw engine only provides depth. */
+    if (!draw_ctx_->v3d || draw_ctx_->v3d->shading.type != OB_RENDER) {
+      draw_debug_grid();
+    }
 
     DRW_submission_end();
 
@@ -596,6 +709,11 @@ class Instance : public DrawEngine {
         GPU_texture_free(compact_atlas_tx_);
         compact_atlas_tx_ = nullptr;
       }
+      if (dirty_bricks_tx_) {
+        GPU_texture_free(dirty_bricks_tx_);
+        dirty_bricks_tx_ = nullptr;
+      }
+      prev_snapshots_.clear();
       needs_bake_ = true;
       scene_hash_ = 0;
     }
@@ -773,11 +891,10 @@ class Instance : public DrawEngine {
 
   void ensure_compact_atlas()
   {
-    /* Free old atlas if it exists. */
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
-      compact_atlas_tx_ = nullptr;
     }
+    compact_atlas_tx_ = nullptr;
 
     if (active_brick_count_ <= 0) {
       active_brick_count_ = 0;
@@ -811,15 +928,6 @@ class Instance : public DrawEngine {
                                               usage,
                                               nullptr);
     GPU_texture_filter_mode(compact_atlas_tx_, true);
-
-    int total_bricks = grid_res_ * grid_res_ * grid_res_;
-    float pct = (total_bricks > 0) ? 100.0f * float(active_brick_count_) / float(total_bricks) :
-                                     0.0f;
-    std::printf("[SDF] Classify: %d/%d bricks active (%.1f%%), compact atlas %d^3\n",
-                active_brick_count_,
-                total_bricks,
-                pct,
-                atlas_dim);
   }
 
   void upload_objects()
@@ -906,7 +1014,7 @@ class Instance : public DrawEngine {
     active_brick_count_ = int(readback.count);
   }
 
-  void dispatch_bake()
+  void dispatch_bake(bool incremental = false)
   {
     if (active_brick_count_ <= 0) {
       return;
@@ -933,29 +1041,38 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_3iv(bake_sh_, "grid_resolution", grid_res_v);
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
 
+    /* Incremental mode: bind dirty bricks texture and set flag. */
+    GPU_shader_uniform_1i(bake_sh_, "incremental", incremental ? 1 : 0);
+    if (incremental && dirty_bricks_tx_) {
+      int dirty_slot = GPU_shader_get_sampler_binding(bake_sh_, "dirty_bricks_tx");
+      GPU_texture_bind(dirty_bricks_tx_, dirty_slot);
+    }
+
     /* Dispatch: one workgroup per brick in the grid. */
     GPU_compute_dispatch(bake_sh_, grid_res_, grid_res_, grid_res_);
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_texture_image_unbind(compact_atlas_tx_);
     GPU_texture_unbind(indirection_tx_);
+    if (incremental && dirty_bricks_tx_) {
+      GPU_texture_unbind(dirty_bricks_tx_);
+    }
     GPU_shader_unbind();
-
-    std::printf("[SDF] Bake dispatched (%d x %d x %d grid, %d active bricks)\n",
-                grid_res_,
-                grid_res_,
-                grid_res_,
-                active_brick_count_);
   }
 
   void draw_march()
   {
     DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
 
-    if (draw_ctx_->is_depth()) {
+    if (draw_ctx_->is_depth() ||
+        (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER))
+    {
+      /* Depth-only: either a depth prepass, or rendered mode where Cycles
+       * provides the color and we only contribute depth for the overlay grid. */
       GPU_framebuffer_bind(dfbl->depth_only_fb);
     }
     else {
+      /* Solid / wireframe: write both color and depth. */
       GPU_framebuffer_bind(dfbl->default_fb);
     }
 
@@ -1245,20 +1362,6 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Detect the OpenVDB background value (narrow-band boundary).
-     * This is the clamped max |SDF| value. Voxels with |value| >= background
-     * are outside the narrow band and should be treated as "no data". */
-    float bg_value = 0.0f;
-    {
-      int total_voxels = w * h * d;
-      for (int i = 0; i < total_voxels; i++) {
-        float abs_v = std::fabs(dense.voxels[i]);
-        if (abs_v > bg_value) {
-          bg_value = abs_v;
-        }
-      }
-    }
-
     /* Create GPU 3D texture from dense data (R32F for full precision). */
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ;
     gpu::Texture *tex = GPU_texture_create_3d(
@@ -1280,13 +1383,6 @@ class Instance : public DrawEngine {
      * Do NOT expand it here — this function only runs when grids change,
      * so expanding here creates AABB inconsistency between bake frames (larger)
      * and cached frames (smaller), causing objects to appear at wrong sizes. */
-
-    std::printf("[SDF] Grid '%s': res %dx%dx%d, background=%.4f\n",
-                ob->id.name + 2,
-                w,
-                h,
-                d,
-                bg_value);
 
     /* Read blend from the "Mesh to SDF Grid" modifier's IDProperties. */
     float blend_val = 0.0f;
@@ -1344,7 +1440,6 @@ class Instance : public DrawEngine {
     grid_obj.world_to_texture = world_to_tex;
     grid_obj.color = color;
     grid_obj.blend = blend_val;
-    grid_obj.background_value = bg_value;
     grid_objects_.append(grid_obj);
   }
 
@@ -1356,6 +1451,93 @@ class Instance : public DrawEngine {
       }
     }
     grid_objects_.clear();
+  }
+
+  /** Prepare in-place incremental bake: compute dirty brick mask and allocate
+   * new slots for dirty bricks that are currently void in the indirection.
+   * Returns false if atlas capacity is exceeded (caller falls back to full bake). */
+  bool prepare_incremental_bake()
+  {
+    int n = grid_res_;
+    int total = n * n * n;
+    float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
+
+    /* Read back current indirection (single readback). */
+    int32_t *data = static_cast<int32_t *>(
+        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+
+    Vector<uint8_t> dirty(total, 0);
+    int max_slot = -1;
+
+    /* Find current max slot (for allocating new ones). */
+    for (int i = 0; i < total; i++) {
+      if (data[i] > max_slot) {
+        max_slot = data[i];
+      }
+    }
+    int next_slot = max_slot + 1;
+    int new_slots_needed = 0;
+
+    /* Mark dirty bricks from dirty AABBs. */
+    for (const auto &aabb : dirty_aabbs_) {
+      int3 bmin = int3(math::floor((aabb.first - atlas_origin_) / brick_world));
+      int3 bmax = int3(math::floor((aabb.second - atlas_origin_) / brick_world));
+      bmin = math::max(bmin, int3(0));
+      bmax = math::min(bmax, int3(n - 1));
+
+      for (int bz = bmin.z; bz <= bmax.z; bz++) {
+        for (int by = bmin.y; by <= bmax.y; by++) {
+          for (int bx = bmin.x; bx <= bmax.x; bx++) {
+            dirty[bx + by * n + bz * n * n] = 1;
+          }
+        }
+      }
+    }
+
+    /* Allocate slots for dirty bricks that are currently void. */
+    for (int i = 0; i < total; i++) {
+      if (dirty[i] && data[i] < 0) {
+        data[i] = next_slot++;
+        new_slots_needed++;
+      }
+    }
+
+    /* Check atlas capacity. */
+    int new_total_active = (max_slot + 1) + new_slots_needed;
+    int atlas_capacity = bricks_per_axis_ * bricks_per_axis_ * bricks_per_axis_;
+    if (new_total_active > atlas_capacity) {
+      MEM_freeN(data);
+      return false; /* Atlas full — caller falls back to full bake. */
+    }
+
+    /* Re-upload indirection with new slot allocations. */
+    if (new_slots_needed > 0) {
+      GPU_texture_update(indirection_tx_, GPU_DATA_INT, data);
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+      active_brick_count_ = new_total_active;
+    }
+    MEM_freeN(data);
+
+    /* Upload dirty mask texture. */
+    if (dirty_bricks_tx_) {
+      GPU_texture_free(dirty_bricks_tx_);
+    }
+    eGPUTextureUsage d_usage = GPU_TEXTURE_USAGE_SHADER_READ;
+    dirty_bricks_tx_ = GPU_texture_create_3d(
+        "sdf_dirty_bricks", n, n, n, 1, gpu::TextureFormat::UINT_8, d_usage, dirty.data());
+
+    int dirty_count = 0;
+    for (int i = 0; i < total; i++) {
+      if (dirty[i]) {
+        dirty_count++;
+      }
+    }
+    std::printf("[SDF] Incremental: %d dirty bricks (%d new slots), %d total active\n",
+                dirty_count,
+                new_slots_needed,
+                new_total_active);
+
+    return true;
   }
 
   void clear_indirection()
@@ -1419,8 +1601,6 @@ class Instance : public DrawEngine {
     GPU_texture_update(indirection_tx_, GPU_DATA_INT, data);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
 
-    std::printf("[SDF] Grid augment: %d active bricks\n", active_brick_count_);
-
     MEM_freeN(data);
   }
 
@@ -1475,7 +1655,6 @@ class Instance : public DrawEngine {
           grid_blend_sh_, "grid_world_to_texture", grid.world_to_texture.ptr());
       GPU_shader_uniform_4fv(grid_blend_sh_, "grid_color", grid.color);
       GPU_shader_uniform_1f(grid_blend_sh_, "grid_blend", grid.blend);
-      GPU_shader_uniform_1f(grid_blend_sh_, "grid_background", grid.background_value);
 
       /* Dispatch: one workgroup per brick in the grid. */
       GPU_compute_dispatch(grid_blend_sh_, grid_res_, grid_res_, grid_res_);
@@ -1490,8 +1669,6 @@ class Instance : public DrawEngine {
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_shader_unbind();
-
-    std::printf("[SDF] Grid blend dispatched (%d grid objects)\n", int(grid_objects_.size()));
   }
 
   /* ---- Performance overlay helpers ---- */
@@ -1659,6 +1836,9 @@ class Instance : public DrawEngine {
     }
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
+    }
+    if (dirty_bricks_tx_) {
+      GPU_texture_free(dirty_bricks_tx_);
     }
     if (brick_counter_) {
       GPU_storagebuf_free(brick_counter_);

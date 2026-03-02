@@ -30,11 +30,22 @@ void main()
                          (float3(brick) * float(BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) *
                              voxel_size;
 
+  /* Per-brick AABB for object culling.
+   * Expand by brick_half_diag to match the surface test threshold. */
+  float3 brick_min = brick_center - float3(brick_half_diag);
+  float3 brick_max = brick_center + float3(brick_half_diag);
+
   /* Evaluate SDF at brick center using all objects. */
   float acc_dist = 1e10f;
 
   for (int i = 0; i < object_count; i++) {
     SDFObjectGPU obj = objects[i];
+
+    /* Per-brick AABB culling: skip objects that can't affect this brick. */
+    if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
+        any(lessThan(brick_max, obj.bbox_min.xyz))) {
+      continue;
+    }
 
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
 

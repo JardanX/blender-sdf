@@ -1041,86 +1041,116 @@ void GeometryManager::device_update(Device *device,
     }
   }
 
-  /* Upload SDF data to device. */
+  /* Upload SDF data to device.
+   *
+   * All SDF Blender objects are baked into a single shared atlas by sync_sdf().
+   * Each SDFGeometry instance contains the same combined atlas, so we only
+   * upload one as a single KernelSDF entry (num_sdfs=1).
+   * Prefer a modified (freshly re-baked) SDFGeometry to ensure we get
+   * the latest atlas after transforms/property changes. */
   {
-    int num_sdfs = 0;
-    int total_shader_entries = 0;
-
-    /* Count SDF geometry objects. */
+    SDFGeometry *first_sdf = nullptr;
     for (Geometry *geom : scene->geometry) {
       if (geom->is_sdf()) {
         SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
         if (!sdf->indirection_data.empty()) {
-          num_sdfs++;
-          total_shader_entries += sdf->num_objects;
+          /* Prefer a freshly re-baked SDFGeometry (need_update_rebuild is set
+           * by tag_update in sync_sdf). This ensures we get the latest atlas
+           * when one SDF object was modified but others weren't re-synced. */
+          if (first_sdf == nullptr || sdf->need_update_rebuild) {
+            first_sdf = sdf;
+          }
         }
       }
     }
 
-    if (num_sdfs > 0) {
+    if (first_sdf != nullptr) {
+      const int num_sdfs = 1;
+
       dscene->sdf_objects.alloc(num_sdfs);
       KernelSDF *sdf_data = dscene->sdf_objects.data();
 
-      dscene->sdf_shader_map.alloc(total_shader_entries);
+      dscene->sdf_shader_map.alloc(first_sdf->num_objects);
       int *shader_map = dscene->sdf_shader_map.data();
 
-      int sdf_idx = 0;
-      int shader_offset = 0;
+      dscene->sdf_indirection.alloc(first_sdf->indirection_data.size());
+      int *indirection_ptr = dscene->sdf_indirection.data();
 
-      for (Geometry *geom : scene->geometry) {
-        if (!geom->is_sdf()) {
-          continue;
+      dscene->sdf_atlas.alloc(first_sdf->atlas_data.size());
+      float4 *atlas_ptr = dscene->sdf_atlas.data();
+
+      dscene->sdf_matid.alloc(first_sdf->matid_data.size());
+      int *matid_ptr = dscene->sdf_matid.data();
+
+      /* Find the Cycles object index for the first SDF object so that
+       * sd->object references valid object_flag data in the kernel. */
+      int sdf_object_id = 0;
+      for (size_t oi = 0; oi < scene->objects.size(); oi++) {
+        if (scene->objects[oi]->get_geometry() &&
+            scene->objects[oi]->get_geometry()->is_sdf())
+        {
+          sdf_object_id = (int)oi;
+          break;
         }
-        SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-        if (sdf->indirection_data.empty()) {
-          continue;
+      }
+
+      KernelSDF &ksdf = sdf_data[0];
+      ksdf.indirection_offset = 0;
+      ksdf.atlas_offset = 0;
+      ksdf.matid_offset = 0;
+      ksdf.grid_res = first_sdf->grid_res;
+      ksdf.bricks_per_axis = first_sdf->bricks_per_axis;
+      ksdf.num_objects = first_sdf->num_objects;
+      ksdf.shader_offset = 0;
+      ksdf.object_id = sdf_object_id;
+      ksdf.voxel_size = first_sdf->voxel_size;
+      ksdf.origin.x = first_sdf->origin.x;
+      ksdf.origin.y = first_sdf->origin.y;
+      ksdf.origin.z = first_sdf->origin.z;
+
+      /* Copy flat arrays. */
+      memcpy(indirection_ptr,
+             first_sdf->indirection_data.data(),
+             first_sdf->indirection_data.size() * sizeof(int));
+
+      memcpy(atlas_ptr,
+             first_sdf->atlas_data.data(),
+             first_sdf->atlas_data.size() * sizeof(float4));
+
+      memcpy(matid_ptr,
+             first_sdf->matid_data.data(),
+             first_sdf->matid_data.size() * sizeof(int));
+
+      /* Build per-object shader mapping.
+       * Use the first SDF object's shader for all objects as default,
+       * since each Blender SDF object maps to an entry in the atlas. */
+      for (int i = 0; i < first_sdf->num_objects; i++) {
+        if (!first_sdf->get_used_shaders().empty()) {
+          Shader *shader = static_cast<Shader *>(first_sdf->get_used_shaders()[0]);
+          shader_map[i] = scene->shader_manager->get_shader_id(shader);
         }
-
-        /* Upload 3D textures via ImageManager.
-         * For now, we store the texture data in the SDF kernel struct
-         * and the actual texture upload happens through the image pipeline.
-         * The slot IDs are placeholders that will be resolved when
-         * the image manager processes them. */
-
-        KernelSDF &ksdf = sdf_data[sdf_idx];
-        ksdf.indirection_slot = 0; /* Will be set by image manager. */
-        ksdf.atlas_slot = 0;       /* Will be set by image manager. */
-        ksdf.matid_slot = 0;       /* Will be set by image manager. */
-        ksdf.grid_res = sdf->grid_res;
-        ksdf.bricks_per_axis = sdf->bricks_per_axis;
-        ksdf.num_objects = sdf->num_objects;
-        ksdf.shader_offset = shader_offset;
-        ksdf.object_id = 0; /* Will be resolved in object sync. */
-        ksdf.voxel_size = sdf->voxel_size;
-        ksdf.origin.x = sdf->origin.x;
-        ksdf.origin.y = sdf->origin.y;
-        ksdf.origin.z = sdf->origin.z;
-
-        /* Copy per-object shader mapping. */
-        for (int i = 0; i < sdf->num_objects; i++) {
-          /* Use the first shader from the geometry's used_shaders. */
-          if (!sdf->get_used_shaders().empty()) {
-            Shader *shader = static_cast<Shader *>(sdf->get_used_shaders()[0]);
-            shader_map[shader_offset + i] = scene->shader_manager->get_shader_id(shader);
-          }
-          else {
-            shader_map[shader_offset + i] = 0;
-          }
+        else {
+          shader_map[i] = 0;
         }
-
-        shader_offset += sdf->num_objects;
-        sdf_idx++;
       }
 
       dscene->sdf_objects.copy_to_device();
       dscene->sdf_shader_map.copy_to_device();
+      dscene->sdf_indirection.copy_to_device();
+      dscene->sdf_atlas.copy_to_device();
+      dscene->sdf_matid.copy_to_device();
+
+      dscene->data.sdf.num_sdfs = num_sdfs;
     }
     else {
       dscene->sdf_objects.free();
       dscene->sdf_shader_map.free();
-    }
+      dscene->sdf_indirection.free();
+      dscene->sdf_atlas.free();
+      dscene->sdf_matid.free();
 
-    dscene->data.sdf.num_sdfs = num_sdfs;
+      dscene->data.sdf.num_sdfs = 0;
+    }
   }
 
   /* unset flags */

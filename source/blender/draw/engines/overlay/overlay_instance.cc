@@ -857,14 +857,12 @@ void Instance::draw_v3d(Manager &manager, View &view)
       GPU_framebuffer_clear_color_depth(resources.overlay_line_fb, clear_color, 1.0f);
     }
     else {
-      if (!state.is_render_depth_available) {
-        /* If the render engine is not outputting correct depth,
-         * clear the depth and render a depth prepass. */
-        GPU_framebuffer_clear_color_depth(resources.overlay_line_fb, clear_color, 1.0f);
-      }
-      else {
-        GPU_framebuffer_clear_color(resources.overlay_line_fb, clear_color);
-      }
+      /* Only clear overlay color — never clear depth here.
+       * Depth is already initialised to 1.0 by draw_context before engines draw.
+       * The SDF engine writes valid depth when active, and the mesh depth prepass
+       * (regular.prepass.draw_line below) writes mesh depth on top.
+       * Clearing depth to 1.0 would wipe SDF depth and make the grid draw on top. */
+      GPU_framebuffer_clear_color(resources.overlay_line_fb, clear_color);
     }
 
     if (BLI_thread_is_main() && !state.hide_overlays) {

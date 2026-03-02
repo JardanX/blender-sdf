@@ -23,14 +23,9 @@ def _get_or_create_node_group():
         "Voxel Size", in_out='INPUT', socket_type='NodeSocketFloat',
     )
     vs_socket.default_value = 0.3
-    vs_socket.min_value = 0.001
+    vs_socket.min_value = 0.01
+    vs_socket.max_value = 10.0
     vs_socket.subtype = 'DISTANCE'
-
-    bw_socket = tree.interface.new_socket(
-        "Band Width", in_out='INPUT', socket_type='NodeSocketInt',
-    )
-    bw_socket.default_value = 3
-    bw_socket.min_value = 1
 
     blend_socket = tree.interface.new_socket(
         "Blend", in_out='INPUT', socket_type='NodeSocketFloat',
@@ -42,27 +37,38 @@ def _get_or_create_node_group():
 
     # --- Nodes ---
     group_in = tree.nodes.new('NodeGroupInput')
-    group_in.location = (-400, 0)
+    group_in.location = (-600, 0)
 
     mesh_to_sdf = tree.nodes.new('GeometryNodeMeshToSDFGrid')
-    mesh_to_sdf.location = (-100, 0)
+    mesh_to_sdf.location = (100, 0)
 
     store_grid = tree.nodes.new('GeometryNodeStoreNamedGrid')
-    store_grid.location = (200, 0)
+    store_grid.location = (400, 0)
     # Set data type to FLOAT (SDF is scalar).
     store_grid.data_type = 'FLOAT'
 
     group_out = tree.nodes.new('NodeGroupOutput')
-    group_out.location = (500, 0)
+    group_out.location = (700, 0)
+
+    # Band width = 2 (optimized for rendering). OpenVDB needs:
+    #   1 voxel for the surface zero-crossing
+    #   1 voxel margin for trilinear interpolation + normals
+    # ~33% faster than band_width=3 and sufficient for rendering.
+    # Max effective blend range ≈ 1.5 * voxel_size. Increase to 3+
+    # if larger blend radii are needed.
+    for inp in mesh_to_sdf.inputs:
+        if inp.name == "Band Width":
+            inp.default_value = 2
+            break
 
     # --- Links ---
     links = tree.links
+
     # Geometry -> Mesh to SDF Grid (Mesh input)
     links.new(group_in.outputs["Geometry"], mesh_to_sdf.inputs["Mesh"])
     # Voxel Size -> Mesh to SDF Grid
     links.new(group_in.outputs["Voxel Size"], mesh_to_sdf.inputs["Voxel Size"])
-    # Band Width -> Mesh to SDF Grid
-    links.new(group_in.outputs["Band Width"], mesh_to_sdf.inputs["Band Width"])
+
     # Mesh to SDF Grid (SDF Grid) -> Store Named Grid (Grid)
     links.new(mesh_to_sdf.outputs["SDF Grid"], store_grid.inputs["Grid"])
     # Store Named Grid (Volume) -> Group Output
