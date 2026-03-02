@@ -579,15 +579,10 @@ class Instance : public DrawEngine {
     GPU_batch_set_shader(fullscreen_batch_, march_sh_);
     GPU_batch_draw(fullscreen_batch_);
 
-    /* DIAGNOSTIC: gl_FragDepth disables early-Z / Hi-Z.
-     * GPU_finish() blocks until ALL GPU work completes — the nuclear option.
-     * If this fixes the grid-on-top-during-zoom issue, the root cause is
-     * GPU pipeline coherency (late depth writes not visible when the overlay
-     * grid samples the depth texture). GPU_flush() alone was tested and
-     * didn't help. If GPU_finish() works, we can try lighter alternatives
-     * (GPU_memory_barrier with FRAMEBUFFER bit, or explicit depth resolve).
-     * TODO(SDF): Remove or replace with minimal sync once diagnosed. */
-    GPU_finish();
+    /* NOTE: No GPU sync needed here. gl_FragDepth framebuffer writes are
+     * automatically coherent with subsequent texture reads in OpenGL.
+     * GPU_flush() and GPU_finish() were both tested and did NOT fix the
+     * grid-on-top-during-zoom issue — root cause is not synchronization. */
 
     GPU_texture_unbind(atlas_tx_);
     if (matcap_tx_) {
