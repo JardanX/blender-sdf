@@ -1,6 +1,7 @@
 set BUILD_DIR=%BLENDER_DIR%..\build_windows
 set BUILD_DIR_OVERRRIDE=%BLENDER_DIR%build
 set BUILD_TYPE=Release
+set BUILD_WITH_NINJA=1
 :argv_loop
 if NOT "%1" == "" (
 

@@ -5809,6 +5809,11 @@ static void rna_def_userdef_edit(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Duplicate Volume", "Causes volume data to be duplicated with the object");
 
+  prop = RNA_def_property(srna, "use_duplicate_sdf", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "dupflag", USER_DUP_SDF);
+  RNA_def_property_ui_text(
+      prop, "Duplicate SDF", "Causes SDF data to be duplicated with the object");
+
   prop = RNA_def_property(srna, "use_duplicate_node_tree", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "dupflag", USER_DUP_NTREE);
   RNA_def_property_ui_text(prop,
