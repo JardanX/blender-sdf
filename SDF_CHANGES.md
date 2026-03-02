@@ -83,6 +83,7 @@ The "Add SDF" operator (`OBJECT_OT_sdf_add`). Called from the Add menu.
 | `makesrna/intern/rna_main.cc` | `bpy.data.sdfs` collection (list/iterate SDF data-blocks). |
 | `makesrna/intern/rna_main_api.cc` | `bpy.data.sdfs.new()` / `.remove()` / `.tag()` functions. Also added `#include "DNA_sdf_types.h"` (missing this caused a build error). |
 | `makesrna/intern/makesrna.cc` | Registered `rna_sdf.cc` in the RNA code generator. |
+| `makesrna/intern/rna_ID.cc` | Added `case ID_SF: return &RNA_SDF;` in `ID_code_to_RNA_type()` so SDF data resolves to proper RNA type (fixes empty Object Data Properties panel). |
 | `makesrna/intern/CMakeLists.txt` | Added `rna_sdf.cc` to build. |
 
 ### Editor — The "Add SDF" button
@@ -114,6 +115,8 @@ The "Add SDF" operator (`OBJECT_OT_sdf_add`). Called from the Add menu.
 | `blentranslation/BLT_translation.hh` | Translation context string `BLT_I18NCONTEXT_ID_SDF`. |
 | `source/blender/CMakeLists.txt` | Added `DNA_sdf_types.h` and `DNA_sdf_defaults.h` to the top-level DNA header lists. Missing this caused a build error (`_SDNA_TYPE_SDF` undefined). |
 | `scripts/startup/bl_ui/space_view3d.py` | Added "SDF" entry to the Add menu (between Volume and Grease Pencil). |
+| `release/datafiles/userdef/userdef_default.c` | Added `USER_DUP_SDF` to factory default `dupflag` so duplicated SDF objects get independent data blocks. |
+| `blenloader/intern/versioning_userdef.cc` | Added versioning block (500.122) to set `USER_DUP_SDF` in existing user preferences. |
 
 ---
 
@@ -123,6 +126,8 @@ The "Add SDF" operator (`OBJECT_OT_sdf_add`). Called from the Add menu.
 2. **Add SDF crash** — `BKE_idtype_idcode_to_index()` was missing `CASE_IDINDEX(SF)`. ID_SF lookups returned -1, so `BKE_libblock_alloc_notest` returned NULL.
 3. **Build error** — `DNA_sdf_types.h` wasn't in `SRC_DNA_INC`, so `makesdna` didn't generate `_SDNA_TYPE_SDF`.
 4. **Build error** — `rna_main_api.cc` used `SDF` type without `#include "DNA_sdf_types.h"`.
+5. **Empty Object Data Properties panel** — `ID_code_to_RNA_type()` in `rna_ID.cc` was missing `case ID_SF: return &RNA_SDF;`. SDF data resolved as generic `ID`, making `context.sdf` always None.
+6. **SDF data shared on duplicate** — `USER_DUP_SDF` was defined but missing from both factory defaults (`userdef_default.c`) and user preferences versioning (`versioning_userdef.cc`). Duplicated SDF objects shared a single data block.
 
 ---
 
@@ -590,7 +595,7 @@ Added a native `DrawEngine` that bakes SDF objects into a dense 3D atlas (256^3,
 |------|--------|
 | `draw/intern/draw_view_data.hh` | Added `#include "engines/sdf/sdf_engine.h"`, `sdf::Engine sdf` member, `callback(sdf)` in `foreach_engine()` after workbench |
 | `draw/intern/draw_context.cc` | Added `#include "engines/sdf/sdf_engine.h"`, `view_data.sdf.set_used(true)` wherever workbench is enabled. Also enabled SDF engine in `DEPTH`/`DEPTH_ACTIVE_OBJECT` modes for 3D cursor placement, orbit pivot, and view center pick on SDF surfaces |
-| `draw/engines/sdf/sdf_engine.cc` | `draw_march()` uses `depth_only_fb` in depth mode (no color attachment), `default_fb` in normal mode |
+| `draw/engines/sdf/sdf_engine.cc` | `draw_march()` uses `depth_only_fb` in depth mode (no color attachment), `default_fb` in normal mode. `GPU_flush()` after march pass ensures depth writes are visible to overlay grid texture reads during rapid camera movement |
 | `draw/CMakeLists.txt` | Added SDF engine source, headers, shader info, GLSL files, and shared header to build |
 
 ### Architecture
@@ -612,3 +617,92 @@ Added a native `DrawEngine` that bakes SDF objects into a dense 3D atlas (256^3,
 |------|--------|
 | `editors/object/object_sdf.cc` | Added `type` RNA enum property to `OBJECT_OT_sdf_add` operator; sets `SDF.sdf_type` on created object. Added `sdf_type_name()` to give type-specific default names ("SDF Cube", "SDF Sphere", etc.) instead of generic "SDF". |
 | `scripts/startup/bl_ui/space_view3d.py` | Added `VIEW3D_MT_sdf_add` submenu class with Cube entry. SDF menu moved to top of Add menu (before Mesh) with a separator line divider below it. |
+
+### Analytic Voxel Intersection (Phase 8 — Replace sphere tracing with DDA + cubic solver)
+
+Replaced the iterative sphere tracing ray marcher with DDA grid traversal + analytic cubic
+intersection, based on "Ray Tracing of Signed Distance Function Grids"
+(Hansson-Soderlund, Evans, Akenine-Moller 2022). The baked 3D atlas IS a voxel grid,
+so this method applies directly and provides exact surface intersections.
+
+**Benefits:**
+- Exact surface intersections (no iterative convergence issues near silhouettes)
+- Analytical normals from trilinear gradient (~12 FMAs vs 6 texture reads for central differences)
+- Eliminates sphere tracing's slow convergence near surface tangents
+
+### Modified Shader Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Major expansion: added `computeTrilinearCoeffs()` (Eq. 3), `computeCubicCoeffs()` (Eq. 6-7), `evalCubic()`/`evalCubicDeriv()` helpers, `solveCubicFirstRoot()` (Vieta's trigonometric method), `solveCubicMarmittNR()` (Marmitt + Newton-Raphson fallback), `trilinearGradient()` (analytical normal from corner values). Original `sdBox` and `opSmoothUnion` kept unchanged. |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Complete rewrite: replaced sphere tracing loop with Amanatides & Woo DDA traversal (max 512 steps). Each voxel cell: fetch 8 corners via `texelFetch`, quick reject (all-positive skip / all-negative immediate hit), compute trilinear + cubic coefficients, solve cubic for exact surface intersection. Normals via analytical `trilinearGradient()` instead of central differences. `find_blended_color()` unchanged. |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `PUSH_CONSTANT(int3, atlas_resolution)` to `sdf_march` shader info for DDA bounds checking. |
+
+### Modified Engine Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Added `GPU_shader_uniform_3iv(march_sh_, "atlas_resolution", res)` in `draw_march()` to pass atlas resolution to the march shader. |
+
+### Technical Details
+
+- **DDA traversal**: Amanatides & Woo algorithm traverses the 3D grid cell-by-cell along the ray. For a 256^3 grid, worst case is ~443 cells (diagonal), capped at 512 steps.
+- **Cubic solver (primary)**: Vieta's trigonometric method — normalizes, depresses to u^3 + pu + q = 0, uses trigonometric solution for 3-root case (D <= 0) or Cardano for 1-root case (D > 0). Handles degenerate cases (quadratic/linear fallback when c3 ~ 0).
+- **Cubic solver (fallback)**: Marmitt method — finds g'(t) = 0 roots to decompose [0, tfar] into monotone intervals, then Newton-Raphson in subintervals with sign changes.
+- **Grid space**: Sample (i,j,k) maps to grid coordinate (i,j,k). Cell (i,j,k) spans [i,i+1]^3. Valid cells: [0, res-2]^3. Grid bounds are half-voxel inset from atlas bounds.
+- **Empty cell rejection**: min/max of 8 corners — all positive skips, all negative is immediate hit.
+- **Entry-inside detection**: If trilinear at ray entry point <= 0, report immediate hit (handles camera-inside-surface case).
+- **Cubic reparametrization**: Raw grid direction D (~60 for 256^3 grid) causes catastrophic float32 conditioning. Fix: scale `d_scaled = D * T_max` so parameter u ∈ [0,1] with balanced O(0.1) coefficients. Uses Marmitt+NR solver (more robust than Vieta's on GPU — no transcendental functions).
+- **Hybrid sphere-trace / DDA**: Pure DDA visits every cell (200-400 cells × 8 texelFetch = 1600-3200 texture reads). Fix: 1 `textureLod` probe per step; if `probe_dist > 2*voxel_size`, sphere-tracing jump (skip empty space in O(1)). Full 8-corner fetch + cubic solve only when within ~2 voxels of surface. Gives sphere tracing's logarithmic convergence in empty space + paper's exact intersection at the surface.
+
+### Matcap / Studio / Flat Shading (Phase 8b — Viewport shading modes)
+
+Made SDF objects respect the viewport's `View3DShading.light` setting (FLAT/STUDIO/MATCAP).
+Previously the SDF engine used a hardcoded directional light (`vec3(0.5, 0.7, 1.0)` + 0.15 ambient).
+Now SDF objects shade identically to mesh objects in Workbench.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `SAMPLER(2, sampler2DArray, matcap_tx)`, `PUSH_CONSTANT(int, lighting_type)`, `PUSH_CONSTANT(int, use_specular)` to `sdf_march` shader info. |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced hardcoded directional light with FLAT/STUDIO/MATCAP shading. FLAT outputs object color directly. STUDIO/MATCAP compute matcap UV from view-space normal (same formula as `workbench_matcap_lib.glsl:matcap_uv_compute()`), sample diffuse (layer 0) + specular (layer 1) from `matcap_tx`. |
+| `draw/engines/sdf/sdf_engine.cc` | Added `sync_shading()` method: reads `v3d->shading.light/matcap/studio_light/flag`, calls `BKE_studiolight_find/ensure_flag`, builds 2-layer matcap array texture (SFLOAT_16_16_16_16) from `StudioLight::matcap_diffuse/specular` ImBuf data. Cached by matcap name. Push constants `lighting_type` and `use_specular` bound in `draw_march()`. 1×1 white fallback texture if no matcap loaded. |
+
+### Dual Voxel Normals + Matcap Mapping Fix (Phase 8c — Normal quality + workbench parity)
+
+**Normals**: Replaced single-voxel analytic gradient (C0 discontinuous at voxel boundaries) with the
+**dual voxel normal** method from Hansson-Soderlund et al. 2022 (Section 3.2, Eq. 12). A dual voxel
+shifted by half a voxel overlaps 2x2x2 primal voxels. For each of the 8 overlapping primal voxels,
+the analytic gradient is computed at the hit point and normalized. The 8 normalized normals are then
+trilinearly interpolated using the hit point's position within the dual voxel. This gives
+C0-continuous normals across voxel boundaries. Cost: 27 texelFetch + 8 gradient evaluations per pixel
+(only at the hit point, not per DDA step).
+
+**Matcap mapping**: Fixed incident vector to use `drw_view_incident_vector()` (from `draw_view_lib.glsl`)
+instead of `normalize(view_pos)`. This correctly handles orthographic cameras (`I = (0,0,1)` constant)
+vs perspective (`I = normalize(-vP)`), and fixes the sign convention (I must point surface-to-camera
+for the matcap basis formula to work). Added `V3D_SHADING_MATCAP_FLIP_X` support via `use_matcap_flip`
+push constant, matching Workbench's `matcap_uv_compute(I, N, flipped)`.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Added `computeDualVoxelNormal()` function (27 texel 3x3x3 fetch, 8 gradient evals, trilinear blend). Replaced single-voxel `trilinearGradient()` call with `computeDualVoxelNormal()`. Fixed matcap `I` vector to use `drw_view_incident_vector()`. Added `use_matcap_flip` support. |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `PUSH_CONSTANT(int, use_matcap_flip)` to `sdf_march` shader info. |
+| `draw/engines/sdf/sdf_engine.cc` | Added `use_matcap_flip_` member. Set from `V3D_SHADING_MATCAP_FLIP_X` flag in `sync_shading()`. Pushed as uniform in `draw_march()`. |
+
+### Baked Color Atlas (Phase 8d — O(1) rendering independent of object count)
+
+Changed atlas from R16F to RGBA16F. The bake shader now computes blended color alongside distance
+and writes both to the atlas. Layout: `.r` = signed distance, `.gba` = RGB color. The march shader
+reads color via a single `textureLod` at the hit point instead of re-evaluating all N objects.
+
+**Before**: `find_blended_color()` looped over all objects per pixel = O(N) per pixel.
+**After**: Color comes from texture read = O(1) per pixel. 10 objects or 10,000 — same cost.
+
+VRAM increase: R16F 256³ = ~32 MB → RGBA16F 256³ = ~128 MB. Acceptable for modern GPUs.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Changed bake atlas IMAGE format from `SFLOAT_16` to `SFLOAT_16_16_16_16`. Removed `STORAGE_BUF(objects[])`, `object_count`, and `TYPEDEF_SOURCE` from march shader info (no longer needed). |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Accumulates blended color alongside distance using same smooth union weighting. `imageStore(sdf_atlas, voxel, float4(acc_dist, acc_color))`. |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Removed `find_blended_color()`. Color read from atlas: `textureLod(sdf_atlas, hit_uv, 0.0).gba` — one texture read, hardware trilinear interpolation, O(1). |
+| `draw/engines/sdf/sdf_engine.cc` | Atlas format `SFLOAT_16` → `SFLOAT_16_16_16_16`. Removed SSBO binding and `object_count` push constant from `draw_march()`. |

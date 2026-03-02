@@ -24,7 +24,8 @@ void main()
   /* World-space position of this voxel center. */
   float3 world_pos = atlas_origin + (float3(voxel) + 0.5f) * voxel_size;
 
-  float min_dist = 1e10f;
+  float acc_dist = 1e10f;
+  float3 acc_color = float3(0.0f);
 
   for (int i = 0; i < object_count; i++) {
     SDFObjectGPU obj = objects[i];
@@ -37,15 +38,21 @@ void main()
     size = max(size, float3(0.001f));
     float dist = sdBox(local_pos, size) - obj.bevel;
 
-    /* Smooth union when blend > 0, hard union otherwise. */
+    /* Smooth union when blend > 0, hard union otherwise.
+     * Color is blended with the same weight as the distance. */
     float k = obj.blend;
-    if (k > 0.0f && min_dist < 1e9f) {
-      min_dist = opSmoothUnion(min_dist, dist, k);
+    if (k > 0.0f && acc_dist < 1e9f) {
+      float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
+      acc_color = mix(acc_color, obj.color.rgb, h);
+      acc_dist = mix(acc_dist, dist, h) - k * h * (1.0f - h);
     }
     else {
-      min_dist = min(min_dist, dist);
+      if (dist < acc_dist) {
+        acc_color = obj.color.rgb;
+        acc_dist = dist;
+      }
     }
   }
 
-  imageStore(sdf_atlas, voxel, float4(min_dist));
+  imageStore(sdf_atlas, voxel, float4(acc_dist, acc_color));
 }

@@ -460,6 +460,7 @@ class USERPREF_PT_edit_objects_duplicate_data(EditingPanel, CenterAlignMixIn, Pa
             ("use_duplicate_speaker", "Speaker", 'OUTLINER_DATA_SPEAKER', ""),
             ("use_duplicate_surface", "Surface", 'OUTLINER_DATA_SURFACE', ""),
             ("use_duplicate_text", "Text", 'OUTLINER_DATA_FONT', ""),
+            ("use_duplicate_sdf", "SDF", 'SDF_DATA', ""),
             ("use_duplicate_volume", "Volume", 'OUTLINER_DATA_VOLUME', "i18n_contexts.id_id"),
         )
 

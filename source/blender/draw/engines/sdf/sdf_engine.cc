@@ -11,8 +11,14 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 
+#include "BKE_studiolight.h"
+
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
+#include "DNA_view3d_enums.h"
+#include "DNA_view3d_types.h"
+
+#include "IMB_imbuf_types.hh"
 
 #include "GPU_batch.hh"
 #include "GPU_compute.hh"
@@ -32,6 +38,7 @@
 #include "sdf_engine.h" /* Own include. */
 
 #include <cstdio>
+#include <string>
 
 namespace blender::draw::sdf {
 
@@ -70,6 +77,18 @@ class Instance : public DrawEngine {
   gpu::Batch *fullscreen_batch_ = nullptr;
 
   const DRWContext *draw_ctx_ = nullptr;
+
+  /** Matcap / shading state. */
+  gpu::Texture *matcap_tx_ = nullptr;
+  std::string current_matcap_;
+  int lighting_type_ = V3D_LIGHTING_STUDIO;
+  int use_specular_ = 0;
+  int use_matcap_flip_ = 0;
+
+  /** Studio light data (4 directional lights + ambient). */
+  float4 studio_light_dir_[4] = {};
+  float4 studio_light_col_[4] = {};
+  float3 studio_ambient_ = float3(0.0f);
 
  public:
   blender::StringRefNull name_get() final
@@ -226,6 +245,7 @@ class Instance : public DrawEngine {
       return;
     }
 
+    sync_shading();
     ensure_shaders();
 
     /* Bail if shader compilation failed. */
@@ -268,6 +288,134 @@ class Instance : public DrawEngine {
   }
 
  private:
+  void sync_shading()
+  {
+    const View3D *v3d = draw_ctx_->v3d;
+    if (v3d == nullptr) {
+      /* No 3D viewport (e.g. final render): default to flat. */
+      lighting_type_ = V3D_LIGHTING_FLAT;
+      use_specular_ = 0;
+      use_matcap_flip_ = 0;
+      return;
+    }
+
+    const View3DShading &shading = v3d->shading;
+    lighting_type_ = int(shading.light);
+    use_specular_ = 0;
+
+    if (lighting_type_ == V3D_LIGHTING_FLAT) {
+      return;
+    }
+
+    if (lighting_type_ == V3D_LIGHTING_STUDIO) {
+      /* STUDIO: extract 4 directional lights + ambient from studio light. */
+      StudioLight *sl = BKE_studiolight_find(shading.studio_light, STUDIOLIGHT_TYPE_STUDIO);
+      if (sl == nullptr) {
+        sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_STUDIO);
+      }
+      if (sl != nullptr) {
+        for (int i = 0; i < 4; i++) {
+          const SolidLight &light = sl->light[i];
+          if (light.flag) {
+            studio_light_dir_[i] = float4(light.vec[0], light.vec[1], light.vec[2], 0.0f);
+            /* Pack wrap factor (smooth) into color.w for the shader. */
+            studio_light_col_[i] = float4(light.col[0], light.col[1], light.col[2], light.smooth);
+          }
+          else {
+            studio_light_dir_[i] = float4(0.0f);
+            studio_light_col_[i] = float4(0.0f);
+          }
+        }
+        studio_ambient_ = float3(sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
+      }
+      else {
+        /* No studio light: use a reasonable default. */
+        studio_light_dir_[0] = float4(
+            math::normalize(float3(0.5f, 0.7f, 1.0f)), 0.0f);
+        studio_light_col_[0] = float4(0.8f, 0.8f, 0.8f, 0.0f);
+        for (int i = 1; i < 4; i++) {
+          studio_light_dir_[i] = float4(0.0f);
+          studio_light_col_[i] = float4(0.0f);
+        }
+        studio_ambient_ = float3(0.15f);
+      }
+    }
+    else {
+      /* MATCAP: find matcap studio light and build 2-layer array texture. */
+      StudioLight *sl = BKE_studiolight_find(shading.matcap, STUDIOLIGHT_TYPE_MATCAP);
+      if (sl == nullptr) {
+        sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_MATCAP);
+      }
+      if (sl == nullptr) {
+        lighting_type_ = V3D_LIGHTING_FLAT;
+        return;
+      }
+
+      use_specular_ = ((shading.flag & V3D_SHADING_SPECULAR_HIGHLIGHT) &&
+                       (sl->flag & STUDIOLIGHT_SPECULAR_HIGHLIGHT_PASS)) ?
+                          1 :
+                          0;
+      use_matcap_flip_ = (shading.flag & V3D_SHADING_MATCAP_FLIP_X) ? 1 : 0;
+
+      /* Build matcap texture if the matcap changed. */
+      if (std::string(sl->name) != current_matcap_) {
+        BKE_studiolight_ensure_flag(
+            sl, STUDIOLIGHT_MATCAP_DIFFUSE_GPUTEXTURE | STUDIOLIGHT_MATCAP_SPECULAR_GPUTEXTURE);
+
+        ImBuf *diffuse_ibuf = sl->matcap_diffuse.ibuf;
+        ImBuf *specular_ibuf = sl->matcap_specular.ibuf;
+
+        if (diffuse_ibuf && diffuse_ibuf->float_buffer.data) {
+          int w = diffuse_ibuf->x;
+          int h = diffuse_ibuf->y;
+          int pixel_count = w * h * 4;
+          int layers = 1;
+          float *buffer = diffuse_ibuf->float_buffer.data;
+          Vector<float> combined;
+
+          if (specular_ibuf && specular_ibuf->float_buffer.data) {
+            combined.extend(diffuse_ibuf->float_buffer.data, pixel_count);
+            combined.extend(specular_ibuf->float_buffer.data, pixel_count);
+            buffer = combined.begin();
+            layers = 2;
+          }
+
+          /* Free old texture. */
+          if (matcap_tx_) {
+            GPU_texture_free(matcap_tx_);
+          }
+
+          matcap_tx_ = GPU_texture_create_2d_array("sdf_matcap",
+                                                    w,
+                                                    h,
+                                                    layers,
+                                                    1,
+                                                    gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                    GPU_TEXTURE_USAGE_SHADER_READ,
+                                                    buffer);
+          if (matcap_tx_) {
+            GPU_texture_filter_mode(matcap_tx_, true);
+          }
+        }
+
+        current_matcap_ = sl->name;
+      }
+
+      /* Ensure a fallback texture exists for matcap mode. */
+      if (matcap_tx_ == nullptr) {
+        float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        matcap_tx_ = GPU_texture_create_2d_array("sdf_matcap_fallback",
+                                                  1,
+                                                  1,
+                                                  1,
+                                                  1,
+                                                  gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                  GPU_TEXTURE_USAGE_SHADER_READ,
+                                                  white);
+      }
+    }
+  }
+
   void ensure_shaders()
   {
     if (bake_sh_ == nullptr) {
@@ -289,7 +437,7 @@ class Instance : public DrawEngine {
                                       SDF_ATLAS_RES,
                                       SDF_ATLAS_RES,
                                       1,
-                                      gpu::TextureFormat::SFLOAT_16,
+                                      gpu::TextureFormat::SFLOAT_16_16_16_16,
                                       usage,
                                       nullptr);
     GPU_texture_filter_mode(atlas_tx_, true);
@@ -381,11 +529,28 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(march_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_extent", atlas_extent_);
-    GPU_shader_uniform_1i(march_sh_, "object_count", int(objects_.size()));
+    int3 res = int3(SDF_ATLAS_RES);
+    GPU_shader_uniform_3iv(march_sh_, "atlas_resolution", res);
+    GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
+    GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
+    GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
 
-    /* Object SSBO for color lookup. */
-    int ssbo_slot = GPU_shader_get_ssbo_binding(march_sh_, "objects");
-    GPU_storagebuf_bind(object_ssbo_, ssbo_slot);
+    /* Studio light data (used when lighting_type == STUDIO). */
+    GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_light2", studio_light_dir_[2]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_light3", studio_light_dir_[3]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_color0", studio_light_col_[0]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_color1", studio_light_col_[1]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_color2", studio_light_col_[2]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_color3", studio_light_col_[3]);
+    GPU_shader_uniform_3fv(march_sh_, "studio_ambient", studio_ambient_);
+
+    /* Bind matcap texture (used when lighting_type == MATCAP). */
+    if (matcap_tx_) {
+      int matcap_slot = GPU_shader_get_sampler_binding(march_sh_, "matcap_tx");
+      GPU_texture_bind(matcap_tx_, matcap_slot);
+    }
 
     /* Bind the view UBO so the fragment shader can access camera matrices. */
     View &view = View::default_get();
@@ -398,7 +563,16 @@ class Instance : public DrawEngine {
     GPU_batch_set_shader(fullscreen_batch_, march_sh_);
     GPU_batch_draw(fullscreen_batch_);
 
+    /* Ensure depth writes from gl_FragDepth are visible to subsequent
+     * texture reads (e.g. overlay grid sampling the depth buffer).
+     * Unlike GPU_flush() (which only submits commands), this barrier
+     * guarantees framebuffer→texture memory visibility. */
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+
     GPU_texture_unbind(atlas_tx_);
+    if (matcap_tx_) {
+      GPU_texture_unbind(matcap_tx_);
+    }
     GPU_shader_unbind();
   }
 
@@ -407,6 +581,9 @@ class Instance : public DrawEngine {
   {
     if (atlas_tx_) {
       GPU_texture_free(atlas_tx_);
+    }
+    if (matcap_tx_) {
+      GPU_texture_free(matcap_tx_);
     }
     if (object_ssbo_) {
       GPU_storagebuf_free(object_ssbo_);

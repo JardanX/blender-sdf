@@ -75,7 +75,7 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "size");
   RNA_def_property_array(prop, 3);
   RNA_def_property_range(prop, 0.001f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.001f, 100.0f, 0.1f, 3);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 1.0f, 3);
   RNA_def_property_ui_text(prop, "Size", "Size in each axis");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
@@ -83,7 +83,7 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "bevel", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "bevel");
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.01f, 3);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
   RNA_def_property_ui_text(prop, "Bevel", "Bevel radius");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
@@ -99,7 +99,7 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "blend", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "blend");
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.01f, 3);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
   RNA_def_property_ui_text(prop, "Blend", "Blend amount for CSG operations");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
