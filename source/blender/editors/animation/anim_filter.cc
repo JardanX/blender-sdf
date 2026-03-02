@@ -3031,18 +3031,6 @@ static size_t animdata_filter_ds_obdata(bAnimContext *ac,
       expanded = FILTER_CUR_OBJD(cu);
       break;
     }
-    case OB_MBALL: /* ------- MetaBall ---------- */
-    {
-      MetaBall *mb = static_cast<MetaBall *>(ob->data);
-
-      if (ads_filterflag & ADS_FILTER_NOMBA) {
-        return 0;
-      }
-
-      type = ANIMTYPE_DSMBALL;
-      expanded = FILTER_MBALL_OBJD(mb);
-      break;
-    }
     case OB_ARMATURE: /* ------- Armature ---------- */
     {
       bArmature *arm = static_cast<bArmature *>(ob->data);

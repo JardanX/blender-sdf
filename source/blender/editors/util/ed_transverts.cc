@@ -209,7 +209,6 @@ bool ED_transverts_check_obedit(const Object *obedit)
               OB_MESH,
               OB_SURF,
               OB_CURVES_LEGACY,
-              OB_MBALL,
               OB_CURVES,
               OB_POINTCLOUD);
 }
@@ -473,24 +472,6 @@ void ED_transverts_create_from_obedit(TransVertStore *tvs, const Object *obedit,
         }
       }
       nu = nu->next;
-    }
-  }
-  else if (obedit->type == OB_MBALL) {
-    MetaBall *mb = static_cast<MetaBall *>(obedit->data);
-    int totmalloc = BLI_listbase_count(mb->editelems);
-
-    tv = tvs->transverts = MEM_calloc_arrayN<TransVert>(totmalloc, __func__);
-
-    ml = static_cast<MetaElem *>(mb->editelems->first);
-    while (ml) {
-      if (ml->flag & SELECT) {
-        tv->loc = &ml->x;
-        copy_v3_v3(tv->oldloc, tv->loc);
-        tv->flag = SELECT;
-        tv++;
-        tvs->transverts_tot++;
-      }
-      ml = ml->next;
     }
   }
   else if (obedit->type == OB_LATTICE) {

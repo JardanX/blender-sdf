@@ -1666,7 +1666,14 @@ RenderEngineType *ED_view3d_engine_type(const Scene *scene, int drawtype)
    */
   RenderEngineType *type = RE_engines_find(scene->r.engine);
   if (drawtype == OB_MATERIAL && (type->flag & RE_USE_EEVEE_VIEWPORT)) {
-    return RE_engines_find(RE_engine_id_BLENDER_EEVEE);
+    return RE_engines_find(RE_engine_id_BLENDER_WORKBENCH);
+  }
+  /* MATHOPS: Rendered viewport delegates to Cycles path tracer. */
+  if (drawtype == OB_RENDER && STREQ(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH)) {
+    RenderEngineType *cycles = RE_engines_find(RE_engine_id_CYCLES);
+    if (cycles && cycles->view_update && cycles->view_draw) {
+      return cycles;
+    }
   }
   return type;
 }
@@ -2191,10 +2198,9 @@ ImBuf *ED_view3d_draw_offscreen_imbuf_simple(Depsgraph *depsgraph,
   memcpy(&v3d.shading, source_shading_settings, sizeof(View3DShading));
 
   if (drawtype == OB_RENDER) {
-    /* Don't use external engines for preview. Fall back to solid instead of Eevee as rendering
-     * with Eevee is potentially slow due to compiling shaders and loading textures, and the
-     * depsgraph may not have been updated to have all the right geometry attributes. */
-    if (!(BKE_scene_uses_blender_eevee(scene) || BKE_scene_uses_blender_workbench(scene))) {
+    /* Don't use external engines for preview. Fall back to solid instead of Proximity as
+     * the depsgraph may not have been updated to have all the right geometry attributes. */
+    if (!BKE_scene_uses_blender_workbench(scene)) {
       drawtype = OB_SOLID;
     }
   }
@@ -2615,8 +2621,6 @@ bool ED_view3d_has_depth_buffer_updated(const Depsgraph *depsgraph, const View3D
   bool is_viewport_wire_no_xray = v3d->shading.type < OB_SOLID && !XRAY_ENABLED(v3d);
   bool is_viewport_preview_solid = v3d->shading.type == OB_SOLID;
   bool is_viewport_preview_material = v3d->shading.type == OB_MATERIAL;
-  bool is_viewport_render_eevee = v3d->shading.type == OB_RENDER &&
-                                  (STREQ(engine_name, RE_engine_id_BLENDER_EEVEE));
   bool is_viewport_render_workbench = v3d->shading.type == OB_RENDER &&
                                       STREQ(engine_name, RE_engine_id_BLENDER_WORKBENCH);
   bool is_viewport_render_external_with_overlay = v3d->shading.type == OB_RENDER &&
@@ -2624,8 +2628,7 @@ bool ED_view3d_has_depth_buffer_updated(const Depsgraph *depsgraph, const View3D
                                                   !(v3d->flag2 & V3D_HIDE_OVERLAYS);
 
   return is_viewport_preview_solid || is_viewport_preview_material || is_viewport_wire_no_xray ||
-         is_viewport_render_eevee || is_viewport_render_workbench ||
-         is_viewport_render_external_with_overlay;
+         is_viewport_render_workbench || is_viewport_render_external_with_overlay;
 #else
   UNUSED_VARS(depsgraph, v3d);
   return false;

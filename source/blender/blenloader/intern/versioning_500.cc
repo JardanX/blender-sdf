@@ -2818,6 +2818,27 @@ void do_versions_after_linking_500(FileData *fd, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 120)) {
+    /* Remap EEVEE and old Workbench to Proximity engine. */
+    LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
+      if (STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE) ||
+          STREQ(scene->r.engine, "BLENDER_WORKBENCH") ||
+          STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE_NEXT))
+      {
+        STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 121)) {
+    /* MATHOPS: Remap Cycles engine to Proximity (Cycles is now delegated transparently). */
+    LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
+      if (STREQ(scene->r.engine, RE_engine_id_CYCLES)) {
+        STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

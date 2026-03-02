@@ -31,10 +31,6 @@ CCL_NAMESPACE_BEGIN
 bool BlenderSync::BKE_object_is_modified(BL::Object &b_ob)
 {
   /* test if we can instance or if the object is modified */
-  if (b_ob.type() == BL::Object::type_META) {
-    /* Multi-user and dupli meta-balls are fused, can't instance. */
-    return true;
-  }
   if (ccl::BKE_object_is_modified(b_ob, b_scene, preview)) {
     /* modifiers */
     return true;
@@ -77,7 +73,6 @@ bool BlenderSync::object_can_have_geometry(BL::Object &b_ob)
     case BL::Object::type_MESH:
     case BL::Object::type_CURVE:
     case BL::Object::type_SURFACE:
-    case BL::Object::type_META:
     case BL::Object::type_FONT:
     case BL::Object::type_CURVES:
     case BL::Object::type_POINTCLOUD:

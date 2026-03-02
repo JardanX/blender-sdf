@@ -122,7 +122,6 @@ bool mode_compat_test(const Object *ob, eObjectMode mode)
     case OB_CURVES_LEGACY:
     case OB_SURF:
     case OB_FONT:
-    case OB_MBALL:
     case OB_POINTCLOUD:
     case OB_LATTICE:
       if (mode & OB_MODE_EDIT) {

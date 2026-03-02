@@ -438,13 +438,6 @@ void nurbs_foreachScreenVert(const ViewContext *vc,
                                           const float screen_co[2]),
                              void *user_data,
                              eV3DProjTest clip_flag);
-/**
- * #ED_view3d_init_mats_rv3d must be called first.
- */
-void mball_foreachScreenElem(const ViewContext *vc,
-                             void (*func)(void *user_data, MetaElem *ml, const float screen_co[2]),
-                             void *user_data,
-                             eV3DProjTest clip_flag);
 void lattice_foreachScreenVert(const ViewContext *vc,
                                void (*func)(void *user_data, BPoint *bp, const float screen_co[2]),
                                void *user_data,

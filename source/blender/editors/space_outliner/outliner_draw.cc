@@ -2452,8 +2452,6 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
         return ICON_OUTLINER_OB_CAMERA;
       case OB_CURVES_LEGACY:
         return ICON_OUTLINER_OB_CURVE;
-      case OB_MBALL:
-        return ICON_OUTLINER_OB_META;
       case OB_LATTICE:
         return ICON_OUTLINER_OB_LATTICE;
       case OB_ARMATURE:
@@ -2473,7 +2471,7 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       case OB_VOLUME:
         return ICON_OUTLINER_OB_VOLUME;
       case OB_SDF:
-        return ICON_OUTLINER_OB_VOLUME;
+        return ICON_OUTLINER_OB_SDF;
       case OB_EMPTY:
         if (ob->instance_collection && (ob->transflag & OB_DUPLICOLLECTION)) {
           return ICON_OUTLINER_OB_GROUP_INSTANCE;
@@ -2514,8 +2512,6 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       }
       break;
     }
-    case ID_MB:
-      return ICON_OUTLINER_DATA_META;
     case ID_LT:
       return ICON_OUTLINER_DATA_LATTICE;
     case ID_LA: {
@@ -2571,7 +2567,7 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
     case ID_VO:
       return ICON_OUTLINER_DATA_VOLUME;
     case ID_SF:
-      return ICON_OUTLINER_DATA_VOLUME;
+      return ICON_SDF_DATA;
     case ID_LI:
       if (id->tag & ID_TAG_MISSING) {
         return ICON_LIBRARY_DATA_BROKEN;

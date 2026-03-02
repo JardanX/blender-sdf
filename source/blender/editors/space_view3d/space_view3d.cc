@@ -387,8 +387,7 @@ static void view3d_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Armature", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
-  keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Metaball", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+  /* MATHOPS: Removed — Metaball keymap */
 
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Lattice", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
@@ -403,41 +402,7 @@ static void view3d_main_region_init(wmWindowManager *wm, ARegion *region)
       wm->runtime->defaultconf, "Sculpt Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
-  /* NOTE: Grease Pencil handlers used to be added using #ED_KEYMAP_GPENCIL in
-   * `ed_default_handlers` because it needed to be added to multiple editors (as other editors use
-   * annotations.). But for OB_GREASE_PENCIL, we only need it to register the keymaps for the
-   * 3D View. */
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Selection", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Edit Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Paint Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Sculpt Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Weight Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Vertex Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Brush Stroke", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "Grease Pencil Fill Tool", SPACE_EMPTY, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+  /* MATHOPS: Removed — Grease Pencil keymap handlers (operators not registered) */
 
   /* Edit-font key-map swallows almost all (because of text input). */
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Font", SPACE_EMPTY, RGN_TYPE_WINDOW);
@@ -1169,9 +1134,6 @@ void ED_view3d_buttons_region_layout_ex(const bContext *C,
       break;
     case CTX_MODE_EDIT_ARMATURE:
       ARRAY_SET_ITEMS(contexts, ".armature_edit");
-      break;
-    case CTX_MODE_EDIT_METABALL:
-      ARRAY_SET_ITEMS(contexts, ".mball_edit");
       break;
     case CTX_MODE_EDIT_LATTICE:
       ARRAY_SET_ITEMS(contexts, ".lattice_edit");

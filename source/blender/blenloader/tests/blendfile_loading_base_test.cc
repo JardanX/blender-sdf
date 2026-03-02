@@ -15,7 +15,6 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
-#include "BKE_mball_tessellate.hh"
 #include "BKE_modifier.hh"
 #include "BKE_node.hh"
 #include "BKE_scene.hh"
@@ -107,7 +106,6 @@ void BlendfileLoadingBaseTest::TearDownTestCase()
 
 void BlendfileLoadingBaseTest::TearDown()
 {
-  BKE_mball_cubeTable_free();
   blendfile_free();
   depsgraph_free();
 

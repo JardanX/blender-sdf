@@ -61,7 +61,6 @@ set(SRC
   tree/tree_element_id_library.cc
   tree/tree_element_id_linestyle.cc
   tree/tree_element_id_mesh.cc
-  tree/tree_element_id_metaball.cc
   tree/tree_element_id_object.cc
   tree/tree_element_id_scene.cc
   tree/tree_element_id_texture.cc
@@ -107,7 +106,6 @@ set(SRC
   tree/tree_element_id_library.hh
   tree/tree_element_id_linestyle.hh
   tree/tree_element_id_mesh.hh
-  tree/tree_element_id_metaball.hh
   tree/tree_element_id_object.hh
   tree/tree_element_id_scene.hh
   tree/tree_element_id_texture.hh

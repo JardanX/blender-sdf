@@ -60,7 +60,7 @@ set(DEFSRC
   rna_mask.cc
   rna_material.cc
   rna_mesh.cc
-  rna_meta.cc
+
   rna_modifier.cc
   rna_movieclip.cc
   rna_nla.cc
@@ -127,7 +127,7 @@ set(APISRC
   rna_main_api.cc
   rna_material_api.cc
   rna_mesh_api.cc
-  rna_meta_api.cc
+
   rna_object_api.cc
   rna_pose_api.cc
   rna_scene_api.cc
@@ -483,7 +483,8 @@ set(LIB
   bf_editor_render
   bf_editor_scene
   bf_editor_sculpt_paint
-  bf_editor_sound
+  # MATHOPS: Removed — Sound editor no longer built
+  # bf_editor_sound
   bf_editor_transform
   bf_editor_undo
   PRIVATE bf::intern::guardedalloc

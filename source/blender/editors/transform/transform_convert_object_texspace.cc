@@ -49,7 +49,7 @@ static void createTransTexspace(bContext * /*C*/, TransInfo *t)
   }
 
   id = static_cast<ID *>(ob->data);
-  if (id == nullptr || !ELEM(GS(id->name), ID_ME, ID_CU_LEGACY, ID_MB)) {
+  if (id == nullptr || !ELEM(GS(id->name), ID_ME, ID_CU_LEGACY)) {
     BKE_report(t->reports, RPT_ERROR, "Unsupported object type for texture space transform");
     return;
   }

@@ -38,7 +38,6 @@ void register_node_type_sh_curve_rgb();
 void register_node_type_sh_curve_vec();
 void register_node_type_sh_displacement();
 void register_node_type_sh_dynamic();
-void register_node_type_sh_eevee_metallic();
 void register_node_type_sh_eevee_specular();
 void register_node_type_sh_emission();
 void register_node_type_sh_fresnel();

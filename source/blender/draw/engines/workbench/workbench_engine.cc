@@ -797,8 +797,8 @@ static void workbench_render(RenderEngine *engine, Depsgraph *depsgraph)
 RenderEngineType DRW_engine_viewport_workbench_type = {
     /*next*/ nullptr,
     /*prev*/ nullptr,
-    /*idname*/ "BLENDER_WORKBENCH",
-    /*name*/ N_("Workbench"),
+    /*idname*/ "BLENDER_PROXIMITY",
+    /*name*/ N_("Proximity"),
     /*flag*/ RE_INTERNAL | RE_USE_STEREO_VIEWPORT | RE_USE_GPU_CONTEXT,
     /*update*/ nullptr,
     /*render*/ &workbench_render,

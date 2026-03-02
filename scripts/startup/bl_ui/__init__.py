@@ -30,7 +30,6 @@ _modules = [
     "properties_data_light",
     "properties_data_lattice",
     "properties_data_mesh",
-    "properties_data_metaball",
     "properties_data_modifier",
     "properties_data_pointcloud",
     "properties_data_shaderfx",
@@ -60,8 +59,9 @@ _modules = [
     "properties_texture",
     "properties_world",
     "properties_collection",
-    "properties_strip",
-    "properties_strip_modifier",
+    # MATHOPS: Removed — sequencer strip panels (sequencer space type not registered)
+    # "properties_strip",
+    # "properties_strip_modifier",
     "generic_ui_list",
 
     # Generic Space Modules
@@ -70,7 +70,8 @@ _modules = [
     "space_toolsystem_common",
     "space_toolsystem_toolbar",
 
-    "space_clip",
+    # MATHOPS: Removed — clip editor space type not registered
+    # "space_clip",
     "space_console",
     "space_dopesheet",
     "space_filebrowser",
@@ -81,7 +82,8 @@ _modules = [
     "space_node",
     "space_outliner",
     "space_properties",
-    "space_sequencer",
+    # MATHOPS: Removed — sequencer space type not registered
+    # "space_sequencer",
     "space_spreadsheet",
     "space_statusbar",
     "space_text",
@@ -98,8 +100,9 @@ _modules = [
 
 import bpy
 
-if bpy.app.build_options.freestyle:
-    _modules.append("properties_freestyle")
+# MATHOPS: Freestyle removed.
+# if bpy.app.build_options.freestyle:
+#     _modules.append("properties_freestyle")
 
 __import__(name=__name__, fromlist=_modules)
 _namespace = globals()

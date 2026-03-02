@@ -18,9 +18,9 @@
 #include "draw_context_private.hh"
 
 #include "engines/compositor/compositor_engine.h"
-#include "engines/eevee/eevee_engine.h"
 #include "engines/external/external_engine.h"
-#include "engines/gpencil/gpencil_engine.hh"
+/* MATHOPS: Removed — Grease Pencil draw engine */
+// #include "engines/gpencil/gpencil_engine.hh"
 #include "engines/image/image_engine.h"
 #include "engines/overlay/overlay_engine.h"
 #include "engines/select/select_engine.hh"
@@ -69,11 +69,11 @@ struct DRWViewData {
   blender::int2 texture_list_size = {0, 0};
 
   /** Engines running for this viewport. nullptr if not enabled. */
-  blender::eevee::Engine eevee;
   blender::workbench::Engine workbench;
   blender::draw::external::Engine external;
   blender::image_engine::Engine image;
-  blender::draw::gpencil::Engine grease_pencil;
+  /* MATHOPS: Removed — Grease Pencil draw engine */
+  // blender::draw::gpencil::Engine grease_pencil;
   blender::draw::overlay::Engine overlay;
   blender::draw::select::Engine object_select;
   blender::draw::edit_select::Engine edit_select;
@@ -106,15 +106,14 @@ struct DRWViewData {
 
     /* Render engines. Output to the render result frame-buffer. Mutually exclusive. */
 
-    callback(eevee);
     callback(workbench);
     callback(external);
     callback(image);
 #ifdef WITH_DRAW_DEBUG
     callback(edit_select_debug);
 #endif
-    /** Grease pencil. Merge its output to the render result frame-buffer. */
-    callback(grease_pencil);
+    /* MATHOPS: Removed — Grease Pencil draw engine */
+    // callback(grease_pencil);
     /** GPU compositor. Processes render result and output to the render result frame-buffer. */
     callback(compositor);
     /** Overlays. Draw on a separate overlay frame-buffer. Can read render result. */

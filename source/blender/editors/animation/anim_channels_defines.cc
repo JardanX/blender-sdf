@@ -658,8 +658,6 @@ static int acf_object_icon(bAnimListElem *ale)
       return ICON_OUTLINER_OB_CAMERA;
     case OB_CURVES_LEGACY:
       return ICON_OUTLINER_OB_CURVE;
-    case OB_MBALL:
-      return ICON_OUTLINER_OB_META;
     case OB_LATTICE:
       return ICON_OUTLINER_OB_LATTICE;
     case OB_SPEAKER:
@@ -2503,92 +2501,7 @@ static bAnimChannelType ACF_DSPART = {
     /*setting_post_update*/ nullptr,
 };
 
-/* MetaBall Expander  ------------------------------------------- */
-
-/* TODO: just get this from RNA? */
-static int acf_dsmball_icon(bAnimListElem * /*ale*/)
-{
-  return ICON_META_DATA;
-}
-
-/* Get the appropriate flag(s) for the setting when it is valid. */
-static int acf_dsmball_setting_flag(bAnimContext * /*ac*/,
-                                    eAnimChannel_Settings setting,
-                                    bool *r_neg)
-{
-  /* Clear extra return data first. */
-  *r_neg = false;
-
-  switch (setting) {
-    case ACHANNEL_SETTING_EXPAND: /* expanded */
-      return MB_DS_EXPAND;
-
-    case ACHANNEL_SETTING_MUTE: /* mute (only in NLA) */
-      return ADT_NLA_EVAL_OFF;
-
-    case ACHANNEL_SETTING_VISIBLE: /* visible (only in Graph Editor) */
-      *r_neg = true;
-      return ADT_CURVES_NOT_VISIBLE;
-
-    case ACHANNEL_SETTING_SELECT: /* selected */
-      return ADT_UI_SELECTED;
-
-    case ACHANNEL_SETTING_ALWAYS_VISIBLE: /* pin */
-      return ADT_CURVES_ALWAYS_VISIBLE;
-
-    default: /* unsupported */
-      return 0;
-  }
-}
-
-/* get pointer to the setting */
-static void *acf_dsmball_setting_ptr(bAnimListElem *ale,
-                                     eAnimChannel_Settings setting,
-                                     short *r_type)
-{
-  MetaBall *mb = static_cast<MetaBall *>(ale->data);
-
-  /* Clear extra return data first. */
-  *r_type = 0;
-
-  switch (setting) {
-    case ACHANNEL_SETTING_EXPAND: /* expanded */
-      return GET_ACF_FLAG_PTR(mb->flag2, r_type);
-
-    case ACHANNEL_SETTING_SELECT:         /* selected */
-    case ACHANNEL_SETTING_MUTE:           /* muted (for NLA only) */
-    case ACHANNEL_SETTING_VISIBLE:        /* visible (for Graph Editor only) */
-    case ACHANNEL_SETTING_ALWAYS_VISIBLE: /* pin */
-      if (mb->adt) {
-        return GET_ACF_FLAG_PTR(mb->adt->flag, r_type);
-      }
-      return nullptr;
-
-    default: /* unsupported */
-      return nullptr;
-  }
-}
-
-/** Meta-ball expander type define. */
-static bAnimChannelType ACF_DSMBALL = {
-    /*channel_type_name*/ "Metaball Expander",
-    /*channel_role*/ ACHANNEL_ROLE_EXPANDER,
-
-    /*get_backdrop_color*/ acf_generic_dataexpand_color,
-    /*get_channel_color*/ nullptr,
-    /*draw_backdrop*/ acf_generic_dataexpand_backdrop,
-    /*get_indent_level*/ acf_generic_indentation_1,
-    /*get_offset*/ acf_generic_basic_offset,
-
-    /*name*/ acf_generic_idblock_name,
-    /*name_prop*/ acf_generic_idblock_name_prop,
-    /*icon*/ acf_dsmball_icon,
-
-    /*has_setting*/ acf_generic_dataexpand_setting_valid,
-    /*setting_flag*/ acf_dsmball_setting_flag,
-    /*setting_ptr*/ acf_dsmball_setting_ptr,
-    /*setting_post_update*/ nullptr,
-};
+/* MetaBall Expander (deprecated/removed) --- slot kept for array index compatibility */
 
 /* Armature Expander  ------------------------------------------- */
 
@@ -4725,7 +4638,7 @@ static void ANIM_init_channel_typeinfo_data()
     animchannelTypeInfo[type++] = &ACF_DSWOR;        /* World Channel */
     animchannelTypeInfo[type++] = &ACF_DSNTREE;      /* NodeTree Channel */
     animchannelTypeInfo[type++] = &ACF_DSPART;       /* Particle Channel */
-    animchannelTypeInfo[type++] = &ACF_DSMBALL;      /* MetaBall Channel */
+    animchannelTypeInfo[type++] = nullptr;            /* MetaBall Channel (removed) */
     animchannelTypeInfo[type++] = &ACF_DSARM;        /* Armature Channel */
     animchannelTypeInfo[type++] = &ACF_DSMESH;       /* Mesh Channel */
     animchannelTypeInfo[type++] = &ACF_DSTEX;        /* Texture Channel */

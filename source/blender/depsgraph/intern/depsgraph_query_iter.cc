@@ -469,9 +469,6 @@ void DEG_iterator_ids_end(BLI_Iterator * /*iter*/) {}
 
 bool DEG_iterator_object_is_visible(eEvaluationMode eval_mode, const Object *ob)
 {
-  if (ob->type == OB_MBALL) {
-    return true;
-  }
   return !deg_object_hide_original(eval_mode, ob, nullptr);
 }
 
@@ -480,10 +477,7 @@ bool DEG_iterator_dupli_is_visible(const DupliObject *dupli, eEvaluationMode eva
   if (dupli->no_draw) {
     return false;
   }
-  if (dupli->ob_data && GS(dupli->ob_data->name) == ID_MB) {
-    return false;
-  }
-  if (dupli->ob->type != OB_MBALL && deg_object_hide_original(eval_mode, dupli->ob, dupli)) {
+  if (deg_object_hide_original(eval_mode, dupli->ob, dupli)) {
     return false;
   }
 

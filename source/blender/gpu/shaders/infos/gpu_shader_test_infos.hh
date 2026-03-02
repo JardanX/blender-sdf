@@ -144,33 +144,3 @@ FRAGMENT_SOURCE("gpu_specialization_test.glsl")
 DO_STATIC_COMPILATION()
 GPU_SHADER_CREATE_END()
 
-/* EEVEE test. */
-
-GPU_SHADER_CREATE_INFO(eevee_shadow_test)
-FRAGMENT_SOURCE("eevee_shadow_test.glsl")
-TYPEDEF_SOURCE("eevee_defines.hh")
-TYPEDEF_SOURCE("eevee_shadow_shared.hh")
-ADDITIONAL_INFO(gpu_shader_test)
-DO_STATIC_COMPILATION()
-GPU_SHADER_CREATE_END()
-
-GPU_SHADER_CREATE_INFO(eevee_occupancy_test)
-FRAGMENT_SOURCE("eevee_occupancy_test.glsl")
-TYPEDEF_SOURCE("eevee_defines.hh")
-ADDITIONAL_INFO(gpu_shader_test)
-DO_STATIC_COMPILATION()
-GPU_SHADER_CREATE_END()
-
-GPU_SHADER_CREATE_INFO(eevee_gbuffer_normal_test)
-FRAGMENT_SOURCE("eevee_gbuffer_normal_test.glsl")
-TYPEDEF_SOURCE("eevee_defines.hh")
-ADDITIONAL_INFO(gpu_shader_test)
-DO_STATIC_COMPILATION()
-GPU_SHADER_CREATE_END()
-
-GPU_SHADER_CREATE_INFO(eevee_gbuffer_closure_test)
-FRAGMENT_SOURCE("eevee_gbuffer_closure_test.glsl")
-TYPEDEF_SOURCE("eevee_defines.hh")
-ADDITIONAL_INFO(gpu_shader_test)
-DO_STATIC_COMPILATION()
-GPU_SHADER_CREATE_END()

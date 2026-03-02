@@ -27,8 +27,7 @@ class RENDER_PT_freestyle(RenderFreestyleButtonsPanel, Panel):
     bl_order = 10
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw_header(self, context):
@@ -89,8 +88,7 @@ class ViewLayerFreestyleLineStyle(ViewLayerFreestyleEditorButtonsPanel):
     # Freestyle Linestyle Panels
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     @classmethod
@@ -133,8 +131,7 @@ class VIEWLAYER_PT_freestyle(ViewLayerFreestyleButtonsPanel, Panel):
     bl_label = "Freestyle"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw_header(self, context):
@@ -167,8 +164,7 @@ class VIEWLAYER_PT_freestyle_edge_detection(ViewLayerFreestyleButtonsPanel, Pane
     bl_parent_id = "VIEWLAYER_PT_freestyle"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw(self, context):
@@ -201,8 +197,7 @@ class VIEWLAYER_PT_freestyle_style_modules(ViewLayerFreestyleButtonsPanel, Panel
     bl_parent_id = "VIEWLAYER_PT_freestyle"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     @classmethod
@@ -241,8 +236,7 @@ class VIEWLAYER_PT_freestyle_lineset(ViewLayerFreestyleEditorButtonsPanel, Panel
     bl_label = "Freestyle Line Set"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw_edge_type_buttons(self, box, lineset, edge_type):
@@ -308,8 +302,7 @@ class VIEWLAYER_PT_freestyle_lineset_visibilty(ViewLayerFreestyleLineStyle, Pane
     bl_parent_id = "VIEWLAYER_PT_freestyle_lineset"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw_header(self, context):
@@ -346,8 +339,7 @@ class VIEWLAYER_PT_freestyle_lineset_edgetype(ViewLayerFreestyleLineStyle, Panel
     bl_parent_id = "VIEWLAYER_PT_freestyle_lineset"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw_header(self, context):
@@ -400,8 +392,7 @@ class VIEWLAYER_PT_freestyle_lineset_facemarks(ViewLayerFreestyleLineStyle, Pane
     bl_parent_id = "VIEWLAYER_PT_freestyle_lineset"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -433,8 +424,7 @@ class VIEWLAYER_PT_freestyle_lineset_collection(ViewLayerFreestyleLineStyle, Pan
     bl_parent_id = "VIEWLAYER_PT_freestyle_lineset"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1254,8 +1244,7 @@ class VIEWLAYER_PT_freestyle_animation(ViewLayerFreestyleButtonsPanel, Propertie
     bl_label = "Freestyle Animation"
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     @classmethod
@@ -1292,8 +1281,7 @@ class MATERIAL_PT_freestyle_line(MaterialFreestyleButtonsPanel, Panel):
     bl_options = {'DEFAULT_CLOSED'}
     COMPAT_ENGINES = {
         'BLENDER_RENDER',
-        'BLENDER_EEVEE',
-        'BLENDER_WORKBENCH',
+        'BLENDER_PROXIMITY',
     }
 
     def draw(self, context):

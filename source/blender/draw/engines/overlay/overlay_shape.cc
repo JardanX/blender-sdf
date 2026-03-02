@@ -809,20 +809,6 @@ ShapeCache::ShapeCache()
     arrows = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_LINES, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
   }
-  /* metaball_wire_circle */
-  {
-    constexpr int resolution = 64;
-    constexpr float radius = 1.0f;
-    Vector<float2> ring = ring_vertices(radius, resolution);
-
-    Vector<Vertex> verts;
-    for (int i : IndexRange(resolution + 1)) {
-      float2 cv = ring[i % resolution];
-      verts.append({{cv[0], cv[1], 0.0f}, VCLASS_SCREENALIGNED});
-    }
-    metaball_wire_circle = BatchPtr(GPU_batch_create_ex(
-        GPU_PRIM_LINE_STRIP, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
-  };
   /* speaker */
   {
     constexpr int segments = 16;

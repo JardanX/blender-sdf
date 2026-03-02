@@ -8782,7 +8782,8 @@ def generate_keymaps(params=None):
         km_uv_editor(params),
         km_view3d_generic(params),
         km_view3d(params),
-        km_mask_editing(params),
+        # MATHOPS: Removed — mask editing (mask operators not registered)
+        # km_mask_editing(params),
         km_markers(params),
         km_time_scrub(params),
         km_time_scrub_clip(params),
@@ -8804,15 +8805,16 @@ def generate_keymaps(params=None):
         km_nla_editor(params),
         km_text_generic(params),
         km_text(params),
-        km_sequencer_generic(params),
-        km_sequencer(params),
-        km_sequencer_preview(params),
-        km_sequencer_channels(params),
+        # MATHOPS: Removed — sequencer/clip (space types not registered)
+        # km_sequencer_generic(params),
+        # km_sequencer(params),
+        # km_sequencer_preview(params),
+        # km_sequencer_channels(params),
         km_console(params),
-        km_clip(params),
-        km_clip_editor(params),
-        km_clip_graph_editor(params),
-        km_clip_dopesheet_editor(params),
+        # km_clip(params),
+        # km_clip_editor(params),
+        # km_clip_graph_editor(params),
+        # km_clip_dopesheet_editor(params),
 
         # Animation.
         km_frames(params),
@@ -8822,15 +8824,15 @@ def generate_keymaps(params=None):
         # Modes.
         # Annotations
         km_annotate(params),
-        # Grease Pencil
-        km_grease_pencil_selection(params),
-        km_grease_pencil_paint_mode(params),
-        km_grease_pencil_edit_mode(params),
-        km_grease_pencil_sculpt_mode(params),
-        km_grease_pencil_weight_paint(params),
-        km_grease_pencil_vertex_paint(params),
-        km_grease_pencil_brush_stroke(params),
-        km_grease_pencil_fill_tool(params),
+        # MATHOPS: Removed — Grease Pencil (operators not registered)
+        # km_grease_pencil_selection(params),
+        # km_grease_pencil_paint_mode(params),
+        # km_grease_pencil_edit_mode(params),
+        # km_grease_pencil_sculpt_mode(params),
+        # km_grease_pencil_weight_paint(params),
+        # km_grease_pencil_vertex_paint(params),
+        # km_grease_pencil_brush_stroke(params),
+        # km_grease_pencil_fill_tool(params),
         # Object mode.
         km_object_mode(params),
         km_object_non_modal(params),
@@ -8848,7 +8850,8 @@ def generate_keymaps(params=None):
         # Object edit modes.
         km_edit_mesh(params),
         km_edit_armature(params),
-        km_edit_metaball(params),
+        # MATHOPS: Removed — metaball edit mode
+        # km_edit_metaball(params),
         km_edit_lattice(params),
         km_edit_particle(params),
         km_edit_font(params),
@@ -8884,10 +8887,11 @@ def generate_keymaps(params=None):
         km_pen_tool_modal_map(params),
         km_node_link_modal_map(params),
         km_node_resize_modal_map(params),
-        km_grease_pencil_primitive_tool_modal_map(params),
-        km_grease_pencil_fill_tool_modal_map(params),
-        km_grease_pencil_interpolate_tool_modal_map(params),
-        km_sequencer_slip_modal_map(params),
+        # MATHOPS: Removed — grease pencil/sequencer modal maps
+        # km_grease_pencil_primitive_tool_modal_map(params),
+        # km_grease_pencil_fill_tool_modal_map(params),
+        # km_grease_pencil_interpolate_tool_modal_map(params),
+        # km_sequencer_slip_modal_map(params),
 
         # Gizmos.
         km_generic_gizmo(params),
@@ -8919,17 +8923,18 @@ def generate_keymaps(params=None):
         km_image_editor_tool_uv_move(params),
         km_image_editor_tool_uv_rotate(params),
         km_image_editor_tool_uv_scale(params),
-        km_image_editor_tool_mask_cursor(params),
-        *(km_image_editor_tool_mask_select(params, fallback=fallback) for fallback in (False, True)),
-        *(km_image_editor_tool_mask_select_box(params, fallback=fallback) for fallback in (False, True)),
-        *(km_image_editor_tool_mask_select_circle(params, fallback=fallback) for fallback in (False, True)),
-        *(km_image_editor_tool_mask_select_lasso(params, fallback=fallback) for fallback in (False, True)),
-        km_image_editor_tool_mask_move(params),
-        km_image_editor_tool_mask_rotate(params),
-        km_image_editor_tool_mask_scale(params),
-        km_image_editor_tool_mask_transform(params),
-        km_image_editor_tool_mask_primitive_circle(params),
-        km_image_editor_tool_mask_primitive_square(params),
+        # MATHOPS: Removed — mask tool keymaps (mask operators not registered)
+        # km_image_editor_tool_mask_cursor(params),
+        # *(km_image_editor_tool_mask_select(params, fallback=fallback) for fallback in (False, True)),
+        # *(km_image_editor_tool_mask_select_box(params, fallback=fallback) for fallback in (False, True)),
+        # *(km_image_editor_tool_mask_select_circle(params, fallback=fallback) for fallback in (False, True)),
+        # *(km_image_editor_tool_mask_select_lasso(params, fallback=fallback) for fallback in (False, True)),
+        # km_image_editor_tool_mask_move(params),
+        # km_image_editor_tool_mask_rotate(params),
+        # km_image_editor_tool_mask_scale(params),
+        # km_image_editor_tool_mask_transform(params),
+        # km_image_editor_tool_mask_primitive_circle(params),
+        # km_image_editor_tool_mask_primitive_square(params),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_lasso(params, fallback=fallback) for fallback in (False, True)),
@@ -9022,33 +9027,35 @@ def generate_keymaps(params=None):
         km_3d_view_tool_paint_grease_pencil_primitive_circle(params),
         km_3d_view_tool_paint_grease_pencil_primitive_arc(params),
         km_3d_view_tool_paint_grease_pencil_primitive_curve(params),
-        *(km_sequencer_tool_generic_select_box(params, fallback=fallback)
-          for fallback in (False, True)),
-        *(km_sequencer_preview_tool_generic_select(params, fallback=fallback)
-          for fallback in (False, True)),
-        *(km_sequencer_preview_tool_generic_select_box(params, fallback=fallback)
-          for fallback in (False, True)),
-        *(km_sequencer_tool_generic_select_lasso(params, fallback=fallback)
-          for fallback in (False, True)),
-        *(km_sequencer_preview_tool_generic_select_lasso(params, fallback=fallback)
-          for fallback in (False, True)),
-        *(km_sequencer_preview_tool_generic_select_circle(params, fallback=fallback)
-          for fallback in (False, True)),
-        *(km_sequencer_tool_generic_select_circle(params, fallback=fallback)
-          for fallback in (False, True)),
-        km_3d_view_tool_paint_grease_pencil_trim(params),
-        km_3d_view_tool_edit_grease_pencil_texture_gradient(params),
-        km_sequencer_tool_blade(params),
-        km_sequencer_tool_slip(params),
-        km_sequencer_preview_tool_generic_cursor(params),
-        km_sequencer_preview_tool_sample(params),
-        km_sequencer_preview_tool_move(params),
-        km_sequencer_preview_tool_rotate(params),
-        km_sequencer_preview_tool_scale(params),
-        km_3d_view_tool_edit_grease_pencil_pen(params),
-        km_3d_view_tool_edit_grease_pencil_interpolate(params),
-        km_3d_view_tool_paint_grease_pencil_interpolate(params),
-        km_3d_view_tool_paint_grease_pencil_eyedropper(params),
+        # MATHOPS: Removed — sequencer tool keymaps
+        # *(km_sequencer_tool_generic_select_box(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # *(km_sequencer_preview_tool_generic_select(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # *(km_sequencer_preview_tool_generic_select_box(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # *(km_sequencer_tool_generic_select_lasso(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # *(km_sequencer_preview_tool_generic_select_lasso(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # *(km_sequencer_preview_tool_generic_select_circle(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # *(km_sequencer_tool_generic_select_circle(params, fallback=fallback)
+        #   for fallback in (False, True)),
+        # MATHOPS: Removed — grease pencil tool keymaps
+        # km_3d_view_tool_paint_grease_pencil_trim(params),
+        # km_3d_view_tool_edit_grease_pencil_texture_gradient(params),
+        # km_sequencer_tool_blade(params),
+        # km_sequencer_tool_slip(params),
+        # km_sequencer_preview_tool_generic_cursor(params),
+        # km_sequencer_preview_tool_sample(params),
+        # km_sequencer_preview_tool_move(params),
+        # km_sequencer_preview_tool_rotate(params),
+        # km_sequencer_preview_tool_scale(params),
+        # km_3d_view_tool_edit_grease_pencil_pen(params),
+        # km_3d_view_tool_edit_grease_pencil_interpolate(params),
+        # km_3d_view_tool_paint_grease_pencil_interpolate(params),
+        # km_3d_view_tool_paint_grease_pencil_eyedropper(params),
     ]
 
 

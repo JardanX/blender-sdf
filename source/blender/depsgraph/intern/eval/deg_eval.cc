@@ -195,17 +195,6 @@ void initialize_execution(DepsgraphEvalState *state, Depsgraph *graph)
   }
 }
 
-bool is_metaball_object_operation(const OperationNode *operation_node)
-{
-  const ComponentNode *component_node = operation_node->owner;
-  const IDNode *id_node = component_node->owner;
-  if (GS(id_node->id_cow->name) != ID_OB) {
-    return false;
-  }
-  const Object *object = reinterpret_cast<const Object *>(id_node->id_cow);
-  return object->type == OB_MBALL;
-}
-
 bool need_evaluate_operation_at_stage(DepsgraphEvalState *state,
                                       const OperationNode *operation_node)
 {
@@ -218,10 +207,6 @@ bool need_evaluate_operation_at_stage(DepsgraphEvalState *state,
       return operation_node->flag & OperationFlag::DEPSOP_FLAG_AFFECTS_VISIBILITY;
 
     case EvaluationStage::THREADED_EVALUATION:
-      if (is_metaball_object_operation(operation_node)) {
-        state->need_single_thread_pass = true;
-        return false;
-      }
       return true;
 
     case EvaluationStage::SINGLE_THREADED_WORKAROUND:
@@ -425,9 +410,7 @@ void deg_evaluate_on_refresh(Depsgraph *graph)
    *   something heavy is not currently visible.
    *
    * - Multi-threaded evaluation of all possible nodes.
-   *   Certain operations (and their subtrees) could be ignored. For example, meta-balls are not
-   *   safe from threading point of view, so the threaded evaluation will stop at the metaball
-   *   operation node.
+   *   Certain operations (and their subtrees) could be ignored.
    *
    * - Single-threaded pass of all remaining operations. */
 

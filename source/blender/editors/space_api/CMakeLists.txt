@@ -24,6 +24,7 @@ set(LIB
   bf_editor_geometry
   bf_editor_space_action
   bf_editor_space_buttons
+  # MATHOPS: Kept — library needed by screen module
   bf_editor_space_clip
   bf_editor_space_console
   bf_editor_space_file
@@ -34,6 +35,7 @@ set(LIB
   bf_editor_space_node
   bf_editor_space_outliner
   bf_editor_space_script
+  # MATHOPS: Kept — library needed by screen module
   bf_editor_space_sequencer
   bf_editor_space_spreadsheet
   bf_editor_space_statusbar

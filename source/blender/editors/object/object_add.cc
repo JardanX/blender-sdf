@@ -79,7 +79,6 @@
 #include "BKE_lightprobe.h"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
-#include "BKE_mball.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_modifier.hh"
@@ -116,7 +115,6 @@
 #include "ED_curves.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_grease_pencil.hh"
-#include "ED_mball.hh"
 #include "ED_mesh.hh"
 #include "ED_node.hh"
 #include "ED_object.hh"
@@ -1228,77 +1226,6 @@ void OBJECT_OT_camera_add(wmOperatorType *ot)
   /* hide this for cameras, default */
   prop = RNA_struct_type_find_property(ot->srna, "align");
   RNA_def_property_flag(prop, PROP_HIDDEN);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Add Metaball Operator
- * \{ */
-
-static wmOperatorStatus object_metaball_add_exec(bContext *C, wmOperator *op)
-{
-  Main *bmain = CTX_data_main(C);
-  Scene *scene = CTX_data_scene(C);
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-
-  ushort local_view_bits;
-  bool enter_editmode;
-  float loc[3], rot[3];
-  WM_operator_view3d_unit_defaults(C, op);
-  add_generic_get_opts(C, op, 'Z', loc, rot, nullptr, &enter_editmode, &local_view_bits, nullptr);
-
-  bool newob = false;
-  BKE_view_layer_synced_ensure(scene, view_layer);
-  Object *obedit = BKE_view_layer_edit_object_get(view_layer);
-  if (obedit == nullptr || obedit->type != OB_MBALL) {
-    obedit = add_type(C, OB_MBALL, nullptr, loc, rot, true, local_view_bits);
-    newob = true;
-  }
-  else {
-    DEG_id_tag_update(&obedit->id, ID_RECALC_GEOMETRY);
-  }
-
-  float mat[4][4];
-  new_primitive_matrix(C, obedit, loc, rot, nullptr, mat);
-  /* Halving here is done to account for constant values from #BKE_mball_element_add.
-   * While the default radius of the resulting meta element is 2,
-   * we want to pass in 1 so other values such as resolution are scaled by 1.0. */
-  float dia = RNA_float_get(op->ptr, "radius") / 2;
-
-  ED_mball_add_primitive(C, obedit, newob, mat, dia, RNA_enum_get(op->ptr, "type"));
-
-  /* userdef */
-  if (newob && !enter_editmode) {
-    editmode_exit_ex(bmain, scene, obedit, EM_FREEDATA);
-  }
-  else {
-    /* Only needed in edit-mode (#add_type normally handles this). */
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, obedit);
-  }
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_metaball_add(wmOperatorType *ot)
-{
-  /* identifiers */
-  ot->name = "Add Metaball";
-  ot->description = "Add an metaball object to the scene";
-  ot->idname = "OBJECT_OT_metaball_add";
-
-  /* API callbacks. */
-  ot->invoke = WM_menu_invoke;
-  ot->exec = object_metaball_add_exec;
-  ot->poll = ED_operator_scene_editable;
-
-  /* flags */
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  ot->prop = RNA_def_enum(ot->srna, "type", rna_enum_metaelem_type_items, 0, "Primitive", "");
-
-  add_unit_props_radius_ex(ot, 2.0f);
-  add_generic_props(ot, true);
 }
 
 /** \} */
@@ -3107,18 +3034,6 @@ static Base *duplibase_for_convert(
   base_select(basen, BA_SELECT);
   base_select(base, BA_DESELECT);
 
-  /* XXX: An ugly hack needed because if we re-run depsgraph with some new meta-ball objects
-   * having same 'family name' as orig ones, they will affect end result of meta-ball computation.
-   * For until we get rid of that name-based thingy in meta-balls, that should do the trick
-   * (this is weak, but other solution (to change name of `obn`) is even worse IMHO).
-   * See #65996. */
-  const bool is_meta_ball = (obn->type == OB_MBALL);
-  void *obdata = obn->data;
-  if (is_meta_ball) {
-    obn->type = OB_EMPTY;
-    obn->data = nullptr;
-  }
-
   /* XXX Doing that here is stupid, it means we update and re-evaluate the whole depsgraph every
    * time we need to duplicate an object to convert it. Even worse, this is not 100% correct, since
    * we do not yet have duplicated obdata.
@@ -3132,11 +3047,6 @@ static Base *duplibase_for_convert(
   CustomData_MeshMasks_update(&scene->customdata_mask, &CD_MASK_MESH);
   BKE_scene_graph_update_tagged(depsgraph, bmain);
   scene->customdata_mask = customdata_mask_prev;
-
-  if (is_meta_ball) {
-    obn->type = OB_MBALL;
-    obn->data = obdata;
-  }
 
   return basen;
 }
@@ -4150,68 +4060,6 @@ static Object *convert_curves_legacy(Base &base,
   }
 }
 
-static Object *convert_mball_to_mesh(Base &base,
-                                     ObjectConversionInfo &info,
-                                     bool &r_mball_converted,
-                                     Base **r_new_base,
-                                     Base **r_act_base)
-{
-  Object *ob = base.object;
-  Object *newob = nullptr;
-  Object *baseob = nullptr;
-
-  base.flag &= ~BASE_SELECTED;
-  base.object->base_flag &= ~BASE_SELECTED;
-
-  baseob = BKE_mball_basis_find(info.scene, ob);
-
-  if (ob != baseob) {
-    /* If mother-ball is converting it would be marked as done later. */
-    ob->flag |= OB_DONE;
-  }
-
-  if (!(baseob->flag & OB_DONE)) {
-    *r_new_base = duplibase_for_convert(
-        info.bmain, info.depsgraph, info.scene, info.view_layer, &base, baseob);
-    newob = (*r_new_base)->object;
-
-    MetaBall *mb = static_cast<MetaBall *>(newob->data);
-    id_us_min(&mb->id);
-
-    /* Find the evaluated mesh of the basis metaball object. */
-    Object *object_eval = DEG_get_evaluated(info.depsgraph, baseob);
-    Mesh *mesh = BKE_mesh_new_from_object_to_bmain(info.bmain, info.depsgraph, object_eval, true);
-
-    id_us_plus(&mesh->id);
-    newob->data = mesh;
-    newob->type = OB_MESH;
-
-    if (info.obact && (info.obact->type == OB_MBALL)) {
-      *r_act_base = *r_new_base;
-    }
-
-    baseob->flag |= OB_DONE;
-    r_mball_converted = true;
-  }
-
-  return newob;
-}
-
-static Object *convert_mball(Base &base,
-                             const ObjectType target,
-                             ObjectConversionInfo &info,
-                             bool &r_mball_converted,
-                             Base **r_new_base,
-                             Base **r_act_base)
-{
-  switch (target) {
-    case OB_MESH:
-      return convert_mball_to_mesh(base, info, r_mball_converted, r_new_base, r_act_base);
-    default:
-      return nullptr;
-  }
-}
-
 static Object *convert_pointcloud_to_mesh(Base &base,
                                           ObjectConversionInfo &info,
                                           Base **r_new_base)
@@ -4286,16 +4134,6 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
         ((ID *)ob->data)->tag |= ID_TAG_DOIT;
       }
 
-      /* possible metaball basis is not in this scene */
-      if (ob->type == OB_MBALL && target == OB_MESH) {
-        if (BKE_mball_is_basis(ob) == false) {
-          Object *ob_basis;
-          ob_basis = BKE_mball_basis_find(scene, ob);
-          if (ob_basis) {
-            ob_basis->flag &= ~OB_DONE;
-          }
-        }
-      }
     }
     FOREACH_SCENE_OBJECT_END;
   }
@@ -4347,7 +4185,6 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
     scene->customdata_mask = customdata_mask_prev;
   }
 
-  bool mball_converted = false;
   int incompatible_count = 0;
 
   for (const PointerRNA &ptr : selected_editable_bases) {
@@ -4390,9 +4227,6 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
         case OB_GREASE_PENCIL:
           newob = convert_grease_pencil(*base, target_type, info, &new_base);
           break;
-        case OB_MBALL:
-          newob = convert_mball(*base, target_type, info, mball_converted, &new_base, &act_base);
-          break;
         case OB_POINTCLOUD:
           newob = convert_pointcloud(*base, target_type, info, &new_base);
           break;
@@ -4426,34 +4260,6 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
        * this relation is lost when curve is converted to mesh. */
       DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY | ID_RECALC_TRANSFORM);
       ((ID *)ob->data)->tag &= ~ID_TAG_DOIT; /* flag not to convert this datablock again */
-    }
-  }
-
-  if (!keep_original) {
-    if (mball_converted) {
-      /* We need to remove non-basis MBalls first, otherwise we won't be able to detect them if
-       * their basis happens to be removed first. */
-      FOREACH_SCENE_OBJECT_BEGIN (scene, ob_mball) {
-        if (ob_mball->type == OB_MBALL) {
-          Object *ob_basis = nullptr;
-          if (!BKE_mball_is_basis(ob_mball) &&
-              ((ob_basis = BKE_mball_basis_find(scene, ob_mball)) && (ob_basis->flag & OB_DONE)))
-          {
-            base_free_and_unlink(bmain, scene, ob_mball);
-          }
-        }
-      }
-      FOREACH_SCENE_OBJECT_END;
-      FOREACH_SCENE_OBJECT_BEGIN (scene, ob_mball) {
-        if (ob_mball->type == OB_MBALL) {
-          if (ob_mball->flag & OB_DONE) {
-            if (BKE_mball_is_basis(ob_mball)) {
-              base_free_and_unlink(bmain, scene, ob_mball);
-            }
-          }
-        }
-      }
-      FOREACH_SCENE_OBJECT_END;
     }
   }
 

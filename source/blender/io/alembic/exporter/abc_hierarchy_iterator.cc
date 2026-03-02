@@ -8,7 +8,6 @@
 #include "abc_writer_curves.h"
 #include "abc_writer_hair.h"
 #include "abc_writer_instance.h"
-#include "abc_writer_mball.h"
 #include "abc_writer_mesh.h"
 #include "abc_writer_nurbs.h"
 #include "abc_writer_points.h"
@@ -202,9 +201,6 @@ ABCAbstractWriter *ABCHierarchyIterator::create_data_writer_for_object_type(
         return new ABCCurveMeshWriter(writer_args);
       }
       return new ABCNurbsWriter(writer_args);
-    case OB_MBALL:
-      return new ABCMetaballWriter(writer_args);
-
     case OB_EMPTY:
     case OB_LAMP:
     case OB_FONT:

@@ -65,6 +65,8 @@ class CyclesButtonsPanel:
 
     @classmethod
     def poll(cls, context):
+        # MATHOPS: Always show Cycles panels for Proximity engine — Cycles is the
+        # backing path tracer for Rendered viewport and F12 render.
         return context.engine in cls.COMPAT_ENGINES
 
 
@@ -2626,9 +2628,20 @@ def register():
 
     for panel in get_panels():
         panel.COMPAT_ENGINES.add('CYCLES')
+        panel.COMPAT_ENGINES.add('BLENDER_PROXIMITY')
 
     for cls in classes:
+        # MATHOPS: Nest top-level Cycles render panels under the Proximity wrapper.
+        # Only panels in bl_context="render" that don't already have a parent.
+        if (cls.__name__.startswith('CYCLES_RENDER_PT_') and
+                not hasattr(cls, 'bl_parent_id') and
+                getattr(cls, 'bl_context', '') == 'render'):
+            cls.bl_parent_id = "RENDER_PT_proximity_cycles"
+
         register_class(cls)
+        # MATHOPS: Allow Cycles panels to show for Proximity engine.
+        if hasattr(cls, 'COMPAT_ENGINES') and 'CYCLES' in cls.COMPAT_ENGINES:
+            cls.COMPAT_ENGINES = cls.COMPAT_ENGINES | {'BLENDER_PROXIMITY'}
 
 
 def unregister():
@@ -2640,6 +2653,11 @@ def unregister():
     for panel in get_panels():
         if 'CYCLES' in panel.COMPAT_ENGINES:
             panel.COMPAT_ENGINES.remove('CYCLES')
+        if 'BLENDER_PROXIMITY' in panel.COMPAT_ENGINES:
+            panel.COMPAT_ENGINES.remove('BLENDER_PROXIMITY')
 
     for cls in classes:
         unregister_class(cls)
+        # MATHOPS: Remove dynamically added parent nesting.
+        if getattr(cls, 'bl_parent_id', None) == "RENDER_PT_proximity_cycles":
+            del cls.bl_parent_id

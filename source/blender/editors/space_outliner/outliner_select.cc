@@ -1271,7 +1271,6 @@ static void outliner_set_properties_tab(bContext *C, TreeElement *te, TreeStoreE
         break;
       case ID_ME:
       case ID_CU_LEGACY:
-      case ID_MB:
       case ID_IM:
       case ID_LT:
       case ID_LA:

@@ -1335,35 +1335,6 @@ int getTransformOrientation_ex(const Scene *scene,
         result = ORIENTATION_FACE;
       }
     }
-    else if (obedit->type == OB_MBALL) {
-      MetaBall *mb = static_cast<MetaBall *>(obedit->data);
-      MetaElem *ml;
-      bool ok = false;
-      float tmat[3][3];
-
-      if (activeOnly && (ml = mb->lastelem)) {
-        quat_to_mat3(tmat, ml->quat);
-        add_v3_v3(r_normal, tmat[2]);
-        add_v3_v3(r_plane, tmat[1]);
-        ok = true;
-      }
-      else {
-        LISTBASE_FOREACH (MetaElem *, ml, mb->editelems) {
-          if (ml->flag & SELECT) {
-            quat_to_mat3(tmat, ml->quat);
-            add_v3_v3(r_normal, tmat[2]);
-            add_v3_v3(r_plane, tmat[1]);
-            ok = true;
-          }
-        }
-      }
-
-      if (ok) {
-        if (!is_zero_v3(r_plane)) {
-          result = ORIENTATION_FACE;
-        }
-      }
-    }
     else if (obedit->type == OB_ARMATURE) {
       bArmature *arm = static_cast<bArmature *>(obedit->data);
       EditBone *ebone;

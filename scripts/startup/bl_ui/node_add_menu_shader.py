@@ -33,18 +33,18 @@ def cycles_shader_nodes_poll(context):
     return context.engine == 'CYCLES'
 
 
-def eevee_shader_nodes_poll(context):
-    return context.engine == 'BLENDER_EEVEE'
+def proximity_shader_nodes_poll(context):
+    return context.engine == 'BLENDER_PROXIMITY'
 
 
-def object_not_eevee_shader_nodes_poll(context):
+def object_not_proximity_shader_nodes_poll(context):
     return (object_shader_nodes_poll(context) and
-            not eevee_shader_nodes_poll(context))
+            not proximity_shader_nodes_poll(context))
 
 
-def object_eevee_shader_nodes_poll(context):
+def object_proximity_shader_nodes_poll(context):
     return (object_shader_nodes_poll(context) and
-            eevee_shader_nodes_poll(context))
+            proximity_shader_nodes_poll(context))
 
 
 class NODE_MT_shader_node_input_base(node_add_menu.NodeMenu):
@@ -148,7 +148,7 @@ class NODE_MT_shader_node_output_base(node_add_menu.NodeMenu):
         self.node_operator(
             layout,
             "ShaderNodeOutputLight",
-            poll=object_not_eevee_shader_nodes_poll(context),
+            poll=object_not_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
@@ -213,7 +213,7 @@ class NODE_MT_shader_node_shader_base(node_add_menu.NodeMenu):
         self.node_operator(
             layout,
             "ShaderNodeBsdfHair",
-            poll=object_not_eevee_shader_nodes_poll(context),
+            poll=object_not_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
@@ -233,12 +233,12 @@ class NODE_MT_shader_node_shader_base(node_add_menu.NodeMenu):
         self.node_operator(
             layout,
             "ShaderNodeBsdfHairPrincipled",
-            poll=object_not_eevee_shader_nodes_poll(context),
+            poll=object_not_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
             "ShaderNodeBsdfRayPortal",
-            poll=object_not_eevee_shader_nodes_poll(context),
+            poll=object_not_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
@@ -248,12 +248,12 @@ class NODE_MT_shader_node_shader_base(node_add_menu.NodeMenu):
         self.node_operator(
             layout,
             "ShaderNodeBsdfSheen",
-            poll=object_not_eevee_shader_nodes_poll(context),
+            poll=object_not_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
             "ShaderNodeEeveeSpecular",
-            poll=object_eevee_shader_nodes_poll(context),
+            poll=object_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
@@ -263,7 +263,7 @@ class NODE_MT_shader_node_shader_base(node_add_menu.NodeMenu):
         self.node_operator(
             layout,
             "ShaderNodeBsdfToon",
-            poll=object_not_eevee_shader_nodes_poll(context),
+            poll=object_not_proximity_shader_nodes_poll(context),
         )
         self.node_operator(
             layout,
@@ -320,7 +320,7 @@ class NODE_MT_shader_node_color_base(node_add_menu.NodeMenu):
         self.node_operator(layout, "ShaderNodeSeparateColor")
         layout.separator()
         self.node_operator(layout, "ShaderNodeRGBToBW")
-        self.node_operator(layout, "ShaderNodeShaderToRGB", poll=object_eevee_shader_nodes_poll(context))
+        self.node_operator(layout, "ShaderNodeShaderToRGB", poll=object_proximity_shader_nodes_poll(context))
 
         self.draw_assets_for_catalog(layout, self.bl_label)
 

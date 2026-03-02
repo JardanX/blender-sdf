@@ -42,7 +42,6 @@
 #include "BKE_keyconfig.h"
 #include "BKE_lib_remap.hh"
 #include "BKE_main.hh"
-#include "BKE_mball_tessellate.hh"
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -557,8 +556,6 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   }
 
   free_openrecent();
-
-  BKE_mball_cubeTable_free();
 
   /* Clear the cache which may (indirectly) contain e.g. GPU resources which need to be freed
    * before the GPU backend is destroyed. */

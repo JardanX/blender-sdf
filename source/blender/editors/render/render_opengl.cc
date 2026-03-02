@@ -602,7 +602,6 @@ static int gather_frames_to_render_for_id(LibraryIDLinkCallbackData *cb_data)
     /* Whitelist: */
     case ID_ME:        /* Mesh */
     case ID_CU_LEGACY: /* Curve */
-    case ID_MB:        /* MetaBall */
     case ID_MA:        /* Material */
     case ID_TE:        /* Tex (Texture) */
     case ID_IM:        /* Image */

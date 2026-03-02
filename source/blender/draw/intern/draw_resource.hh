@@ -144,12 +144,6 @@ inline void ObjectInfos::sync(const blender::draw::ObjectRef ref,
       orco_mul = cu.texspace_size;
       break;
     }
-    case ID_MB: {
-      MetaBall &mb = DRW_object_get_data_for_drawing<MetaBall>(*ref.object);
-      orco_add = mb.texspace_location;
-      orco_mul = mb.texspace_size;
-      break;
-    }
     default:
       orco_add = float3(0.0f);
       orco_mul = float3(1.0f);

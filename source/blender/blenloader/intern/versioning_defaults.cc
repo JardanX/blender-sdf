@@ -418,7 +418,7 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
 {
   ToolSettings *ts = scene->toolsettings;
 
-  STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_EEVEE);
+  STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
 
   scene->r.cfra = 1.0f;
   scene->r.im_format.exr_flag |= R_IMF_EXR_FLAG_MULTIPART;

@@ -93,16 +93,6 @@ bool calc_active_center_for_editmode(Object *obedit, const bool select_only, flo
       }
       break;
     }
-    case OB_MBALL: {
-      MetaBall *mb = static_cast<MetaBall *>(obedit->data);
-      MetaElem *ml_act = mb->lastelem;
-
-      if (ml_act && (!select_only || (ml_act->flag & SELECT))) {
-        copy_v3_v3(r_center, &ml_act->x);
-        return true;
-      }
-      break;
-    }
     case OB_LATTICE: {
       BPoint *actbp = BKE_lattice_active_point_get(static_cast<Lattice *>(obedit->data));
 

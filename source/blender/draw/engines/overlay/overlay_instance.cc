@@ -71,15 +71,9 @@ void Instance::init()
 
     const bool viewport_uses_workbench = state.v3d->shading.type <= OB_SOLID ||
                                          BKE_scene_uses_blender_workbench(state.scene);
-    const bool viewport_uses_eevee = STREQ(
-        ED_view3d_engine_type(state.scene, state.v3d->shading.type)->idname,
-        RE_engine_id_BLENDER_EEVEE);
-    const bool use_resolution_scaling = BKE_render_preview_pixel_size(&state.scene->r) != 1;
-    /* Only workbench ensures the depth buffer is matching overlays.
-     * Force depth prepass for other render engines.
-     * EEVEE is an exception (if not using mixed resolution) to avoid a significant overhead. */
-    state.is_render_depth_available = viewport_uses_workbench ||
-                                      (viewport_uses_eevee && !use_resolution_scaling);
+    /* Only workbench/proximity ensures the depth buffer is matching overlays.
+     * Force depth prepass for other render engines. */
+    state.is_render_depth_available = viewport_uses_workbench;
 
     /* For depth only drawing, no other render engine is expected. Except for Grease Pencil which
      * outputs valid depth. Otherwise depth is cleared and is valid. */
@@ -349,12 +343,6 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   UI_GetThemeColor4fv(TH_FRAME_BEFORE, gb.colors.before_frame);
   UI_GetThemeColor4fv(TH_FRAME_AFTER, gb.colors.after_frame);
 
-  /* Meta-ball. */
-  gb.colors.mball_radius = rgba_uchar_to_float(0xA0, 0x30, 0x30, 0xFF);
-  gb.colors.mball_radius_select = rgba_uchar_to_float(0xF0, 0xA0, 0xA0, 0xFF);
-  gb.colors.mball_stiffness = rgba_uchar_to_float(0x30, 0xA0, 0x30, 0xFF);
-  gb.colors.mball_stiffness_select = rgba_uchar_to_float(0xA0, 0xF0, 0xA0, 0xFF);
-
   /* Grid */
   UI_GetThemeColorShade4fv(TH_GRID, 10, gb.colors.grid);
   /* Emphasize division lines lighter instead of darker, if background is darker than grid. */
@@ -460,11 +448,11 @@ void Instance::begin_sync()
     layer.fade.begin_sync(resources, state);
     layer.force_fields.begin_sync(resources, state);
     layer.fluids.begin_sync(resources, state);
-    layer.grease_pencil.begin_sync(resources, state);
+    /* MATHOPS: Removed — Grease Pencil overlay */
+    // layer.grease_pencil.begin_sync(resources, state);
     layer.lattices.begin_sync(resources, state);
     layer.lights.begin_sync(resources, state);
     layer.light_probes.begin_sync(resources, state);
-    layer.metaballs.begin_sync(resources, state);
     layer.meshes.begin_sync(resources, state);
     layer.mesh_uvs.begin_sync(resources, state);
     layer.mode_transfer.begin_sync(resources, state);
@@ -532,9 +520,10 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
         /* TODO(fclem): Make it part of a #Meshes. */
         layer.paints.object_sync(manager, ob_ref, resources, state);
         break;
-      case OB_GREASE_PENCIL:
-        layer.grease_pencil.paint_object_sync(manager, ob_ref, resources, state);
-        break;
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // case OB_GREASE_PENCIL:
+      //   layer.grease_pencil.paint_object_sync(manager, ob_ref, resources, state);
+      //   break;
       default:
         break;
     }
@@ -547,9 +536,10 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
         /* TODO(fclem): Make it part of a #Meshes. */
         layer.sculpts.object_sync(manager, ob_ref, resources, state);
         break;
-      case OB_GREASE_PENCIL:
-        layer.grease_pencil.sculpt_object_sync(manager, ob_ref, resources, state);
-        break;
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // case OB_GREASE_PENCIL:
+      //   layer.grease_pencil.sculpt_object_sync(manager, ob_ref, resources, state);
+      //   break;
       default:
         break;
     }
@@ -573,18 +563,16 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
       case OB_LATTICE:
         layer.lattices.edit_object_sync(manager, ob_ref, resources, state);
         break;
-      case OB_MBALL:
-        layer.metaballs.edit_object_sync(manager, ob_ref, resources, state);
-        break;
       case OB_POINTCLOUD:
         layer.pointclouds.edit_object_sync(manager, ob_ref, resources, state);
         break;
       case OB_FONT:
         layer.text.edit_object_sync(manager, ob_ref, resources, state);
         break;
-      case OB_GREASE_PENCIL:
-        layer.grease_pencil.edit_object_sync(manager, ob_ref, resources, state);
-        break;
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // case OB_GREASE_PENCIL:
+      //   layer.grease_pencil.edit_object_sync(manager, ob_ref, resources, state);
+      //   break;
     }
   }
 
@@ -617,14 +605,10 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
       case OB_LIGHTPROBE:
         layer.light_probes.object_sync(manager, ob_ref, resources, state);
         break;
-      case OB_MBALL:
-        if (!in_edit_mode) {
-          layer.metaballs.object_sync(manager, ob_ref, resources, state);
-        }
-        break;
-      case OB_GREASE_PENCIL:
-        layer.grease_pencil.object_sync(manager, ob_ref, resources, state);
-        break;
+      /* MATHOPS: Removed — Grease Pencil overlay */
+      // case OB_GREASE_PENCIL:
+      //   layer.grease_pencil.object_sync(manager, ob_ref, resources, state);
+      //   break;
       case OB_SPEAKER:
         layer.speakers.object_sync(manager, ob_ref, resources, state);
         break;
@@ -666,7 +650,6 @@ void Instance::end_sync()
     layer.lights.end_sync(resources, state);
     layer.light_probes.end_sync(resources, state);
     layer.mesh_uvs.end_sync(resources, state);
-    layer.metaballs.end_sync(resources, state);
     layer.relations.end_sync(resources, state);
     layer.fluids.end_sync(resources, state);
     layer.speakers.end_sync(resources, state);
@@ -725,7 +708,6 @@ void Instance::draw(Manager &manager)
   resources.pre_draw();
 
   outline.flat_objects_pass_sync(manager, view, resources, state);
-  GreasePencil::compute_depth_planes(manager, view, resources, state);
 
   /* Pre-Draw: Run the compute steps of all passes up-front
    * to avoid constant GPU compute/raster context switching. */
@@ -835,7 +817,6 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.light_probes.draw_line(framebuffer, manager, view);
     layer.speakers.draw_line(framebuffer, manager, view);
     layer.lattices.draw_line(framebuffer, manager, view);
-    layer.metaballs.draw_line(framebuffer, manager, view);
     layer.pointclouds.draw_line(framebuffer, manager, view);
     layer.relations.draw_line(framebuffer, manager, view);
     layer.fluids.draw_line(framebuffer, manager, view);
@@ -843,7 +824,8 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.attribute_viewer.draw_line(framebuffer, manager, view);
     layer.armatures.draw_line(framebuffer, manager, view);
     layer.sculpts.draw_line(framebuffer, manager, view);
-    layer.grease_pencil.draw_line(framebuffer, manager, view);
+    /* MATHOPS: Removed — Grease Pencil overlay */
+    // layer.grease_pencil.draw_line(framebuffer, manager, view);
     /* NOTE: Temporarily moved after grid drawing (See #136764). */
     // layer.meshes.draw_line(framebuffer, manager, view);
     layer.curves.draw_line(framebuffer, manager, view);
@@ -853,7 +835,8 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.light_probes.draw_color_only(framebuffer, manager, view);
     layer.meshes.draw_color_only(framebuffer, manager, view);
     layer.curves.draw_color_only(framebuffer, manager, view);
-    layer.grease_pencil.draw_color_only(framebuffer, manager, view);
+    /* MATHOPS: Removed — Grease Pencil overlay */
+    // layer.grease_pencil.draw_color_only(framebuffer, manager, view);
   };
 
   {
@@ -1052,8 +1035,6 @@ bool Instance::object_is_edit_mode(const Object *object)
         return state.ctx_mode == CTX_MODE_EDIT_SURFACE;
       case OB_LATTICE:
         return state.ctx_mode == CTX_MODE_EDIT_LATTICE;
-      case OB_MBALL:
-        return state.ctx_mode == CTX_MODE_EDIT_METABALL;
       case OB_FONT:
         return state.ctx_mode == CTX_MODE_EDIT_TEXT;
       case OB_CURVES:

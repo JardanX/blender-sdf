@@ -245,9 +245,6 @@ static bool buttons_context_path_data(ButsContextPath *path, int type)
   if (RNA_struct_is_a(ptr->type, &RNA_Armature) && ELEM(type, -1, OB_ARMATURE)) {
     return true;
   }
-  if (RNA_struct_is_a(ptr->type, &RNA_MetaBall) && ELEM(type, -1, OB_MBALL)) {
-    return true;
-  }
   if (RNA_struct_is_a(ptr->type, &RNA_Lattice) && ELEM(type, -1, OB_LATTICE)) {
     return true;
   }
@@ -983,10 +980,6 @@ int /*eContextResult*/ buttons_context(const bContext *C,
   }
   if (CTX_data_equals(member, "curve")) {
     set_pointer_type(path, result, &RNA_Curve);
-    return CTX_RESULT_OK;
-  }
-  if (CTX_data_equals(member, "meta_ball")) {
-    set_pointer_type(path, result, &RNA_MetaBall);
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "light")) {

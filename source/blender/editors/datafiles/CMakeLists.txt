@@ -721,6 +721,7 @@ if(WITH_BLENDER)
       outliner_ob_meta
       outliner_ob_pointcloud
       outliner_ob_speaker
+      outliner_ob_sdf
       outliner_ob_surface
       outliner_ob_volume
       output
@@ -940,6 +941,7 @@ if(WITH_BLENDER)
       vis_sel_01
       vis_sel_10
       vis_sel_11
+      sdf_data
       volume_data
       vpaint_hlt
       warning_large

@@ -453,7 +453,6 @@ class USERPREF_PT_edit_objects_duplicate_data(EditingPanel, CenterAlignMixIn, Pa
             ("use_duplicate_lightprobe", "Light Probe", 'OUTLINER_DATA_LIGHTPROBE', ""),
             ("use_duplicate_material", "Material", 'MATERIAL_DATA', ""),
             ("use_duplicate_mesh", "Mesh", 'OUTLINER_DATA_MESH', ""),
-            ("use_duplicate_metaball", "Metaball", 'OUTLINER_DATA_META', ""),
             ("use_duplicate_node_tree", "Node Tree", 'NODETREE', ""),
             ("use_duplicate_particle", "Particle", 'PARTICLES', ""),
             (None, None, None, None),

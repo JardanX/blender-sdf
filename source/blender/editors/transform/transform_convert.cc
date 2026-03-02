@@ -713,7 +713,6 @@ static void init_proportional_edit(TransInfo *t)
              &greasepencil::TransConvertType_GreasePencil,
              &TransConvertType_Lattice,
              &TransConvertType_Mask,
-             &TransConvertType_MBall,
              &TransConvertType_Mesh,
              &TransConvertType_MeshEdge,
              &TransConvertType_MeshSkin,
@@ -801,7 +800,6 @@ static void init_TransDataContainers(TransInfo *t, Object *obact, Span<Object *>
             &greasepencil::TransConvertType_GreasePencil,
             &pointcloud::TransConvertType_PointCloud,
             &TransConvertType_Lattice,
-            &TransConvertType_MBall,
             &TransConvertType_Mesh,
             &TransConvertType_MeshEdge,
             &TransConvertType_MeshSkin,
@@ -975,9 +973,6 @@ static TransConvertTypeInfo *convert_type_get(const TransInfo *t, Object **r_obj
     }
     if (t->obedit_type == OB_LATTICE) {
       return &TransConvertType_Lattice;
-    }
-    if (t->obedit_type == OB_MBALL) {
-      return &TransConvertType_MBall;
     }
     if (t->obedit_type == OB_ARMATURE) {
       return &TransConvertType_EditArmature;

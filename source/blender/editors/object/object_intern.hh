@@ -118,7 +118,6 @@ void OBJECT_OT_add(wmOperatorType *ot);
 void OBJECT_OT_lattice_add_to_selected(wmOperatorType *ot);
 void OBJECT_OT_add_named(wmOperatorType *ot);
 void OBJECT_OT_transform_to_mouse(wmOperatorType *ot);
-void OBJECT_OT_metaball_add(wmOperatorType *ot);
 void OBJECT_OT_text_add(wmOperatorType *ot);
 void OBJECT_OT_armature_add(wmOperatorType *ot);
 void OBJECT_OT_empty_add(wmOperatorType *ot);

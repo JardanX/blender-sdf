@@ -62,7 +62,7 @@ static void rna_def_sdf(BlenderRNA *brna)
 
   srna = RNA_def_struct(brna, "SDF", "ID");
   RNA_def_struct_ui_text(srna, "SDF", "SDF data-block for signed distance field objects");
-  RNA_def_struct_ui_icon(srna, ICON_OUTLINER_OB_VOLUME);
+  RNA_def_struct_ui_icon(srna, ICON_SDF_DATA);
 
   /* SDF Type */
   prop = RNA_def_property(srna, "sdf_type", PROP_ENUM, PROP_NONE);
