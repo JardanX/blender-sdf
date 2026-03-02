@@ -109,8 +109,8 @@ struct DRWViewData {
     /* Render engines. Output to the render result frame-buffer. Mutually exclusive. */
 
     callback(workbench);
-    callback(sdf);
     callback(external);
+    callback(sdf);
     callback(image);
 #ifdef WITH_DRAW_DEBUG
     callback(edit_select_debug);

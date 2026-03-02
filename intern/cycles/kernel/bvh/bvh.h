@@ -115,29 +115,32 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
 
   IF_NOT_USING_EMBREE
   {
+    /* Skip BVH traversal if no BVH nodes exist (e.g. scene with only SDF objects). */
+    if (kernel_data.bvh.have_bvh_nodes) {
 #  ifdef __OBJECT_MOTION__
-    if (kernel_data.bvh.have_motion) {
+      if (kernel_data.bvh.have_motion) {
 #    ifdef __HAIR__
-      if (kernel_data.bvh.have_curves) {
-        hit = bvh_intersect_hair_motion(kg, ray, isect, visibility);
-      }
-      else
+        if (kernel_data.bvh.have_curves) {
+          hit = bvh_intersect_hair_motion(kg, ray, isect, visibility);
+        }
+        else
 #    endif /* __HAIR__ */
-      {
-        hit = bvh_intersect_motion(kg, ray, isect, visibility);
-      }
-    }
-    else
-#  endif /* __OBJECT_MOTION__ */
-    {
-#  ifdef __HAIR__
-      if (kernel_data.bvh.have_curves) {
-        hit = bvh_intersect_hair(kg, ray, isect, visibility);
+        {
+          hit = bvh_intersect_motion(kg, ray, isect, visibility);
+        }
       }
       else
-#  endif /* __HAIR__ */
+#  endif /* __OBJECT_MOTION__ */
       {
-        hit = bvh_intersect(kg, ray, isect, visibility);
+#  ifdef __HAIR__
+        if (kernel_data.bvh.have_curves) {
+          hit = bvh_intersect_hair(kg, ray, isect, visibility);
+        }
+        else
+#  endif /* __HAIR__ */
+        {
+          hit = bvh_intersect(kg, ray, isect, visibility);
+        }
       }
     }
   }

@@ -30,6 +30,7 @@ set(SRC
   curves.cpp
   logging.cpp
   python.cpp
+  sdf.cpp
   session.cpp
   shader.cpp
   sync.cpp

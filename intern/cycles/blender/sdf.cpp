@@ -17,6 +17,7 @@
 #include "util/hash.h"
 #include "util/log.h"
 #include "util/math.h"
+#include "util/task.h"
 #include "util/transform.h"
 #include "util/vector.h"
 
@@ -107,7 +108,8 @@ static float evaluate_sdf_object(const SDFObjectData &obj, const float3 world_po
 /* Constants matching the draw engine. */
 
 static constexpr int BRICK_SIZE = 8;
-static constexpr int BRICK_STORAGE = 10;
+static constexpr int BRICK_STORAGE = 12; /* 8 interior + 2-voxel border on each side. */
+static constexpr int BRICK_BORDER = 2;
 
 /* -------------------------------------------------------------------- */
 /* Main sync function. */
@@ -120,7 +122,10 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   float3 scene_min_acc = make_float3(1e30f, 1e30f, 1e30f);
   float3 scene_max_acc = make_float3(-1e30f, -1e30f, -1e30f);
 
-  /* Iterate over all depsgraph objects. */
+  /* Iterate over all depsgraph objects.
+   * b_depsgraph_ptr is set by sync_objects() before geometry sync starts. */
+  assert(b_depsgraph_ptr != nullptr);
+  BL::Depsgraph &b_depsgraph = *b_depsgraph_ptr;
   BL::Depsgraph::object_instances_iterator b_instance_iter;
   for (b_depsgraph.object_instances.begin(b_instance_iter);
        b_instance_iter != b_depsgraph.object_instances.end();
@@ -226,7 +231,7 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   }
 
   /* Compute atlas parameters. */
-  const int grid_res = 32; /* Bricks per axis. */
+  const int grid_res = 32; /* Bricks per axis (32 * 8 = 256 voxels per axis). */
   const int total_res = grid_res * BRICK_SIZE;
 
   float3 scene_center = (scene_min_acc + scene_max_acc) * 0.5f;
@@ -293,83 +298,78 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   int atlas_dim = bricks_per_axis * BRICK_STORAGE;
   size_t atlas_total = (size_t)atlas_dim * atlas_dim * atlas_dim;
 
-  /* ---- Phase 2: Bake atlas ---- */
-  vector<half4> atlas(atlas_total);
-  vector<int16_t> matid(atlas_total, -1);
+  /* ---- Phase 2: Bake atlas (multithreaded) ---- */
+  vector<float4> atlas(atlas_total, make_float4(100.0f, 0.0f, 0.0f, 0.0f));
+  vector<int> matid(atlas_total, -1);
 
-  /* Initialize atlas to large distance. */
-  for (size_t i = 0; i < atlas_total; i++) {
-    atlas[i] = make_half4(half(100.0f), half(0.0f), half(0.0f), half(0.0f));
-  }
+  /* Each brick writes to its own atlas region, so bricks are independent.
+   * Parallelize over the flat brick index for good load balance. */
+  float4 *atlas_data = atlas.data();
+  int *matid_data = matid.data();
 
-  for (int bz = 0; bz < grid_res; bz++) {
-    for (int by = 0; by < grid_res; by++) {
-      for (int bx = 0; bx < grid_res; bx++) {
-        int idx = bz * grid_res * grid_res + by * grid_res + bx;
-        int slot = indirection[idx];
-        if (slot < 0) {
-          continue;
-        }
+  parallel_for(0, num_bricks, [&](int idx) {
+    int slot = indirection[idx];
+    if (slot < 0) {
+      return;
+    }
 
-        /* Compute slot block in compact atlas. */
-        int sx = slot % bricks_per_axis;
-        int sy = (slot / bricks_per_axis) % bricks_per_axis;
-        int sz = slot / (bricks_per_axis * bricks_per_axis);
-        int3 slot_origin = make_int3(sx * BRICK_STORAGE, sy * BRICK_STORAGE, sz * BRICK_STORAGE);
+    int bx = idx % grid_res;
+    int by = (idx / grid_res) % grid_res;
+    int bz = idx / (grid_res * grid_res);
 
-        /* Bake each voxel in the brick (including overlap border). */
-        for (int lz = 0; lz < BRICK_STORAGE; lz++) {
-          for (int ly = 0; ly < BRICK_STORAGE; ly++) {
-            for (int lx = 0; lx < BRICK_STORAGE; lx++) {
-              /* World position: brick * 8 + (local - 1) + 0.5, times voxel_size.
-               * The -1 accounts for the overlap border. */
-              float3 world_pos = atlas_origin +
-                                 make_float3(float(bx * BRICK_SIZE + lx - 1) + 0.5f,
-                                             float(by * BRICK_SIZE + ly - 1) + 0.5f,
-                                             float(bz * BRICK_SIZE + lz - 1) + 0.5f) *
-                                     voxel_size;
+    int sx = slot % bricks_per_axis;
+    int sy = (slot / bricks_per_axis) % bricks_per_axis;
+    int sz = slot / (bricks_per_axis * bricks_per_axis);
+    int3 slot_origin = make_int3(sx * BRICK_STORAGE, sy * BRICK_STORAGE, sz * BRICK_STORAGE);
 
-              float acc_dist = 1e10f;
-              float3 acc_color = zero_float3();
-              int closest_obj = 0;
-              float closest_raw = 1e10f;
+    for (int lz = 0; lz < BRICK_STORAGE; lz++) {
+      for (int ly = 0; ly < BRICK_STORAGE; ly++) {
+        for (int lx = 0; lx < BRICK_STORAGE; lx++) {
+          float3 world_pos = atlas_origin +
+                             make_float3(float(bx * BRICK_SIZE + lx - BRICK_BORDER) + 0.5f,
+                                         float(by * BRICK_SIZE + ly - BRICK_BORDER) + 0.5f,
+                                         float(bz * BRICK_SIZE + lz - BRICK_BORDER) + 0.5f) *
+                                 voxel_size;
 
-              for (size_t i = 0; i < sdf_objects.size(); i++) {
-                float dist = evaluate_sdf_object(sdf_objects[i], world_pos);
-                float k = sdf_objects[i].blend;
+          float acc_dist = 1e10f;
+          float3 acc_color = zero_float3();
+          int closest_obj = 0;
+          float closest_raw = 1e10f;
 
-                if (k > 0.0f && acc_dist < 1e9f) {
-                  float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-                  acc_color = acc_color * (1.0f - h) + sdf_objects[i].color * h;
-                  acc_dist = acc_dist * (1.0f - h) + dist * h - k * h * (1.0f - h);
-                }
-                else {
-                  if (dist < acc_dist) {
-                    acc_color = sdf_objects[i].color;
-                    acc_dist = dist;
-                  }
-                }
+          for (size_t i = 0; i < sdf_objects.size(); i++) {
+            float dist = evaluate_sdf_object(sdf_objects[i], world_pos);
+            float k = sdf_objects[i].blend;
 
-                if (dist < closest_raw) {
-                  closest_raw = dist;
-                  closest_obj = (int)i;
-                }
+            if (k > 0.0f && acc_dist < 1e9f) {
+              float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
+              acc_color = acc_color * (1.0f - h) + sdf_objects[i].color * h;
+              acc_dist = acc_dist * (1.0f - h) + dist * h - k * h * (1.0f - h);
+            }
+            else {
+              if (dist < acc_dist) {
+                acc_color = sdf_objects[i].color;
+                acc_dist = dist;
               }
+            }
 
-              int3 atlas_coord = slot_origin + make_int3(lx, ly, lz);
-              size_t atlas_idx = (size_t)atlas_coord.z * atlas_dim * atlas_dim +
-                                 (size_t)atlas_coord.y * atlas_dim +
-                                 (size_t)atlas_coord.x;
-
-              atlas[atlas_idx] = make_half4(
-                  half(acc_dist), half(acc_color.x), half(acc_color.y), half(acc_color.z));
-              matid[atlas_idx] = (int16_t)closest_obj;
+            if (dist < closest_raw) {
+              closest_raw = dist;
+              closest_obj = (int)i;
             }
           }
+
+          int3 atlas_coord = slot_origin + make_int3(lx, ly, lz);
+          size_t atlas_idx = (size_t)atlas_coord.z * atlas_dim * atlas_dim +
+                             (size_t)atlas_coord.y * atlas_dim +
+                             (size_t)atlas_coord.x;
+
+          atlas_data[atlas_idx] = make_float4(
+              acc_dist, acc_color.x, acc_color.y, acc_color.z);
+          matid_data[atlas_idx] = closest_obj;
         }
       }
     }
-  }
+  });
 
   /* ---- Store results in SDFGeometry ---- */
   sdf_geom->origin = atlas_origin;

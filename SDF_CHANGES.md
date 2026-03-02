@@ -898,3 +898,74 @@ SDF objects are integrated into Cycles as a **surface primitive** (`PRIMITIVE_SD
 | `intern/cycles/blender/CMakeLists.txt` | Added `sdf.cpp` |
 | `intern/cycles/scene/CMakeLists.txt` | Added `sdf.h`, `sdf.cpp` |
 | `intern/cycles/kernel/CMakeLists.txt` | Added `geom/sdf.h`, `geom/sdf_lib.h` |
+
+### Cycles SDF Bug Fixes (Post-Integration)
+
+Multiple fixes to SDF rendering quality, interaction, and real-time updates in Cycles rendered view.
+
+#### Surface Normals ("Jeans Material" Fix)
+
+Increased Cycles kernel's `SDF_BRICK_STORAGE` from 10 to 12 (matching draw engine), added `SDF_BRICK_BORDER=2`. This gives the dual voxel normal method a full 3×3×3 neighborhood for all base values `[-1, BRICK_SIZE-1]`. Also fixed baking to use `-BRICK_BORDER` offset, and fixed fully-inside bricks using slot=-2 instead of 0.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/geom/sdf.h` | `SDF_BRICK_STORAGE` 10→12, added `SDF_BRICK_BORDER=2`. Fixed `sdf_grid_to_compact` offset +1→+2. Fixed `sdf_compute_normal` base clamp `[0,6]`→`[-1,7]`, atlas offset +1→+2. Fixed fully-inside brick slot from 0 to -2. Encoded brick cell + slot in `isect->u/v` via `__int_as_float` for reliable decode in shader_setup. Initialized `sd->shader` to first shader in map before matid lookup |
+| `intern/cycles/blender/sdf.cpp` | Grid resolution 32→64. `BRICK_STORAGE` 10→12, `BRICK_BORDER=2`. Bake offset -1→-2 |
+
+#### SDF Object Bounding Box
+
+Added `case OB_SDF` to `BKE_object_boundbox_get()` so viewport selection, transform gizmos, and interaction work correctly for SDF objects.
+
+| File | Change |
+|------|--------|
+| `source/blender/blenkernel/intern/object.cc` | Added `OB_SDF` case returning bounds from `SDF::size + SDF::bevel` |
+
+#### Real-Time Transform Updates
+
+SDF atlas is world-space baked — moving any SDF object requires full atlas re-bake. Modified Cycles sync to trigger geometry re-sync when an SDF object's transform changes.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/blender/sync.cpp` | Added `(updated_transform && is_sdf_object)` to geometry re-sync condition at line 154 |
+
+#### Deduplicated SDF Device Upload
+
+All SDF objects bake into one shared atlas, so only the first valid SDFGeometry is uploaded to the device (num_sdfs=1). Also fixed `sd->object` — now finds the actual Cycles object index for the first SDF object instead of hardcoding 0.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/scene/geometry.cpp` | Deduplicates SDFGeometry upload. Searches `scene->objects` for first SDF geometry to set correct `object_id` |
+
+#### Mesh-to-SDF and Narrow Band Optimization
+
+Reduced default narrow band width from 3 to 2 voxels (~33% faster `meshToLevelSet` and less data). Replaced per-element vertex copy with `memcpy` in `mesh_to_sdf_grid`. Removed the aggressive band cutoff in the grid blend shader — inactive voxels at ±background provide valid conservative distance estimates, preventing the ray marcher from overshooting the surface due to 1e10 discontinuities. Removed `grid_background` push constant and `background_value` from GridObject since the cutoff is gone.
+
+| File | Change |
+|------|--------|
+| `source/blender/geometry/intern/mesh_to_volume.cc` | Vertex copy via `memcpy` instead of parallel_for loop |
+| `source/blender/nodes/geometry/nodes/node_geo_mesh_to_sdf_grid.cc` | Default band width 3→2, updated description |
+| `scripts/startup/bl_operators/mesh_to_sdf.py` | Default band width 3→2, updated comment |
+| `source/blender/draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Removed band cutoff (was causing surface truncation) |
+| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed `grid_background` push constant |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | Removed `background_value` from GridObject, removed O(n) voxel scan, removed `grid_background` uniform upload |
+
+---
+
+### Incremental SDF Baking + Per-Brick Object Culling
+
+Two complementary optimizations to the SDF bake pipeline:
+
+**Per-brick object culling:** Each brick now skips SDF objects whose world-space AABB doesn't overlap the brick, in both classify and bake shaders. For scenes with many spread-out objects, this drastically reduces per-brick evaluation cost.
+
+**In-place incremental baking:** When objects move (without add/remove), only bricks overlapping moved objects' old+new AABBs are rebaked **in-place** in the existing atlas. No classify, no copy — clean brick data stays at its correct atlas positions. New slots are allocated on-the-fly for dirty bricks that are currently void. Falls back to full bake on first frame, resolution change, object add/remove, grid object presence, or atlas capacity exceeded.
+
+Combined: moving 1 of 10 spread-out objects → ~20% bricks rebaked, each evaluating ~1-3 objects.
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Added per-brick AABB culling in object loop (expand by `brick_half_diag`) |
+| `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added incremental early-out (skip clean bricks), per-brick AABB culling in object loop (expand by 2-voxel overlap border) |
+| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `dirty_bricks_tx` sampler + `incremental` push constant in `sdf_bake` (copy_bricks info removed) |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | In-place incremental baking: `prepare_incremental_bake()` reads indirection, computes dirty mask, allocates new slots for void bricks, re-uploads indirection. Removed copy-based infrastructure (`prev_indirection_tx_`, `prev_compact_atlas_tx_`, `copy_bricks_sh_`, `dispatch_copy_bricks()`, `compute_dirty_bricks()`). Simplified `ensure_compact_atlas()` and destructor. Removed debug printfs |
+| `source/blender/draw/engines/sdf/shaders/sdf_copy_bricks_comp.glsl` | **DELETED** — no longer needed; clean bricks stay in-place |
+| `source/blender/draw/CMakeLists.txt` | Removed `sdf_copy_bricks_comp.glsl` from shader file list |

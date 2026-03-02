@@ -85,10 +85,10 @@ ccl_device_inline void shader_setup_from_ray(KernelGlobals kg,
     }
 
 #ifdef __RAY_DIFFERENTIALS__
-    sd->dP = differential_make_compact(ray->dP);
-    sd->dI = differential_make_compact(ray->dD);
-    sd->du = differential_make_compact(differential_zero());
-    sd->dv = differential_make_compact(differential_zero());
+    sd->dP = differential_zero_compact();
+    sd->dI = differential_zero_compact();
+    sd->du = differential_zero();
+    sd->dv = differential_zero();
 #endif
     return;
   }

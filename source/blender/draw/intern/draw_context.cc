@@ -1144,6 +1144,8 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
         }
         else if ((render_engine_type->flag & RE_INTERNAL) == 0) {
           view_data.external.set_used(true);
+          /* SDF engine must also run to provide depth for overlays (grid, outlines). */
+          view_data.sdf.set_used(true);
         }
         else {
           BLI_assert_unreachable();

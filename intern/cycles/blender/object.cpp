@@ -439,6 +439,9 @@ void BlenderSync::sync_objects(BL::Depsgraph &b_depsgraph,
                                BL::SpaceView3D &b_v3d,
                                const float motion_time)
 {
+  /* Store depsgraph pointer for SDF sync (needs to iterate all objects). */
+  b_depsgraph_ptr = &b_depsgraph;
+
   /* Task pool for multithreaded geometry sync. */
   TaskPool geom_task_pool;
 

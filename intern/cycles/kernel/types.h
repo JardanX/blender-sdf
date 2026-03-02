@@ -827,8 +827,6 @@ enum PrimitiveType {
   PRIMITIVE_VOLUME = (1 << 4),
   PRIMITIVE_LAMP = (1 << 5),
 
-  PRIMITIVE_SDF = (1 << 7),
-
   PRIMITIVE_MOTION = (1 << 6),
   PRIMITIVE_MOTION_TRIANGLE = (PRIMITIVE_TRIANGLE | PRIMITIVE_MOTION),
   PRIMITIVE_MOTION_CURVE_THICK = (PRIMITIVE_CURVE_THICK | PRIMITIVE_MOTION),
@@ -838,10 +836,14 @@ enum PrimitiveType {
 
   PRIMITIVE_CURVE = (PRIMITIVE_CURVE_THICK | PRIMITIVE_CURVE_RIBBON),
 
+  /* SDF uses a high bit outside the shape/motion range.
+   * It does not participate in BVH — ray marching is separate. */
+  PRIMITIVE_SDF = (1 << 15),
+
   PRIMITIVE_ALL = (PRIMITIVE_TRIANGLE | PRIMITIVE_CURVE | PRIMITIVE_POINT | PRIMITIVE_VOLUME |
                    PRIMITIVE_LAMP | PRIMITIVE_SDF | PRIMITIVE_MOTION),
 
-  PRIMITIVE_NUM_SHAPES = 7,
+  PRIMITIVE_NUM_SHAPES = 6,
   PRIMITIVE_NUM_BITS = PRIMITIVE_NUM_SHAPES + 1, /* All shapes + motion bit. */
   PRIMITIVE_NUM = PRIMITIVE_NUM_SHAPES * 2,      /* With and without motion. */
 };
@@ -1572,11 +1574,11 @@ struct KernelObject {
 static_assert_align(KernelObject, 16);
 
 struct KernelSDF {
-  /* Image manager SVM slots for 3D textures. */
-  int indirection_slot;  /* R32I: brick -> compact atlas slot mapping. */
-  int atlas_slot;        /* RGBA16F: distance + color compact atlas. */
-  int matid_slot;        /* R16I: per-voxel closest object index. */
-  int grid_res;          /* Bricks per axis in the indirection grid. */
+  /* Offsets into flat device arrays (sdf_indirection, sdf_atlas, sdf_matid). */
+  int indirection_offset;  /* Start index in sdf_indirection array. */
+  int atlas_offset;        /* Start index in sdf_atlas array. */
+  int matid_offset;        /* Start index in sdf_matid array. */
+  int grid_res;            /* Bricks per axis in the indirection grid. */
 
   int bricks_per_axis;   /* ceil(cbrt(active_bricks)) for compact atlas layout. */
   int num_objects;       /* Number of SDF Blender objects contributing to atlas. */

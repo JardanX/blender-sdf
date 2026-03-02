@@ -60,15 +60,12 @@ void main()
     }
 
     /* Sample the grid SDF at this position.
-     * OpenVDB level-set values are already in world-space units. */
+     * OpenVDB level-set values are already in world-space units.
+     * Inactive voxels (outside the narrow band) are filled with ±background,
+     * which provides a conservative distance estimate. Including them prevents
+     * discontinuities between grid data and the atlas clear value (1e10) that
+     * would cause the ray marcher to overshoot and miss the surface. */
     float grid_dist = texture(sdf_grid, grid_uvw).r;
-
-    /* Skip voxels at the narrow-band boundary (clamped background value).
-     * These don't contain accurate distance data and would create hard
-     * cutoff artifacts during blending. */
-    if (abs(grid_dist) >= grid_background * 0.95f) {
-      continue;
-    }
 
     /* Read current accumulated atlas value. */
     int3 atlas_coord = slot_origin + local_voxel;

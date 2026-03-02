@@ -17,53 +17,63 @@
 CCL_NAMESPACE_BEGIN
 
 #define SDF_BRICK_SIZE 8
-#define SDF_BRICK_STORAGE 10
-#define SDF_MAX_BRICK_STEPS 128
+#define SDF_BRICK_STORAGE 12 /* 8 interior + 2-voxel border on each side (matches draw engine). */
+#define SDF_BRICK_BORDER 2
+#define SDF_MAX_BRICK_STEPS 256
 #define SDF_MAX_VOXEL_STEPS 24
 
 /* -------------------------------------------------------------------- */
-/* Texture access helpers. */
+/* Flat array access helpers.
+ *
+ * SDF data is stored in flat device arrays (sdf_indirection, sdf_atlas,
+ * sdf_matid) and accessed via kernel_data_fetch with linearized 3D indices.
+ * Each SDF object stores an offset into these arrays. */
 
-/* Fetch integer value from indirection 3D texture at brick coordinate. */
+/* Fetch integer value from indirection array at brick coordinate. */
 ccl_device_inline int sdf_fetch_indirection(KernelGlobals kg,
-                                             const int slot,
+                                             const int offset,
                                              const int bx,
                                              const int by,
                                              const int bz,
                                              const int grid_res)
 {
-  /* Indirection is a 3D texture of grid_res^3. We linearize and use
-   * kernel_data_fetch into the texture data. */
-  float3 uvw = make_float3((float(bx) + 0.5f) / float(grid_res),
-                           (float(by) + 0.5f) / float(grid_res),
-                           (float(bz) + 0.5f) / float(grid_res));
-  float4 val = kernel_tex_image_interp_3d(kg, slot, uvw, INTERPOLATION_CLOSEST);
-  return (int)val.x;
+  const int idx = offset + bz * grid_res * grid_res + by * grid_res + bx;
+  return kernel_data_fetch(sdf_indirection, idx);
 }
 
-/* Fetch float value from atlas 3D texture at given texel. */
+/* Fetch float4 value from atlas array at given texel. */
 ccl_device_inline float4 sdf_fetch_atlas(KernelGlobals kg,
-                                          const int slot,
+                                          const int offset,
                                           const int x,
                                           const int y,
                                           const int z,
                                           const int atlas_dim)
 {
-  float3 uvw = make_float3((float(x) + 0.5f) / float(atlas_dim),
-                           (float(y) + 0.5f) / float(atlas_dim),
-                           (float(z) + 0.5f) / float(atlas_dim));
-  return kernel_tex_image_interp_3d(kg, slot, uvw, INTERPOLATION_CLOSEST);
+  const int idx = offset + z * atlas_dim * atlas_dim + y * atlas_dim + x;
+  return kernel_data_fetch(sdf_atlas, idx);
 }
 
 /* Fetch the SDF distance at a compact atlas coordinate. */
 ccl_device_inline float sdf_fetch_distance(KernelGlobals kg,
-                                            const int slot,
+                                            const int offset,
                                             const int x,
                                             const int y,
                                             const int z,
                                             const int atlas_dim)
 {
-  return sdf_fetch_atlas(kg, slot, x, y, z, atlas_dim).x;
+  return sdf_fetch_atlas(kg, offset, x, y, z, atlas_dim).x;
+}
+
+/* Fetch material ID from matid array at given texel. */
+ccl_device_inline int sdf_fetch_matid(KernelGlobals kg,
+                                       const int offset,
+                                       const int x,
+                                       const int y,
+                                       const int z,
+                                       const int atlas_dim)
+{
+  const int idx = offset + z * atlas_dim * atlas_dim + y * atlas_dim + x;
+  return kernel_data_fetch(sdf_matid, idx);
 }
 
 /* Convert grid-space brick + local voxel to compact atlas coordinate. */
@@ -74,14 +84,14 @@ ccl_device_inline int3 sdf_grid_to_compact(const int3 local_voxel,
   const int sx = brick_slot % bpa;
   const int sy = (brick_slot / bpa) % bpa;
   const int sz = brick_slot / (bpa * bpa);
-  return make_int3(sx * SDF_BRICK_STORAGE + local_voxel.x + 1,
-                   sy * SDF_BRICK_STORAGE + local_voxel.y + 1,
-                   sz * SDF_BRICK_STORAGE + local_voxel.z + 1);
+  return make_int3(sx * SDF_BRICK_STORAGE + local_voxel.x + SDF_BRICK_BORDER,
+                   sy * SDF_BRICK_STORAGE + local_voxel.y + SDF_BRICK_BORDER,
+                   sz * SDF_BRICK_STORAGE + local_voxel.z + SDF_BRICK_BORDER);
 }
 
 /* Fetch 8 corner SDF values for a voxel cell. */
 ccl_device void sdf_fetch_corners(KernelGlobals kg,
-                                   const int atlas_slot,
+                                   const int atlas_offset,
                                    const int3 local_cell,
                                    const int brick_slot,
                                    const int bpa,
@@ -89,34 +99,36 @@ ccl_device void sdf_fetch_corners(KernelGlobals kg,
                                    float s[8])
 {
   const int3 base = sdf_grid_to_compact(local_cell, brick_slot, bpa);
-  s[0] = sdf_fetch_distance(kg, atlas_slot, base.x, base.y, base.z, atlas_dim);
-  s[1] = sdf_fetch_distance(kg, atlas_slot, base.x + 1, base.y, base.z, atlas_dim);
-  s[2] = sdf_fetch_distance(kg, atlas_slot, base.x, base.y + 1, base.z, atlas_dim);
-  s[3] = sdf_fetch_distance(kg, atlas_slot, base.x + 1, base.y + 1, base.z, atlas_dim);
-  s[4] = sdf_fetch_distance(kg, atlas_slot, base.x, base.y, base.z + 1, atlas_dim);
-  s[5] = sdf_fetch_distance(kg, atlas_slot, base.x + 1, base.y, base.z + 1, atlas_dim);
-  s[6] = sdf_fetch_distance(kg, atlas_slot, base.x, base.y + 1, base.z + 1, atlas_dim);
+  s[0] = sdf_fetch_distance(kg, atlas_offset, base.x, base.y, base.z, atlas_dim);
+  s[1] = sdf_fetch_distance(kg, atlas_offset, base.x + 1, base.y, base.z, atlas_dim);
+  s[2] = sdf_fetch_distance(kg, atlas_offset, base.x, base.y + 1, base.z, atlas_dim);
+  s[3] = sdf_fetch_distance(kg, atlas_offset, base.x + 1, base.y + 1, base.z, atlas_dim);
+  s[4] = sdf_fetch_distance(kg, atlas_offset, base.x, base.y, base.z + 1, atlas_dim);
+  s[5] = sdf_fetch_distance(kg, atlas_offset, base.x + 1, base.y, base.z + 1, atlas_dim);
+  s[6] = sdf_fetch_distance(kg, atlas_offset, base.x, base.y + 1, base.z + 1, atlas_dim);
   s[7] = sdf_fetch_distance(
-      kg, atlas_slot, base.x + 1, base.y + 1, base.z + 1, atlas_dim);
+      kg, atlas_offset, base.x + 1, base.y + 1, base.z + 1, atlas_dim);
 }
 
 /* -------------------------------------------------------------------- */
 /* Normal computation using dual voxel method. */
 
 ccl_device float3 sdf_compute_normal(KernelGlobals kg,
-                                      const int atlas_slot,
+                                      const int atlas_offset,
                                       const float3 grid_pos_in_brick,
                                       const int brick_slot,
                                       const int bpa,
                                       const int atlas_dim)
 {
-  /* Dual voxel base: shift by -0.5 then floor. */
+  /* Dual voxel base: shift by -0.5 then floor.
+   * Allow range [-1, BRICK_SIZE-1] so the 3x3x3 neighborhood uses the
+   * 2-voxel border overlap (BRICK_STORAGE=12 provides voxels -2..9). */
   int3 base = make_int3((int)floorf(grid_pos_in_brick.x - 0.5f),
                         (int)floorf(grid_pos_in_brick.y - 0.5f),
                         (int)floorf(grid_pos_in_brick.z - 0.5f));
-  base.x = clamp(base.x, 0, SDF_BRICK_SIZE - 2);
-  base.y = clamp(base.y, 0, SDF_BRICK_SIZE - 2);
-  base.z = clamp(base.z, 0, SDF_BRICK_SIZE - 2);
+  base.x = clamp(base.x, -1, SDF_BRICK_SIZE - 1);
+  base.y = clamp(base.y, -1, SDF_BRICK_SIZE - 1);
+  base.z = clamp(base.z, -1, SDF_BRICK_SIZE - 1);
 
   float3 uvw = make_float3(grid_pos_in_brick.x - 0.5f - float(base.x),
                            grid_pos_in_brick.y - 0.5f - float(base.y),
@@ -127,9 +139,9 @@ ccl_device float3 sdf_compute_normal(KernelGlobals kg,
   const int sx = brick_slot % bpa;
   const int sy = (brick_slot / bpa) % bpa;
   const int sz = brick_slot / (bpa * bpa);
-  const int3 atlas_base = make_int3(sx * SDF_BRICK_STORAGE + base.x + 1,
-                                    sy * SDF_BRICK_STORAGE + base.y + 1,
-                                    sz * SDF_BRICK_STORAGE + base.z + 1);
+  const int3 atlas_base = make_int3(sx * SDF_BRICK_STORAGE + base.x + SDF_BRICK_BORDER,
+                                    sy * SDF_BRICK_STORAGE + base.y + SDF_BRICK_BORDER,
+                                    sz * SDF_BRICK_STORAGE + base.z + SDF_BRICK_BORDER);
 
   /* Fetch 3x3x3 = 27 neighborhood. */
   float v[27];
@@ -137,7 +149,7 @@ ccl_device float3 sdf_compute_normal(KernelGlobals kg,
     for (int dy = 0; dy < 3; dy++) {
       for (int dx = 0; dx < 3; dx++) {
         v[dz * 9 + dy * 3 + dx] = sdf_fetch_distance(
-            kg, atlas_slot, atlas_base.x + dx, atlas_base.y + dy, atlas_base.z + dz, atlas_dim);
+            kg, atlas_offset, atlas_base.x + dx, atlas_base.y + dy, atlas_base.z + dz, atlas_dim);
       }
     }
   }
@@ -192,8 +204,8 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
   const float voxel_size = ksdf.voxel_size;
   const float3 origin = make_float3(ksdf.origin.x, ksdf.origin.y, ksdf.origin.z);
   const int bpa = ksdf.bricks_per_axis;
-  const int atlas_slot = ksdf.atlas_slot;
-  const int indir_slot = ksdf.indirection_slot;
+  const int atlas_off = ksdf.atlas_offset;
+  const int indir_off = ksdf.indirection_offset;
   const int atlas_dim = bpa * SDF_BRICK_STORAGE;
 
   /* Clip ray to atlas AABB. */
@@ -217,7 +229,12 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
   if (t_enter > t_exit_grid || t_exit_grid < 0.0f) {
     return false;
   }
-  t_enter = max(t_enter, 0.0f);
+  /* Start slightly ahead to avoid self-intersection on shadow/bounce rays.
+   * Without this, secondary rays that originate on the SDF surface immediately
+   * re-intersect the same surface, causing dark noise ("jeans texture").
+   * The offset is 1 voxel — enough to clear the surface voxel. */
+  const float t_self_offset = voxel_size;
+  t_enter = max(t_enter, t_self_offset);
 
   /* Limit to current closest hit. */
   const float t_exit = min(t_exit_grid, isect->t);
@@ -275,13 +292,14 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
 
     /* Read indirection. */
     int slot = sdf_fetch_indirection(
-        kg, indir_slot, brick_cell.x, brick_cell.y, brick_cell.z, grid_res);
+        kg, indir_off, brick_cell.x, brick_cell.y, brick_cell.z, grid_res);
 
     if (slot == -2) {
-      /* Fully inside: immediate hit at entry. */
+      /* Fully inside: immediate hit at entry.
+       * Keep slot=-2 so shader_setup uses fallback normal (-ray->D). */
       hit_t = t_current;
       hit_brick = brick_cell;
-      hit_brick_slot = 0;
+      hit_brick_slot = -2;
       break;
     }
 
@@ -332,7 +350,7 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
 
         /* Fetch 8 corners. */
         float s[8];
-        sdf_fetch_corners(kg, atlas_slot, vcell, slot, bpa, atlas_dim, s);
+        sdf_fetch_corners(kg, atlas_off, vcell, slot, bpa, atlas_dim, s);
 
         float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                          min(min(s[4], s[5]), min(s[6], s[7])));
@@ -364,7 +382,10 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
             float c[4];
             sdf_cubic_coeffs(k, o_local, d_scaled, c);
 
-            if (c[0] <= 0.0f) {
+            if (c[0] < -1e-5f) {
+              /* Genuinely inside the surface at ray origin.
+               * Use a threshold to avoid false positives from secondary rays
+               * that start on the surface with c[0] ≈ 0. */
               hit_t = vt_current;
               hit_brick = brick_cell;
               hit_brick_slot = slot;
@@ -454,13 +475,17 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
     return false;
   }
 
-  /* Record intersection. */
+  /* Record intersection.
+   * Encode brick cell index and slot in u/v so shader_setup can
+   * recover the exact brick without recomputing from the float hit position. */
   isect->t = hit_t;
   isect->prim = sdf_index;
   isect->object = ksdf.object_id;
   isect->type = PRIMITIVE_SDF;
-  isect->u = 0.0f;
-  isect->v = 0.0f;
+  const int brick_linear = hit_brick.x + hit_brick.y * grid_res +
+                           hit_brick.z * grid_res * grid_res;
+  isect->u = __int_as_float(brick_linear);
+  isect->v = __int_as_float(hit_brick_slot);
 
   return true;
 }
@@ -494,24 +519,30 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
   const float3 origin = make_float3(ksdf.origin.x, ksdf.origin.y, ksdf.origin.z);
   const float voxel_size = ksdf.voxel_size;
   const int bpa = ksdf.bricks_per_axis;
-  const int atlas_slot = ksdf.atlas_slot;
+  const int atlas_off = ksdf.atlas_offset;
+  const int matid_off = ksdf.matid_offset;
   const int atlas_dim = bpa * SDF_BRICK_STORAGE;
   const int grid_res = ksdf.grid_res;
+
+  /* Default shader (overridden below if matid lookup succeeds). */
+  sd->shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset);
 
   /* Hit position. */
   sd->P = ray->P + ray->D * isect->t;
 
-  /* Find which brick and local position the hit is in. */
-  float3 grid_pos = (sd->P - origin) / voxel_size;
-  int3 brick_cell = make_int3((int)floorf(grid_pos.x / float(SDF_BRICK_SIZE)),
-                              (int)floorf(grid_pos.y / float(SDF_BRICK_SIZE)),
-                              (int)floorf(grid_pos.z / float(SDF_BRICK_SIZE)));
-  brick_cell.x = clamp(brick_cell.x, 0, grid_res - 1);
-  brick_cell.y = clamp(brick_cell.y, 0, grid_res - 1);
-  brick_cell.z = clamp(brick_cell.z, 0, grid_res - 1);
+  /* Recover brick cell and slot encoded during ray march (stored in u/v).
+   * This avoids recomputing from float position which can give wrong
+   * brick at cell boundaries due to floating-point precision. */
+  const int brick_linear = __float_as_int(isect->u);
+  const int brick_slot = __float_as_int(isect->v);
+  const int3 brick_cell = make_int3(brick_linear % grid_res,
+                                     (brick_linear / grid_res) % grid_res,
+                                     brick_linear / (grid_res * grid_res));
 
-  int brick_slot = sdf_fetch_indirection(
-      kg, ksdf.indirection_slot, brick_cell.x, brick_cell.y, brick_cell.z, grid_res);
+  /* Reset u/v to sensible values so downstream shader code doesn't
+   * read the bit-cast brick info as garbage float UVs. */
+  sd->u = 0.0f;
+  sd->v = 0.0f;
 
   /* Grid position within the brick (0..BRICK_SIZE). */
   float3 brick_origin_w = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
@@ -527,10 +558,11 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
 
   /* Normal from dual voxel gradient. */
   if (brick_slot >= 0) {
-    sd->Ng = sdf_compute_normal(kg, atlas_slot, grid_pos_in_brick, brick_slot, bpa, atlas_dim);
+    sd->Ng = sdf_compute_normal(kg, atlas_off, grid_pos_in_brick, brick_slot, bpa, atlas_dim);
   }
   else {
-    sd->Ng = make_float3(0.0f, 0.0f, 1.0f);
+    /* Fully-inside brick (slot=-2) or fallback: use ray direction as normal. */
+    sd->Ng = -ray->D;
   }
   sd->N = sd->Ng;
 
@@ -540,9 +572,8 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
   sd->dPdu = normalize(cross(up, sd->N));
   sd->dPdv = cross(sd->N, sd->dPdu);
 
-  /* Read material ID from matid texture to determine shader. */
+  /* Read material ID from matid array to determine shader. */
   if (brick_slot >= 0) {
-    /* Sample matid texture at hit position. */
     int3 atlas_coord = sdf_grid_to_compact(
         make_int3((int)floorf(grid_pos_in_brick.x),
                   (int)floorf(grid_pos_in_brick.y),
@@ -553,12 +584,11 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
     atlas_coord.y = clamp(atlas_coord.y, 0, atlas_dim - 1);
     atlas_coord.z = clamp(atlas_coord.z, 0, atlas_dim - 1);
 
-    float4 matid_val = sdf_fetch_atlas(
-        kg, ksdf.matid_slot, atlas_coord.x, atlas_coord.y, atlas_coord.z, atlas_dim);
-    int obj_id = (int)matid_val.x;
+    int obj_id = sdf_fetch_matid(
+        kg, matid_off, atlas_coord.x, atlas_coord.y, atlas_coord.z, atlas_dim);
 
     /* Look up shader for this object. */
-    if (obj_id >= 0 && ksdf.shader_offset + obj_id < ksdf.shader_offset + ksdf.num_objects) {
+    if (obj_id >= 0 && obj_id < ksdf.num_objects) {
       sd->shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset + obj_id);
     }
   }

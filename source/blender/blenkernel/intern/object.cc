@@ -45,6 +45,7 @@
 #include "DNA_pointcloud_types.h"
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_shader_fx_types.h"
 #include "DNA_view3d_types.h"
 
@@ -3520,6 +3521,12 @@ std::optional<blender::Bounds<blender::float3>> BKE_object_boundbox_get(const Ob
       return BKE_volume_min_max(static_cast<const Volume *>(ob->data));
     case OB_GREASE_PENCIL:
       return static_cast<const GreasePencil *>(ob->data)->bounds_min_max_eval();
+    case OB_SDF: {
+      const SDF *sdf = static_cast<const SDF *>(ob->data);
+      const blender::float3 half_size = blender::float3(sdf->size[0], sdf->size[1], sdf->size[2]) +
+                                        blender::float3(sdf->bevel);
+      return blender::Bounds<blender::float3>{-half_size, half_size};
+    }
   }
   return std::nullopt;
 }

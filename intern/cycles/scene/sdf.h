@@ -32,10 +32,10 @@ class SDFGeometry : public Geometry {
   ImageHandle atlas_handle;       /* RGBA16F: distance + color. */
   ImageHandle matid_handle;       /* R16I: per-voxel closest object index. */
 
-  /* Baked data (CPU-side, uploaded as textures). */
+  /* Baked data (CPU-side, uploaded to device as flat arrays). */
   vector<int> indirection_data;   /* grid_res^3 ints. */
-  vector<half4> atlas_data;       /* Compact atlas voxels (dist, r, g, b). */
-  vector<int16_t> matid_data;     /* Compact atlas material IDs. */
+  vector<float4> atlas_data;      /* Compact atlas voxels (dist, r, g, b). */
+  vector<int> matid_data;         /* Compact atlas material IDs. */
 
   /* Per-object shader mapping: [blender_obj_index] -> cycles_shader_id. */
   vector<int> object_shader_ids;

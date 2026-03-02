@@ -138,6 +138,10 @@ void BVHEmbree::build(Progress &progress,
 
   int i = 0;
   for (Object *ob : objects) {
+    if (ob->get_geometry()->is_sdf()) {
+      ++i;
+      continue; /* SDF uses separate ray marching, not BVH. */
+    }
     if (params.top_level) {
       if (!ob->is_traceable()) {
         ++i;
