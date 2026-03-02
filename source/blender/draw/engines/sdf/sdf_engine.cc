@@ -88,6 +88,7 @@ class Instance : public DrawEngine {
   /** Studio light data (4 directional lights + ambient). */
   float4 studio_light_dir_[4] = {};
   float4 studio_light_col_[4] = {};
+  float4 studio_light_spec_[4] = {};
   float3 studio_ambient_ = float3(0.0f);
 
  public:
@@ -308,34 +309,45 @@ class Instance : public DrawEngine {
     }
 
     if (lighting_type_ == V3D_LIGHTING_STUDIO) {
-      /* STUDIO: extract 4 directional lights + ambient from studio light. */
+      /* STUDIO: extract 4 directional lights + ambient from studio light.
+       * Light directions (sl->vec) are in view space (camera-relative). The
+       * shader transforms the world-space normal to view space to match. */
       StudioLight *sl = BKE_studiolight_find(shading.studio_light, STUDIOLIGHT_TYPE_STUDIO);
       if (sl == nullptr) {
         sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_STUDIO);
       }
       if (sl != nullptr) {
+        use_specular_ = ((shading.flag & V3D_SHADING_SPECULAR_HIGHLIGHT) &&
+                         (sl->flag & STUDIOLIGHT_SPECULAR_HIGHLIGHT_PASS)) ?
+                            1 :
+                            0;
         for (int i = 0; i < 4; i++) {
           const SolidLight &light = sl->light[i];
           if (light.flag) {
             studio_light_dir_[i] = float4(light.vec[0], light.vec[1], light.vec[2], 0.0f);
             /* Pack wrap factor (smooth) into color.w for the shader. */
-            studio_light_col_[i] = float4(light.col[0], light.col[1], light.col[2], light.smooth);
+            studio_light_col_[i] = float4(
+                light.col[0], light.col[1], light.col[2], light.smooth);
+            studio_light_spec_[i] = float4(light.spec[0], light.spec[1], light.spec[2], 0.0f);
           }
           else {
             studio_light_dir_[i] = float4(0.0f);
             studio_light_col_[i] = float4(0.0f);
+            studio_light_spec_[i] = float4(0.0f);
           }
         }
-        studio_ambient_ = float3(sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
+        studio_ambient_ = float3(
+            sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
       }
       else {
         /* No studio light: use a reasonable default. */
-        studio_light_dir_[0] = float4(
-            math::normalize(float3(0.5f, 0.7f, 1.0f)), 0.0f);
+        studio_light_dir_[0] = float4(math::normalize(float3(0.5f, 0.7f, 1.0f)), 0.0f);
         studio_light_col_[0] = float4(0.8f, 0.8f, 0.8f, 0.0f);
+        studio_light_spec_[0] = float4(1.0f, 1.0f, 1.0f, 0.0f);
         for (int i = 1; i < 4; i++) {
           studio_light_dir_[i] = float4(0.0f);
           studio_light_col_[i] = float4(0.0f);
+          studio_light_spec_[i] = float4(0.0f);
         }
         studio_ambient_ = float3(0.15f);
       }
@@ -544,6 +556,10 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_4fv(march_sh_, "studio_color1", studio_light_col_[1]);
     GPU_shader_uniform_4fv(march_sh_, "studio_color2", studio_light_col_[2]);
     GPU_shader_uniform_4fv(march_sh_, "studio_color3", studio_light_col_[3]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_spec0", studio_light_spec_[0]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_spec1", studio_light_spec_[1]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_spec2", studio_light_spec_[2]);
+    GPU_shader_uniform_4fv(march_sh_, "studio_spec3", studio_light_spec_[3]);
     GPU_shader_uniform_3fv(march_sh_, "studio_ambient", studio_ambient_);
 
     /* Bind matcap texture (used when lighting_type == MATCAP). */
@@ -563,11 +579,15 @@ class Instance : public DrawEngine {
     GPU_batch_set_shader(fullscreen_batch_, march_sh_);
     GPU_batch_draw(fullscreen_batch_);
 
-    /* Ensure depth writes from gl_FragDepth are visible to subsequent
-     * texture reads (e.g. overlay grid sampling the depth buffer).
-     * Unlike GPU_flush() (which only submits commands), this barrier
-     * guarantees framebuffer→texture memory visibility. */
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    /* DIAGNOSTIC: gl_FragDepth disables early-Z / Hi-Z.
+     * GPU_finish() blocks until ALL GPU work completes — the nuclear option.
+     * If this fixes the grid-on-top-during-zoom issue, the root cause is
+     * GPU pipeline coherency (late depth writes not visible when the overlay
+     * grid samples the depth texture). GPU_flush() alone was tested and
+     * didn't help. If GPU_finish() works, we can try lighter alternatives
+     * (GPU_memory_barrier with FRAMEBUFFER bit, or explicit depth resolve).
+     * TODO(SDF): Remove or replace with minimal sync once diagnosed. */
+    GPU_finish();
 
     GPU_texture_unbind(atlas_tx_);
     if (matcap_tx_) {
