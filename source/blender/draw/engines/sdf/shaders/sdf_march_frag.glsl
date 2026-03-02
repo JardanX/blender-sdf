@@ -382,20 +382,67 @@ void main()
     shaded_color = obj_color;
   }
   else if (lighting_type == 1) {
-    /* STUDIO: 4 directional lights + ambient (matches Workbench's studio lighting). */
-    float3 diffuse_acc = studio_ambient;
+    /* STUDIO: 4 directional lights + ambient + specular.
+     * Matches workbench_world_light_lib.glsl: get_world_lighting().
+     * Studio light directions are in view space (camera-relative),
+     * so transform the world-space normal to view space. */
+    float3 N = normalize((vm.viewmat * float4(normal, 0.0f)).xyz);
+    float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
+    float3 I = drw_view_incident_vector(view_pos);
+
     float4 dirs[4] = float4[4](studio_light0, studio_light1, studio_light2, studio_light3);
     float4 cols[4] = float4[4](studio_color0, studio_color1, studio_color2, studio_color3);
+    float4 specs[4] = float4[4](studio_spec0, studio_spec1, studio_spec2, studio_spec3);
+
+    float3 diffuse_light = studio_ambient;
+    float3 specular_light = studio_ambient;
+    float roughness = 0.5f;
+
+    /* Wrapped diffuse: (NL + w) / (1+w)^2, matching Workbench. */
     for (int i = 0; i < 4; i++) {
-      float3 light_dir = dirs[i].xyz;
-      float wrap = cols[i].w;
-      float ndl = dot(normal, light_dir);
-      /* Wrapped diffuse: maps [-1,1] to [0,1] with wrap factor. */
-      ndl = (ndl + wrap) / (1.0f + wrap);
-      ndl = clamp(ndl, 0.0f, 1.0f);
-      diffuse_acc += cols[i].rgb * ndl;
+      float NL = dot(dirs[i].xyz, N);
+      float w = cols[i].w;
+      float w1 = w + 1.0f;
+      diffuse_light += cols[i].rgb * clamp((NL + w) / (w1 * w1), 0.0f, 1.0f);
     }
-    shaded_color = obj_color * diffuse_acc;
+
+    float3 spec_col = float3(0.0f);
+    if (use_specular != 0) {
+      /* Blinn-Phong specular, matching Workbench's blinn_specular(). */
+      float3 R = -reflect(I, N);
+      for (int i = 0; i < 4; i++) {
+        float3 L = dirs[i].xyz;
+        float w = cols[i].w;
+        float3 H = normalize(L + I);
+        float spec_angle = clamp(dot(H, N), 0.0f, 1.0f);
+        float cNL = clamp(dot(L, N), 0.0f, 1.0f);
+
+        float gloss = (1.0f - roughness) * (1.0f - w);
+        float shininess = exp2(10.0f * gloss + 1.0f);
+        float norm_factor = shininess * 0.125f + 1.0f;
+        float spec = pow(spec_angle, shininess) * cNL * norm_factor;
+
+        /* Env specular (simulates environment reflection). */
+        float wrap_NL = dot(L, R);
+        float w_s = mix(w, 1.0f, roughness);
+        float w_s1 = w_s + 1.0f;
+        float spec_env = clamp((wrap_NL + w_s) / (w_s1 * w_s1), 0.0f, 1.0f);
+
+        specular_light += specs[i].rgb * mix(spec, spec_env, w * w);
+      }
+
+      /* BRDF fresnel approximation. */
+      spec_col = float3(0.05f);
+      float NV = clamp(dot(N, I), 0.0f, 1.0f);
+      float fresnel = exp2(-8.35f * NV) * (1.0f - roughness);
+      spec_col = mix(spec_col, float3(1.0f), fresnel);
+    }
+
+    specular_light *= spec_col;
+    float spec_energy = dot(spec_col, float3(0.33333f));
+    diffuse_light *= obj_color * (1.0f - spec_energy);
+
+    shaded_color = diffuse_light + specular_light;
   }
   else {
     /* MATCAP: compute matcap UV from view-space normal.
