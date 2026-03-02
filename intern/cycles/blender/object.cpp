@@ -57,7 +57,8 @@ bool BlenderSync::object_is_geometry(BObjectInfo &b_ob_info)
   const BL::Object::type_enum type = b_ob_info.iter_object.type();
 
   if (type == BL::Object::type_VOLUME || type == BL::Object::type_CURVES ||
-      type == BL::Object::type_POINTCLOUD || type == BL::Object::type_LIGHT)
+      type == BL::Object::type_POINTCLOUD || type == BL::Object::type_LIGHT ||
+      type == BL::Object::type_SDF)
   {
     /* Will be exported as geometry. */
     return true;
@@ -77,6 +78,7 @@ bool BlenderSync::object_can_have_geometry(BL::Object &b_ob)
     case BL::Object::type_CURVES:
     case BL::Object::type_POINTCLOUD:
     case BL::Object::type_VOLUME:
+    case BL::Object::type_SDF:
       return true;
     default:
       return false;

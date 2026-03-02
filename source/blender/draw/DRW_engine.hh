@@ -176,6 +176,13 @@ void DRW_xr_drawing_end();
 /** For garbage collection. */
 void DRW_cache_free_old_batches(Main *bmain);
 
+/**
+ * Query SDF draw engine performance overlay text.
+ * \param r_text: Set to the formatted performance string, or nullptr if not available.
+ * \param r_active: Set to true if performance data is valid for display.
+ */
+void DRW_sdf_perf_info_get(const char **r_text, bool *r_active);
+
 namespace blender::draw {
 
 /** Free garbage collected subdivision data. */

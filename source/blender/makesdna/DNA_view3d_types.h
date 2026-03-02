@@ -205,6 +205,12 @@ typedef struct View3DShading {
   int render_pass;
   char aov_name[64];
 
+  /** SDF draw engine: total voxel resolution (64, 128, 256, 512). Grid res = this / 8. */
+  int sdf_resolution;
+  /** SDF draw engine: debug grid mode (0=Off, 1=3D Voxel Grid). */
+  short sdf_debug_grid;
+  short _pad3;
+
   struct IDProperty *prop;
   void *_pad2;
 } View3DShading;
@@ -648,6 +654,7 @@ enum {
   V3D_OVERLAY_SCULPT_CURVES_CAGE = (1 << 16),
   V3D_OVERLAY_SHOW_LIGHT_COLORS = (1 << 17),
   V3D_OVERLAY_VIEWER_ATTRIBUTE_TEXT = (1 << 18),
+  V3D_OVERLAY_SDF_PERF = (1 << 19),
 };
 
 /** #View3DOverlay.edit_flag */

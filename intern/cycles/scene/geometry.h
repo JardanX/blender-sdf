@@ -77,6 +77,7 @@ class Geometry : public Node {
     VOLUME,
     POINTCLOUD,
     LIGHT,
+    SDF,
   };
 
   Type geometry_type;
@@ -192,6 +193,11 @@ class Geometry : public Node {
     return geometry_type == LIGHT;
   }
 
+  bool is_sdf() const
+  {
+    return geometry_type == SDF;
+  }
+
   /* Updates */
   void tag_update(Scene *scene, bool rebuild);
 };
@@ -218,12 +224,14 @@ class GeometryManager {
     HAIR_REMOVED = (1 << 7),
     POINT_ADDED = (1 << 12),
     POINT_REMOVED = (1 << 13),
+    SDF_ADDED = (1 << 14),
+    SDF_REMOVED = (1 << 15),
 
     SHADER_ATTRIBUTE_MODIFIED = (1 << 8),
     SHADER_DISPLACEMENT_MODIFIED = (1 << 9),
 
-    GEOMETRY_ADDED = MESH_ADDED | HAIR_ADDED | POINT_ADDED,
-    GEOMETRY_REMOVED = MESH_REMOVED | HAIR_REMOVED | POINT_REMOVED,
+    GEOMETRY_ADDED = MESH_ADDED | HAIR_ADDED | POINT_ADDED | SDF_ADDED,
+    GEOMETRY_REMOVED = MESH_REMOVED | HAIR_REMOVED | POINT_REMOVED | SDF_REMOVED,
 
     TRANSFORM_MODIFIED = (1 << 10),
 

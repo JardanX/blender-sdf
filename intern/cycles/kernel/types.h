@@ -827,6 +827,8 @@ enum PrimitiveType {
   PRIMITIVE_VOLUME = (1 << 4),
   PRIMITIVE_LAMP = (1 << 5),
 
+  PRIMITIVE_SDF = (1 << 7),
+
   PRIMITIVE_MOTION = (1 << 6),
   PRIMITIVE_MOTION_TRIANGLE = (PRIMITIVE_TRIANGLE | PRIMITIVE_MOTION),
   PRIMITIVE_MOTION_CURVE_THICK = (PRIMITIVE_CURVE_THICK | PRIMITIVE_MOTION),
@@ -837,9 +839,9 @@ enum PrimitiveType {
   PRIMITIVE_CURVE = (PRIMITIVE_CURVE_THICK | PRIMITIVE_CURVE_RIBBON),
 
   PRIMITIVE_ALL = (PRIMITIVE_TRIANGLE | PRIMITIVE_CURVE | PRIMITIVE_POINT | PRIMITIVE_VOLUME |
-                   PRIMITIVE_LAMP | PRIMITIVE_MOTION),
+                   PRIMITIVE_LAMP | PRIMITIVE_SDF | PRIMITIVE_MOTION),
 
-  PRIMITIVE_NUM_SHAPES = 6,
+  PRIMITIVE_NUM_SHAPES = 7,
   PRIMITIVE_NUM_BITS = PRIMITIVE_NUM_SHAPES + 1, /* All shapes + motion bit. */
   PRIMITIVE_NUM = PRIMITIVE_NUM_SHAPES * 2,      /* With and without motion. */
 };
@@ -1490,6 +1492,12 @@ struct ccl_align(16) KernelData {
 #define KERNEL_STRUCT_BEGIN(name, parent) name parent;
 #include "kernel/data_template.h"
 
+  /* SDF. */
+  struct {
+    int num_sdfs;
+    int pad0, pad1_sdf, pad2_sdf;
+  } sdf;
+
   /* Device specific BVH. */
 #ifdef __KERNEL_OPTIX__
   OptixTraversableHandle device_bvh;
@@ -1562,6 +1570,23 @@ struct KernelObject {
   uint blocker_shadow_set;
 };
 static_assert_align(KernelObject, 16);
+
+struct KernelSDF {
+  /* Image manager SVM slots for 3D textures. */
+  int indirection_slot;  /* R32I: brick -> compact atlas slot mapping. */
+  int atlas_slot;        /* RGBA16F: distance + color compact atlas. */
+  int matid_slot;        /* R16I: per-voxel closest object index. */
+  int grid_res;          /* Bricks per axis in the indirection grid. */
+
+  int bricks_per_axis;   /* ceil(cbrt(active_bricks)) for compact atlas layout. */
+  int num_objects;       /* Number of SDF Blender objects contributing to atlas. */
+  int shader_offset;     /* Offset into sdf_shader_map for per-object shader IDs. */
+  int object_id;         /* Cycles object index (for sd->object). */
+
+  float voxel_size;      /* World-space voxel size. */
+  packed_float3 origin;  /* World-space atlas origin. */
+};
+static_assert_align(KernelSDF, 16);
 
 struct KernelCurve {
   int shader_id;

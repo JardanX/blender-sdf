@@ -1625,6 +1625,51 @@ void view3d_draw_region_info(const bContext *C, ARegion *region)
           bmain, scene, view_layer, v3d_local, xoffset, &yoffset, VIEW3D_OVERLAY_LINEHEIGHT);
     }
 
+    /* SDF performance overlay: drawn bottom-right. */
+    if (v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) {
+      const char *perf_text = nullptr;
+      bool perf_active = false;
+      DRW_sdf_perf_info_get(&perf_text, &perf_active);
+      if (perf_active && perf_text) {
+        const int line_height = int(VIEW3D_OVERLAY_LINEHEIGHT);
+        const int padding = int(0.5f * U.widget_unit);
+
+        /* Count lines and find widest line for right-alignment. */
+        float max_width = 0.0f;
+        int line_count = 0;
+        {
+          const char *p = perf_text;
+          while (*p) {
+            const char *eol = p;
+            while (*eol && *eol != '\n') {
+              eol++;
+            }
+            float w = BLF_width(font_id, p, size_t(eol - p));
+            if (w > max_width) {
+              max_width = w;
+            }
+            line_count++;
+            p = (*eol) ? eol + 1 : eol;
+          }
+        }
+
+        int perf_x = rect->xmax - int(max_width) - padding;
+        int perf_y = rect->ymin + padding + (line_count - 1) * line_height;
+
+        /* Draw each line top-to-bottom, stacking downward from the top line. */
+        const char *p = perf_text;
+        while (*p) {
+          const char *eol = p;
+          while (*eol && *eol != '\n') {
+            eol++;
+          }
+          BLF_draw_default(float(perf_x), float(perf_y), 0.0f, p, size_t(eol - p));
+          perf_y -= line_height;
+          p = (*eol) ? eol + 1 : eol;
+        }
+      }
+    }
+
     /* Set the size back to the default hard-coded size. Otherwise anyone drawing after this,
      * without setting explicit size, will draw with widget size. That is probably ideal,
      * but size should be set at the calling site not just carried over from here. */

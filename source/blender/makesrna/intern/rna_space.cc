@@ -4741,6 +4741,37 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_update(prop,
                           NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING,
                           "rna_SpaceView3D_shading_use_compositor_update");
+
+  /* SDF draw engine settings. */
+  static const EnumPropertyItem sdf_resolution_items[] = {
+      {64, "RES_64", 0, "64", "64 voxel resolution (8 bricks per axis)"},
+      {128, "RES_128", 0, "128", "128 voxel resolution (16 bricks per axis)"},
+      {256, "RES_256", 0, "256", "256 voxel resolution (32 bricks per axis)"},
+      {512, "RES_512", 0, "512", "512 voxel resolution (64 bricks per axis)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_resolution", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_resolution");
+  RNA_def_property_enum_items(prop, sdf_resolution_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "SDF Resolution", "Total voxel resolution for the SDF brick atlas");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  static const EnumPropertyItem sdf_debug_grid_items[] = {
+      {0, "OFF", 0, "Off", "No debug overlay"},
+      {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_debug_grid", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_debug_grid");
+  RNA_def_property_enum_items(prop, sdf_debug_grid_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "SDF Debug Grid", "Debug visualization for the sparse brick grid");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 }
 
 static void rna_def_space_view3d_overlay(BlenderRNA *brna)
@@ -4852,6 +4883,12 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   prop = RNA_def_property(srna, "show_stats", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_STATS);
   RNA_def_property_ui_text(prop, "Show Statistics", "Display scene statistics overlay text");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sdf_perf", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_SDF_PERF);
+  RNA_def_property_ui_text(
+      prop, "SDF Performance", "Display SDF draw engine performance overlay (FPS, pass timings)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   /* show camera composition guides */

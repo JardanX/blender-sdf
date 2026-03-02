@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a **Blender 5.0.1 fork** (base: `v5.0-release`) that adds **SDF (Signed Distance Field)** as a native object type. The fork is part of the **MathOPS** project — a GPU compute-shader SDF renderer that runs as a Blender addon. The fork itself provides the data foundation; rendering is handled externally by the addon.
 
+### MathOPS Addon (separate repo)
+
+The rendering counterpart lives at **`D:/Projects/GitHub/MathOPS/MathOPS`** — a Blender addon with:
+- **Proximity engine**: Real-time GPU compute-shader ray marching (`Addon/engine/proximity/`)
+- **Brick Map engine**: Voxel-based SDF baking with C++ native module (`Addon/engine/proximity/brick_map/`)
+- **GLSL shaders**: `Addon/engine/shaders/sdf/` (primitives, utils, scene, compute)
+- **Properties**: `Addon/properties.py` (RNA properties on `bpy.types.Object`)
+- **Selection**: `Addon/operators/sdf_selection.py` (GPU-assisted picking)
+
+The addon reads the SDF data structures defined by this fork's DNA/RNA. When modifying SDF struct fields or RNA properties here, the addon may need corresponding updates.
+
 Key modifications from upstream Blender:
 - **SDF object type** (`OB_SDF = 31`, `ID_SF = 'SF'`) — 6 new files, 26 modified
 - **Metaball removal** — SDF replaces metaballs; runtime code deleted, DNA kept as tombstones for .blend compat

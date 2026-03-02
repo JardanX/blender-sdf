@@ -16,6 +16,7 @@
 #include "scene/osl.h"
 #include "scene/pointcloud.h"
 #include "scene/scene.h"
+#include "scene/sdf.h"
 #include "scene/shader.h"
 #include "scene/shader_nodes.h"
 #include "scene/stats.h"
@@ -1038,6 +1039,88 @@ void GeometryManager::device_update(Device *device,
     if (progress.get_cancel()) {
       return;
     }
+  }
+
+  /* Upload SDF data to device. */
+  {
+    int num_sdfs = 0;
+    int total_shader_entries = 0;
+
+    /* Count SDF geometry objects. */
+    for (Geometry *geom : scene->geometry) {
+      if (geom->is_sdf()) {
+        SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
+        if (!sdf->indirection_data.empty()) {
+          num_sdfs++;
+          total_shader_entries += sdf->num_objects;
+        }
+      }
+    }
+
+    if (num_sdfs > 0) {
+      dscene->sdf_objects.alloc(num_sdfs);
+      KernelSDF *sdf_data = dscene->sdf_objects.data();
+
+      dscene->sdf_shader_map.alloc(total_shader_entries);
+      int *shader_map = dscene->sdf_shader_map.data();
+
+      int sdf_idx = 0;
+      int shader_offset = 0;
+
+      for (Geometry *geom : scene->geometry) {
+        if (!geom->is_sdf()) {
+          continue;
+        }
+        SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
+        if (sdf->indirection_data.empty()) {
+          continue;
+        }
+
+        /* Upload 3D textures via ImageManager.
+         * For now, we store the texture data in the SDF kernel struct
+         * and the actual texture upload happens through the image pipeline.
+         * The slot IDs are placeholders that will be resolved when
+         * the image manager processes them. */
+
+        KernelSDF &ksdf = sdf_data[sdf_idx];
+        ksdf.indirection_slot = 0; /* Will be set by image manager. */
+        ksdf.atlas_slot = 0;       /* Will be set by image manager. */
+        ksdf.matid_slot = 0;       /* Will be set by image manager. */
+        ksdf.grid_res = sdf->grid_res;
+        ksdf.bricks_per_axis = sdf->bricks_per_axis;
+        ksdf.num_objects = sdf->num_objects;
+        ksdf.shader_offset = shader_offset;
+        ksdf.object_id = 0; /* Will be resolved in object sync. */
+        ksdf.voxel_size = sdf->voxel_size;
+        ksdf.origin.x = sdf->origin.x;
+        ksdf.origin.y = sdf->origin.y;
+        ksdf.origin.z = sdf->origin.z;
+
+        /* Copy per-object shader mapping. */
+        for (int i = 0; i < sdf->num_objects; i++) {
+          /* Use the first shader from the geometry's used_shaders. */
+          if (!sdf->get_used_shaders().empty()) {
+            Shader *shader = static_cast<Shader *>(sdf->get_used_shaders()[0]);
+            shader_map[shader_offset + i] = scene->shader_manager->get_shader_id(shader);
+          }
+          else {
+            shader_map[shader_offset + i] = 0;
+          }
+        }
+
+        shader_offset += sdf->num_objects;
+        sdf_idx++;
+      }
+
+      dscene->sdf_objects.copy_to_device();
+      dscene->sdf_shader_map.copy_to_device();
+    }
+    else {
+      dscene->sdf_objects.free();
+      dscene->sdf_shader_map.free();
+    }
+
+    dscene->data.sdf.num_sdfs = num_sdfs;
   }
 
   /* unset flags */

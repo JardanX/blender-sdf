@@ -2088,6 +2088,8 @@ int UI_icon_from_idcode(const int idcode)
     case ID_LI:
     case ID_SCR:
     case ID_WM:
+    case ID_MB:
+    case ID_SF:
       break;
   }
   return ICON_NONE;

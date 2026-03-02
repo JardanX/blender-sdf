@@ -57,7 +57,12 @@ DeviceScene::DeviceScene(Device *device)
       volume_tree_nodes(device, "volume_tree_nodes", MEM_GLOBAL),
       volume_tree_roots(device, "volume_tree_roots", MEM_GLOBAL),
       volume_tree_root_ids(device, "volume_tree_root_ids", MEM_GLOBAL),
-      volume_step_size(device, "volume_step_size", MEM_GLOBAL)
+      volume_step_size(device, "volume_step_size", MEM_GLOBAL),
+      sdf_objects(device, "sdf_objects", MEM_GLOBAL),
+      sdf_shader_map(device, "sdf_shader_map", MEM_GLOBAL),
+      sdf_indirection(device, "sdf_indirection", MEM_GLOBAL),
+      sdf_atlas(device, "sdf_atlas", MEM_GLOBAL),
+      sdf_matid(device, "sdf_matid", MEM_GLOBAL)
 {
   memset((void *)&data, 0, sizeof(data));
 }

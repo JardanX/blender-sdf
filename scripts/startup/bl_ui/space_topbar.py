@@ -258,19 +258,15 @@ class TOPBAR_MT_file_new(Menu):
             props = layout.operator("wm.read_homefile", text="General", icon='FILE_NEW')
             props.app_template = ""
 
+        # MATHOPS: Removed — 2D Animation, Storyboarding, VFX, Video Editing templates
+        _hidden_templates = {"2D_Animation", "Storyboarding", "VFX", "Video_Editing"}
         for d in paths:
+            if d in _hidden_templates:
+                continue
             icon = 'FILE_NEW'
             # Set icon per template.
-            if d == "2D_Animation":
-                icon = 'GREASEPENCIL_LAYER_GROUP'
-            elif d == "Sculpting":
+            if d == "Sculpting":
                 icon = 'SCULPTMODE_HLT'
-            elif d == "Storyboarding":
-                icon = 'GREASEPENCIL'
-            elif d == "VFX":
-                icon = 'TRACKER'
-            elif d == "Video_Editing":
-                icon = 'SEQUENCE'
             props = layout.operator("wm.read_homefile", text=bpy.path.display_name(iface_(d)), icon=icon)
             props.app_template = d
 

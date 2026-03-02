@@ -91,6 +91,13 @@ class DeviceScene {
   device_vector<int> volume_tree_root_ids;
   device_vector<float> volume_step_size;
 
+  /* SDF. */
+  device_vector<KernelSDF> sdf_objects;
+  device_vector<int> sdf_shader_map;
+  device_vector<int> sdf_indirection;
+  device_vector<float4> sdf_atlas;
+  device_vector<int> sdf_matid;
+
   KernelData data;
 
   DeviceScene(Device *device);
