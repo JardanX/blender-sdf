@@ -1735,6 +1735,10 @@ void blo_do_versions_userdef(UserDef *userdef)
         userdef, "NODE_AST_compositor", "Utilities");
   }
 
+  if (!USER_VERSION_ATLEAST(500, 122)) {
+    userdef->dupflag |= USER_DUP_SDF;
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.
