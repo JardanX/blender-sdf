@@ -659,6 +659,22 @@ if(WITH_CYCLES_CUDA_BINARIES)
   cycles_set_solution_folder(cycles_kernel_cuda)
 endif()
 
+# MATHOPS: Install prebuilt GPU kernels when not compiling from source.
+# Kernels copied from official Blender 5.0.1 release into prebuilt/cycles_kernels/.
+if(NOT WITH_CYCLES_CUDA_BINARIES)
+  set(_prebuilt_kernels_dir "${CMAKE_SOURCE_DIR}/prebuilt/cycles_kernels")
+  if(EXISTS ${_prebuilt_kernels_dir})
+    file(GLOB _prebuilt_kernel_files "${_prebuilt_kernels_dir}/*.zst")
+    if(_prebuilt_kernel_files)
+      delayed_install(${_prebuilt_kernels_dir} "${_prebuilt_kernel_files}" ${CYCLES_INSTALL_PATH}/lib)
+      list(LENGTH _prebuilt_kernel_files _num_kernels)
+      message(STATUS "Installing ${_num_kernels} prebuilt Cycles GPU kernels")
+    endif()
+    unset(_prebuilt_kernel_files)
+  endif()
+  unset(_prebuilt_kernels_dir)
+endif()
+
 # HIP module
 
 if(WITH_CYCLES_HIP_BINARIES AND WITH_CYCLES_DEVICE_HIP)
