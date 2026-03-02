@@ -4,8 +4,8 @@
 
 /**
  * SDF bake compute shader (sparse brick version).
- * Each workgroup handles one brick. Local threads cover the 10x10 XY slice,
- * looping over Z to fill 10x10x10 voxels (8 inner + 1 overlap each side).
+ * Each workgroup handles one brick. Local threads cover the 12x12 XY slice,
+ * looping over Z to fill 12x12x12 voxels (8 inner + 2 overlap each side).
  */
 
 #include "infos/sdf_shader_infos.hh"
@@ -15,7 +15,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 #include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
-#define BRICK_STORAGE 10
+#define BRICK_STORAGE 12
 
 void main()
 {
@@ -46,10 +46,10 @@ void main()
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
 
-    /* World-space position: brick_coord * 8 + (local - 1) + 0.5, times voxel_size.
-     * The -1 accounts for the overlap border. */
+    /* World-space position: brick_coord * 8 + (local - 2) + 0.5, times voxel_size.
+     * The -2 accounts for the 2-voxel overlap border. */
     float3 world_pos = atlas_origin +
-                       (float3(brick * BRICK_SIZE + local_voxel - int3(1)) + 0.5f) * voxel_size;
+                       (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) * voxel_size;
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);

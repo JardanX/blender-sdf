@@ -4765,6 +4765,17 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  prop = RNA_def_property(srna, "sdf_surface_margin", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_surface_margin");
+  RNA_def_property_range(prop, 50, 300);
+  RNA_def_property_int_default(prop, 100);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Surface Margin",
+                           "Multiplier for brick classification threshold. "
+                           "Increase to fill holes at surface edges");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   prop = RNA_def_property(srna, "sdf_debug_grid", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "sdf_debug_grid");
   RNA_def_property_enum_items(prop, sdf_debug_grid_items);

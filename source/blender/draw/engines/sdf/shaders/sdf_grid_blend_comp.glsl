@@ -14,7 +14,7 @@
 COMPUTE_SHADER_CREATE_INFO(sdf_grid_blend)
 
 #define BRICK_SIZE 8
-#define BRICK_STORAGE 10
+#define BRICK_STORAGE 12
 
 void main()
 {
@@ -46,10 +46,10 @@ void main()
     int3 local_voxel = int3(local_xy, lz);
 
     /* World-space position: same calculation as the bake shader.
-     * brick_coord * 8 + (local - 1) + 0.5, times voxel_size.
-     * The -1 accounts for the overlap border. */
+     * brick_coord * 8 + (local - 2) + 0.5, times voxel_size.
+     * The -2 accounts for the 2-voxel overlap border. */
     float3 world_pos = atlas_origin +
-                       (float3(brick * BRICK_SIZE + local_voxel - int3(1)) + 0.5f) * voxel_size;
+                       (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) * voxel_size;
 
     /* Transform world position to grid texture UVW [0,1]^3. */
     float3 grid_uvw = (grid_world_to_texture * float4(world_pos, 1.0f)).xyz;
@@ -60,9 +60,15 @@ void main()
     }
 
     /* Sample the grid SDF at this position.
-     * OpenVDB stores SDF values in index space (voxel units).
-     * Multiply by grid_voxel_size to convert to world-space distance. */
-    float grid_dist = texture(sdf_grid, grid_uvw).r * grid_voxel_size;
+     * OpenVDB level-set values are already in world-space units. */
+    float grid_dist = texture(sdf_grid, grid_uvw).r;
+
+    /* Skip voxels at the narrow-band boundary (clamped background value).
+     * These don't contain accurate distance data and would create hard
+     * cutoff artifacts during blending. */
+    if (abs(grid_dist) >= grid_background * 0.95f) {
+      continue;
+    }
 
     /* Read current accumulated atlas value. */
     int3 atlas_coord = slot_origin + local_voxel;

@@ -821,3 +821,80 @@ Replaced the shader-overlay debug grid (which painted on the SDF surface) with a
 | `makesrna/intern/rna_space.cc` | Consolidated enum to 2 items: Off, "3D Voxel Grid" (value 1). Removed old "Grid Lines" (1) and "Occupancy Heatmap" (2) |
 | `makesdna/DNA_view3d_types.h` | Updated `sdf_debug_grid` comment |
 | `scripts/startup/bl_ui/properties_render.py` | Renamed UI label to "3D Voxel Grid" |
+
+---
+
+## Session 8: Fix Normal Transitions + Surface Margin Control
+
+### Bug Fix: Dual Voxel Normal Discontinuities (Increased Brick Overlap)
+
+Increased brick overlap padding from 1 to 2 on each side (`BRICK_STORAGE` 10 → 12). This gives the dual voxel normal method a full 3x3x3 neighborhood for **all** base values `[-1, 7]` without any fallback. Previously, base=7 (cell 7 hits) would read beyond the 10-wide storage causing hard normal seams at brick boundaries.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_private.hh` | `SDF_BRICK_STORAGE` 10 → 12 (8 inner + 2 overlap each side) |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | `BRICK_STORAGE` 10→12. `gridToCompact` offset +1→+2. `computeDualVoxelNormalCompact` clamp range `[0,6]`→`[-1,7]`, atlas offset +1→+2. Color sampling offset +1→+2 |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | `BRICK_STORAGE` 10→12, world-pos overlap offset -1→-2 |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | `BRICK_STORAGE` 10→12, world-pos overlap offset -1→-2 |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Bake and grid_blend workgroup sizes 10×10×1 → 12×12×1 |
+
+### Feature: Surface Margin UI Parameter
+
+Added a controllable "Surface Margin" slider (50%-300%, default 100%) that multiplies the brick classification threshold (`brick_half_diag`). Increasing this fills holes where voxels near the surface boundary were not classified as active.
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Added `short sdf_surface_margin` field (percentage, 0 or 100 = default 1.0x) replacing `_pad3` |
+| `makesrna/intern/rna_space.cc` | Added `sdf_surface_margin` RNA property (INT, PERCENTAGE, range 50-300, default 100) |
+| `scripts/startup/bl_ui/properties_render.py` | Added "Surface Margin" slider to SDF Ray Marcher panel |
+| `draw/engines/sdf/sdf_engine.cc` | Added `surface_margin_` member, read from `View3DShading::sdf_surface_margin` in `sync_sdf_settings()`, applied as multiplier to `brick_half_diag` in `dispatch_classify()`. Included in scene hash to trigger rebake on change |
+
+### Bug Fix: Smooth Union Blend Cutoff at High k Values
+
+With large blend factors (e.g. k=5.0), the blended surface extends beyond the atlas volume. The per-object AABB only accounted for `sdf_size + bevel`, not the blend radius. The blended region was clipped at the atlas boundary, visible as hard cutoff planes.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Expanded per-object world AABB by blend value: `local_extent = sdf_size + bevel + blend`. This grows the atlas volume to cover the full smooth union region. The classify threshold (`brick_half_diag`) no longer needs the expensive `+ max_blend` — reverted to pure geometric half-diagonal × surface_margin |
+
+---
+
+## Cycles SDF Surface Primitive Integration
+
+SDF objects are integrated into Cycles as a **surface primitive** (`PRIMITIVE_SDF`), giving them full path-traced material evaluation — GI, reflections, metallic, glass, SSS — exactly like triangle meshes. The existing draw engine's sparse brick atlas + two-level DDA ray march pipeline is ported to Cycles' kernel.
+
+### New Files (5)
+
+| File | Purpose |
+|------|---------|
+| `intern/cycles/scene/sdf.h` | `SDFGeometry` class extending `Geometry`. Stores grid parameters, CPU-baked atlas data (indirection, atlas as half4, matid as int16), per-object shader mapping. Overrides `compute_bounds()`, `primitive_type() -> PRIMITIVE_SDF` |
+| `intern/cycles/scene/sdf.cpp` | `SDFGeometry` implementation: NODE_DEFINE registration, constructor with defaults (grid_res=32, voxel_size=1/256), `compute_bounds()` from origin + grid extent, `apply_transform()` no-op (world-space baked) |
+| `intern/cycles/blender/sdf.cpp` | Blender-to-Cycles sync + CPU bake. Collects all SDF objects via depsgraph, reads transform/RNA (size, bevel, blend, color, sdf_type). Two-phase bake: classify bricks (active/inside/outside), then evaluate all objects with smooth union at each voxel. Stores distance+color in atlas, tracks closest object in matid for per-object materials |
+| `intern/cycles/kernel/geom/sdf.h` | Kernel ray march: two-level DDA (brick-level skips empty space, voxel-level finds exact surface via cubic solver). Flat array access via `kernel_data_fetch`. Normal from dual voxel method (27-neighborhood trilinear gradient blend). `sdf_shader_setup()` for ShaderData initialization |
+| `intern/cycles/kernel/geom/sdf_lib.h` | SDF math primitives ported from `sdf_lib.glsl`: trilinear coefficient computation, cubic polynomial construction, Marmitt+Newton-Raphson cubic solver, analytic trilinear gradient |
+
+### Modified Files (Cycles)
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/types.h` | Added `PRIMITIVE_SDF = (1 << 7)` to PrimitiveType enum. Updated `PRIMITIVE_ALL` and `PRIMITIVE_NUM_SHAPES` (6→7). Added `KernelSDF` struct (offsets into flat arrays, grid params, origin, voxel_size). Added `sdf` section to `KernelData` with `num_sdfs` |
+| `intern/cycles/scene/geometry.h` | Added `SDF` to `Geometry::Type` enum, `is_sdf()` helper, `SDF_ADDED`/`SDF_REMOVED` flags to GeometryManager, updated `GEOMETRY_ADDED`/`GEOMETRY_REMOVED` composites |
+| `intern/cycles/scene/devicescene.h` | Added `device_vector<KernelSDF> sdf_objects`, `device_vector<int> sdf_shader_map`, `device_vector<int> sdf_indirection`, `device_vector<float4> sdf_atlas`, `device_vector<int> sdf_matid` |
+| `intern/cycles/scene/devicescene.cpp` | Constructor initializers for all 5 SDF device vectors |
+| `intern/cycles/scene/scene.h` | Forward declaration `SDFGeometry`, `create_node`/`delete_node` template specializations |
+| `intern/cycles/scene/scene.cpp` | `create_node<SDFGeometry>()` and `delete_node(SDFGeometry*)` implementations, SDF branch in generic `delete_node(Geometry*)` |
+| `intern/cycles/scene/geometry.cpp` | SDF device upload: counts SDF geometries, allocates and fills flat arrays (indirection, atlas half4→float4, matid int16→int), copies per-object shader map, uploads all to device. Sets `dscene->data.sdf.num_sdfs` |
+| `intern/cycles/kernel/data_arrays.h` | Added `KERNEL_DATA_ARRAY` entries for `sdf_objects`, `sdf_shader_map`, `sdf_indirection`, `sdf_atlas`, `sdf_matid` |
+| `intern/cycles/kernel/bvh/bvh.h` | `scene_intersect()` rewritten to accumulate hits, added SDF check after BVH traversal via `sdf_intersect_all()` |
+| `intern/cycles/kernel/geom/shader_data.h` | Added `PRIMITIVE_SDF` branch in `shader_setup_from_ray()` — calls `sdf_shader_setup()`, handles backfacing, ray differentials |
+| `intern/cycles/blender/sync.h` | Added `SDFGeometry` forward declaration and `sync_sdf()` declaration |
+| `intern/cycles/blender/object.cpp` | Added `type_SDF` to `object_is_geometry()` and `object_can_have_geometry()` |
+| `intern/cycles/blender/geometry.cpp` | Added SDF detection in `determine_geom_type()`, SDF default shader (surface), `SDFGeometry` creation, `sync_sdf` dispatch, SDF no-op in motion sync |
+
+### CMakeLists Changes (3)
+
+| File | Change |
+|------|--------|
+| `intern/cycles/blender/CMakeLists.txt` | Added `sdf.cpp` |
+| `intern/cycles/scene/CMakeLists.txt` | Added `sdf.h`, `sdf.cpp` |
+| `intern/cycles/kernel/CMakeLists.txt` | Added `geom/sdf.h`, `geom/sdf_lib.h` |
