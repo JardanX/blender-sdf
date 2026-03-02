@@ -1668,13 +1668,6 @@ RenderEngineType *ED_view3d_engine_type(const Scene *scene, int drawtype)
   if (drawtype == OB_MATERIAL && (type->flag & RE_USE_EEVEE_VIEWPORT)) {
     return RE_engines_find(RE_engine_id_BLENDER_WORKBENCH);
   }
-  /* MATHOPS: Rendered viewport delegates to Cycles path tracer. */
-  if (drawtype == OB_RENDER && STREQ(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH)) {
-    RenderEngineType *cycles = RE_engines_find(RE_engine_id_CYCLES);
-    if (cycles && cycles->view_update && cycles->view_draw) {
-      return cycles;
-    }
-  }
   return type;
 }
 

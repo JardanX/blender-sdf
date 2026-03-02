@@ -23,6 +23,7 @@
 // #include "engines/gpencil/gpencil_engine.hh"
 #include "engines/image/image_engine.h"
 #include "engines/overlay/overlay_engine.h"
+#include "engines/sdf/sdf_engine.h"
 #include "engines/select/select_engine.hh"
 #include "engines/workbench/workbench_engine.h"
 
@@ -70,6 +71,7 @@ struct DRWViewData {
 
   /** Engines running for this viewport. nullptr if not enabled. */
   blender::workbench::Engine workbench;
+  blender::draw::sdf::Engine sdf;
   blender::draw::external::Engine external;
   blender::image_engine::Engine image;
   /* MATHOPS: Removed — Grease Pencil draw engine */
@@ -107,6 +109,7 @@ struct DRWViewData {
     /* Render engines. Output to the render result frame-buffer. Mutually exclusive. */
 
     callback(workbench);
+    callback(sdf);
     callback(external);
     callback(image);
 #ifdef WITH_DRAW_DEBUG

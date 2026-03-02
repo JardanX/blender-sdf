@@ -2471,7 +2471,7 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       case OB_VOLUME:
         return ICON_OUTLINER_OB_VOLUME;
       case OB_SDF:
-        return ICON_OUTLINER_OB_SDF;
+        return ICON_SDF_PRIMITIVE;
       case OB_EMPTY:
         if (ob->instance_collection && (ob->transflag & OB_DUPLICOLLECTION)) {
           return ICON_OUTLINER_OB_GROUP_INSTANCE;

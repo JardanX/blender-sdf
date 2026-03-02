@@ -272,6 +272,9 @@ static bool buttons_context_path_data(ButsContextPath *path, int type)
   if (RNA_struct_is_a(ptr->type, &RNA_Volume) && ELEM(type, -1, OB_VOLUME)) {
     return true;
   }
+  if (RNA_struct_is_a(ptr->type, &RNA_SDF) && ELEM(type, -1, OB_SDF)) {
+    return true;
+  }
   /* try to get an object in the path, no pinning supported here */
   if (buttons_context_path_object(path)) {
     Object *ob = static_cast<Object *>(path->ptr[path->len - 1].data);
@@ -911,6 +914,7 @@ const char *buttons_context_dir[] = {
     "curves",
     "pointcloud",
     "volume",
+    "sdf",
     "strip",
     "strip_modifier",
     nullptr,
@@ -1008,6 +1012,10 @@ int /*eContextResult*/ buttons_context(const bContext *C,
   }
   if (CTX_data_equals(member, "volume")) {
     set_pointer_type(path, result, &RNA_Volume);
+    return CTX_RESULT_OK;
+  }
+  if (CTX_data_equals(member, "sdf")) {
+    set_pointer_type(path, result, &RNA_SDF);
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "material")) {

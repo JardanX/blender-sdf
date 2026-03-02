@@ -65,8 +65,6 @@ class CyclesButtonsPanel:
 
     @classmethod
     def poll(cls, context):
-        # MATHOPS: Always show Cycles panels for Proximity engine — Cycles is the
-        # backing path tracer for Rendered viewport and F12 render.
         return context.engine in cls.COMPAT_ENGINES
 
 
@@ -2460,28 +2458,15 @@ def draw_device(self, context):
     layout.use_property_split = True
     layout.use_property_decorate = False
 
-    if context.engine == 'CYCLES':
-        from . import engine
-        cscene = scene.cycles
-
-        col = layout.column()
-        col.active = show_device_active(context)
-        col.prop(cscene, "device")
-
-        from . import engine
-        if engine.with_osl() and (
-            use_cpu(context) or (
-                use_optix(context) and (
-                engine.osl_version()[1] >= 13 or engine.osl_version()[0] > 1))):
-            osl_col = layout.column()
-            osl_col.prop(cscene, "shading_system")
+    # MATHOPS: Device selector and OSL toggle are in the Path Tracer wrapper panel
+    # (RENDER_PT_proximity_cycles in properties_render.py). Nothing drawn here.
 
 
 def draw_pause(self, context):
     layout = self.layout
     scene = context.scene
 
-    if context.engine == "CYCLES":
+    if context.engine == 'CYCLES':
         view = context.space_data
 
         if view.shading.type == 'RENDERED':
@@ -2628,10 +2613,9 @@ def register():
 
     for panel in get_panels():
         panel.COMPAT_ENGINES.add('CYCLES')
-        panel.COMPAT_ENGINES.add('BLENDER_PROXIMITY')
 
     for cls in classes:
-        # MATHOPS: Nest top-level Cycles render panels under the Proximity wrapper.
+        # MATHOPS: Nest top-level Cycles render panels under the Path Tracer wrapper.
         # Only panels in bl_context="render" that don't already have a parent.
         if (cls.__name__.startswith('CYCLES_RENDER_PT_') and
                 not hasattr(cls, 'bl_parent_id') and
@@ -2639,9 +2623,6 @@ def register():
             cls.bl_parent_id = "RENDER_PT_proximity_cycles"
 
         register_class(cls)
-        # MATHOPS: Allow Cycles panels to show for Proximity engine.
-        if hasattr(cls, 'COMPAT_ENGINES') and 'CYCLES' in cls.COMPAT_ENGINES:
-            cls.COMPAT_ENGINES = cls.COMPAT_ENGINES | {'BLENDER_PROXIMITY'}
 
 
 def unregister():
@@ -2653,8 +2634,6 @@ def unregister():
     for panel in get_panels():
         if 'CYCLES' in panel.COMPAT_ENGINES:
             panel.COMPAT_ENGINES.remove('CYCLES')
-        if 'BLENDER_PROXIMITY' in panel.COMPAT_ENGINES:
-            panel.COMPAT_ENGINES.remove('BLENDER_PROXIMITY')
 
     for cls in classes:
         unregister_class(cls)

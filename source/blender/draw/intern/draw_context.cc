@@ -100,6 +100,7 @@
 // #include "engines/gpencil/gpencil_engine.hh"
 #include "engines/image/image_engine.h"
 #include "engines/overlay/overlay_engine.h"
+#include "engines/sdf/sdf_engine.h"
 #include "engines/select/select_engine.hh"
 #include "engines/workbench/workbench_engine.h"
 
@@ -1105,6 +1106,7 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
   if (ELEM(this->mode, DRWContext::DEPTH, DRWContext::DEPTH_ACTIVE_OBJECT)) {
     /* MATHOPS: Removed — Grease Pencil draw engine */
     // view_data.grease_pencil.set_used(gpencil_engine_needed);
+    view_data.sdf.set_used(true);
     view_data.overlay.set_used(true);
     return;
   }
@@ -1119,12 +1121,14 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
       case OB_WIRE:
       case OB_SOLID:
         view_data.workbench.set_used(true);
+        view_data.sdf.set_used(true);
         break;
       case OB_MATERIAL:
       case OB_RENDER:
       default:
         if (render_engine_type == &DRW_engine_viewport_workbench_type) {
           view_data.workbench.set_used(true);
+          view_data.sdf.set_used(true);
         }
         else if ((render_engine_type->flag & RE_INTERNAL) == 0) {
           view_data.external.set_used(true);

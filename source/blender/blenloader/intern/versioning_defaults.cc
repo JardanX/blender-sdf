@@ -418,7 +418,9 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
 {
   ToolSettings *ts = scene->toolsettings;
 
-  STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
+  /* MATHOPS: Default engine is Cycles — world/materials/lights work natively.
+   * Solid viewport still uses Workbench internally via ED_view3d_engine_type(). */
+  STRNCPY_UTF8(scene->r.engine, RE_engine_id_CYCLES);
 
   scene->r.cfra = 1.0f;
   scene->r.im_format.exr_flag |= R_IMF_EXR_FLAG_MULTIPART;

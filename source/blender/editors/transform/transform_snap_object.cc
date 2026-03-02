@@ -955,6 +955,7 @@ static eSnapMode snap_obj_fn(SnapObjectContext *sctx,
     }
     case OB_EMPTY:
     case OB_LAMP:
+    case OB_SDF:
       retval = snap_object_center(sctx, ob_eval, obmat, sctx->runtime.snap_to_flag);
       break;
     case OB_CAMERA:

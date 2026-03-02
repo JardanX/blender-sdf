@@ -2510,6 +2510,17 @@ class VIEW3D_MT_camera_add(Menu):
         layout.operator("object.camera_add", text="Camera", icon='OUTLINER_OB_CAMERA')
 
 
+class VIEW3D_MT_sdf_add(Menu):
+    bl_idname = "VIEW3D_MT_sdf_add"
+    bl_label = "SDF"
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator_context = 'EXEC_REGION_WIN'
+        layout.operator("object.sdf_add", text="SDF Cube", icon='SDF_PRIMITIVE').type = 'BOX'
+
+
 class VIEW3D_MT_volume_add(Menu):
     bl_idname = "VIEW3D_MT_volume_add"
     bl_label = "Volume"
@@ -2598,6 +2609,10 @@ class VIEW3D_MT_add(Menu):
         #       "align_view" to work on first call (see #32719).
         layout.operator_context = 'EXEC_REGION_WIN'
 
+        layout.menu("VIEW3D_MT_sdf_add", icon='OUTLINER_OB_SDF')
+
+        layout.separator()
+
         # layout.operator_menu_enum("object.mesh_add", "type", text="Mesh", icon='OUTLINER_OB_MESH')
         layout.menu("VIEW3D_MT_mesh_add", icon='OUTLINER_OB_MESH')
 
@@ -2605,7 +2620,6 @@ class VIEW3D_MT_add(Menu):
         layout.menu("VIEW3D_MT_curve_add", icon='OUTLINER_OB_CURVE')
         # layout.operator_menu_enum("object.surface_add", "type", text="Surface", icon='OUTLINER_OB_SURFACE')
         layout.menu("VIEW3D_MT_surface_add", icon='OUTLINER_OB_SURFACE')
-        layout.operator("object.sdf_add", text="SDF", icon='OUTLINER_OB_SDF')
         layout.operator("object.text_add", text="Text", icon='OUTLINER_OB_FONT')
         layout.operator("object.pointcloud_random_add", text="Point Cloud", icon='OUTLINER_OB_POINTCLOUD')
         layout.menu("VIEW3D_MT_volume_add", text="Volume", text_ctxt=i18n_contexts.id_id, icon='OUTLINER_OB_VOLUME')
@@ -6466,10 +6480,6 @@ class VIEW3D_PT_shading_lighting(Panel):
         shading = VIEW3D_PT_shading.get_shading(context)
         if shading.type in {'SOLID', 'MATERIAL'}:
             return True
-        if shading.type == 'RENDERED':
-            engine = context.scene.render.engine
-            if engine == 'BLENDER_PROXIMITY':
-                return True
         return False
 
     def draw(self, context):
@@ -6542,11 +6552,9 @@ class VIEW3D_PT_shading_lighting(Panel):
                 split = layout.split(factor=0.95)
                 col = split.column()
 
-                engine = context.scene.render.engine
                 row = col.row()
-                if engine == 'BLENDER_PROXIMITY':
-                    row.prop(shading, "use_studiolight_view_rotation", text="", icon='WORLD', toggle=True)
-                    row = row.row()
+                row.prop(shading, "use_studiolight_view_rotation", text="", icon='WORLD', toggle=True)
+                row = row.row()
                 row.prop(shading, "studiolight_rotate_z", text="Rotation")
 
                 col.prop(shading, "studiolight_intensity")
@@ -9065,6 +9073,7 @@ classes = (
     VIEW3D_MT_mesh_add,
     VIEW3D_MT_curve_add,
     VIEW3D_MT_surface_add,
+    VIEW3D_MT_sdf_add,
     TOPBAR_MT_edit_curve_add,
     TOPBAR_MT_edit_armature_add,
     VIEW3D_MT_armature_add,

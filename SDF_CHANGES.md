@@ -215,11 +215,19 @@ Removed `OB_MBALL`/`ID_MB` cases from transform, view3d, outliner, object, anima
 screen, info, buttons, render modules. `ED_operator_editmball` gutted to stub (returns false).
 Updated 5 CMakeLists.txt files.
 
+| File | Change |
+|------|--------|
+| `editors/transform/transform_snap_object.cc` | Added `case OB_SDF:` alongside `OB_EMPTY`/`OB_LAMP` for center-snapping support |
+
 ### Modified Files — RNA (14 files)
 
 Removed `rna_meta.cc`/`rna_meta_api.cc` from build. Cleaned `ID_MB`/`OB_MBALL`/metaball
 references from `rna_object.cc`, `rna_main_api.cc`, `rna_main.cc`, `rna_ID.cc`, `rna_scene.cc`,
 `rna_space.cc`, `rna_userdef.cc`, `rna_space_api.cc`, `rna_object_api.cc`, `rna_action.cc`.
+
+| File | Change |
+|------|--------|
+| `makesrna/intern/rna_ID.cc` | Added `case ID_SF: return &RNA_SDF;` in `ID_code_to_RNA_type()` — required for `ob.data` to resolve as `SDF` type instead of generic `ID`, enabling `context.sdf` in Properties panels |
 
 ### Modified Files — IO
 
@@ -425,6 +433,11 @@ Removed keymap handler registrations:
 - ~30 lines of Grease Pencil keymap handlers (Selection, Edit, Paint, Sculpt, Weight Paint,
   Vertex Paint, Brush Stroke, Fill Tool)
 
+#### `scripts/modules/bl_keymap_utils/keymap_hierarchy.py`
+Commented out `Video Sequence Editor` keymap hierarchy block — it uses
+`_km_expand_from_toolsystem('SEQUENCE_EDITOR', ...)` which crashes because
+the `SEQUENCE_EDITOR` `ToolSelectPanelHelper` subclass was removed in Phase 4.
+
 #### `scripts/presets/keyconfig/keymap_data/blender_default.py`
 Commented out all keymap registrations in `generate_keymaps()` for removed features:
 - Mask editing, Sequencer (generic + main + preview + channels)
@@ -492,3 +505,110 @@ Added fallback: when `WITH_CYCLES_CUDA_BINARIES=OFF`, auto-installs prebuilt ker
 
 ### `intern/cycles/CMakeLists.txt` (Modified)
 Added auto-detection of OptiX SDK from standard Windows install paths (`C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.*/9.*`). Eliminates manual `OPTIX_ROOT_DIR` configuration.
+
+---
+
+## Cycles as Default Engine (Phase 6 — Remove Workbench from UI)
+
+Replaced the delegation architecture (Phase 5) with a simpler approach: the scene engine
+IS Cycles. Solid/Material Preview viewport still uses Workbench internally via
+`ED_view3d_engine_type()`, but users never see or configure Workbench. World lights,
+materials, and lights all work natively because the engine is Cycles.
+
+### Architecture Change
+
+| Before (Phase 5) | After (Phase 6) |
+|-------------------|------------------|
+| `scene.r.engine = "BLENDER_PROXIMITY"` | `scene.r.engine = "CYCLES"` |
+| `ED_view3d_engine_type()` delegates Rendered→Cycles | Cycles is the engine; no delegation needed |
+| `do_render_engine()` swaps engine for F12 | Cycles handles F12 natively |
+| `context.engine == 'BLENDER_PROXIMITY'` | `context.engine == 'CYCLES'` |
+| Engine dropdown hidden (only Proximity visible) | Engine dropdown hidden (only Cycles visible) |
+| Workbench panels in Render Properties | No Workbench panels — Cycles panels always shown |
+| BLENDER_PROXIMITY added to Cycles COMPAT_ENGINES | Not needed — engine IS Cycles |
+
+### Modified Files — C++
+
+| File | Change |
+|------|--------|
+| `blenloader/intern/versioning_defaults.cc` | Default engine for new files changed from `RE_engine_id_BLENDER_WORKBENCH` to `RE_engine_id_CYCLES`. |
+| `blenloader/intern/versioning_500.cc` | Merged versioning blocks (500,120 + 500,121) into single (500,122): remaps EEVEE, old Workbench, EEVEE Next, and BLENDER_PROXIMITY all to CYCLES. |
+| `blenkernel/BKE_blender_version.h` | Bumped `BLENDER_FILE_SUBVERSION` from 121 to 122. |
+| `makesrna/intern/rna_scene.cc` | Engine dropdown now hides `BLENDER_PROXIMITY` + `HYDRA_STORM` (was hiding `CYCLES` + `HYDRA_STORM`). |
+| `editors/space_view3d/view3d_draw.cc` | Removed Proximity→Cycles viewport delegation in `ED_view3d_engine_type()`. |
+| `render/intern/pipeline.cc` | Removed F12 engine swap in `do_render_engine()`. |
+| `draw/engines/overlay/overlay_instance.cc` | Updated comment on `viewport_uses_workbench`. Logic unchanged (correct for engine=CYCLES). |
+
+### Modified Files — Python
+
+| File | Change |
+|------|--------|
+| `scripts/startup/bl_ui/properties_render.py` | Removed Workbench wrapper + 5 children panels. Removed viewport helpers. Path Tracer always visible for CYCLES engine. Color Management moved to bl_order=200 with `layout.separator(type='LINE')` contour. |
+| `scripts/startup/bl_ui/__init__.py` | Removed msgbus shading subscription (no longer needed — no viewport-dependent panels). |
+| `scripts/startup/bl_ui/space_view3d.py` | Removed `BLENDER_PROXIMITY` engine checks in lighting panel poll and studio light rotation. |
+| `intern/cycles/blender/addon/ui.py` | Removed all BLENDER_PROXIMITY from COMPAT_ENGINES, register(), unregister(), draw_pause(). Device selector still shown in Path Tracer wrapper. Kept `bl_parent_id` nesting for Cycles panels under `RENDER_PT_proximity_cycles`. |
+
+### Design decisions
+
+1. **Why Cycles as scene engine?** World lights, materials, and light objects are Cycles-specific properties. With engine=BLENDER_PROXIMITY (Workbench), these properties weren't accessible through `context.engine` checks, requiring COMPAT_ENGINES hacks. Making Cycles the scene engine gives natural access.
+
+2. **Why keep Workbench?** `ED_view3d_engine_type()` hardcodes Workbench return for `shading.type <= OB_SOLID`. Solid/Wireframe modes always use Workbench regardless of scene engine. This is a viewport-level concern, not a scene engine concern.
+
+3. **Why remove viewport-dependent panel polling?** With Cycles as the sole engine, all Cycles panels should always be visible. Users don't need panels appearing/disappearing based on viewport mode.
+
+4. **Why hide BLENDER_PROXIMITY from dropdown?** It's still registered as an engine type (needed for Solid viewport), but users should never manually select it.
+
+---
+
+## Native SDF Draw Engine (Phase 7 — C++ voxel renderer)
+
+Added a native `DrawEngine` that bakes SDF objects into a dense 3D atlas (256^3, R16F) via compute shader, then ray-marches it in a fullscreen fragment shader. Runs alongside Workbench — meshes rendered by Workbench, SDF objects rendered by SDF engine, sharing the depth buffer for correct occlusion.
+
+**Scope:** Cubes only. No blend/CSG, no BVH, no sparse atlas. Flat shading with object color.
+
+### New Files (5)
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/sdf_engine.h` | Engine pointer struct (`Engine : DrawEngine::Pointer`) |
+| `draw/engines/sdf/sdf_engine.cc` | `Instance` class: init, sync, bake dispatch, ray-march draw |
+| `draw/engines/sdf/sdf_private.hh` | Internal types, atlas resolution constant |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Shared C++/GLSL struct (`SDFObjectGPU`, 160 bytes) |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `ShaderCreateInfo` for `sdf_bake` (compute) and `sdf_march` (fragment) |
+
+### New Shader Files (3)
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Compute shader (8×8×4 workgroup): evaluates `sdBox` for all objects at each voxel, writes min distance |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Fullscreen fragment shader: sphere-traces the atlas, computes normals via central differences, writes color+depth |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | SDF primitives library (`sdBox`) |
+
+### Modified Files (3)
+
+| File | Change |
+|------|--------|
+| `draw/intern/draw_view_data.hh` | Added `#include "engines/sdf/sdf_engine.h"`, `sdf::Engine sdf` member, `callback(sdf)` in `foreach_engine()` after workbench |
+| `draw/intern/draw_context.cc` | Added `#include "engines/sdf/sdf_engine.h"`, `view_data.sdf.set_used(true)` wherever workbench is enabled. Also enabled SDF engine in `DEPTH`/`DEPTH_ACTIVE_OBJECT` modes for 3D cursor placement, orbit pivot, and view center pick on SDF surfaces |
+| `draw/engines/sdf/sdf_engine.cc` | `draw_march()` uses `depth_only_fb` in depth mode (no color attachment), `default_fb` in normal mode |
+| `draw/CMakeLists.txt` | Added SDF engine source, headers, shader info, GLSL files, and shared header to build |
+
+### Architecture
+
+- **Object sync**: For each `OB_SDF` object, decomposes `object_to_world()` into rotation + scale, bakes scale into `sdf_size`, packs into `SDFObjectGPU` SSBO
+- **Dirty tracking**: Hash-based — if no objects changed, skip compute bake, just ray-march the cached atlas
+- **Bake pass**: Compute dispatch writes to 3D `image3D` (R16F), each thread evaluates one voxel against all objects with AABB early-out
+- **March pass**: Fullscreen triangle with `gpu_fullscreen` vertex shader. Reconstructs rays from `draw_view` UBO matrices, sphere-traces the atlas with hardware trilinear filtering, writes `gl_FragDepth` for mesh occlusion
+
+### Bug Fixes
+
+- **Shader info file naming**: Renamed `sdf_shader_info.hh` → `sdf_shader_infos.hh` (plural). Blender's GLSL preprocessor strips `#include` directives containing `"infos.hh"` as a substring — the singular name didn't match, causing runtime "Dependency not found" errors.
+- **IMAGE macro syntax**: Changed `IMAGE(0, GPU_R16F, WRITE, image3D, sdf_atlas)` → `IMAGE(0, SFLOAT_16, write, image3D, sdf_atlas)`. The macro maps to `TextureFormat::format` and `Qualifier::qualifiers` (lowercase enum values, not GPU API constants).
+- **STORAGE_BUF qualifier case**: Changed `READ` → `read` to match `Qualifier::read` enum.
+
+### SDF Add Menu (Add > SDF > Cube)
+
+| File | Change |
+|------|--------|
+| `editors/object/object_sdf.cc` | Added `type` RNA enum property to `OBJECT_OT_sdf_add` operator; sets `SDF.sdf_type` on created object. Added `sdf_type_name()` to give type-specific default names ("SDF Cube", "SDF Sphere", etc.) instead of generic "SDF". |
+| `scripts/startup/bl_ui/space_view3d.py` | Added `VIEW3D_MT_sdf_add` submenu class with Cube entry. SDF menu moved to top of Add menu (before Mesh) with a separator line divider below it. |

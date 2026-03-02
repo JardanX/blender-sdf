@@ -942,6 +942,7 @@ if(WITH_BLENDER)
       vis_sel_10
       vis_sel_11
       sdf_data
+      sdf_primitive
       volume_data
       vpaint_hlt
       warning_large

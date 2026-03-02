@@ -19,15 +19,12 @@ All changes are tracked in `SDF_CHANGES.md` at the repo root — consult it befo
 ### Windows (primary platform)
 
 ```batch
-.\make.bat
+.\make.bat ninja
 ```
 
-This auto-detects MSVC (2019/2022/2026), checks SVN library dependencies, runs CMake, and builds. Output goes to `build/bin/Release/`. The build directory already exists with a compiled binary.
+This auto-detects MSVC (2019/2022/2026), checks SVN library dependencies, runs CMake with the Ninja generator, and builds. Output goes to `build/bin/Release/`. The build directory already exists with a compiled binary.
 
-To rebuild after C++ changes, run `make.bat` again — it's incremental. For a clean build:
-```batch
-.\make.bat ninja    # Use Ninja instead of MSBuild (faster incremental)
-```
+To rebuild after C++ changes, run `make.bat ninja` again — it's incremental. Ninja is faster than MSBuild for incremental builds.
 
 ### Linux/macOS
 
@@ -83,6 +80,7 @@ Runtime management. Every ID type needs an `IDTypeInfo` struct with callbacks.
 ### 3. RNA (Python API) — `makesrna/`
 Exposes DNA to Python/UI. Generated at build time by `makesrna.cc`.
 - `intern/rna_sdf.cc` — Property definitions (type, size, bevel, color, blend, etc.)
+- `intern/rna_ID.cc` — `case ID_SF: return &RNA_SDF;` in `ID_code_to_RNA_type()` (without this, `ob.data` is generic `ID`, not `SDF`, and `context.sdf` is always None)
 - `intern/rna_main.cc` — `bpy.data.sdfs` collection
 - `intern/rna_main_api.cc` — `.new()` / `.remove()` / `.tag()` API
 
@@ -102,12 +100,13 @@ Rendering pipeline. SDF objects currently pass through as no-ops in the draw sys
 
 ### Registration Checklist (for adding new ID types)
 
-These are the exact registration points that caused crashes when missed:
+These are the exact registration points that caused crashes or broken functionality when missed:
 1. `idtype.cc`: `INIT_TYPE()` + both `CASE_IDINDEX()` switches
 2. `main.cc`: `lb[INDEX_ID_*] = &bmain->listbase` in `BKE_main_lists_get()`
 3. `CMakeLists.txt` (root `source/blender/`): DNA headers in `SRC_DNA_INC`
 4. `makesrna.cc`: Register in RNA code generator array
 5. `rna_main_api.cc`: Include the DNA header
+6. `rna_ID.cc`: `case ID_SF: return &RNA_SDF;` in `ID_code_to_RNA_type()` — without this, `ob.data` resolves to generic `ID` instead of the proper RNA type, breaking `context.sdf` and all Properties panels
 
 ## Key Source Directories
 

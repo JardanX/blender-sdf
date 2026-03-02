@@ -1817,8 +1817,10 @@ static const EnumPropertyItem *rna_RenderSettings_engine_itemf(bContext * /*C*/,
   int a = 0, totitem = 0;
 
   for (type = static_cast<RenderEngineType *>(R_engines.first); type; type = type->next, a++) {
-    /* MATHOPS: Hide Cycles and Hydra Storm — Proximity delegates to Cycles transparently. */
-    if (STREQ(type->idname, "CYCLES") || STREQ(type->idname, "HYDRA_STORM")) {
+    /* MATHOPS: Hide Workbench/Proximity and Hydra Storm — Cycles is the sole engine. */
+    if (STREQ(type->idname, RE_engine_id_BLENDER_WORKBENCH) ||
+        STREQ(type->idname, "HYDRA_STORM"))
+    {
       continue;
     }
     tmp.value = a;
@@ -1860,10 +1862,12 @@ static void rna_Scene_update_render_engine(Main *bmain)
 
 static bool rna_RenderSettings_multiple_engines_get(PointerRNA * /*ptr*/)
 {
-  /* MATHOPS: Count only visible engines (Cycles and Hydra Storm are hidden). */
+  /* MATHOPS: Count only visible engines (Workbench/Proximity and Hydra Storm are hidden). */
   int visible = 0;
   LISTBASE_FOREACH (RenderEngineType *, type, &R_engines) {
-    if (!STREQ(type->idname, "CYCLES") && !STREQ(type->idname, "HYDRA_STORM")) {
+    if (!STREQ(type->idname, RE_engine_id_BLENDER_WORKBENCH) &&
+        !STREQ(type->idname, "HYDRA_STORM"))
+    {
       visible++;
     }
   }

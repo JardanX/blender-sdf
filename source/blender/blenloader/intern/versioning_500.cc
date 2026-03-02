@@ -2818,23 +2818,16 @@ void do_versions_after_linking_500(FileData *fd, Main *bmain)
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 120)) {
-    /* Remap EEVEE and old Workbench to Proximity engine. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 122)) {
+    /* MATHOPS: Remap all engines to Cycles — single engine architecture.
+     * EEVEE removed, Proximity/Workbench only used for solid viewport internally. */
     LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
       if (STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE) ||
           STREQ(scene->r.engine, "BLENDER_WORKBENCH") ||
-          STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE_NEXT))
+          STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE_NEXT) ||
+          STREQ(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH))
       {
-        STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
-      }
-    }
-  }
-
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 121)) {
-    /* MATHOPS: Remap Cycles engine to Proximity (Cycles is now delegated transparently). */
-    LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
-      if (STREQ(scene->r.engine, RE_engine_id_CYCLES)) {
-        STRNCPY_UTF8(scene->r.engine, RE_engine_id_BLENDER_WORKBENCH);
+        STRNCPY_UTF8(scene->r.engine, RE_engine_id_CYCLES);
       }
     }
   }
