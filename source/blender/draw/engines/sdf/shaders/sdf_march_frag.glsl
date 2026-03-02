@@ -19,7 +19,7 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 #include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
-#define BRICK_STORAGE 10
+#define BRICK_STORAGE 12
 
 /** Max brick-level DDA steps (grid_res * sqrt(3) ~ 56 for 32). */
 #define MAX_BRICK_STEPS 128
@@ -38,8 +38,8 @@ int3 gridToCompact(int3 brick, int3 local_voxel, int slot, int bpa)
 {
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
-  /* +1 for the overlap padding border. */
-  return slot_origin + local_voxel + int3(1);
+  /* +2 for the 2-voxel overlap padding border. */
+  return slot_origin + local_voxel + int3(2);
 }
 
 /**
@@ -60,19 +60,23 @@ void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out flo
 
 /**
  * Compute C0-continuous normal using the dual voxel method within a compact brick.
- * The 3x3x3 neighborhood is within the brick's 10^3 storage due to overlap.
+ * The 3x3x3 neighborhood fits within the brick's 12^3 storage (2-voxel overlap
+ * on each side) for all valid base values [-1, BRICK_SIZE-1] = [-1, 7].
+ *
+ *   base=-1 → atlas indices (−1+2)..(−1+2+2) = 1..3  ✓
+ *   base= 7 → atlas indices (7+2)..(7+2+2)   = 9..11 ✓ (within 0..11)
  */
 float3 computeDualVoxelNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
 {
   /* Dual voxel base: shift by -0.5 then floor. */
   int3 base = int3(floor(grid_pos_in_brick - float3(0.5f)));
-  base = clamp(base, int3(0), int3(BRICK_SIZE - 2));
+  base = clamp(base, int3(-1), int3(BRICK_SIZE - 1));
 
   float3 uvw = clamp(grid_pos_in_brick - float3(0.5f) - float3(base), float3(0.0f), float3(1.0f));
 
-  /* Convert to compact atlas coords. +1 for overlap border. */
+  /* Convert to compact atlas coords. +2 for the 2-voxel overlap border. */
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
-  int3 atlas_base = slot_block * BRICK_STORAGE + base + int3(1);
+  int3 atlas_base = slot_block * BRICK_STORAGE + base + int3(2);
 
   /* Fetch 3x3x3 = 27 neighborhood. */
   float v[27];
@@ -427,7 +431,7 @@ void main()
     /* Compute compact atlas UV for hardware trilinear. */
     int bpa = bricks_per_axis;
     int3 slot_block = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
-    float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(1.0f);
+    float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(2.0f);
 
     /* Normalize to [0,1] for texture() sampling. */
     int3 compact_size = int3(textureSize(compact_atlas, 0));
