@@ -837,16 +837,21 @@ enum PrimitiveType {
   PRIMITIVE_CURVE = (PRIMITIVE_CURVE_THICK | PRIMITIVE_CURVE_RIBBON),
 
   /* SDF uses a high bit outside the shape/motion range.
-   * It does not participate in BVH — ray marching is separate. */
+   * Not included in PRIMITIVE_ALL since that must fit in OptiX 7-bit hit kind. */
   PRIMITIVE_SDF = (1 << 15),
 
+  /* Mask of primitive types that fit in OptiX hit kind (< 128). */
   PRIMITIVE_ALL = (PRIMITIVE_TRIANGLE | PRIMITIVE_CURVE | PRIMITIVE_POINT | PRIMITIVE_VOLUME |
-                   PRIMITIVE_LAMP | PRIMITIVE_SDF | PRIMITIVE_MOTION),
+                   PRIMITIVE_LAMP | PRIMITIVE_MOTION),
 
   PRIMITIVE_NUM_SHAPES = 6,
   PRIMITIVE_NUM_BITS = PRIMITIVE_NUM_SHAPES + 1, /* All shapes + motion bit. */
   PRIMITIVE_NUM = PRIMITIVE_NUM_SHAPES * 2,      /* With and without motion. */
 };
+
+/* OptiX hit kind for SDF custom intersection.
+ * Must be < 128 (OptiX 7-bit limit) and distinct from PRIMITIVE_ALL values. */
+#define SDF_OPTIX_HIT_KIND 64
 
 /* Convert type to index in range 0..PRIMITIVE_NUM-1. */
 #define PRIMITIVE_INDEX(type) \
@@ -1515,7 +1520,11 @@ struct ccl_align(16) KernelData {
   int device_bvh, pad1;
 #  endif
 #endif
-  int pad2, pad3;
+
+  /* SDF parameters. */
+  int num_sdfs;
+  int num_sdf_bricks;
+  int pad3, pad4;
 };
 static_assert_align(KernelData, 16);
 

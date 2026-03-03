@@ -12,9 +12,7 @@
 #include "kernel/geom/motion_triangle_intersect.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/point_intersect.h"
-#ifndef __KERNEL_GPU__
-#  include "kernel/geom/sdf.h"
-#endif
+#include "kernel/geom/sdf.h"
 #include "kernel/geom/triangle_intersect.h"
 
 /* Device specific acceleration structures for ray tracing. */
@@ -117,10 +115,8 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
 
   IF_NOT_USING_EMBREE
   {
-    /* Skip BVH traversal if no BVH nodes exist (e.g. scene with only SDF objects).
-     * Use array width check instead of a KernelData field to avoid breaking
-     * prebuilt GPU kernel (PTX) struct layout. */
-    if (kg->bvh_nodes.width > 0) {
+    /* Skip BVH traversal if no BVH nodes exist (e.g. scene with only SDF objects). */
+    if (kernel_data.bvh.have_bvh_nodes) {
 #  ifdef __OBJECT_MOTION__
       if (kernel_data.bvh.have_motion) {
 #    ifdef __HAIR__
@@ -149,14 +145,12 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     }
   }
 
-#ifndef __KERNEL_GPU__
   /* SDF intersection: march all SDF objects, only find closer hits. */
-  if (kg->sdf_objects.width > 0) {
+  if (kernel_data.num_sdfs > 0) {
     if (sdf_intersect_all(kg, ray, isect, visibility)) {
       hit = true;
     }
   }
-#endif
 
   return hit;
 }

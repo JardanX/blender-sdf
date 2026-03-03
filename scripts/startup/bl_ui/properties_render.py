@@ -114,7 +114,7 @@ class RENDER_PT_proximity_raymarcher(Panel):
             return
         layout.prop(shading, "sdf_resolution", text="Resolution")
         layout.prop(shading, "sdf_surface_margin", text="Surface Margin")
-        layout.prop(shading, "sdf_debug_grid", text="3D Voxel Grid")
+        layout.prop(shading, "sdf_debug_grid", text="Debug View")
 
 
 # ---------------------------------------------------------------------------

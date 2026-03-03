@@ -43,14 +43,6 @@ struct KernelGlobalsCPU {
 #define KERNEL_DATA_ARRAY(type, name) kernel_array<type> name;
 #include "kernel/data_arrays.h"
 
-  /* SDF arrays — CPU only, excluded from data_arrays.h to preserve prebuilt
-   * GPU kernel (PTX) struct layout compatibility. */
-  kernel_array<KernelSDF> sdf_objects;
-  kernel_array<int> sdf_shader_map;
-  kernel_array<int> sdf_indirection;
-  kernel_array<float4> sdf_atlas;
-  kernel_array<int> sdf_matid;
-
   KernelData data = {};
 
   ProfilingState profiler;

@@ -62,7 +62,8 @@ DeviceScene::DeviceScene(Device *device)
       sdf_shader_map(device, "sdf_shader_map", MEM_GLOBAL),
       sdf_indirection(device, "sdf_indirection", MEM_GLOBAL),
       sdf_atlas(device, "sdf_atlas", MEM_GLOBAL),
-      sdf_matid(device, "sdf_matid", MEM_GLOBAL)
+      sdf_matid(device, "sdf_matid", MEM_GLOBAL),
+      sdf_brick_map(device, "sdf_brick_map", MEM_GLOBAL)
 {
   memset((void *)&data, 0, sizeof(data));
 }

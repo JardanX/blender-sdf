@@ -242,6 +242,11 @@ string CUDADevice::compile_kernel_get_common_cflags(const uint kernel_features)
   cflags += " -DWITH_CYCLES_DEBUG";
 #  endif
 
+#  ifdef _WIN32
+  /* Help nvcc find cl.exe when Blender is not launched from a Developer Command Prompt. */
+  cflags += " --compiler-bindir \"" CYCLES_MSVC_CL_DIR "\"";
+#  endif
+
   return cflags;
 }
 
@@ -308,7 +313,7 @@ string CUDADevice::compile_kernel(const string &common_cflags,
   }
 
 #  ifdef _WIN32
-  if (!use_adaptive_compilation() && have_precompiled_kernels()) {
+  if (!use_adaptive_compilation() && have_precompiled_kernels() && !cuewCompilerPath()) {
     if (major < 5) {
       set_error(
           string_printf("CUDA backend requires compute capability 5.0 or up, but found %d.%d. "
@@ -343,9 +348,9 @@ string CUDADevice::compile_kernel(const string &common_cflags,
               << nvcc_cuda_version % 10 << ", you need CUDA 10.1 or newer";
     return string();
   }
-  if (!(nvcc_cuda_version >= 102 && nvcc_cuda_version < 130)) {
+  if (!(nvcc_cuda_version >= 102 && nvcc_cuda_version < 140)) {
     LOG_ERROR << "CUDA version " << nvcc_cuda_version / 10 << "." << nvcc_cuda_version % 10
-              << "CUDA 10.1 to 12 are officially supported.";
+              << "CUDA 10.1 to 13 are officially supported.";
   }
 
   double starttime = time_dt();

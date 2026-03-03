@@ -97,6 +97,7 @@ class DeviceScene {
   device_vector<int> sdf_indirection;
   device_vector<float4> sdf_atlas;
   device_vector<int> sdf_matid;
+  device_vector<int4> sdf_brick_map;
 
   KernelData data;
 
