@@ -69,6 +69,10 @@ enum {
   PG_HITS_POINTCLOUD,
   PG_HITV_POINTCLOUD,
   PG_HITL_POINTCLOUD,
+  PG_HITD_SDF,
+  PG_HITS_SDF,
+  PG_HITV_SDF,
+  PG_HITL_SDF,
 
   /* Callable */
   PG_CALL_SVM_AO,
@@ -80,7 +84,7 @@ enum {
 static const int MISS_PROGRAM_GROUP_OFFSET = PG_MISS;
 static const int NUM_MISS_PROGRAM_GROUPS = 1;
 static const int HIT_PROGAM_GROUP_OFFSET = PG_HITD;
-static const int NUM_HIT_PROGRAM_GROUPS = 24;
+static const int NUM_HIT_PROGRAM_GROUPS = 28;
 static const int CALLABLE_PROGRAM_GROUPS_BASE = PG_CALL_SVM_AO;
 static const int NUM_CALLABLE_PROGRAM_GROUPS = 2;
 
@@ -117,6 +121,10 @@ class OptiXDevice : public CUDADevice {
   OptixTraversableHandle tlas_handle = 0;
   vector<unique_ptr<device_only_memory<char>>> delayed_free_bvh_memory;
   thread_mutex delayed_free_bvh_mutex;
+
+  /* SDF custom primitive BLAS. */
+  OptixTraversableHandle sdf_blas_handle = 0;
+  unique_ptr<device_only_memory<char>> sdf_blas_data;
 
  public:
   OptiXDevice(const DeviceInfo &info, Stats &stats, Profiler &profiler, bool headless);

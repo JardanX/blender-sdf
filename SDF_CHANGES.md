@@ -1058,3 +1058,211 @@ Per-brick AABB in the bake shader only included a 2-voxel overlap border. Object
 | File | Change |
 |------|--------|
 | `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Expanded per-brick AABB by `max_blend` so objects contributing to smooth union are always evaluated |
+
+---
+
+## Pixel-Perfect SDF Selection via Object ID Atlas
+
+Replaced the bounding-box GPU picking overlay for SDF objects with pixel-perfect selection through the baked atlas. The previous approach used instanced solid cubes (`extra_shape` pattern) that produced false positives — clicking empty space inside a torus hole, or outside a beveled shape's actual surface, incorrectly selected the object.
+
+The new approach: during baking, each voxel records which object is closest (by index into the `objects[]` SSBO). During selection draws, a fullscreen march reads the object ID atlas and outputs the correct `select_id` per pixel. This gives pixel-perfect picking for all SDF shapes with zero additional sphere-tracing cost — the atlas is already baked.
+
+### New Files (1)
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_select_march_frag.glsl` | Fullscreen fragment shader: DDA brick-walk (same as `sdf_march_frag.glsl`), reads `object_id_tx` at hit position, maps object index to `select::ID` via SSBO, writes to selection output buffer with correct depth |
+
+### Modified Files (Draw)
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Added `object_id_tx_` (R32I, same dims as compact atlas). Created alongside `compact_atlas_tx_` in `ensure_compact_atlas()`. Bound as IMAGE(1) in `dispatch_bake()`. Freed in destructor and on resolution change. Added static getters (`sdf_atlas_get()`, `sdf_indirection_get()`, `sdf_object_id_atlas_get()`, `sdf_atlas_params_get()`, `sdf_object_count_get()`) for cross-engine access from the overlay |
+| `draw/engines/sdf/sdf_engine.h` | Declared static getter functions for atlas textures, parameters, and object count |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `IMAGE(1, SINT_32, write, iimage3D, object_id_atlas)` to `sdf_bake` info. Added `sdf_select_march` shader create info with atlas samplers, `select_id_map_buf` SSBO, selection UBO/SSBO bindings, `draw_view` and `gpu_fullscreen` additional infos |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Tracks closest object index (`acc_obj_id`) during smooth union loop. For hard union: winner by distance. For smooth union: winner by >50% influence factor. Writes to `object_id_atlas` via `imageStore` |
+| `draw/engines/overlay/overlay_sdf.hh` | Rewritten: replaced instanced bbox approach (`ShapeInstanceBuf`, `extra_shape`) with fullscreen selection march. Collects `select::ID` per object in `object_sync()`, captures selection buffer pointers in `end_sync()`, draws fullscreen triangle with manual texture/SSBO/UBO binding in `draw()` |
+| `draw/CMakeLists.txt` | Added `sdf_select_march_frag.glsl` to shader file list |
+
+### Architecture
+
+```
+Bake pass:  objects[] → per-voxel smooth union → compact_atlas (dist,R,G,B)
+                                                  object_id_atlas (int, closest obj index)
+
+Select pass: overlay calls SDF engine static API to get textures →
+             fullscreen march shader (DDA brick walk) →
+             on hit: read object_id_atlas → map to select_id → atomicMin/atomicOr
+```
+
+- **Object ID = index into `objects[]` SSBO** as ordered during `object_sync()` — the overlay builds a parallel `object_index → select::ID` mapping SSBO
+- **Selection depth**: The shader inlines `select_id_output` logic using the computed SDF hit depth (not `gl_FragCoord.z` from the fullscreen triangle) for correct depth-aware picking
+- **Ordering guarantee**: Both the SDF engine and overlay iterate depsgraph objects filtering `OB_SDF` in the same order, verified by `BLI_assert` in `end_sync()`
+
+---
+
+## Uniform World-Aligned Chunk System
+
+Added world-aligned chunk snapping and per-axis grid resolution to the SDF atlas system.
+
+**Problem:** The old cubic grid was always centered on the scene centroid with uniform resolution on all axes. This wasted bricks on thin/flat scenes and meant the grid origin shifted with every object movement.
+
+**Solution:** Grid bounds are now snapped to world-aligned chunk boundaries via `floor`/`ceil`. Resolution is per-axis (non-cubic), adapting to scene shape. Resolution semantics are unchanged (`sdf_resolution` = total voxels across longest axis). `voxel_size` is still scene-dependent but the chunk-snapped grid gives stable brick boundaries for incremental baking.
+
+### Key Benefits
+- World-aligned grid: chunk boundaries are stable across small movements
+- Non-cubic grids: per-axis resolution adapts to scene shape (thin scenes use fewer bricks)
+- Dirty hash uses chunk-snapped `atlas_origin_` + `grid_res_` instead of raw scene bounds
+- Textures are only freed/reallocated when grid dimensions actually change
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_private.hh` | Added `SDF_MAX_GRID_RES = 128` constant (max bricks per axis) |
+| `draw/engines/sdf/sdf_engine.cc` | `grid_res_` changed from `int` to `int3` for per-axis resolution. `end_sync()` rewritten: `voxel_size_ = max_axis / sdf_resolution_`, chunk-snapped grid bounds via `floor`/`ceil`, per-axis `grid_res_`, textures freed only when dimensions change. `sync_sdf_settings()` simplified (grid computation moved to `end_sync()`). Dirty hash uses `grid_res_` + `atlas_origin_` instead of raw `scene_min_/max_`. ~25 usage sites updated for per-axis int3: `ensure_indirection`, `clear_indirection`, `dispatch_classify`, `dispatch_bake`, `draw_march`, `rebuild_grid_batch_active`, `augment_indirection_for_grids`, `dispatch_grid_blends`, `perf_end_frame`, static grid resolution assignment |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | `MAX_BRICK_STEPS` increased from 128 to 256 (non-cubic grids up to 128/axis → max diagonal ~222) |
+
+---
+
+## Object ID Debug Visualization
+
+Added a debug view mode that colorizes the SDF surface by object ID, useful for verifying the object ID atlas used by pixel-perfect selection.
+
+### How to Use
+
+In the Render Properties panel under SDF Settings, change **Debug View** from "Off" to "Object IDs". Each SDF object is rendered with a distinct color (golden-ratio hue hash) with simple lambertian shading for depth cues. Unclaimed voxels (object ID = -1) render as dark gray.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `makesrna/intern/rna_space.cc` | Added `OBJECT_IDS` enum item (value 2) to `sdf_debug_grid_items` |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `SAMPLER(4, isampler3D, object_id_tx)` and `PUSH_CONSTANT(int, debug_mode)` to `sdf_march` shader info |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Added section 5b: when `debug_mode == 1`, reads object ID from atlas at hit position, maps to a distinct hue via golden-ratio hash, applies lambertian shading, outputs color and depth, then returns early (skipping normal shading) |
+| `draw/engines/sdf/sdf_engine.cc` | In `draw_march()`: binds `object_id_tx_` at sampler slot 4, pushes `debug_mode` uniform (`1` when `debug_grid_ == 2`, else `0`), unbinds `object_id_tx_` after draw |
+| `scripts/startup/bl_ui/properties_render.py` | Changed label from "3D Voxel Grid" to "Debug View" |
+
+---
+
+## Active-Brick-Only Dispatch + Fixed Voxel Density
+
+Replaced the grid_res³ bake/grid_blend dispatch (one workgroup per grid brick, most skipped) with active-brick-only dispatch (one workgroup per active brick). This makes bake cost proportional to surface area, not grid volume, enabling fixed voxel density without performance constraints.
+
+**Problem:** At high resolutions or with spread-out scenes, grid_res³ dispatch launched millions of empty workgroups (95%+ skipped by the `if (slot < 0) return;` check in bake/grid_blend shaders). With fixed voxel density (`voxel_size = 1/resolution`), a 4 BU scene at resolution 256 = 128³ = 2M workgroups × 144 threads each = wasted GPU time.
+
+**Solution:** The classify shader now writes active brick coordinates to an SSBO alongside slot allocation. Bake and grid_blend shaders read brick coordinates from this SSBO instead of using `gl_WorkGroupID` as the brick coordinate. Dispatch is now `GPU_compute_dispatch(sh, active_brick_count, 1, 1)` — only active bricks get workgroups.
+
+### Key Changes
+
+- **Fixed voxel density**: `voxel_size = 1.0 / sdf_resolution` (was: `max_axis / sdf_resolution`). Resolution now means "voxels per Blender unit" — consistent quality regardless of scene size
+- **Auto-coarsening**: If grid exceeds 128 bricks on any axis, voxel_size is doubled iteratively until it fits
+- **Active brick SSBO**: `ActiveBrick` struct (int4 coord) written by classify, read by bake/grid_blend
+- **2D dispatch**: Uses `gl_WorkGroupID.x + gl_WorkGroupID.y * dispatch_width` to handle >65535 active bricks
+- **Removed indirection_tx from bake/grid_blend**: No longer needed — slot index IS the brick index in the active bricks list
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `ActiveBrick` struct (int4 coord) for SSBO |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `STORAGE_BUF(2, write, ActiveBrick, active_bricks[])` to `sdf_classify`. Added `STORAGE_BUF(1, read, ActiveBrick, active_bricks[])` + `active_brick_count`/`dispatch_width` push constants to `sdf_bake` and `sdf_grid_blend`. Removed `indirection_tx` sampler and `grid_resolution` push constant from `sdf_bake`/`sdf_grid_blend`. Added `TYPEDEF_SOURCE` to `sdf_grid_blend` |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Writes `active_bricks[slot].coord = int4(brick, 0)` when allocating a slot |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Reads brick coordinate from `active_bricks[brick_idx]` instead of `gl_WorkGroupID`. Uses 2D dispatch indexing. Removed indirection texture lookup |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Same as bake: reads from active_bricks SSBO, 2D dispatch indexing, removed indirection lookup |
+| `draw/engines/sdf/sdf_engine.cc` | Added `active_bricks_` SSBO (created in `dispatch_classify()`, freed in destructor). Changed `dispatch_bake()` and `dispatch_grid_blends()` from grid_res³ to 2D active-brick-count dispatch. `augment_indirection_for_grids()` appends grid brick coords to the SSBO. Restored fixed voxel density (`1.0/sdf_resolution`) with auto-coarsening loop. Removed indirection bindings from bake/grid_blend dispatch |
+
+---
+
+## BVH Object Culling + Dirty Brick Partial Rebake
+
+Two optimizations to make SDF viewport performance constant regardless of object count (10 or 10,000).
+
+**Problem:** The bake shader's inner loop evaluated ALL objects per voxel (O(N) per brick). With 10K objects × 8K active bricks, this meant ~138 billion SDF evaluations per frame. Additionally, moving a single object triggered a full rebake of all bricks.
+
+### Phase 1: BVH Object Culling
+
+SAH (Surface Area Heuristic) BVH built on CPU, uploaded as SSBO. Classify and bake shaders traverse the binary tree with a stack, testing node AABBs against brick AABBs. Each brick evaluates only ~5-15 nearby objects instead of all N. Falls back to linear scan when BVH is empty.
+
+### Phase 2: Dirty Brick Partial Rebake
+
+Per-object state tracking (session_uid → hash of position/size/bevel/blend/rotation/color) detects which objects changed. CPU-managed persistent slot assignment ensures bricks keep stable atlas positions across frames. Only bricks in the dirty region (union of old + new AABB of changed objects) are re-baked; clean bricks preserve their atlas data.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `BVHNodeGPU` struct (float4 min_and_left, float4 max_and_right). Updated `ActiveBrick.coord.w` to store slot index |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Added `BVH_MAX_STACK`, `bvh_decode_int()`, `aabb_overlap()` helpers |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `STORAGE_BUF(3, read, BVHNodeGPU, bvh_nodes[])` + `bvh_node_count` push constant to `sdf_classify`. Added `STORAGE_BUF(2, read, BVHNodeGPU, bvh_nodes[])` + `bvh_node_count` push constant to `sdf_bake` |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Replaced linear `for(i=0;i<object_count;i++)` with stack-based BVH traversal. Falls back to linear scan when `bvh_node_count == 0` |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Same BVH traversal replacing per-voxel object loop. Reads slot from `active_bricks[].coord.w` instead of using brick index |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Reads slot from `active_bricks[].coord.w` instead of brick index |
+| `draw/engines/sdf/sdf_engine.cc` | Added `build_bvh()` (top-down SAH 8-bin partitioning), `upload_bvh()`, BVH SSBO bindings in classify/bake dispatches. Added persistent slot system (`brick_slot_map_`, `free_slots_`, `total_slots_allocated_`), per-object dirty tracking (`prev_object_states_`, `prev_object_aabbs_`), `assign_persistent_slots()`, `compute_dirty_objects()`, `compute_dirty_brick_set()`, `dispatch_bake_dirty()`. Atlas preserved across frames when dimensions unchanged. Full rebake fallback on resolution/grid changes |
+
+---
+
+## Fix Cycles GPU SDF Crash and Rendering
+
+Cycles GPU (OptiX/CUDA) crashed with "Illegal address" when rendering scenes with SDF objects. Three root causes fixed:
+
+### Bug Fix: OptiX Anyhit Reads curve_segments for SDF Hits (CRASH)
+
+The `__anyhit__kernel_optix_visibility_test` didn't handle SDF custom primitives. When OptiX traced with `ENFORCE_ANYHIT` (overriding the SDF instance's `DISABLE_ANYHIT`), the anyhit fell through to the `#ifdef __HAIR__` curve branch because `SDF_OPTIX_HIT_KIND (64)` and `PRIMITIVE_MOTION (1<<6 = 64)` share the same value, making `(hitKind & ~PRIMITIVE_MOTION) != PRIMITIVE_POINT` evaluate to true. This caused `curve_segments[0]` to be read — illegal memory access if no curves exist.
+
+### Bug Fix: OptiX Intersection Program Was Debug Stub
+
+The `__intersection__sdf` program always reported a hit at AABB entry with zeroed brick coordinates, rendering SDF objects as solid bounding boxes. Replaced with actual two-level DDA ray marching via `sdf_intersect()`.
+
+### Bug Fix: Shader Flags Missing PRIMITIVE_SDF
+
+`intersection_get_shader_flags` and `intersection_get_shader_from_isect_prim` in `bvh/util.h` didn't handle `PRIMITIVE_SDF`, causing shadow rays to get wrong shader flags (defaulting to shader 0).
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/device/optix/bvh.h` | Added `SDF_OPTIX_HIT_KIND` check in `__anyhit__kernel_optix_visibility_test` before curve branch. Replaced `__intersection__sdf` debug stub with actual DDA ray march calling `sdf_intersect()` |
+| `intern/cycles/kernel/bvh/util.h` | Added `PRIMITIVE_SDF` case to `intersection_get_shader_flags` and `intersection_get_shader_from_isect_prim` — looks up shader via `KernelSDF.shader_offset` into `sdf_shader_map` |
+| `intern/cycles/device/optix/device_impl.cpp` | SDF BLAS AABB now uses union of ALL SDF object bounds (via `BoundBox::grow()`), not just the first object. Fixes clipping of SDF objects whose bounds extend beyond the first object |
+
+---
+
+## Per-Brick AABB Hardware BVH Optimization (Cycles OptiX)
+
+Major performance optimization for Cycles GPU (OptiX) SDF path tracing. Instead of one AABB covering the entire SDF atlas (forcing every ray through 256-step brick-level DDA), we now build one AABB per active brick. OptiX hardware BVH handles brick-level traversal, reducing intersection cost from O(256+24) to O(24) DDA steps.
+
+Based on the SBS (Sparse Brick Set) approach from "Ray Tracing of Signed Distance Function Grids" (Hansson-Soderlund, Evans, Akenine-Moller, JCGT 2022).
+
+### Architecture
+
+1. **Brick map**: During SDF data upload, scan the indirection grid for active bricks (slot >= 0 or -2). Build `sdf_brick_map` array where each entry maps `primitiveIndex → (brick_linear, atlas_slot, sdf_index)`.
+2. **Per-brick AABBs**: Instead of 1 AABB, create N AABBs (one per active brick). Each AABB covers the world-space extent of that brick (8 voxels wide).
+3. **Hardware BVH**: OptiX builds an efficient BVH over all brick AABBs. Rays that miss a brick never invoke the intersection program.
+4. **Per-brick intersection**: New `sdf_intersect_brick()` function skips brick-level DDA entirely. Uses `optixGetPrimitiveIndex()` to look up the brick map, then only does voxel-level DDA (max 24 steps).
+
+### New Data Structures
+
+| Item | Description |
+|------|-------------|
+| `sdf_brick_map` (int4 array) | Per-brick mapping: `(brick_linear, atlas_slot, sdf_index, 0)`. Indexed by OptiX primitive index. |
+| `num_sdf_bricks` (KernelData field) | Number of active bricks (entries in sdf_brick_map). |
+
+### New Functions
+
+| Function | File | Description |
+|----------|------|-------------|
+| `sdf_intersect_brick()` | `intern/cycles/kernel/geom/sdf.h` | Per-brick voxel-level DDA only (24 steps max). Used by OptiX intersection program. |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/types.h` | Added `num_sdf_bricks` to `KernelData`, replaced `pad2` |
+| `intern/cycles/kernel/data_arrays.h` | Added `KERNEL_DATA_ARRAY(int4, sdf_brick_map)` |
+| `intern/cycles/kernel/geom/sdf.h` | Added `sdf_intersect_brick()` for per-brick voxel-only DDA |
+| `intern/cycles/kernel/device/optix/bvh.h` | `__intersection__sdf` now uses `sdf_brick_map` lookup + `sdf_intersect_brick()` instead of full DDA |
+| `intern/cycles/device/optix/device_impl.cpp` | SDF BLAS now builds N AABBs (one per active brick) instead of 1. Added `#include "scene/sdf.h"` to access `SDFGeometry` for grid parameters. |
+| `intern/cycles/scene/devicescene.h` | Added `device_vector<int4> sdf_brick_map` to `DeviceScene` |
+| `intern/cycles/scene/devicescene.cpp` | Added `sdf_brick_map` initialization in `DeviceScene` constructor |
+| `intern/cycles/scene/geometry.cpp` | Build `sdf_brick_map` during SDF upload: scan indirection for active bricks, upload mapping array |

@@ -18,18 +18,16 @@ COMPUTE_SHADER_CREATE_INFO(sdf_grid_blend)
 
 void main()
 {
-  /* Each workgroup = one brick. gl_WorkGroupID = brick coord. */
-  int3 brick = int3(gl_WorkGroupID);
-
-  if (any(greaterThanEqual(brick, grid_resolution.xyz))) {
+  /* Active-brick-only dispatch: one workgroup per active brick.
+   * 2D dispatch to avoid GL's 65535 workgroup limit per axis. */
+  int brick_idx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * dispatch_width;
+  if (brick_idx >= active_brick_count) {
     return;
   }
 
-  /* Read indirection: skip void bricks. */
-  int slot = texelFetch(indirection_tx, brick, 0).r;
-  if (slot < 0) {
-    return;
-  }
+  int4 brick_data = active_bricks[brick_idx].coord;
+  int3 brick = brick_data.xyz;
+  int slot = brick_data.w;
 
   /* Compute slot origin in compact atlas. */
   int bpa = bricks_per_axis;

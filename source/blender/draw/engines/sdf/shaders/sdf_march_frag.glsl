@@ -21,8 +21,8 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 
-/** Max brick-level DDA steps (grid_res * sqrt(3) ~ 56 for 32). */
-#define MAX_BRICK_STEPS 128
+/** Max brick-level DDA steps. Non-cubic grids up to 128/axis → diagonal ~ 222. */
+#define MAX_BRICK_STEPS 256
 /** Max voxel-level DDA steps within one brick (8 * sqrt(3) ~ 14). */
 #define MAX_VOXEL_STEPS 24
 
@@ -59,70 +59,25 @@ void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out flo
 }
 
 /**
- * Compute C0-continuous normal using the dual voxel method within a compact brick.
- * The 3x3x3 neighborhood fits within the brick's 12^3 storage (2-voxel overlap
- * on each side) for all valid base values [-1, BRICK_SIZE-1] = [-1, 7].
- *
- *   base=-1 → atlas indices (−1+2)..(−1+2+2) = 1..3  ✓
- *   base= 7 → atlas indices (7+2)..(7+2+2)   = 9..11 ✓ (within 0..11)
+ * Compute normal from trilinear gradient at the hit point.
+ * Fetches 8 corner SDF values and computes the analytic gradient (Eq. 9-11).
+ * Much cheaper than the 27-fetch dual voxel method while giving smooth results
+ * for blended SDFs (the smooth union produces a smooth distance field).
  */
-float3 computeDualVoxelNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
+float3 computeNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
 {
-  /* Dual voxel base: shift by -0.5 then floor. */
-  int3 base = int3(floor(grid_pos_in_brick - float3(0.5f)));
-  base = clamp(base, int3(-1), int3(BRICK_SIZE - 1));
+  int3 cell = int3(floor(grid_pos_in_brick));
+  cell = clamp(cell, int3(0), int3(BRICK_SIZE - 1));
 
-  float3 uvw = clamp(grid_pos_in_brick - float3(0.5f) - float3(base), float3(0.0f), float3(1.0f));
+  float3 frac_pos = grid_pos_in_brick - float3(cell);
+  frac_pos = clamp(frac_pos, float3(0.0f), float3(1.0f));
 
-  /* Convert to compact atlas coords. +2 for the 2-voxel overlap border. */
-  int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
-  int3 atlas_base = slot_block * BRICK_STORAGE + base + int3(2);
+  float s[8];
+  fetchCornersCompact(brick, cell, slot, bpa, s);
 
-  /* Fetch 3x3x3 = 27 neighborhood. */
-  float v[27];
-  for (int dz = 0; dz < 3; dz++) {
-    for (int dy = 0; dy < 3; dy++) {
-      for (int dx = 0; dx < 3; dx++) {
-        v[dz * 9 + dy * 3 + dx] = texelFetch(compact_atlas,
-                                               atlas_base + int3(dx, dy, dz),
-                                               0)
-                                       .r;
-      }
-    }
-  }
-
-  /* For each of 8 overlapping primal voxels: analytic gradient, normalize. */
-  float3 normals[8];
-  for (int dz = 0; dz < 2; dz++) {
-    for (int dy = 0; dy < 2; dy++) {
-      for (int dx = 0; dx < 2; dx++) {
-        int o = dz * 9 + dy * 3 + dx;
-        float corners[8];
-        corners[0] = v[o];
-        corners[1] = v[o + 1];
-        corners[2] = v[o + 3];
-        corners[3] = v[o + 4];
-        corners[4] = v[o + 9];
-        corners[5] = v[o + 10];
-        corners[6] = v[o + 12];
-        corners[7] = v[o + 13];
-
-        float3 local = grid_pos_in_brick - float3(base + int3(dx, dy, dz));
-        float3 grad = trilinearGradient(corners, local);
-        float len = length(grad);
-        normals[dz * 4 + dy * 2 + dx] = len > 1e-8f ? grad / len
-                                                       : float3(0.0f, 0.0f, 1.0f);
-      }
-    }
-  }
-
-  float3 n00 = mix(normals[0], normals[1], uvw.x);
-  float3 n10 = mix(normals[2], normals[3], uvw.x);
-  float3 n01 = mix(normals[4], normals[5], uvw.x);
-  float3 n11 = mix(normals[6], normals[7], uvw.x);
-  float3 n0 = mix(n00, n10, uvw.y);
-  float3 n1 = mix(n01, n11, uvw.y);
-  return normalize(mix(n0, n1, uvw.z));
+  float3 grad = trilinearGradient(s, frac_pos);
+  float len = length(grad);
+  return len > 1e-8f ? grad / len : float3(0.0f, 0.0f, 1.0f);
 }
 
 void main()
@@ -223,6 +178,11 @@ void main()
 
     /* Read indirection. */
     int slot = texelFetch(indirection_tx, brick_cell, 0).r;
+
+    if (slot == -2) {
+      /* Fully inside the SDF: surface was already passed. Stop marching. */
+      break;
+    }
 
     if (slot >= 0) {
       /* Active brick: enter voxel-level DDA. */
@@ -398,11 +358,49 @@ void main()
 
   float3 hit_pos = ray_origin + ray_dir * hit_t;
 
+  /* ---- 5b. Debug: Object ID visualization ---- */
+  if (debug_mode == 1) {
+    /* Read object ID from atlas at hit position. */
+    float3 brick_origin_dbg = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
+    float3 local_pos_dbg = (hit_pos - brick_origin_dbg) * inv_voxel;
+
+    int bpa_dbg = bricks_per_axis;
+    int3 slot_block_dbg = int3(hit_slot % bpa_dbg,
+                               (hit_slot / bpa_dbg) % bpa_dbg,
+                               hit_slot / (bpa_dbg * bpa_dbg));
+    int3 atlas_coord_dbg = slot_block_dbg * BRICK_STORAGE + int3(floor(local_pos_dbg)) + int3(2);
+    int obj_id = texelFetch(object_id_tx, atlas_coord_dbg, 0).r;
+
+    /* Golden-ratio hue hash for distinct per-object colors. */
+    float3 id_color;
+    if (obj_id < 0) {
+      id_color = float3(0.15f); /* Dark gray for unclaimed voxels. */
+    }
+    else {
+      float hue = fract(float(obj_id) * 0.618033988749895f + 0.1f);
+      /* Simplified HSV→RGB (S=0.75, V=0.9). */
+      float3 k = fract(float3(hue) + float3(0.0f, 0.6667f, 0.3333f)) * 6.0f;
+      id_color = 0.9f * (1.0f - 0.75f * max(1.0f - abs(k - 3.0f), float3(0.0f)));
+    }
+
+    /* Simple lambertian with fixed light for depth cues. */
+    float3 brick_origin_n = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
+    float3 hit_in_brick_n = (hit_pos - brick_origin_n) * inv_voxel;
+    float3 N = computeNormalCompact(
+        hit_in_brick_n, hit_brick, hit_slot, bricks_per_axis);
+    float NdotL = max(dot(normalize(N), normalize(float3(0.5f, 0.7f, 1.0f))), 0.0f);
+    float shade = 0.35f + 0.65f * NdotL;
+
+    out_color = float4(id_color * shade, 1.0f);
+    gl_FragDepth = drw_point_world_to_screen(hit_pos).z;
+    return;
+  }
+
   /* ---- 6. Compute normal ---- */
   /* Grid position within the brick (0..BRICK_SIZE). */
   float3 brick_origin = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
   float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
-  float3 normal = computeDualVoxelNormalCompact(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
+  float3 normal = computeNormalCompact(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
 
   /* ---- 7. Read blended color ---- */
   /* Trilinear interpolate color from the compact atlas. */

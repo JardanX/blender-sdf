@@ -21,6 +21,27 @@
 #define SDF_PI 3.14159265358979323846f
 
 /* -------------------------------------------------------------------- */
+/** \name BVH Traversal Helpers
+ * \{ */
+
+/** Maximum BVH traversal stack depth (supports ~4 billion nodes). */
+#define BVH_MAX_STACK 32
+
+/** Decode an integer packed via intBitsToFloat in a BVH node field. */
+int bvh_decode_int(float encoded)
+{
+  return floatBitsToInt(encoded);
+}
+
+/** Test whether two AABBs overlap (inclusive). */
+bool aabb_overlap(float3 a_min, float3 a_max, float3 b_min, float3 b_max)
+{
+  return all(lessThanEqual(a_min, b_max)) && all(greaterThanEqual(a_max, b_min));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Primitives
  * \{ */
 

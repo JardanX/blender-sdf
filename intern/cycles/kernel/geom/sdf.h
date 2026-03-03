@@ -192,7 +192,233 @@ ccl_device float3 sdf_compute_normal(KernelGlobals kg,
 }
 
 /* -------------------------------------------------------------------- */
-/* Two-level DDA ray march. */
+/* Per-brick intersection (used by OptiX hardware BVH path).
+ *
+ * When OptiX builds one AABB per active brick, the hardware BVH handles
+ * brick-level traversal. The intersection program only needs to march
+ * voxels within the single brick that was hit.
+ * This reduces worst-case from 256+24 DDA steps to just 24 steps. */
+
+ccl_device bool sdf_intersect_brick(KernelGlobals kg,
+                                     ccl_private const Ray *ray,
+                                     ccl_private Intersection *isect,
+                                     const int sdf_index,
+                                     const int brick_linear,
+                                     const int brick_slot)
+{
+  const KernelSDF ksdf = kernel_data_fetch(sdf_objects, sdf_index);
+  const int grid_res = ksdf.grid_res;
+  const float voxel_size = ksdf.voxel_size;
+  const float3 origin = make_float3(ksdf.origin.x, ksdf.origin.y, ksdf.origin.z);
+  const int bpa = ksdf.bricks_per_axis;
+  const int atlas_off = ksdf.atlas_offset;
+  const int atlas_dim = bpa * SDF_BRICK_STORAGE;
+
+  /* Decode brick cell from linear index. */
+  const int3 brick_cell = make_int3(brick_linear % grid_res,
+                                     (brick_linear / grid_res) % grid_res,
+                                     brick_linear / (grid_res * grid_res));
+
+  /* Fully-inside brick: immediate hit at AABB entry. */
+  if (brick_slot == -2) {
+    /* Clip ray to brick AABB. */
+    const float brick_world = float(SDF_BRICK_SIZE) * voxel_size;
+    const float3 brick_min = origin + make_float3(float(brick_cell.x),
+                                                    float(brick_cell.y),
+                                                    float(brick_cell.z)) *
+                                          brick_world;
+    const float3 brick_max = brick_min + make_float3(brick_world, brick_world, brick_world);
+
+    const float3 inv_dir = safe_divide(one_float3(), ray->D);
+    const float3 t0 = (brick_min - ray->P) * inv_dir;
+    const float3 t1 = (brick_max - ray->P) * inv_dir;
+    const float3 t_lo = min(t0, t1);
+    float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+
+    const float t_self_offset = voxel_size;
+    t_enter = max(t_enter, t_self_offset);
+
+    if (t_enter >= isect->t) {
+      return false;
+    }
+
+    isect->t = t_enter;
+    isect->prim = sdf_index;
+    isect->object = ksdf.object_id;
+    isect->type = PRIMITIVE_SDF;
+    isect->u = __int_as_float(brick_linear);
+    isect->v = __int_as_float(-2);
+    return true;
+  }
+
+  /* Active brick: voxel-level DDA only. */
+  const float inv_voxel = 1.0f / voxel_size;
+
+  const float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
+                                                     float(brick_cell.y * SDF_BRICK_SIZE),
+                                                     float(brick_cell.z * SDF_BRICK_SIZE)) *
+                                            voxel_size;
+
+  /* Clip ray to brick AABB. */
+  const float3 brick_min = brick_origin;
+  const float3 brick_max = brick_origin + make_float3(float(SDF_BRICK_SIZE),
+                                                        float(SDF_BRICK_SIZE),
+                                                        float(SDF_BRICK_SIZE)) *
+                                               voxel_size;
+
+  const float3 inv_dir = safe_divide(one_float3(), ray->D);
+  const float3 t0 = (brick_min - ray->P) * inv_dir;
+  const float3 t1 = (brick_max - ray->P) * inv_dir;
+  const float3 t_lo = min(t0, t1);
+  const float3 t_hi = max(t0, t1);
+  float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+  float t_brick_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
+
+  const float t_self_offset = voxel_size;
+  t_enter = max(t_enter, t_self_offset);
+  t_brick_exit = min(t_brick_exit, isect->t);
+
+  if (t_enter >= t_brick_exit) {
+    return false;
+  }
+
+  /* Voxel-level DDA setup. */
+  const float3 V = (ray->P - brick_origin) * inv_voxel;
+  const float3 VD = ray->D * inv_voxel;
+
+  const float3 V_enter = V + t_enter * VD;
+  int3 vcell = make_int3(
+      (int)floorf(V_enter.x), (int)floorf(V_enter.y), (int)floorf(V_enter.z));
+  vcell.x = clamp(vcell.x, 0, SDF_BRICK_SIZE - 1);
+  vcell.y = clamp(vcell.y, 0, SDF_BRICK_SIZE - 1);
+  vcell.z = clamp(vcell.z, 0, SDF_BRICK_SIZE - 1);
+
+  const int3 vstep = make_int3(VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0),
+                                VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0),
+                                VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0));
+
+  const float3 vtDelta = make_float3(VD.x != 0.0f ? fabsf(1.0f / VD.x) : 1e30f,
+                                      VD.y != 0.0f ? fabsf(1.0f / VD.y) : 1e30f,
+                                      VD.z != 0.0f ? fabsf(1.0f / VD.z) : 1e30f);
+
+  const float3 vbound = make_float3(VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x),
+                                     VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y),
+                                     VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z));
+
+  float3 vtMax = make_float3(VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f,
+                               VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f,
+                               VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f);
+
+  float vt_current = t_enter;
+
+  for (int vs = 0; vs < SDF_MAX_VOXEL_STEPS; vs++) {
+    if (vcell.x < 0 || vcell.y < 0 || vcell.z < 0 || vcell.x > SDF_BRICK_SIZE - 1 ||
+        vcell.y > SDF_BRICK_SIZE - 1 || vcell.z > SDF_BRICK_SIZE - 1)
+    {
+      break;
+    }
+
+    float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
+    vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+
+    /* Fetch 8 corners. */
+    float s[8];
+    sdf_fetch_corners(kg, atlas_off, vcell, brick_slot, bpa, atlas_dim, s);
+
+    float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
+                     min(min(s[4], s[5]), min(s[6], s[7])));
+    float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
+                     max(max(s[4], s[5]), max(s[6], s[7])));
+
+    if (smin <= 0.0f) {
+      if (smax < 0.0f) {
+        /* All negative: immediate hit. */
+        isect->t = vt_current;
+        isect->prim = sdf_index;
+        isect->object = ksdf.object_id;
+        isect->type = PRIMITIVE_SDF;
+        isect->u = __int_as_float(brick_linear);
+        isect->v = __int_as_float(brick_slot);
+        return true;
+      }
+
+      /* Mixed signs: cubic solve. */
+      float T_max = vt_cell_exit - vt_current;
+      if (T_max > 1e-8f) {
+        float k[8];
+        sdf_trilinear_coeffs(s, k);
+
+        float3 o_local = V + vt_current * VD - make_float3(float(vcell.x),
+                                                              float(vcell.y),
+                                                              float(vcell.z));
+        o_local = clamp(o_local, zero_float3(), one_float3());
+        float3 d_scaled = VD * T_max;
+
+        float c[4];
+        sdf_cubic_coeffs(k, o_local, d_scaled, c);
+
+        if (c[0] < -1e-5f) {
+          isect->t = vt_current;
+          isect->prim = sdf_index;
+          isect->object = ksdf.object_id;
+          isect->type = PRIMITIVE_SDF;
+          isect->u = __int_as_float(brick_linear);
+          isect->v = __int_as_float(brick_slot);
+          return true;
+        }
+
+        float u_hit = sdf_solve_cubic(c, 1.0f);
+        if (u_hit >= 0.0f) {
+          float hit_t = vt_current + u_hit * T_max;
+          if (hit_t < isect->t) {
+            isect->t = hit_t;
+            isect->prim = sdf_index;
+            isect->object = ksdf.object_id;
+            isect->type = PRIMITIVE_SDF;
+            isect->u = __int_as_float(brick_linear);
+            isect->v = __int_as_float(brick_slot);
+            return true;
+          }
+        }
+      }
+    }
+
+    /* Advance voxel DDA. */
+    if (vtMax.x < vtMax.y) {
+      if (vtMax.x < vtMax.z) {
+        vt_current = vtMax.x;
+        vcell.x += vstep.x;
+        vtMax.x += vtDelta.x;
+      }
+      else {
+        vt_current = vtMax.z;
+        vcell.z += vstep.z;
+        vtMax.z += vtDelta.z;
+      }
+    }
+    else {
+      if (vtMax.y < vtMax.z) {
+        vt_current = vtMax.y;
+        vcell.y += vstep.y;
+        vtMax.y += vtDelta.y;
+      }
+      else {
+        vt_current = vtMax.z;
+        vcell.z += vstep.z;
+        vtMax.z += vtDelta.z;
+      }
+    }
+
+    if (vt_current >= t_brick_exit) {
+      break;
+    }
+  }
+
+  return false;
+}
+
+/* -------------------------------------------------------------------- */
+/* Two-level DDA ray march (CPU/BVH2 path). */
 
 ccl_device bool sdf_intersect(KernelGlobals kg,
                                ccl_private const Ray *ray,
@@ -497,7 +723,7 @@ ccl_device bool sdf_intersect_all(KernelGlobals kg,
                                    const uint visibility)
 {
   bool hit = false;
-  const int num_sdfs = kg->sdf_objects.width;
+  const int num_sdfs = kernel_data.num_sdfs;
 
   for (int i = 0; i < num_sdfs; i++) {
     if (sdf_intersect(kg, ray, isect, i)) {

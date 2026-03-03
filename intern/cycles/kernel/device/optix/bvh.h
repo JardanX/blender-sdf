@@ -161,6 +161,12 @@ extern "C" __global__ void __anyhit__kernel_optix_shadow_all_hit()
     v = barycentrics.y;
     type = kernel_data_fetch(objects, object).primitive_type;
   }
+  else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
+    /* SDF. */
+    u = __uint_as_float(optixGetAttribute_0());
+    v = __uint_as_float(optixGetAttribute_1());
+    type = PRIMITIVE_SDF;
+  }
 #  ifdef __HAIR__
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {
     /* Curve. */
@@ -318,6 +324,9 @@ extern "C" __global__ void __anyhit__kernel_optix_visibility_test()
   if (optixIsTriangleHit()) {
     /* Triangle. */
   }
+  else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
+    /* SDF custom primitive — prim is the SDF index, not a curve segment. */
+  }
 #ifdef __HAIR__
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {
     /* Curve. */
@@ -363,6 +372,13 @@ extern "C" __global__ void __closesthit__kernel_optix_hit()
     optixSetPayload_2(__float_as_uint(barycentrics.y));
     optixSetPayload_3(prim);
     optixSetPayload_5(kernel_data_fetch(objects, object).primitive_type);
+  }
+  else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
+    /* SDF custom intersection — brick info encoded in attributes. */
+    optixSetPayload_1(optixGetAttribute_0()); /* brick_linear as uint bits */
+    optixSetPayload_2(optixGetAttribute_1()); /* brick_slot as uint bits */
+    optixSetPayload_3(prim);
+    optixSetPayload_5(PRIMITIVE_SDF);
   }
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {
     const KernelCurveSegment segment = kernel_data_fetch(curve_segments, prim);
@@ -462,6 +478,37 @@ extern "C" __global__ void __intersection__point()
   }
 }
 #endif
+
+/* SDF custom intersection program.
+ * Per-brick AABB approach: OptiX hardware BVH has one AABB per active brick.
+ * The primitive index maps to sdf_brick_map which gives us the brick
+ * coordinates and atlas slot. We only do voxel-level DDA (max 24 steps)
+ * instead of the full two-level DDA (256+24 steps). */
+extern "C" __global__ void __intersection__sdf()
+{
+  const int brick_prim = optixGetPrimitiveIndex();
+  const int4 brick_info = kernel_data_fetch(sdf_brick_map, brick_prim);
+  const int brick_linear = brick_info.x;
+  const int brick_slot = brick_info.y;
+  const int sdf_index = brick_info.z;
+
+  const float3 ray_P = optixGetObjectRayOrigin();
+  const float3 ray_D = optixGetObjectRayDirection();
+
+  Ray ray;
+  ray.P = ray_P;
+  ray.D = ray_D;
+
+  Intersection isect;
+  isect.t = optixGetRayTmax();
+
+  if (sdf_intersect_brick(nullptr, &ray, &isect, sdf_index, brick_linear, brick_slot)) {
+    optixReportIntersection(isect.t,
+                            SDF_OPTIX_HIT_KIND,
+                            __float_as_uint(isect.u),
+                            __float_as_uint(isect.v));
+  }
+}
 
 /* Scene intersection. */
 

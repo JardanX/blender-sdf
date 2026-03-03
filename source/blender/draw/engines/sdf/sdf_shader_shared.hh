@@ -39,6 +39,19 @@ struct BrickCounter {
   uint _pad2;
 };
 
+/** Active brick coordinate entry (written by classify, read by bake/grid_blend). */
+struct ActiveBrick {
+  int4 coord; /* xyz = brick coordinate, w = compact atlas slot index */
+};
+
+/** BVH node for GPU-side object AABB tree traversal.
+ * Interior node: left >= 0, right = right child index.
+ * Leaf node:     left = -1, right = object index into objects[]. */
+struct BVHNodeGPU {
+  float4 min_and_left;  /* xyz = AABB min, w = intBitsToFloat(left_child or -1) */
+  float4 max_and_right; /* xyz = AABB max, w = intBitsToFloat(right_child or obj_idx) */
+};
+
 /** Push constants for the classify compute shader. */
 struct SDFClassifyParams {
   float4 atlas_origin;

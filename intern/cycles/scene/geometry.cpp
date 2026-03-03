@@ -1138,11 +1138,47 @@ void GeometryManager::device_update(Device *device,
         }
       }
 
+      /* Build per-brick map for hardware BVH acceleration.
+       * Each active brick gets an entry so OptiX can build one AABB per brick. */
+      {
+        const int gr = first_sdf->grid_res;
+        vector<int4> brick_entries;
+        brick_entries.reserve(gr * gr * gr / 4);
+
+        for (int bz = 0; bz < gr; bz++) {
+          for (int by = 0; by < gr; by++) {
+            for (int bx = 0; bx < gr; bx++) {
+              const int idx = bz * gr * gr + by * gr + bx;
+              const int slot = first_sdf->indirection_data[idx];
+              if (slot >= 0 || slot == -2) {
+                const int brick_linear = bx + by * gr + bz * gr * gr;
+                brick_entries.push_back(make_int4(brick_linear, slot, 0, 0));
+              }
+            }
+          }
+        }
+
+        if (!brick_entries.empty()) {
+          dscene->sdf_brick_map.alloc(brick_entries.size());
+          memcpy(dscene->sdf_brick_map.data(),
+                 brick_entries.data(),
+                 brick_entries.size() * sizeof(int4));
+          dscene->sdf_brick_map.copy_to_device();
+          dscene->data.num_sdf_bricks = (int)brick_entries.size();
+        }
+        else {
+          dscene->sdf_brick_map.free();
+          dscene->data.num_sdf_bricks = 0;
+        }
+      }
+
       dscene->sdf_objects.copy_to_device();
       dscene->sdf_shader_map.copy_to_device();
       dscene->sdf_indirection.copy_to_device();
       dscene->sdf_atlas.copy_to_device();
       dscene->sdf_matid.copy_to_device();
+
+      dscene->data.num_sdfs = num_sdfs;
     }
     else {
       dscene->sdf_objects.free();
@@ -1150,6 +1186,10 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_indirection.free();
       dscene->sdf_atlas.free();
       dscene->sdf_matid.free();
+      dscene->sdf_brick_map.free();
+
+      dscene->data.num_sdfs = 0;
+      dscene->data.num_sdf_bricks = 0;
     }
   }
 
