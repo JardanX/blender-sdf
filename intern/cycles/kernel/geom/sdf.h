@@ -418,6 +418,186 @@ ccl_device bool sdf_intersect_brick(KernelGlobals kg,
 }
 
 /* -------------------------------------------------------------------- */
+/* Per-brick shadow intersection (OptiX path).
+ * Skips Newton-Raphson refinement — only detects root existence. */
+
+ccl_device bool sdf_intersect_brick_shadow(KernelGlobals kg,
+                                            ccl_private const Ray *ray,
+                                            const float t_max,
+                                            const int sdf_index,
+                                            const int brick_linear,
+                                            const int brick_slot)
+{
+  const KernelSDF ksdf = kernel_data_fetch(sdf_objects, sdf_index);
+  const int grid_res = ksdf.grid_res;
+  const float voxel_size = ksdf.voxel_size;
+  const float3 origin = make_float3(ksdf.origin.x, ksdf.origin.y, ksdf.origin.z);
+  const int bpa = ksdf.bricks_per_axis;
+  const int atlas_off = ksdf.atlas_offset;
+  const int atlas_dim = bpa * SDF_BRICK_STORAGE;
+
+  /* Decode brick cell from linear index. */
+  const int3 brick_cell = make_int3(brick_linear % grid_res,
+                                     (brick_linear / grid_res) % grid_res,
+                                     brick_linear / (grid_res * grid_res));
+
+  /* Fully-inside brick: immediate shadow hit. */
+  if (brick_slot == -2) {
+    const float brick_world = float(SDF_BRICK_SIZE) * voxel_size;
+    const float3 brick_min = origin + make_float3(float(brick_cell.x),
+                                                    float(brick_cell.y),
+                                                    float(brick_cell.z)) *
+                                          brick_world;
+    const float3 brick_max = brick_min + make_float3(brick_world, brick_world, brick_world);
+    const float3 inv_dir = safe_divide(one_float3(), ray->D);
+    const float3 t0 = (brick_min - ray->P) * inv_dir;
+    const float3 t1 = (brick_max - ray->P) * inv_dir;
+    const float3 t_lo = min(t0, t1);
+    float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+    t_enter = max(t_enter, voxel_size);
+    return t_enter < t_max;
+  }
+
+  /* Active brick: voxel-level DDA. */
+  const float inv_voxel = 1.0f / voxel_size;
+  const float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
+                                                     float(brick_cell.y * SDF_BRICK_SIZE),
+                                                     float(brick_cell.z * SDF_BRICK_SIZE)) *
+                                            voxel_size;
+
+  const float3 brick_min = brick_origin;
+  const float3 brick_max = brick_origin + make_float3(float(SDF_BRICK_SIZE),
+                                                        float(SDF_BRICK_SIZE),
+                                                        float(SDF_BRICK_SIZE)) *
+                                               voxel_size;
+
+  const float3 inv_dir = safe_divide(one_float3(), ray->D);
+  const float3 t0 = (brick_min - ray->P) * inv_dir;
+  const float3 t1 = (brick_max - ray->P) * inv_dir;
+  const float3 t_lo = min(t0, t1);
+  const float3 t_hi = max(t0, t1);
+  float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+  float t_brick_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
+
+  t_enter = max(t_enter, voxel_size);
+  t_brick_exit = min(t_brick_exit, t_max);
+
+  if (t_enter >= t_brick_exit) {
+    return false;
+  }
+
+  /* Voxel-level DDA. */
+  const float3 V = (ray->P - brick_origin) * inv_voxel;
+  const float3 VD = ray->D * inv_voxel;
+
+  const float3 V_enter = V + t_enter * VD;
+  int3 vcell = make_int3(
+      (int)floorf(V_enter.x), (int)floorf(V_enter.y), (int)floorf(V_enter.z));
+  vcell.x = clamp(vcell.x, 0, SDF_BRICK_SIZE - 1);
+  vcell.y = clamp(vcell.y, 0, SDF_BRICK_SIZE - 1);
+  vcell.z = clamp(vcell.z, 0, SDF_BRICK_SIZE - 1);
+
+  const int3 vstep = make_int3(VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0),
+                                VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0),
+                                VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0));
+
+  const float3 vtDelta = make_float3(VD.x != 0.0f ? fabsf(1.0f / VD.x) : 1e30f,
+                                      VD.y != 0.0f ? fabsf(1.0f / VD.y) : 1e30f,
+                                      VD.z != 0.0f ? fabsf(1.0f / VD.z) : 1e30f);
+
+  const float3 vbound = make_float3(VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x),
+                                     VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y),
+                                     VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z));
+
+  float3 vtMax = make_float3(VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f,
+                               VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f,
+                               VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f);
+
+  float vt_current = t_enter;
+
+  for (int vs = 0; vs < SDF_MAX_VOXEL_STEPS; vs++) {
+    if (vcell.x < 0 || vcell.y < 0 || vcell.z < 0 || vcell.x > SDF_BRICK_SIZE - 1 ||
+        vcell.y > SDF_BRICK_SIZE - 1 || vcell.z > SDF_BRICK_SIZE - 1)
+    {
+      break;
+    }
+
+    float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
+    vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+
+    float s[8];
+    sdf_fetch_corners(kg, atlas_off, vcell, brick_slot, bpa, atlas_dim, s);
+
+    float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
+                     min(min(s[4], s[5]), min(s[6], s[7])));
+    float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
+                     max(max(s[4], s[5]), max(s[6], s[7])));
+
+    if (smin <= 0.0f) {
+      if (smax < 0.0f) {
+        return true; /* All negative: inside surface. */
+      }
+
+      /* Mixed signs: check root existence without NR. */
+      float T_max = vt_cell_exit - vt_current;
+      if (T_max > 1e-8f) {
+        float k[8];
+        sdf_trilinear_coeffs(s, k);
+
+        float3 o_local = V + vt_current * VD - make_float3(float(vcell.x),
+                                                              float(vcell.y),
+                                                              float(vcell.z));
+        o_local = clamp(o_local, zero_float3(), one_float3());
+        float3 d_scaled = VD * T_max;
+
+        float c[4];
+        sdf_cubic_coeffs(k, o_local, d_scaled, c);
+
+        if (c[0] < -1e-5f) {
+          return true; /* Inside surface at ray entry. */
+        }
+
+        if (sdf_has_cubic_root(c, 1.0f)) {
+          return true; /* Root exists — shadow is blocked. */
+        }
+      }
+    }
+
+    /* Advance voxel DDA. */
+    if (vtMax.x < vtMax.y) {
+      if (vtMax.x < vtMax.z) {
+        vt_current = vtMax.x;
+        vcell.x += vstep.x;
+        vtMax.x += vtDelta.x;
+      }
+      else {
+        vt_current = vtMax.z;
+        vcell.z += vstep.z;
+        vtMax.z += vtDelta.z;
+      }
+    }
+    else {
+      if (vtMax.y < vtMax.z) {
+        vt_current = vtMax.y;
+        vcell.y += vstep.y;
+        vtMax.y += vtDelta.y;
+      }
+      else {
+        vt_current = vtMax.z;
+        vcell.z += vstep.z;
+        vtMax.z += vtDelta.z;
+      }
+    }
+
+    if (vt_current >= t_brick_exit) {
+      break;
+    }
+  }
+
+  return false;
+}
+
+/* -------------------------------------------------------------------- */
 /* Two-level DDA ray march (CPU/BVH2 path). */
 
 ccl_device bool sdf_intersect(KernelGlobals kg,
@@ -732,6 +912,267 @@ ccl_device bool sdf_intersect_all(KernelGlobals kg,
   }
 
   return hit;
+}
+
+/* -------------------------------------------------------------------- */
+/* Shadow ray intersection (CPU/BVH2 path).
+ * Uses sdf_has_cubic_root() — skips Newton-Raphson for ~6-14% speedup
+ * on shadow rays (per JCGT 2022 paper benchmarks). */
+
+ccl_device bool sdf_intersect_shadow(KernelGlobals kg,
+                                      ccl_private const Ray *ray,
+                                      const float t_max,
+                                      const int sdf_index)
+{
+  const KernelSDF ksdf = kernel_data_fetch(sdf_objects, sdf_index);
+  const int grid_res = ksdf.grid_res;
+  const float voxel_size = ksdf.voxel_size;
+  const float3 origin = make_float3(ksdf.origin.x, ksdf.origin.y, ksdf.origin.z);
+  const int bpa = ksdf.bricks_per_axis;
+  const int atlas_off = ksdf.atlas_offset;
+  const int indir_off = ksdf.indirection_offset;
+  const int atlas_dim = bpa * SDF_BRICK_STORAGE;
+
+  /* Clip ray to atlas AABB. */
+  const int3 total_res = make_int3(grid_res * SDF_BRICK_SIZE,
+                                   grid_res * SDF_BRICK_SIZE,
+                                   grid_res * SDF_BRICK_SIZE);
+  const float3 grid_min = origin;
+  const float3 grid_max = origin + make_float3(float(total_res.x),
+                                                float(total_res.y),
+                                                float(total_res.z)) *
+                                       voxel_size;
+
+  const float3 inv_dir = safe_divide(one_float3(), ray->D);
+  const float3 t0 = (grid_min - ray->P) * inv_dir;
+  const float3 t1 = (grid_max - ray->P) * inv_dir;
+  const float3 t_lo = min(t0, t1);
+  const float3 t_hi = max(t0, t1);
+  float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+  const float t_exit_grid = min(min(t_hi.x, t_hi.y), t_hi.z);
+
+  if (t_enter > t_exit_grid || t_exit_grid < 0.0f) {
+    return false;
+  }
+  t_enter = max(t_enter, voxel_size);
+
+  const float t_exit = min(t_exit_grid, t_max);
+  if (t_enter >= t_exit) {
+    return false;
+  }
+
+  /* Brick-level DDA setup. */
+  const float inv_voxel = 1.0f / voxel_size;
+  const float brick_world = float(SDF_BRICK_SIZE) * voxel_size;
+  const float inv_brick = 1.0f / brick_world;
+
+  const float3 B = (ray->P - origin) * inv_brick;
+  const float3 BD = ray->D * inv_brick;
+
+  float3 B_enter = B + t_enter * BD;
+  int3 brick_cell = make_int3((int)floorf(B_enter.x),
+                              (int)floorf(B_enter.y),
+                              (int)floorf(B_enter.z));
+  brick_cell.x = clamp(brick_cell.x, 0, grid_res - 1);
+  brick_cell.y = clamp(brick_cell.y, 0, grid_res - 1);
+  brick_cell.z = clamp(brick_cell.z, 0, grid_res - 1);
+
+  const int3 brick_step = make_int3(BD.x > 0.0f ? 1 : (BD.x < 0.0f ? -1 : 0),
+                                    BD.y > 0.0f ? 1 : (BD.y < 0.0f ? -1 : 0),
+                                    BD.z > 0.0f ? 1 : (BD.z < 0.0f ? -1 : 0));
+
+  const float3 brick_tDelta = make_float3(BD.x != 0.0f ? fabsf(1.0f / BD.x) : 1e30f,
+                                          BD.y != 0.0f ? fabsf(1.0f / BD.y) : 1e30f,
+                                          BD.z != 0.0f ? fabsf(1.0f / BD.z) : 1e30f);
+
+  float3 brick_boundary = make_float3(BD.x > 0.0f ? float(brick_cell.x + 1) : float(brick_cell.x),
+                                      BD.y > 0.0f ? float(brick_cell.y + 1) : float(brick_cell.y),
+                                      BD.z > 0.0f ? float(brick_cell.z + 1) : float(brick_cell.z));
+
+  float3 brick_tMax = make_float3(BD.x != 0.0f ? (brick_boundary.x - B.x) / BD.x : 1e30f,
+                                  BD.y != 0.0f ? (brick_boundary.y - B.y) / BD.y : 1e30f,
+                                  BD.z != 0.0f ? (brick_boundary.z - B.z) / BD.z : 1e30f);
+
+  float t_current = t_enter;
+
+  for (int bstep = 0; bstep < SDF_MAX_BRICK_STEPS; bstep++) {
+    if (brick_cell.x < 0 || brick_cell.y < 0 || brick_cell.z < 0 ||
+        brick_cell.x >= grid_res || brick_cell.y >= grid_res || brick_cell.z >= grid_res)
+    {
+      break;
+    }
+
+    float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
+    t_brick_exit = min(t_brick_exit, t_exit);
+
+    int slot = sdf_fetch_indirection(
+        kg, indir_off, brick_cell.x, brick_cell.y, brick_cell.z, grid_res);
+
+    if (slot == -2) {
+      return true; /* Fully inside: shadow blocked. */
+    }
+
+    if (slot >= 0) {
+      /* Active brick: voxel-level DDA with shadow fast path. */
+      float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
+                                                  float(brick_cell.y * SDF_BRICK_SIZE),
+                                                  float(brick_cell.z * SDF_BRICK_SIZE)) *
+                                         voxel_size;
+      float3 V = (ray->P - brick_origin) * inv_voxel;
+      float3 VD = ray->D * inv_voxel;
+
+      float3 V_enter = V + t_current * VD;
+      int3 vcell = make_int3(
+          (int)floorf(V_enter.x), (int)floorf(V_enter.y), (int)floorf(V_enter.z));
+      vcell.x = clamp(vcell.x, 0, SDF_BRICK_SIZE - 1);
+      vcell.y = clamp(vcell.y, 0, SDF_BRICK_SIZE - 1);
+      vcell.z = clamp(vcell.z, 0, SDF_BRICK_SIZE - 1);
+
+      int3 vstep = make_int3(VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0),
+                             VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0),
+                             VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0));
+
+      float3 vtDelta = make_float3(VD.x != 0.0f ? fabsf(1.0f / VD.x) : 1e30f,
+                                   VD.y != 0.0f ? fabsf(1.0f / VD.y) : 1e30f,
+                                   VD.z != 0.0f ? fabsf(1.0f / VD.z) : 1e30f);
+
+      float3 vbound = make_float3(VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x),
+                                  VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y),
+                                  VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z));
+
+      float3 vtMax = make_float3(VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f,
+                                 VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f,
+                                 VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f);
+
+      float vt_current = t_current;
+
+      for (int vs = 0; vs < SDF_MAX_VOXEL_STEPS; vs++) {
+        if (vcell.x < 0 || vcell.y < 0 || vcell.z < 0 || vcell.x > SDF_BRICK_SIZE - 1 ||
+            vcell.y > SDF_BRICK_SIZE - 1 || vcell.z > SDF_BRICK_SIZE - 1)
+        {
+          break;
+        }
+
+        float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
+        vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+
+        float s[8];
+        sdf_fetch_corners(kg, atlas_off, vcell, slot, bpa, atlas_dim, s);
+
+        float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
+                         min(min(s[4], s[5]), min(s[6], s[7])));
+        float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
+                         max(max(s[4], s[5]), max(s[6], s[7])));
+
+        if (smin <= 0.0f) {
+          if (smax < 0.0f) {
+            return true; /* All negative: shadow blocked. */
+          }
+
+          float T_max = vt_cell_exit - vt_current;
+          if (T_max > 1e-8f) {
+            float k[8];
+            sdf_trilinear_coeffs(s, k);
+
+            float3 o_local = V + vt_current * VD - make_float3(float(vcell.x),
+                                                                float(vcell.y),
+                                                                float(vcell.z));
+            o_local = clamp(o_local, zero_float3(), one_float3());
+            float3 d_scaled = VD * T_max;
+
+            float c[4];
+            sdf_cubic_coeffs(k, o_local, d_scaled, c);
+
+            if (c[0] < -1e-5f) {
+              return true;
+            }
+
+            /* Shadow fast path: existence check only, no NR refinement. */
+            if (sdf_has_cubic_root(c, 1.0f)) {
+              return true;
+            }
+          }
+        }
+
+        /* Advance voxel DDA. */
+        if (vtMax.x < vtMax.y) {
+          if (vtMax.x < vtMax.z) {
+            vt_current = vtMax.x;
+            vcell.x += vstep.x;
+            vtMax.x += vtDelta.x;
+          }
+          else {
+            vt_current = vtMax.z;
+            vcell.z += vstep.z;
+            vtMax.z += vtDelta.z;
+          }
+        }
+        else {
+          if (vtMax.y < vtMax.z) {
+            vt_current = vtMax.y;
+            vcell.y += vstep.y;
+            vtMax.y += vtDelta.y;
+          }
+          else {
+            vt_current = vtMax.z;
+            vcell.z += vstep.z;
+            vtMax.z += vtDelta.z;
+          }
+        }
+
+        if (vt_current >= t_brick_exit) {
+          break;
+        }
+      }
+    }
+
+    /* Advance brick-level DDA. */
+    if (brick_tMax.x < brick_tMax.y) {
+      if (brick_tMax.x < brick_tMax.z) {
+        t_current = brick_tMax.x;
+        brick_cell.x += brick_step.x;
+        brick_tMax.x += brick_tDelta.x;
+      }
+      else {
+        t_current = brick_tMax.z;
+        brick_cell.z += brick_step.z;
+        brick_tMax.z += brick_tDelta.z;
+      }
+    }
+    else {
+      if (brick_tMax.y < brick_tMax.z) {
+        t_current = brick_tMax.y;
+        brick_cell.y += brick_step.y;
+        brick_tMax.y += brick_tDelta.y;
+      }
+      else {
+        t_current = brick_tMax.z;
+        brick_cell.z += brick_step.z;
+        brick_tMax.z += brick_tDelta.z;
+      }
+    }
+
+    if (t_current > t_exit) {
+      break;
+    }
+  }
+
+  return false;
+}
+
+/* Shadow test across all SDF objects. */
+ccl_device bool sdf_intersect_all_shadow(KernelGlobals kg,
+                                          ccl_private const Ray *ray,
+                                          const float t_max,
+                                          const uint visibility)
+{
+  const int num_sdfs = kernel_data.num_sdfs;
+  for (int i = 0; i < num_sdfs; i++) {
+    if (sdf_intersect_shadow(kg, ray, t_max, i)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* Set up shader data for an SDF hit. */

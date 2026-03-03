@@ -494,7 +494,11 @@ extern "C" __global__ void __intersection__point()
  * Per-brick AABB approach: OptiX hardware BVH has one AABB per active brick.
  * The primitive index maps to sdf_brick_map which gives us the brick
  * coordinates and atlas slot. We only do voxel-level DDA (max 24 steps)
- * instead of the full two-level DDA (256+24 steps). */
+ * instead of the full two-level DDA (256+24 steps).
+ *
+ * Shadow ray optimization: when visibility flags indicate a shadow ray,
+ * uses sdf_intersect_brick_shadow() which skips Newton-Raphson refinement
+ * for ~6-14% faster shadow testing (JCGT 2022). */
 extern "C" __global__ void __intersection__sdf()
 {
   const int brick_prim = optixGetPrimitiveIndex();
@@ -510,14 +514,32 @@ extern "C" __global__ void __intersection__sdf()
   ray.P = ray_P;
   ray.D = ray_D;
 
-  Intersection isect;
-  isect.t = optixGetRayTmax();
+  const float t_max = optixGetRayTmax();
 
-  if (sdf_intersect_brick(nullptr, &ray, &isect, sdf_index, brick_linear, brick_slot)) {
-    optixReportIntersection(isect.t,
-                            SDF_OPTIX_HIT_KIND,
-                            __float_as_uint(isect.u),
-                            __float_as_uint(isect.v));
+  /* Detect shadow rays via visibility payload (p4). */
+  const uint visibility = optixGetPayload_4();
+  const bool is_shadow = (visibility & PATH_RAY_SHADOW) != 0;
+
+  if (is_shadow) {
+    /* Shadow fast path: existence check only, no NR refinement. */
+    if (sdf_intersect_brick_shadow(nullptr, &ray, t_max, sdf_index, brick_linear, brick_slot)) {
+      /* Report at t_max — exact t doesn't matter for shadow rays. */
+      optixReportIntersection(t_max,
+                              SDF_OPTIX_HIT_KIND,
+                              __float_as_uint(0.0f),
+                              __float_as_uint(0.0f));
+    }
+  }
+  else {
+    Intersection isect;
+    isect.t = t_max;
+
+    if (sdf_intersect_brick(nullptr, &ray, &isect, sdf_index, brick_linear, brick_slot)) {
+      optixReportIntersection(isect.t,
+                              SDF_OPTIX_HIT_KIND,
+                              __float_as_uint(isect.u),
+                              __float_as_uint(isect.v));
+    }
   }
 }
 

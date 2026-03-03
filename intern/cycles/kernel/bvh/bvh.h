@@ -165,7 +165,60 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
                                                  const uint visibility)
 {
   Intersection isect;
-  return scene_intersect(kg, ray, visibility, &isect);
+  isect.t = ray->tmax;
+
+  bool hit = false;
+
+  /* Standard BVH traversal for triangle/curve/point geometry. */
+#  ifdef __EMBREE__
+  IF_USING_EMBREE
+  {
+    if (kernel_data.device_bvh) {
+      hit = kernel_embree_intersect(kg, ray, visibility, &isect);
+    }
+  }
+#  endif
+
+  IF_NOT_USING_EMBREE
+  {
+    if (kernel_data.bvh.have_bvh_nodes) {
+#  ifdef __OBJECT_MOTION__
+      if (kernel_data.bvh.have_motion) {
+#    ifdef __HAIR__
+        if (kernel_data.bvh.have_curves) {
+          hit = bvh_intersect_hair_motion(kg, ray, &isect, visibility);
+        }
+        else
+#    endif
+        {
+          hit = bvh_intersect_motion(kg, ray, &isect, visibility);
+        }
+      }
+      else
+#  endif
+      {
+#  ifdef __HAIR__
+        if (kernel_data.bvh.have_curves) {
+          hit = bvh_intersect_hair(kg, ray, &isect, visibility);
+        }
+        else
+#  endif
+        {
+          hit = bvh_intersect(kg, ray, &isect, visibility);
+        }
+      }
+    }
+  }
+
+  /* SDF shadow: existence check only, skips Newton-Raphson refinement. */
+  if (kernel_data.num_sdfs > 0) {
+    const float shadow_tmax = hit ? isect.t : ray->tmax;
+    if (sdf_intersect_all_shadow(kg, ray, shadow_tmax, visibility)) {
+      hit = true;
+    }
+  }
+
+  return hit;
 }
 
 /* Single object BVH traversal, for SSS/AO/bevel. */
