@@ -13,6 +13,7 @@
 
 #include "BLI_math_vector_types.hh"
 
+#include "GPU_storage_buffer.hh"
 #include "GPU_texture.hh"
 
 #include "DRW_render.hh"
@@ -54,5 +55,8 @@ void sdf_atlas_params_get(float *voxel_size,
 
 /** Returns the number of SDF objects in the current bake. */
 int sdf_object_count_get();
+
+/** Returns the objects SSBO (SDFObjectGPU[]), or nullptr. */
+gpu::StorageBuf *sdf_objects_ssbo_get();
 
 }  // namespace blender::draw::sdf

@@ -92,6 +92,7 @@ static float3 s_atlas_extent = float3(0);
 static int3 s_grid_resolution = int3(0);
 static int s_bricks_per_axis = 0;
 static int s_object_count = 0;
+static gpu::StorageBuf *s_object_ssbo = nullptr;
 
 class Instance : public DrawEngine {
  private:
@@ -201,6 +202,9 @@ class Instance : public DrawEngine {
   gpu::Batch *grid_batch_ = nullptr;
   int grid_batch_mode_ = 0;
   int3 grid_batch_res_ = int3(0);
+
+  /** Debug BVH wireframe batch (GPU_PRIM_LINES, per-vertex color). */
+  gpu::Batch *bvh_batch_ = nullptr;
 
   const DRWContext *draw_ctx_ = nullptr;
 
@@ -377,9 +381,13 @@ class Instance : public DrawEngine {
     gpu_obj.bbox_min = float4(world_min, 0.0f);
     gpu_obj.bbox_max = float4(world_max, 0.0f);
 
-    /* Accumulate scene AABB. */
-    scene_min_ = math::min(scene_min_, world_min);
-    scene_max_ = math::max(scene_max_, world_max);
+    /* Rotation-invariant scene extent: circumscribed sphere of local AABB.
+     * radius = length(local_extent) is the tightest rotation-invariant bound.
+     * Grid resolution stays constant regardless of object rotation. */
+    float sphere_radius = math::length(local_extent);
+    float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
+    scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
+    scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
     objects_.append(gpu_obj);
     object_uids_.append(ob->id.session_uid);
@@ -591,10 +599,14 @@ class Instance : public DrawEngine {
     }
 
     if (needs_bake_) {
-      /* Invalidate debug grid batch: atlas geometry may have changed. */
+      /* Invalidate debug batches: atlas/BVH geometry may have changed. */
       if (grid_batch_) {
         GPU_batch_discard(grid_batch_);
         grid_batch_ = nullptr;
+      }
+      if (bvh_batch_) {
+        GPU_batch_discard(bvh_batch_);
+        bvh_batch_ = nullptr;
       }
 
       /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
@@ -677,6 +689,7 @@ class Instance : public DrawEngine {
      * path-traced image since the SDF draw engine only provides depth. */
     if (!draw_ctx_->v3d || draw_ctx_->v3d->shading.type != OB_RENDER) {
       draw_debug_grid();
+      draw_debug_bvh();
     }
 
     DRW_submission_end();
@@ -691,6 +704,7 @@ class Instance : public DrawEngine {
     s_grid_resolution = grid_res_;
     s_bricks_per_axis = bricks_per_axis_;
     s_object_count = int(objects_.size());
+    s_object_ssbo = object_ssbo_;
 
     if (perf_enabled_) {
       perf_end_frame(needs_bake_);
@@ -1552,15 +1566,22 @@ class Instance : public DrawEngine {
     }
 
     /* Brick half-diagonal: conservative surface test distance.
-     * Multiplied by surface_margin_ (UI "Surface Margin" percentage) to
-     * widen the band of bricks classified as active near the surface.
-     * Add max_blend * 0.25 for the smooth union outward surface push. */
+     * The classify shader evaluates the blended smooth-union SDF, so the
+     * result already accounts for smooth-union surface push — no need to
+     * add max_blend here.  surface_margin_ (UI "Surface Margin" %) lets
+     * the user widen the active-brick shell if needed. */
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
-    brick_half_diag += max_blend_ * 0.25f;
     GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
     GPU_shader_uniform_1f(classify_sh_, "max_blend", max_blend_);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
+
+    /* Coarse threshold for super-brick (4x4x4 bricks = 32^3 voxels) early-out.
+     * Half-diagonal of super-brick with 2x Lipschitz safety factor, plus the
+     * fine brick_half_diag so that bricks at the super-brick edge are covered. */
+    float super_half_diag = 2.0f * float(SDF_BRICK_SIZE) * voxel_size_ * 1.732051f; /* 2*8*vs*sqrt(3) */
+    float coarse_threshold = super_half_diag * 2.0f + brick_half_diag;
+    GPU_shader_uniform_1f(classify_sh_, "coarse_threshold", coarse_threshold);
 
     /* Dispatch: one thread per brick, local group size is 4x4x4. */
     GPU_compute_dispatch(classify_sh_,
@@ -1802,6 +1823,29 @@ class Instance : public DrawEngine {
     return GPU_batch_create_ex(GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
   }
 
+  /** Create a GPU_PRIM_LINES batch with per-vertex position and color. */
+  gpu::Batch *create_colored_line_batch(const float3 *positions,
+                                        const float4 *colors,
+                                        int vert_count)
+  {
+    if (vert_count <= 0) {
+      return nullptr;
+    }
+
+    GPUVertFormat format = {};
+    uint pos_attr = GPU_vertformat_attr_add(
+        &format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    uint col_attr = GPU_vertformat_attr_add(
+        &format, "color", gpu::VertAttrType::SFLOAT_32_32_32_32);
+
+    gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
+    GPU_vertbuf_data_alloc(*vbo, uint(vert_count));
+    GPU_vertbuf_attr_fill(vbo, pos_attr, positions);
+    GPU_vertbuf_attr_fill(vbo, col_attr, colors);
+
+    return GPU_batch_create_ex(GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+  }
+
   void rebuild_grid_batch_active()
   {
     if (!indirection_tx_) {
@@ -1884,11 +1928,219 @@ class Instance : public DrawEngine {
     grid_batch_ = create_line_batch(positions.data(), vi);
   }
 
+  /** Emit 12 wireframe edges (24 vertices) for an axis-aligned box. */
+  static void emit_box_edges(Vector<float3> &positions,
+                             Vector<float4> &colors,
+                             const float3 &lo,
+                             const float3 &hi,
+                             const float4 &col)
+  {
+    /* Bottom face. */
+    positions.append(float3(lo.x, lo.y, lo.z));
+    colors.append(col);
+    positions.append(float3(hi.x, lo.y, lo.z));
+    colors.append(col);
+    positions.append(float3(hi.x, lo.y, lo.z));
+    colors.append(col);
+    positions.append(float3(hi.x, hi.y, lo.z));
+    colors.append(col);
+    positions.append(float3(hi.x, hi.y, lo.z));
+    colors.append(col);
+    positions.append(float3(lo.x, hi.y, lo.z));
+    colors.append(col);
+    positions.append(float3(lo.x, hi.y, lo.z));
+    colors.append(col);
+    positions.append(float3(lo.x, lo.y, lo.z));
+    colors.append(col);
+
+    /* Top face. */
+    positions.append(float3(lo.x, lo.y, hi.z));
+    colors.append(col);
+    positions.append(float3(hi.x, lo.y, hi.z));
+    colors.append(col);
+    positions.append(float3(hi.x, lo.y, hi.z));
+    colors.append(col);
+    positions.append(float3(hi.x, hi.y, hi.z));
+    colors.append(col);
+    positions.append(float3(hi.x, hi.y, hi.z));
+    colors.append(col);
+    positions.append(float3(lo.x, hi.y, hi.z));
+    colors.append(col);
+    positions.append(float3(lo.x, hi.y, hi.z));
+    colors.append(col);
+    positions.append(float3(lo.x, lo.y, hi.z));
+    colors.append(col);
+
+    /* Vertical edges. */
+    positions.append(float3(lo.x, lo.y, lo.z));
+    colors.append(col);
+    positions.append(float3(lo.x, lo.y, hi.z));
+    colors.append(col);
+    positions.append(float3(hi.x, lo.y, lo.z));
+    colors.append(col);
+    positions.append(float3(hi.x, lo.y, hi.z));
+    colors.append(col);
+    positions.append(float3(hi.x, hi.y, lo.z));
+    colors.append(col);
+    positions.append(float3(hi.x, hi.y, hi.z));
+    colors.append(col);
+    positions.append(float3(lo.x, hi.y, lo.z));
+    colors.append(col);
+    positions.append(float3(lo.x, hi.y, hi.z));
+    colors.append(col);
+  }
+
+  /** HSV to RGB (H in [0,1], S in [0,1], V in [0,1]). */
+  static float3 hsv_to_rgb(float h, float s, float v)
+  {
+    float c = v * s;
+    float x = c * (1.0f - fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f));
+    float m = v - c;
+    float3 rgb;
+    if (h < 1.0f / 6.0f) {
+      rgb = float3(c, x, 0);
+    }
+    else if (h < 2.0f / 6.0f) {
+      rgb = float3(x, c, 0);
+    }
+    else if (h < 3.0f / 6.0f) {
+      rgb = float3(0, c, x);
+    }
+    else if (h < 4.0f / 6.0f) {
+      rgb = float3(0, x, c);
+    }
+    else if (h < 5.0f / 6.0f) {
+      rgb = float3(x, 0, c);
+    }
+    else {
+      rgb = float3(c, 0, x);
+    }
+    return rgb + float3(m);
+  }
+
+  /** Build a colored wireframe batch from the BVH tree and per-object OBBs. */
+  void rebuild_bvh_batch()
+  {
+    if (bvh_nodes_.is_empty()) {
+      return;
+    }
+
+    const int node_count = int(bvh_nodes_.size());
+    const int obj_count = int(objects_.size());
+
+    /* --- Compute depth for each node via iterative stack-based DFS --- */
+    Vector<int> depth(node_count, 0);
+    int max_depth = 0;
+
+    struct StackEntry {
+      int node_idx;
+      int node_depth;
+    };
+    Vector<StackEntry> stack;
+    stack.append({0, 0});
+
+    while (!stack.is_empty()) {
+      StackEntry entry = stack.last();
+      stack.remove_last();
+
+      if (entry.node_idx < 0 || entry.node_idx >= node_count) {
+        continue;
+      }
+
+      depth[entry.node_idx] = entry.node_depth;
+      max_depth = max_ii(max_depth, entry.node_depth);
+
+      const BVHNodeGPU &node = bvh_nodes_[entry.node_idx];
+      int left = reinterpret_cast<const int &>(node.min_and_left.w);
+      int right = reinterpret_cast<const int &>(node.max_and_right.w);
+
+      if (left >= 0) {
+        /* Interior node: push children. */
+        stack.append({left, entry.node_depth + 1});
+        stack.append({right, entry.node_depth + 1});
+      }
+      /* Leaf: left == -1, nothing to push. */
+    }
+
+    /* Preallocate: 24 verts per BVH node + 24 verts per object OBB. */
+    Vector<float3> positions;
+    Vector<float4> colors;
+    positions.reserve((node_count + obj_count) * 24);
+    colors.reserve((node_count + obj_count) * 24);
+
+    /* --- BVH node AABBs: depth-colored red→blue --- */
+    float depth_range = max_ii(max_depth, 1);
+    for (int i = 0; i < node_count; i++) {
+      const BVHNodeGPU &node = bvh_nodes_[i];
+      float3 lo = float3(node.min_and_left);
+      float3 hi = float3(node.max_and_right);
+
+      float t = float(depth[i]) / depth_range;
+      float hue = t * 0.67f; /* 0 = red, 0.67 = blue. */
+      float3 rgb = hsv_to_rgb(hue, 0.85f, 0.9f);
+      float4 col = float4(rgb, 0.85f);
+
+      emit_box_edges(positions, colors, lo, hi, col);
+    }
+
+    /* --- Per-object OBBs: white, rotated wireframes --- */
+    float4 white = float4(1.0f, 1.0f, 1.0f, 0.9f);
+    for (int i = 0; i < obj_count; i++) {
+      const SDFObjectGPU &obj = objects_[i];
+
+      /* Reconstruct rotation matrix from inverse_matrix.
+       * inverse_matrix is the inverse of the rotation-only matrix.
+       * For pure rotation: inverse = transpose, so rot = transpose(inv). */
+      float3 rot_col0 = float3(obj.inverse_matrix[0][0],
+                               obj.inverse_matrix[1][0],
+                               obj.inverse_matrix[2][0]);
+      float3 rot_col1 = float3(obj.inverse_matrix[0][1],
+                               obj.inverse_matrix[1][1],
+                               obj.inverse_matrix[2][1]);
+      float3 rot_col2 = float3(obj.inverse_matrix[0][2],
+                               obj.inverse_matrix[1][2],
+                               obj.inverse_matrix[2][2]);
+
+      float3 pos = float3(obj.position);
+      float3 extent = float3(obj.sdf_size) + float3(obj.bevel + obj.blend);
+
+      /* Generate 8 OBB corners. */
+      float3 corners[8];
+      for (int c = 0; c < 8; c++) {
+        float3 local = float3((c & 1) ? extent.x : -extent.x,
+                              (c & 2) ? extent.y : -extent.y,
+                              (c & 4) ? extent.z : -extent.z);
+        corners[c] = rot_col0 * local.x + rot_col1 * local.y + rot_col2 * local.z + pos;
+      }
+
+      /* 12 edges of a box: bottom(4), top(4), vertical(4).
+       * Corner indices: bottom = 0,1,3,2  top = 4,5,7,6 */
+      const int edges[12][2] = {
+          {0, 1}, {1, 3}, {3, 2}, {2, 0}, /* bottom */
+          {4, 5}, {5, 7}, {7, 6}, {6, 4}, /* top */
+          {0, 4}, {1, 5}, {3, 7}, {2, 6}, /* vertical */
+      };
+      for (int e = 0; e < 12; e++) {
+        positions.append(corners[edges[e][0]]);
+        colors.append(white);
+        positions.append(corners[edges[e][1]]);
+        colors.append(white);
+      }
+    }
+
+    bvh_batch_ = create_colored_line_batch(
+        positions.data(), colors.data(), int(positions.size()));
+  }
+
   void rebuild_grid_batch()
   {
     if (grid_batch_) {
       GPU_batch_discard(grid_batch_);
       grid_batch_ = nullptr;
+    }
+    if (bvh_batch_) {
+      GPU_batch_discard(bvh_batch_);
+      bvh_batch_ = nullptr;
     }
 
     grid_batch_mode_ = debug_grid_;
@@ -1896,6 +2148,9 @@ class Instance : public DrawEngine {
 
     if (debug_grid_ == 1) {
       rebuild_grid_batch_active();
+    }
+    else if (debug_grid_ == 3) {
+      rebuild_bvh_batch();
     }
   }
 
@@ -1943,6 +2198,45 @@ class Instance : public DrawEngine {
     GPU_line_width(1.5f);
     GPU_shader_uniform_4f(shader, "color", 0.0f, 1.0f, 0.0f, 0.8f);
     GPU_batch_draw(grid_batch_);
+
+    /* Restore state. */
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
+    GPU_line_width(1.0f);
+    GPU_shader_unbind();
+  }
+
+  void draw_debug_bvh()
+  {
+    if (debug_grid_ != 3) {
+      return;
+    }
+
+    /* Rebuild batch if settings changed or batch was invalidated. */
+    if (bvh_batch_ == nullptr || grid_batch_mode_ != debug_grid_) {
+      rebuild_grid_batch();
+    }
+    if (bvh_batch_ == nullptr) {
+      return;
+    }
+
+    /* Use builtin flat-color shader (per-vertex color). */
+    gpu::Shader *shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_FLAT_COLOR);
+    GPU_shader_bind(shader);
+
+    /* MVP = persmat (lines are in world space). */
+    View &view = View::default_get();
+    float4x4 mvp = view.persmat();
+    GPU_shader_uniform_mat4(shader, "ModelViewProjectionMatrix", mvp.ptr());
+
+    GPU_blend(GPU_BLEND_ALPHA);
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(false);
+    GPU_line_width(1.5f);
+
+    GPU_batch_set_shader(bvh_batch_, shader);
+    GPU_batch_draw(bvh_batch_);
 
     /* Restore state. */
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
@@ -2464,6 +2758,9 @@ class Instance : public DrawEngine {
     if (grid_batch_) {
       GPU_batch_discard(grid_batch_);
     }
+    if (bvh_batch_) {
+      GPU_batch_discard(bvh_batch_);
+    }
   }
 };
 
@@ -2509,6 +2806,11 @@ void sdf_atlas_params_get(
 int sdf_object_count_get()
 {
   return s_object_count;
+}
+
+gpu::StorageBuf *sdf_objects_ssbo_get()
+{
+  return s_object_ssbo;
 }
 
 DrawEngine *Engine::create_instance()

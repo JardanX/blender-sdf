@@ -26,9 +26,6 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
 #define MAX_BRICK_STEPS 128
 /** Max voxel-level DDA steps within one brick. */
 #define MAX_VOXEL_STEPS 24
-/** Max unique object hits to collect for selection cycling. */
-#define MAX_CYCLE_HITS 4
-
 int3 gridToCompact(int3 brick, int3 local_voxel, int slot, int bpa)
 {
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
@@ -341,121 +338,49 @@ void main()
     return;
   }
 
-  /* ---- 6. Collect all objects along the ray ---- */
-  /* Record the surface object, then resume the DDA march through the
-   * rest of the volume. At each active voxel, sample the object_id atlas
-   * to discover behind-objects. The DDA efficiently skips empty bricks,
-   * covering the full ray depth without expensive fixed-step sampling. */
+  /* ---- 6. Test all objects' AABBs against the ray for cycling ---- */
+  /* The object_id atlas only stores one object per voxel, so interior scanning
+   * can't reliably find all objects under the cursor (e.g. side-by-side objects
+   * that share a blended surface). Instead, test each object's world AABB against
+   * the camera ray. Any object whose AABB the ray intersects is a candidate.
+   * The first-hit object from the DDA gets the surface depth; others get their
+   * AABB entry depth. This matches how mesh selection works in Blender. */
 
-  int found_ids[MAX_CYCLE_HITS];
-  float found_depths[MAX_CYCLE_HITS];
-  int found_count = 0;
-
-  /* First hit: the surface object. */
-  int first_id = readObjectIdAtPos(hit_pos);
   float base_depth = drw_point_world_to_screen(hit_pos).z;
+  gl_FragDepth = base_depth;
 
+  /* First, write the surface hit object (from object_id atlas at hit point). */
+  int first_id = readObjectIdAtPos(hit_pos);
   if (first_id >= 0 && first_id < object_count) {
-    found_ids[0] = first_id;
-    found_depths[0] = base_depth;
-    found_count = 1;
+    uint sel_id = select_id_map_buf[first_id];
+    writeSelectHit(sel_id, base_depth);
   }
 
-  /* ---- 6b. Continue DDA from the hit point, sampling object_id at each voxel ---- */
-  /* Re-initialize brick DDA from the hit position. */
-  float3 B_hit = B + hit_t * BD;
-  int3 scan_brick = int3(floor(B_hit));
-  scan_brick = clamp(scan_brick, int3(0), grid_res - int3(1));
-
-  float3 scan_brick_boundary;
-  scan_brick_boundary.x = BD.x > 0.0f ? float(scan_brick.x + 1) : float(scan_brick.x);
-  scan_brick_boundary.y = BD.y > 0.0f ? float(scan_brick.y + 1) : float(scan_brick.y);
-  scan_brick_boundary.z = BD.z > 0.0f ? float(scan_brick.z + 1) : float(scan_brick.z);
-
-  float3 scan_brick_tMax;
-  scan_brick_tMax.x = BD.x != 0.0f ? (scan_brick_boundary.x - B.x) / BD.x : 1e30f;
-  scan_brick_tMax.y = BD.y != 0.0f ? (scan_brick_boundary.y - B.y) / BD.y : 1e30f;
-  scan_brick_tMax.z = BD.z != 0.0f ? (scan_brick_boundary.z - B.z) / BD.z : 1e30f;
-
-  float scan_t = hit_t;
-
-  for (int bstep2 = 0; bstep2 < MAX_BRICK_STEPS && found_count < MAX_CYCLE_HITS; bstep2++) {
-    if (any(lessThan(scan_brick, int3(0))) || any(greaterThanEqual(scan_brick, grid_res))) {
-      break;
+  /* Then test all other objects' AABBs against the ray. */
+  for (int i = 0; i < object_count; i++) {
+    if (i == first_id) {
+      continue;
     }
 
-    float scan_t_brick_exit = min(min(scan_brick_tMax.x, scan_brick_tMax.y), scan_brick_tMax.z);
-    scan_t_brick_exit = min(scan_t_brick_exit, t_exit);
+    float3 bmin = sdf_objects[i].bbox_min.xyz;
+    float3 bmax = sdf_objects[i].bbox_max.xyz;
 
-    int scan_slot = texelFetch(indirection_tx, scan_brick, 0).r;
+    /* Ray-AABB intersection (slab method). */
+    float3 t_min = (bmin - ray_origin) * inv_dir;
+    float3 t_max = (bmax - ray_origin) * inv_dir;
+    float3 t_near = min(t_min, t_max);
+    float3 t_far = max(t_min, t_max);
+    float t_in = max(max(t_near.x, t_near.y), t_near.z);
+    float t_out = min(min(t_far.x, t_far.y), t_far.z);
 
-    if (scan_slot == -2) {
-      break;
+    if (t_in <= t_out && t_out >= 0.0f) {
+      /* Ray hits this object's AABB. Use the entry point depth. */
+      float entry_t = max(t_in, 0.0f);
+      float3 entry_pos = ray_origin + ray_dir * entry_t;
+      float entry_depth = drw_point_world_to_screen(entry_pos).z;
+
+      uint sel_id = select_id_map_buf[i];
+      writeSelectHit(sel_id, entry_depth);
     }
-
-    if (scan_slot >= 0) {
-      /* Sample object_id at the midpoint of the ray segment through this brick. */
-      float mid_t = (scan_t + scan_t_brick_exit) * 0.5f;
-      float3 mid_pos = ray_origin + ray_dir * mid_t;
-      int obj_id = readObjectIdAtPos(mid_pos);
-
-      if (obj_id >= 0 && obj_id < object_count) {
-        bool already = false;
-        for (int j = 0; j < found_count; j++) {
-          if (found_ids[j] == obj_id) {
-            already = true;
-            break;
-          }
-        }
-        if (!already) {
-          found_ids[found_count] = obj_id;
-          found_depths[found_count] = drw_point_world_to_screen(mid_pos).z;
-          found_count++;
-        }
-      }
-    }
-
-    /* Advance brick DDA. */
-    if (scan_brick_tMax.x < scan_brick_tMax.y) {
-      if (scan_brick_tMax.x < scan_brick_tMax.z) {
-        scan_t = scan_brick_tMax.x;
-        scan_brick.x += brick_step.x;
-        scan_brick_tMax.x += brick_tDelta.x;
-      }
-      else {
-        scan_t = scan_brick_tMax.z;
-        scan_brick.z += brick_step.z;
-        scan_brick_tMax.z += brick_tDelta.z;
-      }
-    }
-    else {
-      if (scan_brick_tMax.y < scan_brick_tMax.z) {
-        scan_t = scan_brick_tMax.y;
-        scan_brick.y += brick_step.y;
-        scan_brick_tMax.y += brick_tDelta.y;
-      }
-      else {
-        scan_t = scan_brick_tMax.z;
-        scan_brick.z += brick_step.z;
-        scan_brick_tMax.z += brick_tDelta.z;
-      }
-    }
-
-    if (scan_t > t_exit) {
-      break;
-    }
-  }
-
-  if (found_count == 0) {
-    discard;
-    return;
-  }
-
-  /* ---- 7. Write all found objects to the selection buffer ---- */
-  gl_FragDepth = found_depths[0];
-
-  for (int i = 0; i < found_count; i++) {
-    uint sel_id = select_id_map_buf[found_ids[i]];
-    writeSelectHit(sel_id, found_depths[i]);
   }
 }
