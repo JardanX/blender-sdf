@@ -180,9 +180,11 @@ class Instance : public DrawEngine {
   bool perf_queries_valid_[2] = {false, false};
   /** Which passes were active (issued) on each frame slot. */
   bool perf_pass_active_[2][PERF_PASS_COUNT] = {};
+  /** Per-slot flag: whether bake passes ran on this slot's frame. */
+  bool perf_slot_baked_[2] = {false, false};
   /** Current frame index (alternates 0/1). */
   int perf_frame_idx_ = 0;
-  /** Whether bake passes ran on the frame whose results we're reading. */
+  /** Whether the DISPLAYED data is from a bake frame (set during readback). */
   bool perf_prev_baked_ = false;
   /** Timing results (from previous frame's queries). */
   double perf_classify_ms_ = 0.0;
@@ -191,6 +193,12 @@ class Instance : public DrawEngine {
   double perf_march_ms_ = 0.0;
   double perf_frame_ms_ = 0.0;
   double perf_fps_ = 0.0;
+  /** Persistent last-bake timing (updated only when a bake frame is read). */
+  double perf_last_classify_ms_ = 0.0;
+  double perf_last_bake_ms_ = 0.0;
+  double perf_last_grid_ms_ = 0.0;
+  /** Whether we have ever read valid bake timing data. */
+  bool perf_has_bake_data_ = false;
   /** Wall-clock time of last draw() call for FPS. */
   double perf_last_draw_time_ = 0.0;
   /** Circular buffer for FPS smoothing. */
@@ -476,11 +484,12 @@ class Instance : public DrawEngine {
       upload_objects();
     }
 
-    /* Reset per-frame pass activity flags. */
+    /* Reset per-frame pass activity flags and record bake status for this slot. */
     if (perf_enabled_) {
       for (int i = 0; i < PERF_PASS_COUNT; i++) {
         perf_pass_active_[perf_frame_idx_][i] = false;
       }
+      perf_slot_baked_[perf_frame_idx_] = needs_bake_;
     }
 
     if (needs_bake_) {
@@ -865,7 +874,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", grid_res_v);
 
     /* Compute max blend across all objects. Smooth union pushes the
-     * iso-surface outward by up to k/4 from either object's hard surface. */
+     * iso-surface outward by up to k/4 per blending pair. */
     max_blend_ = 0.0f;
     for (const SDFObjectGPU &obj : objects_) {
       max_blend_ = math::max(max_blend_, obj.blend);
@@ -874,7 +883,7 @@ class Instance : public DrawEngine {
     /* Brick half-diagonal: conservative surface test distance.
      * Multiplied by surface_margin_ (UI "Surface Margin" percentage) to
      * widen the band of bricks classified as active near the surface.
-     * Add max_blend * 0.25 to account for smooth union outward push. */
+     * Add max_blend * 0.25 for the smooth union outward surface push. */
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
     brick_half_diag += max_blend_ * 0.25f;
@@ -1503,21 +1512,17 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Read back previous frame's elapsed-time results (non-blocking). */
+    /* Read back previous frame's elapsed-time results.
+     * With double-buffering the previous frame's GPU work should be complete,
+     * so a blocking GL_QUERY_RESULT read is effectively free.  The old
+     * non-blocking GL_QUERY_RESULT_AVAILABLE check was unreliable and caused
+     * intermittent readback failures that left timing displays stale. */
     int prev = 1 - perf_frame_idx_;
     if (!perf_queries_valid_[prev]) {
       return;
     }
 
-    /* Check if the march query (always issued) is ready. */
-    GLint available = 0;
-    glGetQueryObjectiv(
-        perf_queries_[prev][PERF_PASS_MARCH], GL_QUERY_RESULT_AVAILABLE, &available);
-    if (!available) {
-      return;
-    }
-
-    /* Read each pass that was active on the previous frame. */
+    /* Read each pass that was active on the previous frame (blocking). */
     auto read_pass = [&](int pass, double &out_ms) {
       if (perf_pass_active_[prev][pass]) {
         GLuint64 elapsed_ns = 0;
@@ -1532,6 +1537,20 @@ class Instance : public DrawEngine {
     read_pass(PERF_PASS_BAKE, perf_bake_ms_);
     read_pass(PERF_PASS_GRID, perf_grid_ms_);
     read_pass(PERF_PASS_MARCH, perf_march_ms_);
+
+    /* Associate baked status with the data we just read, not the current frame.
+     * This fixes the one-frame mismatch where perf_prev_baked_ was set from
+     * the current frame's needs_bake_ but the displayed data is from the
+     * previous frame's queries. */
+    perf_prev_baked_ = perf_slot_baked_[prev];
+
+    /* Update persistent cache when the previous frame actually baked. */
+    if (perf_prev_baked_) {
+      perf_last_classify_ms_ = perf_classify_ms_;
+      perf_last_bake_ms_ = perf_bake_ms_;
+      perf_last_grid_ms_ = perf_grid_ms_;
+      perf_has_bake_data_ = true;
+    }
   }
 
   /** Begin a GL_TIME_ELAPSED query for the given pass. */
@@ -1554,10 +1573,9 @@ class Instance : public DrawEngine {
   }
 
   /** Format results and swap frame index. */
-  void perf_end_frame(bool baked)
+  void perf_end_frame(bool /*currently_baking*/)
   {
     perf_queries_valid_[perf_frame_idx_] = true;
-    perf_prev_baked_ = baked;
     perf_frame_idx_ = 1 - perf_frame_idx_;
 
     /* Format the text. */
@@ -1566,11 +1584,23 @@ class Instance : public DrawEngine {
                           100.0f * float(active_brick_count_) / float(total_bricks) :
                           0.0f;
 
-    char classify_str[32], bake_str[32], grid_str[32];
+    /* Display logic:
+     * - perf_prev_baked_: previous frame's readback had bake data → show live timing.
+     * - !perf_prev_baked_ && perf_has_bake_data_: idle but have cached values.
+     * - Neither: never baked yet → dashes. */
+    char classify_str[48], bake_str[48], grid_str[48];
     if (perf_prev_baked_) {
+      /* Live data from the frame we just read back. */
       std::snprintf(classify_str, sizeof(classify_str), "%.2f ms", perf_classify_ms_);
       std::snprintf(bake_str, sizeof(bake_str), "%.2f ms", perf_bake_ms_);
       std::snprintf(grid_str, sizeof(grid_str), "%.2f ms", perf_grid_ms_);
+    }
+    else if (perf_has_bake_data_) {
+      /* Idle: show last bake cost so user can still see it. */
+      std::snprintf(
+          classify_str, sizeof(classify_str), "%.2f ms", perf_last_classify_ms_);
+      std::snprintf(bake_str, sizeof(bake_str), "%.2f ms", perf_last_bake_ms_);
+      std::snprintf(grid_str, sizeof(grid_str), "%.2f ms", perf_last_grid_ms_);
     }
     else {
       std::snprintf(classify_str, sizeof(classify_str), "%s", "\xe2\x80\x94");

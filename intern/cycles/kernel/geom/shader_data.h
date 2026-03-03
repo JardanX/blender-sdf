@@ -14,7 +14,9 @@
 #include "kernel/geom/motion_triangle_shader.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/point_intersect.h"
-#include "kernel/geom/sdf.h"
+#ifndef __KERNEL_GPU__
+#  include "kernel/geom/sdf.h"
+#endif
 #include "kernel/geom/triangle_intersect.h"
 
 #include "kernel/util/differential.h"
@@ -66,8 +68,9 @@ ccl_device_inline void shader_setup_from_ray(KernelGlobals kg,
   /* Read ray data into shader globals. */
   sd->wi = -ray->D;
 
+#ifndef __KERNEL_GPU__
   if (sd->type & PRIMITIVE_SDF) {
-    /* SDF surface primitive. */
+    /* SDF surface primitive (CPU only — GPU uses prebuilt PTX without SDF). */
     sdf_shader_setup(kg, sd, ray, isect);
 
     sd->flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
@@ -78,20 +81,21 @@ ccl_device_inline void shader_setup_from_ray(KernelGlobals kg,
       sd->flag |= SD_BACKFACING;
       sd->Ng = -sd->Ng;
       sd->N = -sd->N;
-#ifdef __DPDU__
+#  ifdef __DPDU__
       sd->dPdu = -sd->dPdu;
       sd->dPdv = -sd->dPdv;
-#endif
+#  endif
     }
 
-#ifdef __RAY_DIFFERENTIALS__
+#  ifdef __RAY_DIFFERENTIALS__
     sd->dP = differential_zero_compact();
     sd->dI = differential_zero_compact();
     sd->du = differential_zero();
     sd->dv = differential_zero();
-#endif
+#  endif
     return;
   }
+#endif /* !__KERNEL_GPU__ */
 
 #ifdef __HAIR__
   if (sd->type & PRIMITIVE_CURVE) {

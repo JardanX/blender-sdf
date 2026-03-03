@@ -1516,12 +1516,6 @@ struct ccl_align(16) KernelData {
 #  endif
 #endif
   int pad2, pad3;
-
-  /* SDF — placed after device_bvh to preserve field offsets for prebuilt PTX. */
-  struct {
-    int num_sdfs;
-    int pad0, pad1_sdf, pad2_sdf;
-  } sdf;
 };
 static_assert_align(KernelData, 16);
 

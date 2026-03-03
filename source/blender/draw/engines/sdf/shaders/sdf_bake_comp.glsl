@@ -38,7 +38,9 @@ void main()
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
   /* Per-brick AABB for object culling (includes 2-voxel overlap border).
-   * Expand by max_blend so objects contributing to smooth union are evaluated. */
+   * Expand by max_blend so objects contributing to smooth union are evaluated.
+   * Objects outside max_blend of the storage region get h=0 in the smooth
+   * union (no contribution), so this is safe for cross-brick consistency. */
   float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
                       float3(max_blend);
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
