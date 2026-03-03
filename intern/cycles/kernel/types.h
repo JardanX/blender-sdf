@@ -1494,12 +1494,6 @@ struct ccl_align(16) KernelData {
 #define KERNEL_STRUCT_BEGIN(name, parent) name parent;
 #include "kernel/data_template.h"
 
-  /* SDF. */
-  struct {
-    int num_sdfs;
-    int pad0, pad1_sdf, pad2_sdf;
-  } sdf;
-
   /* Device specific BVH. */
 #ifdef __KERNEL_OPTIX__
   OptixTraversableHandle device_bvh;
@@ -1522,6 +1516,12 @@ struct ccl_align(16) KernelData {
 #  endif
 #endif
   int pad2, pad3;
+
+  /* SDF — placed after device_bvh to preserve field offsets for prebuilt PTX. */
+  struct {
+    int num_sdfs;
+    int pad0, pad1_sdf, pad2_sdf;
+  } sdf;
 };
 static_assert_align(KernelData, 16);
 

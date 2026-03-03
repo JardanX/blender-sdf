@@ -515,7 +515,16 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
   isect->object = p4;
   isect->type = p5;
 
-  return p5 != PRIMITIVE_NONE;
+  bool hit = (p5 != PRIMITIVE_NONE);
+
+  /* SDF intersection: march all SDF objects, only find closer hits. */
+  if (kernel_data.sdf.num_sdfs > 0) {
+    if (sdf_intersect_all(kg, ray, isect, visibility)) {
+      hit = true;
+    }
+  }
+
+  return hit;
 }
 
 ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
@@ -560,7 +569,20 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
                 p6,
                 p7);
 
-  return optixHitObjectIsHit();
+  if (optixHitObjectIsHit()) {
+    return true;
+  }
+
+  /* SDF intersection: check if shadow ray is blocked by any SDF object. */
+  if (kernel_data.sdf.num_sdfs > 0) {
+    Intersection isect;
+    isect.t = ray->tmax;
+    if (sdf_intersect_all(kg, ray, &isect, visibility)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 #ifdef __BVH_LOCAL__

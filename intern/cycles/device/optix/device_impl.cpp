@@ -1318,6 +1318,10 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 
     /* Build bottom level acceleration structures (BLAS). */
     Geometry *const geom = bvh->geometry[0];
+    if (geom->is_sdf()) {
+      /* SDF objects use distance-field ray marching, not hardware BVH. */
+      return;
+    }
     if (geom->is_hair()) {
       /* Build BLAS for curve primitives. */
       Hair *const hair = static_cast<Hair *const>(geom);
@@ -1710,6 +1714,9 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
       }
 
       BVHOptiX *const blas = static_cast<BVHOptiX *>(ob->get_geometry()->bvh.get());
+      if (!blas) {
+        continue;
+      }
       OptixTraversableHandle handle = blas->traversable_handle;
       if (handle == 0) {
         continue;

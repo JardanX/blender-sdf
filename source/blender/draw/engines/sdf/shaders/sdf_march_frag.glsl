@@ -224,15 +224,6 @@ void main()
     /* Read indirection. */
     int slot = texelFetch(indirection_tx, brick_cell, 0).r;
 
-    if (slot == -2) {
-      /* Fully inside: immediate hit at entry point. */
-      hit_t = t_current;
-      hit_brick = brick_cell;
-      hit_local_cell = int3(0);
-      hit_slot = 0; /* Will use -2 path for color. */
-      break;
-    }
-
     if (slot >= 0) {
       /* Active brick: enter voxel-level DDA. */
       active_bricks_hit++;
@@ -408,39 +399,24 @@ void main()
   float3 hit_pos = ray_origin + ray_dir * hit_t;
 
   /* ---- 6. Compute normal ---- */
-  float3 normal;
-  if (hit_slot >= 0) {
-    /* Grid position within the brick (0..BRICK_SIZE). */
-    float3 brick_origin = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
-    float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
-    normal = computeDualVoxelNormalCompact(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
-  }
-  else {
-    /* Slot == -2 (fully inside) or fallback: use central differences in world space.
-     * This only happens for the -2 case which is rare. */
-    normal = float3(0.0f, 0.0f, 1.0f);
-  }
+  /* Grid position within the brick (0..BRICK_SIZE). */
+  float3 brick_origin = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
+  float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
+  float3 normal = computeDualVoxelNormalCompact(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
 
   /* ---- 7. Read blended color ---- */
-  float3 obj_color;
-  if (hit_slot >= 0) {
-    /* Trilinear interpolate color from the compact atlas. */
-    float3 brick_origin_w = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
-    float3 local_pos = (hit_pos - brick_origin_w) * inv_voxel;
+  /* Trilinear interpolate color from the compact atlas. */
+  float3 local_pos = (hit_pos - brick_origin) * inv_voxel;
 
-    /* Compute compact atlas UV for hardware trilinear. */
-    int bpa = bricks_per_axis;
-    int3 slot_block = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
-    float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(2.0f);
+  /* Compute compact atlas UV for hardware trilinear. */
+  int bpa = bricks_per_axis;
+  int3 slot_block = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
+  float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(2.0f);
 
-    /* Normalize to [0,1] for texture() sampling. */
-    int3 compact_size = int3(textureSize(compact_atlas, 0));
-    float3 atlas_uv = atlas_pos / float3(compact_size);
-    obj_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
-  }
-  else {
-    obj_color = float3(0.5f);
-  }
+  /* Normalize to [0,1] for texture() sampling. */
+  int3 compact_size = int3(textureSize(compact_atlas, 0));
+  float3 atlas_uv = atlas_pos / float3(compact_size);
+  float3 obj_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
 
   /* ---- 8. Shading ---- */
   float3 shaded_color;
