@@ -151,6 +151,13 @@ class Sdfs : Overlay {
     int map_slot = GPU_shader_get_ssbo_binding(select_march_sh_, "select_id_map_buf");
     GPU_storagebuf_bind(map_ssbo_, map_slot);
 
+    /* Bind SDF objects SSBO (for ray-AABB cycling). */
+    gpu::StorageBuf *obj_ssbo = sdf::sdf_objects_ssbo_get();
+    if (obj_ssbo) {
+      int obj_slot = GPU_shader_get_ssbo_binding(select_march_sh_, "sdf_objects");
+      GPU_storagebuf_bind(obj_ssbo, obj_slot);
+    }
+
     /* Bind selection system UBO and output SSBO. */
     if (select_info_buf_) {
       GPU_uniformbuf_bind(select_info_buf_, SELECT_DATA);
