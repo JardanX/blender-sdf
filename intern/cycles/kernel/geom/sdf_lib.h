@@ -140,6 +140,63 @@ ccl_device float sdf_solve_cubic(const float c[4], const float tfar)
   return -1.0f;
 }
 
+/* Shadow ray optimization: detect root existence without numeric refinement.
+ * Based on the shadow ray optimization from "Ray Tracing of SDF Grids"
+ * (Hansson-Soderlund et al., JCGT 2022, Section 2):
+ * If a monotone subinterval has a sign change, a root exists — skip NR. */
+ccl_device bool sdf_has_cubic_root(const float c[4], const float tfar)
+{
+  /* Find critical points: g'(t) = c[1] + 2*c[2]*t + 3*c[3]*t^2 = 0 */
+  const float da = 3.0f * c[3];
+  const float db = 2.0f * c[2];
+  const float dc = c[1];
+
+  /* Build sorted interval boundaries. */
+  float bounds[4];
+  int n = 0;
+  bounds[n++] = 0.0f;
+
+  if (fabsf(da) > 1e-8f) {
+    float disc = db * db - 4.0f * da * dc;
+    if (disc >= 0.0f) {
+      disc = sqrtf(disc);
+      float t1 = (-db - disc) / (2.0f * da);
+      float t2 = (-db + disc) / (2.0f * da);
+      if (t1 > t2) {
+        float tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+      }
+      if (t1 > 1e-6f && t1 < tfar - 1e-6f) {
+        bounds[n++] = t1;
+      }
+      if (t2 > 1e-6f && t2 < tfar - 1e-6f && t2 - t1 > 1e-6f) {
+        bounds[n++] = t2;
+      }
+    }
+  }
+  else if (fabsf(db) > 1e-8f) {
+    float t1 = -dc / db;
+    if (t1 > 1e-6f && t1 < tfar - 1e-6f) {
+      bounds[n++] = t1;
+    }
+  }
+
+  bounds[n++] = tfar;
+
+  /* Check each monotone interval for a sign change. */
+  float fa = sdf_eval_cubic(c, bounds[0]);
+  for (int i = 0; i < n - 1; i++) {
+    float fb = sdf_eval_cubic(c, bounds[i + 1]);
+    if (fa * fb <= 0.0f) {
+      return true; /* Root exists — no refinement needed for shadow rays. */
+    }
+    fa = fb;
+  }
+
+  return false;
+}
+
 /* -------------------------------------------------------------------- */
 /* Trilinear Gradient (for normals). */
 
