@@ -497,7 +497,7 @@ ccl_device bool sdf_intersect_all(KernelGlobals kg,
                                    const uint visibility)
 {
   bool hit = false;
-  const int num_sdfs = kernel_data.sdf.num_sdfs;
+  const int num_sdfs = kg->sdf_objects.width;
 
   for (int i = 0; i < num_sdfs; i++) {
     if (sdf_intersect(kg, ray, isect, i)) {

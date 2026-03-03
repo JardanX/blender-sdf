@@ -90,11 +90,4 @@ KERNEL_DATA_ARRAY(KernelOctreeRoot, volume_tree_roots)
 KERNEL_DATA_ARRAY(int, volume_tree_root_ids)
 KERNEL_DATA_ARRAY(float, volume_step_size)
 
-/* SDF. */
-KERNEL_DATA_ARRAY(KernelSDF, sdf_objects)
-KERNEL_DATA_ARRAY(int, sdf_shader_map)
-KERNEL_DATA_ARRAY(int, sdf_indirection)
-KERNEL_DATA_ARRAY(float4, sdf_atlas)
-KERNEL_DATA_ARRAY(int, sdf_matid)
-
 #undef KERNEL_DATA_ARRAY

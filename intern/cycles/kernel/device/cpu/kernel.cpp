@@ -77,6 +77,28 @@ void kernel_global_memory_copy(KernelGlobalsCPU *kg,
     kg->tname.width = size; \
   }
 #include "kernel/data_arrays.h"
+
+  /* SDF arrays — CPU only, not in data_arrays.h to preserve GPU struct layout. */
+  else if (strcmp(name, "sdf_objects") == 0) {
+    kg->sdf_objects.data = (KernelSDF *)mem;
+    kg->sdf_objects.width = size;
+  }
+  else if (strcmp(name, "sdf_shader_map") == 0) {
+    kg->sdf_shader_map.data = (int *)mem;
+    kg->sdf_shader_map.width = size;
+  }
+  else if (strcmp(name, "sdf_indirection") == 0) {
+    kg->sdf_indirection.data = (int *)mem;
+    kg->sdf_indirection.width = size;
+  }
+  else if (strcmp(name, "sdf_atlas") == 0) {
+    kg->sdf_atlas.data = (float4 *)mem;
+    kg->sdf_atlas.width = size;
+  }
+  else if (strcmp(name, "sdf_matid") == 0) {
+    kg->sdf_matid.data = (int *)mem;
+    kg->sdf_matid.width = size;
+  }
   else {
     assert(0);
   }

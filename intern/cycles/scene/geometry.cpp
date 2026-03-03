@@ -1143,8 +1143,6 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_indirection.copy_to_device();
       dscene->sdf_atlas.copy_to_device();
       dscene->sdf_matid.copy_to_device();
-
-      dscene->data.sdf.num_sdfs = num_sdfs;
     }
     else {
       dscene->sdf_objects.free();
@@ -1152,8 +1150,6 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_indirection.free();
       dscene->sdf_atlas.free();
       dscene->sdf_matid.free();
-
-      dscene->data.sdf.num_sdfs = 0;
     }
   }
 

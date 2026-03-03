@@ -58,7 +58,6 @@ KERNEL_STRUCT_MEMBER(bvh, int, have_volumes)
 KERNEL_STRUCT_MEMBER(bvh, int, bvh_layout)
 KERNEL_STRUCT_MEMBER(bvh, int, use_bvh_steps)
 KERNEL_STRUCT_MEMBER(bvh, int, curve_subdivisions)
-KERNEL_STRUCT_MEMBER(bvh, int, have_bvh_nodes)
 KERNEL_STRUCT_END(KernelBVH)
 
 /* Film. */

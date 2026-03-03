@@ -31,12 +31,6 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
   }
 
   if (kernel_data.device_bvh == 0) {
-    /* No BVH, but may still have SDF objects. */
-    if (kernel_data.sdf.num_sdfs > 0) {
-      if (sdf_intersect_all(kg, ray, isect, visibility)) {
-        return true;
-      }
-    }
     return false;
   }
 
@@ -71,16 +65,7 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     }
   }
 
-  bool have_hit = hit.hasHit();
-
-  /* SDF intersection: march all SDF objects, only find closer hits. */
-  if (kernel_data.sdf.num_sdfs > 0) {
-    if (sdf_intersect_all(kg, ray, isect, visibility)) {
-      have_hit = true;
-    }
-  }
-
-  return have_hit;
+  return hit.hasHit();
 }
 
 ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,

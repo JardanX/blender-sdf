@@ -1866,18 +1866,21 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 
     /* Upload instance descriptions. */
     instances.resize(num_instances);
-    instances.copy_to_device();
 
-    /* Build top-level acceleration structure (TLAS) */
-    OptixBuildInput build_input = {};
-    build_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
-    build_input.instanceArray.instances = instances.device_pointer;
-    build_input.instanceArray.numInstances = num_instances;
+    if (num_instances > 0) {
+      instances.copy_to_device();
 
-    if (!build_optix_bvh(bvh_optix, OPTIX_BUILD_OPERATION_BUILD, build_input, 0)) {
-      progress.set_error("Failed to build OptiX acceleration structure");
+      /* Build top-level acceleration structure (TLAS) */
+      OptixBuildInput build_input = {};
+      build_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+      build_input.instanceArray.instances = instances.device_pointer;
+      build_input.instanceArray.numInstances = num_instances;
+
+      if (!build_optix_bvh(bvh_optix, OPTIX_BUILD_OPERATION_BUILD, build_input, 0)) {
+        progress.set_error("Failed to build OptiX acceleration structure");
+      }
+      tlas_handle = bvh_optix->traversable_handle;
     }
-    tlas_handle = bvh_optix->traversable_handle;
   }
 }
 

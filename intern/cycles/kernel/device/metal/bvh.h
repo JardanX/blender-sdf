@@ -212,13 +212,6 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     isect->t = ray->tmax;
     isect->type = PRIMITIVE_NONE;
 
-    /* SDF intersection: check even when MetalRT finds no hit. */
-    if (kernel_data.sdf.num_sdfs > 0) {
-      if (sdf_intersect_all(kg, ray, isect, visibility)) {
-        return true;
-      }
-    }
-
     return false;
   }
 
@@ -290,13 +283,6 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
   }
 #endif /* __POINTCLOUD__ */
 
-  /* SDF intersection: march all SDF objects, only find closer hits. */
-  if (kernel_data.sdf.num_sdfs > 0) {
-    if (sdf_intersect_all(kg, ray, isect, visibility)) {
-      return true;
-    }
-  }
-
   return true;
 }
 
@@ -341,15 +327,6 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
 
   if (intersection.type != intersection_type::none) {
     return true;
-  }
-
-  /* SDF intersection: check if shadow ray is blocked by any SDF object. */
-  if (kernel_data.sdf.num_sdfs > 0) {
-    Intersection isect;
-    isect.t = ray->tmax;
-    if (sdf_intersect_all(kg, ray, &isect, visibility)) {
-      return true;
-    }
   }
 
   return false;

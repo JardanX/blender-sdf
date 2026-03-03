@@ -16,41 +16,34 @@ namespace blender::draw::overlay {
 
 /**
  * SDF overlay for GPU picking.
- * Draws a solid ray-march bounding cube per SDF object so the selection system
- * can sphere-trace the analytical SDF primitive for pixel-perfect picking with exact depth.
- * Only active during selection draws (no visible output).
+ * Draws a solid bounding cube per SDF object using the standard extra_shape instanced
+ * pattern (same as speakers/empties). Only active during selection draws.
  */
 class Sdfs : Overlay {
+  using SdfInstanceBuf = ShapeInstanceBuf<ExtraInstanceData>;
+
  private:
   const SelectionType selection_type_;
 
-  /* Solid ray-march pass for picking/depth. */
   PassSimple solid_ps_ = {"SDF_solid"};
+  SdfInstanceBuf pick_buf_;
 
  public:
-  Sdfs(const SelectionType selection_type) : selection_type_(selection_type) {};
+  Sdfs(const SelectionType selection_type)
+      : selection_type_(selection_type), pick_buf_(selection_type, "sdf_pick_buf") {};
 
-  void begin_sync(Resources &res, const State &state) final
+  void begin_sync(Resources & /*res*/, const State &state) final
   {
-    enabled_ = state.is_space_v3d() &&
-               (selection_type_ != SelectionType::DISABLED);
+    enabled_ = state.is_space_v3d() && (selection_type_ != SelectionType::DISABLED);
 
     if (!enabled_) {
       return;
     }
 
-    /* Set up solid pass fully here so we can record draws in object_sync.
-     * PassSimple requires shader_set() before draw() calls. */
-    solid_ps_.init();
-    solid_ps_.state_set(DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL,
-                        state.clipping_plane_count);
-    solid_ps_.shader_set(res.shaders->sdf_pick.get());
-    solid_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
-    solid_ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
-    res.select_bind(solid_ps_);
+    pick_buf_.clear();
   }
 
-  void object_sync(Manager &manager,
+  void object_sync(Manager & /*manager*/,
                    const ObjectRef &ob_ref,
                    Resources &res,
                    const State & /*state*/) final
@@ -74,21 +67,34 @@ class Sdfs : Overlay {
       bound = float3(half.x + half.y, half.y + sdf->bevel, half.z + half.y);
     }
 
-    /* Use the object's unscaled transform for the resource handle so that
-     * drw_point_world_to_object() in the fragment shader gives SDF-local coordinates.
-     * The bounding cube is scaled in the vertex shader via sdf_bound push constant. */
-    ResourceHandle handle = manager.resource_handle(float4x4(ob->object_to_world()));
+    /* Bake SDF bounding extent into the model matrix so the unit cube [-1,1]
+     * maps to the SDF bounding volume in world space. */
+    float4x4 mat = float4x4(ob->object_to_world());
+    mat[0] *= bound.x;
+    mat[1] *= bound.y;
+    mat[2] *= bound.z;
 
-    /* Push constants must come before the draw call. */
-    solid_ps_.push_constant("sdf_type", int(sdf->sdf_type));
-    solid_ps_.push_constant("sdf_size", float3(sdf->size));
-    solid_ps_.push_constant("sdf_bevel", sdf->bevel);
-    solid_ps_.push_constant("sdf_bound", bound);
-    solid_ps_.draw(
-        res.shapes.cube_solid.get(), ResourceHandleRange(handle), select_id.get());
+    const float4 color(0.0f);
+    pick_buf_.append({mat, color, 1.0f}, select_id);
   }
 
-  void end_sync(Resources & /*res*/, const State & /*state*/) final {}
+  void end_sync(Resources &res, const State &state) final
+  {
+    if (!enabled_) {
+      return;
+    }
+
+    solid_ps_.init();
+    solid_ps_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_WRITE_DEPTH |
+                            DRW_STATE_DEPTH_LESS_EQUAL,
+                        state.clipping_plane_count);
+    solid_ps_.shader_set(res.shaders->extra_shape.get());
+    solid_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+    solid_ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+    res.select_bind(solid_ps_);
+
+    pick_buf_.end_sync(solid_ps_, res.shapes.cube_solid.get());
+  }
 
   void draw(Framebuffer &framebuffer, Manager &manager, View &view) final
   {
