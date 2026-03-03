@@ -969,3 +969,92 @@ Combined: moving 1 of 10 spread-out objects → ~20% bricks rebaked, each evalua
 | `source/blender/draw/engines/sdf/sdf_engine.cc` | In-place incremental baking: `prepare_incremental_bake()` reads indirection, computes dirty mask, allocates new slots for void bricks, re-uploads indirection. Removed copy-based infrastructure (`prev_indirection_tx_`, `prev_compact_atlas_tx_`, `copy_bricks_sh_`, `dispatch_copy_bricks()`, `compute_dirty_bricks()`). Simplified `ensure_compact_atlas()` and destructor. Removed debug printfs |
 | `source/blender/draw/engines/sdf/shaders/sdf_copy_bricks_comp.glsl` | **DELETED** — no longer needed; clean bricks stay in-place |
 | `source/blender/draw/CMakeLists.txt` | Removed `sdf_copy_bricks_comp.glsl` from shader file list |
+
+---
+
+## Native Picking Support for SDF Objects
+
+SDF objects were invisible to Blender's GPU picking system because they had no overlay handler writing to the selection buffer. Added a two-pass SDF overlay: wireframe shapes for viewport display, and a solid ray-march pass that sphere-traces each SDF primitive analytically for pixel-perfect picking with exact depth.
+
+### New Files (4)
+
+| File | Purpose |
+|------|---------|
+| `source/blender/draw/engines/overlay/overlay_sdf.hh` | SDF overlay class (`Sdfs`) with wireframe + solid ray-march passes, following the Speaker/Empty pattern |
+| `source/blender/draw/engines/overlay/shaders/overlay_sdf_pick_vert.glsl` | Vertex shader: transforms bounding cube vertices to clip space, passes world position to fragment |
+| `source/blender/draw/engines/overlay/shaders/overlay_sdf_pick_frag.glsl` | Fragment shader: sphere-traces analytical SDF (box/sphere/capsule/torus), writes exact `gl_FragDepth` + `select_id_output()` on hit, `discard` on miss |
+| `source/blender/draw/engines/overlay/shaders/infos/overlay_sdf_infos.hh` | Shader create info with push constants (sdf_type, sdf_size, sdf_bevel), DEPTH_WRITE(ANY), OVERLAY_INFO_VARIATIONS_MODELMAT |
+
+### Modified Files (4)
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/overlay/overlay_instance.hh` | Added `#include "overlay_sdf.hh"`, `Sdfs sdfs = {selection_type_}` member in `OverlayLayer` |
+| `source/blender/draw/engines/overlay/overlay_instance.cc` | Added `layer.sdfs` calls in `begin_sync`, `object_sync` (`case OB_SDF`), `end_sync`, `draw_v3d` (draw + draw_line lambdas) |
+| `source/blender/draw/engines/overlay/overlay_private.hh` | Added `StaticShader sdf_pick = shader_selectable("overlay_sdf_pick")` + `ensure_compile_async()` |
+| `source/blender/draw/CMakeLists.txt` | Added overlay_sdf.hh, overlay_sdf_infos.hh, overlay_sdf_pick_vert.glsl, overlay_sdf_pick_frag.glsl |
+
+---
+
+## Cycles GPU Crash Fix
+
+SDF objects caused Blender to crash when Cycles was set to GPU compute (OptiX/CUDA/HIP). The crash occurred because SDF geometry has no hardware BVH representation — GPU backends (OptiX, Metal, HIP) tried to build acceleration structures for SDF objects, hit null pointers, and crashed. CPU rendering worked fine because the CPU BVH2 path already calls `sdf_intersect_all()` for distance-field ray marching.
+
+**Fix strategy:** Exclude SDF objects from GPU BVH building entirely (they use analytical ray marching, not hardware BVH). Also added `sdf_intersect_all()` calls to GPU kernel headers for future PTX recompilation.
+
+### Modified Files (Cycles Host — Crash Fix)
+
+| File | Change |
+|------|--------|
+| `intern/cycles/scene/object.cpp` | `is_traceable()` returns false for SDF objects — excludes them from GPU top-level acceleration structure |
+| `intern/cycles/scene/geometry.cpp` | `need_build_bvh()` returns false for SDF geometry — prevents bottom-level BVH build attempts |
+| `intern/cycles/device/optix/device_impl.cpp` | Added `is_sdf()` early return in BLAS building + null check for `blas` in TLAS instance loop |
+| `intern/cycles/device/hiprt/device_impl.cpp` | Added null checks for `current_bvh` before accessing `geom_input` and `hiprt_geom` |
+
+### Modified Files (Cycles GPU Kernels — Future PTX)
+
+These changes add `sdf_intersect_all()` calls to GPU ray intersection functions. They take effect only when PTX/GPU kernels are recompiled (requires CUDA SDK for OptiX).
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/device/optix/bvh.h` | Added SDF intersection in `scene_intersect()` and `scene_intersect_shadow()` |
+| `intern/cycles/kernel/device/metal/bvh.h` | Added SDF intersection in `scene_intersect()` (both hit/no-hit paths) and `scene_intersect_shadow()` |
+| `intern/cycles/kernel/device/hiprt/bvh.h` | Added SDF intersection after HIPRT traversal + early SDF-only path when `device_bvh == 0` |
+
+### Modified Files (Draw — Pre-existing Build Fix)
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/overlay/overlay_sdf.hh` | Fixed stale draw API: `DRW_cache_cube_get()` → `res.shapes.cube_solid.get()`, `ResourceHandle` → `ResourceHandleRange`, removed `select_id` param from `draw()` |
+
+---
+
+## Fix SDF Blend Cutoff and Voxel Artifacts
+
+When two SDF objects overlap with blend > 0 (smooth union), hard black cutoffs and voxel grid artifacts appeared at the intersection zone. Three root causes fixed:
+
+### Bug Fix: -2 Brick Immediate Hit (Garbage Data)
+
+When a ray hit a `-2` (fully inside) brick, the ray marcher set `hit_slot = 0`, reading SDF data from the **first allocated active brick** — a completely unrelated brick. This produced garbage normals/colors, causing dark/black rendering.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Removed `-2` immediate-hit block (lines 227-234). Rays now skip `-2` bricks via DDA like `-1` bricks. Simplified normal/color computation — removed dead `else` branches since `hit_slot` is always >= 0 for any hit |
+
+### Bug Fix: Classify Threshold Missing Blend Margin
+
+The smooth union pushes the iso-surface outward by up to `k/4` from either object's hard surface. The brick classification threshold (`brick_half_diag`) didn't account for this, causing bricks at the blend boundary to be classified as `-2` (fully inside) instead of active.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Compute `max_blend_` across all objects. Add `max_blend * 0.25` to `brick_half_diag` in `dispatch_classify()`. Push `max_blend` uniform to both classify and bake shaders. New member `max_blend_` |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `max_blend` push constant to both `sdf_classify` and `sdf_bake` shader create infos |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Expanded per-brick AABB by `max_blend` (in addition to `brick_half_diag`) for object culling |
+
+### Bug Fix: Bake AABB Missing Blend Margin
+
+Per-brick AABB in the bake shader only included a 2-voxel overlap border. Objects contributing to smooth union but outside this narrow AABB were skipped, causing SDF discontinuities at brick boundaries.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Expanded per-brick AABB by `max_blend` so objects contributing to smooth union are always evaluated |

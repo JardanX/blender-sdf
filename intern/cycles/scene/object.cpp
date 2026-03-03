@@ -276,6 +276,11 @@ bool Object::is_traceable() const
   if (geometry->is_light()) {
     return false;
   }
+  /* SDF objects use distance-field ray marching (sdf_intersect_all),
+   * not hardware BVH traversal. Exclude them from the trace BVH. */
+  if (geometry->is_sdf()) {
+    return false;
+  }
   /* Mesh itself can be empty,can skip all such objects. */
   if (!bounds.valid() || bounds.size() == zero_float3()) {
     return false;

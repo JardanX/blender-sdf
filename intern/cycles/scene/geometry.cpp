@@ -110,6 +110,10 @@ int Geometry::motion_step(const float time) const
 
 bool Geometry::need_build_bvh(BVHLayout layout) const
 {
+  /* SDF objects use distance-field ray marching, not hardware BVH. */
+  if (is_sdf()) {
+    return false;
+  }
   return is_instanced() || layout == BVH_LAYOUT_OPTIX || layout == BVH_LAYOUT_MULTI_OPTIX ||
          layout == BVH_LAYOUT_METAL || layout == BVH_LAYOUT_MULTI_OPTIX_EMBREE ||
          layout == BVH_LAYOUT_MULTI_METAL || layout == BVH_LAYOUT_MULTI_METAL_EMBREE ||

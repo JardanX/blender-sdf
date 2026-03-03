@@ -31,9 +31,11 @@ void main()
                              voxel_size;
 
   /* Per-brick AABB for object culling.
-   * Expand by brick_half_diag to match the surface test threshold. */
-  float3 brick_min = brick_center - float3(brick_half_diag);
-  float3 brick_max = brick_center + float3(brick_half_diag);
+   * Expand by brick_half_diag to match the surface test threshold,
+   * plus max_blend to capture objects contributing to smooth union. */
+  float expand = brick_half_diag + max_blend;
+  float3 brick_min = brick_center - float3(expand);
+  float3 brick_max = brick_center + float3(expand);
 
   /* Evaluate SDF at brick center using all objects. */
   float acc_dist = 1e10f;

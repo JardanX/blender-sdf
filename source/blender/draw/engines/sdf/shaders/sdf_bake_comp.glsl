@@ -32,19 +32,17 @@ void main()
     return;
   }
 
-  /* Incremental: skip clean bricks (already copied from prev atlas). */
-  if (incremental != 0 && texelFetch(dirty_bricks_tx, brick, 0).r == 0u) {
-    return;
-  }
-
   /* Compute slot origin in compact atlas. */
   int bpa = bricks_per_axis;
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
-  /* Per-brick AABB for object culling (includes 2-voxel overlap border). */
-  float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size;
-  float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size;
+  /* Per-brick AABB for object culling (includes 2-voxel overlap border).
+   * Expand by max_blend so objects contributing to smooth union are evaluated. */
+  float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
+                      float3(max_blend);
+  float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
+                      float3(max_blend);
 
   /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
