@@ -461,31 +461,27 @@ class Instance : public DrawEngine {
     float3 scene_size = scene_max_ - scene_min_;
     float margin = math::max(math::reduce_max(scene_size) * 0.1f, 0.5f);
 
-    /* Fixed voxel density: resolution = voxels per BU. */
-    voxel_size_ = 1.0f / float(sdf_resolution_);
+    /* Fixed voxel density: resolution = voxels per BU.
+     * Smooth auto-coarsen: if the padded scene extent would exceed
+     * SDF_MAX_GRID_RES bricks, grow voxel_size by the exact amount needed.
+     * Using max(base, extent-based) gives a perfectly linear ramp —
+     * no snapping at all.  The -2 absorbs worst-case floor/ceil snap
+     * overhead (one extra brick per side), guaranteeing the grid fits. */
+    float base_voxel = 1.0f / float(sdf_resolution_);
+    float3 padded_min = scene_min_ - float3(margin);
+    float3 padded_max = scene_max_ + float3(margin);
+    float max_extent = math::reduce_max(padded_max - padded_min);
+    float min_voxel = max_extent /
+                      (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
+    voxel_size_ = math::max(base_voxel, min_voxel);
     float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
 
     /* Snap to world-aligned chunk boundaries. */
-    float3 grid_min = math::floor((scene_min_ - float3(margin)) / chunk_size) * chunk_size;
-    float3 grid_max = math::ceil((scene_max_ + float3(margin)) / chunk_size) * chunk_size;
+    float3 grid_min = math::floor(padded_min / chunk_size) * chunk_size;
+    float3 grid_max = math::ceil(padded_max / chunk_size) * chunk_size;
 
     /* Per-axis grid resolution in bricks. */
     int3 new_grid_res = int3(math::round((grid_max - grid_min) / chunk_size));
-
-    /* Auto-coarsen: if any axis exceeds SDF_MAX_GRID_RES, double voxel_size
-     * iteratively until the grid fits. This keeps the grid manageable for
-     * very large scenes while maintaining world-aligned chunk boundaries.
-     * Guard against infinite loops from float edge cases (NaN, overflow). */
-    for (int coarsen_iter = 0;
-         coarsen_iter < 20 && math::reduce_max(new_grid_res) > SDF_MAX_GRID_RES;
-         coarsen_iter++)
-    {
-      voxel_size_ *= 2.0f;
-      chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
-      grid_min = math::floor((scene_min_ - float3(margin)) / chunk_size) * chunk_size;
-      grid_max = math::ceil((scene_max_ + float3(margin)) / chunk_size) * chunk_size;
-      new_grid_res = int3(math::round((grid_max - grid_min) / chunk_size));
-    }
     new_grid_res = math::clamp(new_grid_res, int3(1), int3(SDF_MAX_GRID_RES));
 
     atlas_origin_ = grid_min;
@@ -615,6 +611,11 @@ class Instance : public DrawEngine {
       }
       ensure_indirection();
       if (!objects_.is_empty()) {
+        /* Clear indirection to -1 (outside) before classify to guarantee no
+         * stale slot IDs survive if a driver drops an imageStore write.
+         * GPU_texture_clear maps to glClearTexImage — fast GPU-side fill. */
+        int32_t clear_val = -1;
+        GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
         dispatch_classify();
       }
       else {

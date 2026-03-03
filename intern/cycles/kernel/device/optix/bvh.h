@@ -162,7 +162,11 @@ extern "C" __global__ void __anyhit__kernel_optix_shadow_all_hit()
     type = kernel_data_fetch(objects, object).primitive_type;
   }
   else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
-    /* SDF. */
+    /* SDF — prim is the brick_map index, not the sdf_index.
+     * Must resolve to sdf_index so downstream code (intersection_get_shader_flags,
+     * intersection_skip_self_shadow) indexes sdf_objects[0..num_sdfs-1] correctly. */
+    const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
+    prim = brick_info.z; /* sdf_index */
     u = __uint_as_float(optixGetAttribute_0());
     v = __uint_as_float(optixGetAttribute_1());
     type = PRIMITIVE_SDF;
@@ -325,7 +329,11 @@ extern "C" __global__ void __anyhit__kernel_optix_visibility_test()
     /* Triangle. */
   }
   else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
-    /* SDF custom primitive — prim is the SDF index, not a curve segment. */
+    /* SDF custom primitive — look up the SDF index from the brick map.
+     * With per-brick AABBs, optixGetPrimitiveIndex() is the brick map index,
+     * not the SDF index. We need the SDF index for self-intersection skipping. */
+    const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
+    prim = brick_info.z; /* sdf_index */
   }
 #ifdef __HAIR__
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {
@@ -374,10 +382,13 @@ extern "C" __global__ void __closesthit__kernel_optix_hit()
     optixSetPayload_5(kernel_data_fetch(objects, object).primitive_type);
   }
   else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
-    /* SDF custom intersection — brick info encoded in attributes. */
+    /* SDF custom intersection — brick info encoded in attributes.
+     * With per-brick AABBs, prim is the brick map index, not the SDF index.
+     * Look up the actual SDF index from the brick map. */
+    const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
     optixSetPayload_1(optixGetAttribute_0()); /* brick_linear as uint bits */
     optixSetPayload_2(optixGetAttribute_1()); /* brick_slot as uint bits */
-    optixSetPayload_3(prim);
+    optixSetPayload_3(brick_info.z);          /* sdf_index (not brick prim) */
     optixSetPayload_5(PRIMITIVE_SDF);
   }
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {

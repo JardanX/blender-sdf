@@ -4763,6 +4763,11 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},
       {2, "OBJECT_IDS", 0, "Object IDs", "Color each voxel by closest SDF object index"},
+      {3,
+       "BVH_BOUNDS",
+       0,
+       "BVH Bounds",
+       "BVH node AABBs and per-object oriented bounding boxes"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

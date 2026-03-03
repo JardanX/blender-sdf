@@ -1900,15 +1900,26 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
      * Based on SBS approach from "Ray Tracing of SDF Grids" (JCGT 2022). */
     sdf_blas_handle = 0;
     {
-      Object *sdf_object = nullptr;
+      /* Find the SDFGeometry marked as active by GeometryManager::device_update.
+       * This ensures we use the same instance that built the sdf_brick_map,
+       * preventing a count mismatch between BLAS AABBs and brick_map entries. */
       SDFGeometry *first_sdf = nullptr;
-      for (Object *ob : bvh->objects) {
-        if (ob->get_geometry() && ob->get_geometry()->is_sdf() && ob->bounds.valid() &&
-            ob->bounds.size() != zero_float3())
-        {
-          if (!sdf_object) {
+      for (Geometry *geom : bvh->geometry) {
+        if (geom->is_sdf()) {
+          SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
+          if (sdf->is_active_atlas && !sdf->indirection_data.empty()) {
+            first_sdf = sdf;
+            break;
+          }
+        }
+      }
+      /* Find any Object that uses this SDFGeometry (for TLAS instance ID). */
+      Object *sdf_object = nullptr;
+      if (first_sdf) {
+        for (Object *ob : bvh->objects) {
+          if (ob->get_geometry() == first_sdf) {
             sdf_object = ob;
-            first_sdf = static_cast<SDFGeometry *>(ob->get_geometry());
+            break;
           }
         }
       }
@@ -1949,8 +1960,7 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
           memcpy(sdf_aabb.data(), aabb_list.data(), num_bricks * sizeof(OptixAabb));
           sdf_aabb.copy_to_device();
 
-          unsigned int sdf_build_flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT |
-                                         OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
+          unsigned int sdf_build_flags = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
           OptixBuildInput sdf_build_input = {};
           sdf_build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
           CUdeviceptr aabb_ptr = sdf_aabb.device_pointer;

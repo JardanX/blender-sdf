@@ -179,11 +179,6 @@ void main()
     /* Read indirection. */
     int slot = texelFetch(indirection_tx, brick_cell, 0).r;
 
-    if (slot == -2) {
-      /* Fully inside the SDF: surface was already passed. Stop marching. */
-      break;
-    }
-
     if (slot >= 0) {
       /* Active brick: enter voxel-level DDA. */
       active_bricks_hit++;

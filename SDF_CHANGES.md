@@ -1266,3 +1266,146 @@ Based on the SBS (Sparse Brick Set) approach from "Ray Tracing of Signed Distanc
 | `intern/cycles/scene/devicescene.h` | Added `device_vector<int4> sdf_brick_map` to `DeviceScene` |
 | `intern/cycles/scene/devicescene.cpp` | Added `sdf_brick_map` initialization in `DeviceScene` constructor |
 | `intern/cycles/scene/geometry.cpp` | Build `sdf_brick_map` during SDF upload: scan indirection for active bricks, upload mapping array |
+
+### Bug Fix: Multi-SDF Crash (Illegal Address)
+
+When multiple SDF Blender objects are in the scene, `geometry.cpp` and `device_impl.cpp` could pick **different SDFGeometry instances** for building the brick_map and BLAS respectively. `geometry.cpp` iterated `scene->geometry` and preferred the instance with `need_update_rebuild`, while `device_impl.cpp` iterated `bvh->objects` and took the first with valid bounds. If they picked instances with different indirection data (one stale, one fresh), the brick_map entry count didn't match the BLAS AABB count, causing `optixGetPrimitiveIndex()` to return out-of-bounds indices for the brick_map → GPU illegal address crash.
+
+**Fix:** Added `is_active_atlas` flag to `SDFGeometry`. `geometry.cpp` marks the uploaded instance; `device_impl.cpp` finds and uses that same instance. Also fixed contradictory OptiX geometry flags (`DISABLE_ANYHIT` + `REQUIRE_SINGLE_ANYHIT_CALL`) on the SDF BLAS.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/scene/sdf.h` | Added `bool is_active_atlas` field to SDFGeometry class |
+| `intern/cycles/scene/geometry.cpp` | After picking first_sdf, marks it `is_active_atlas = true` (others false) |
+| `intern/cycles/device/optix/device_impl.cpp` | Now iterates `bvh->geometry` to find the SDFGeometry with `is_active_atlas = true`, then finds an Object referencing it for TLAS instance ID. Removed contradictory `OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT` from SDF geometry flags. |
+
+### Bug Fix: SDF BLAS/Data Ordering (CUDA Illegal Address)
+
+**Problem:** `is_active_atlas` was set in the SDF data upload section of `device_update()`, which runs AFTER `device_update_bvh()`. The OptiX TLAS code uses `is_active_atlas` to find the correct SDFGeometry for building the SDF BLAS. On first render, `is_active_atlas` was never set → no SDF BLAS → SDF invisible. On subsequent renders, BLAS used stale data from previous frame, causing brick count mismatch → CUDA illegal address crash.
+
+**Fix:** Moved `first_sdf` determination and `is_active_atlas` flag setting to BEFORE the BVH build step. Also fixed `sdf_object_id` lookup to find the object using the active atlas (matching `device_impl.cpp`), not just any SDF object.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/scene/geometry.cpp` | Moved `first_sdf` selection and `is_active_atlas` assignment before BVH build. Fixed `sdf_object_id` to match active atlas object. |
+| `intern/cycles/kernel/device/optix/bvh.h` | Fixed `__anyhit__kernel_optix_shadow_all_hit`: SDF branch now resolves brick_prim → sdf_index via `sdf_brick_map` lookup (was passing raw brick index as `prim`, causing `sdf_objects[brick_idx]` out-of-bounds in `intersection_get_shader_flags`). |
+
+### Bug Fix: Stale `need_update_rebuild` Causes Wrong Atlas Selection (Multi-SDF Update)
+
+**Problem:** Only the last-added SDF object updates when moved; earlier SDFs appear frozen. Root cause: SDF geometries don't build individual BVHs (`need_build_bvh()` returns false), so `compute_bvh()` is never pushed for them when only `need_update_rebuild` is set (not `is_modified()` via socket changes). Since `sync_sdf()` modifies raw arrays (not Node sockets), `is_modified()` returns false. The `need_update_rebuild` flag was never cleared, accumulating as a stale flag. On subsequent frames, the stale flag on the WRONG SDFGeometry caused the `first_sdf` selection to pick stale data instead of the freshly synced atlas.
+
+**Fix:** Two changes in `geometry.cpp`:
+1. **Explicit flag clearing:** Added `geom->need_update_rebuild = false` in the cleanup phase at the end of `device_update()`. For non-SDF types this is redundant (already cleared by `compute_bvh()`); for SDF types it prevents stale flags from carrying over to the next frame.
+2. **Improved `first_sdf` selection:** Changed from "last with `need_update_rebuild`" to a priority-based selection: (a) freshly synced (`need_update_rebuild`) always wins, (b) previously active atlas (`is_active_atlas`) preferred for stability when no SDF changed, (c) first non-empty as fallback.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/scene/geometry.cpp` | Fixed `first_sdf` selection to use priority-based logic (fresh > previously-active > fallback). Added explicit `need_update_rebuild = false` in cleanup loop to prevent stale flags. |
+
+### Bug Fix: CUDA SDF Invisible — Uninitialized `isect->t` in `scene_intersect`
+
+**Problem:** CUDA backend renders no SDF objects (completely invisible, no errors). OptiX works fine. Root cause: in `scene_intersect()` (bvh/bvh.h), `isect->t` was never initialized before the SDF intersection check. The BVH traversal templates set `isect->t = ray->tmax` internally, but when `have_bvh_nodes` is false (SDF-only scene with no mesh objects), BVH traversal is skipped entirely. On CUDA, `ccl_optional_struct_init` is a no-op (empty `#define`), leaving `isect->t` as uninitialized stack garbage (usually 0). The SDF ray march then computes `t_exit = min(t_exit_grid, isect->t)` and immediately exits because `t_enter >= t_exit`. OptiX is unaffected because it uses hardware RT with custom intersection programs that manage ray distances via the OptiX API.
+
+**Fix:** Initialize `isect->t = ray->tmax` at the top of `scene_intersect()`, before any traversal. This is harmless for BVH traversal (which already sets it internally) but ensures SDF intersection always has a valid max distance.
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/bvh/bvh.h` | Added `isect->t = ray->tmax;` after `bool hit = false;` in `scene_intersect()` |
+
+---
+
+## Adaptive Octree Classification — Reduce Brick Count Explosion
+
+With 2 SDF objects at 128 resolution: blend=1 gave 3,796 bricks, blend=5 gave 137,000 bricks — a 36x explosion. Two fixes applied:
+
+### Fix 1: Remove `max_blend * 0.25` from classify threshold
+
+The classify threshold formula included `+ max_blend * 0.25` to account for smooth union surface push. This was unnecessary: the classify shader evaluates the **blended** smooth-union SDF, so `acc_dist=0` IS the blended surface. The threshold only needs the brick half-diagonal (whether the surface could pass through the brick). Removing this term reduces the active-brick shell from ~21 bricks thick to ~1 brick thick at blend=5.
+
+### Fix 2: Super-brick coarse check (workgroup-level early-out)
+
+The classify workgroup is 4×4×4 = 64 threads, each processing one brick. This naturally maps to a "super-brick" of 32×32×32 voxels. Thread 0 evaluates the blended SDF at the super-brick center. If `|distance| > coarse_threshold`, all 64 threads exit immediately (Lipschitz bound guarantees no brick in the workgroup can contain surface). This eliminates per-brick evaluation for 90%+ of workgroups.
+
+The SDF evaluation logic was extracted into an `evaluateSDF(center, query_min, query_max)` function reused by both coarse and fine checks.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Removed `max_blend_ * 0.25f` from `brick_half_diag` computation. Added `coarse_threshold` calculation (super-brick half-diagonal × 2 Lipschitz safety + brick_half_diag) and `GPU_shader_uniform_1f` call in `dispatch_classify()` |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Extracted `evaluateSDF()` function from inline BVH traversal + SDF evaluation. Added `shared float coarse_dist` for workgroup communication. Thread 0 evaluates at super-brick center; all threads early-out if `abs(coarse_dist) > coarse_threshold`, marking bricks as void (-1) or inside (-2) based on sign |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `PUSH_CONSTANT(float, coarse_threshold)` to `sdf_classify` shader info |
+
+---
+
+### Rotation-Invariant Grid Sizing with OBB Culling
+
+**Problem:** Rotating an SDF object changes the world-space AABB (a box rotated 45° has an AABB √2× larger per axis), which changes the grid resolution and triggers a full rebake. The grid "breathes" as objects rotate.
+
+**Solution:** Two complementary changes:
+
+1. **Grid sizing** — Use circumscribed sphere of each object's local AABB instead of tight world AABB for `scene_min_`/`scene_max_` accumulation. `radius = length(local_extent)` is the tightest rotation-invariant bound (Cauchy-Schwarz). Grid resolution stays constant regardless of rotation.
+
+2. **Shader culling** — Replace world-AABB overlap tests in classify/bake fallback paths with OBB tests. Transform query center to object-local space, test against local extent. Tighter culling for rotated objects.
+
+**Trade-off:** For a cubic object, the sphere AABB is √3 ≈ 1.73× per axis → ~5.2× indirection volume. At 128 res with a 1 BU cube: 36³ → 60³ bricks of indirection (184KB → 844KB). Negligible — active bricks unchanged, only indirection texture overhead increases. `SDF_MAX_GRID_RES = 128` cap prevents runaway.
+
+**What stays the same:** Tight world AABBs in `gpu_obj.bbox_min/bbox_max` (for BVH construction), `object_aabbs_` (dirty brick tracking), BVH traversal in shaders.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Replaced tight world AABB accumulation for `scene_min_`/`scene_max_` with circumscribed sphere: `sphere_radius = length(local_extent)`, centered at object position. Tight world AABB retained for BVH and dirty-brick tracking |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Fallback linear scan: replaced world AABB overlap test with OBB culling — transform query center to object local space via `inverse_matrix`, test `abs(local_pos) > obb_extent + expand_radius` where `expand_radius = length(query_half)` |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Same OBB culling pattern in bake fallback: transform brick center to local space, test against local extent + brick half-diagonal sphere radius |
+
+---
+
+### BVH Bounds Debug Visualization
+
+**Purpose:** Visual inspection of the SAH BVH structure and per-object OBBs. No way to verify BVH quality or OBB correctness without a debug view.
+
+**What it does:** New debug mode "BVH Bounds" (value 3) alongside Off/Voxel Grid/Object IDs. Renders:
+1. **BVH node AABBs** — world-aligned wireframe boxes, color-coded by tree depth (red=root → blue=leaves via HSV hue ramp)
+2. **Per-object OBBs** — rotated wireframe boxes at leaf level, in white. Shows the actual oriented bounding box including bevel+blend expansion.
+
+Single-pass front-only rendering using `GPU_SHADER_3D_FLAT_COLOR` (built-in shader with per-vertex `pos` + `color` attributes). Batches rebuilt on bake invalidation.
+
+| File | Change |
+|------|--------|
+| `makesrna/intern/rna_space.cc` | Added `{3, "BVH_BOUNDS", ...}` to `sdf_debug_grid_items[]` enum |
+| `draw/engines/sdf/sdf_engine.cc` | Added `bvh_batch_` member, `create_colored_line_batch()` helper, `rebuild_bvh_batch()` (DFS depth computation + HSV-colored AABB edges + white OBB edges), `draw_debug_bvh()` draw method. Wired into draw path, invalidation, and destructor |
+
+---
+
+### Fix Half-Voxel Shift + Dual Voxel Normals
+
+**Problem 1 — Voxel shift:** The bake shader sampled SDF values at cell centers (`+ 0.5f`), but the march shader treated them as corner samples for trilinear interpolation. This caused the rendered surface to be shifted by half a voxel from the true analytic SDF position. Most visible at low resolutions.
+
+**Fix:** Removed `+ 0.5f` from the world position computation in the bake shader. Values are now sampled at voxel corners (integer grid positions), matching the march shader's interpretation.
+
+**Problem 2 — Normal discontinuity:** The existing `computeNormalCompact` computed the analytic gradient from a single voxel's 8 corners. While C2-continuous inside each voxel, this produces visible C0 discontinuity (faceting) at voxel boundaries.
+
+**Fix:** Implemented the dual voxel normal interpolation method from Section 3.2 of "Ray Tracing of Signed Distance Function Grids" (Hansson-Soderlund, Evans, Akenine-Moller, JCGT 2022). The new `computeNormalDualVoxel` function:
+1. Shifts the grid by half a voxel to define dual cells
+2. Fetches a 3x3x3 = 27 texel neighborhood (all corners of the 8 overlapping voxels)
+3. Computes the analytic gradient (Eq. 9-11) in each of the 8 overlapping voxels at the hit point (evaluated outside [0,1]^3 for 7 of 8 — the trilinear field extends naturally)
+4. Trilinearly interpolates the 8 normalized normals (Eq. 12) based on position within the dual cell
+
+Result: C0-continuous normals across voxel boundaries. Cost: 27 texel fetches + 8 gradient evaluations (~1-7% overhead per paper benchmarks). The 2-voxel overlap border in the brick storage is sufficient for all dual voxel accesses.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Removed `+ 0.5f` from `world_pos` computation (line 130). SDF values now sampled at voxel corners instead of cell centers |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced `computeNormalCompact` with `computeNormalDualVoxel`: 27-fetch 3x3x3 neighborhood, 8 analytic gradients, trilinear normal interpolation for C0 continuity across voxel boundaries |
+
+---
+
+### Smooth Auto-Coarsening for SDF Voxel Resolution
+
+**Problem:** When SDF objects are moved apart, the scene bounds grow. Once the grid exceeds `SDF_MAX_GRID_RES=128` bricks on any axis, the old code doubled `voxel_size` iteratively (×2, ×4, ×8…). This created jarring quality snaps — e.g., from voxel_size 0.125 to 0.25 (halving resolution) the instant the scene crossed the threshold.
+
+**Fix:** Replaced the doubling loop with a single exact computation. If the grid exceeds 128 bricks on any axis, `voxel_size` is scaled by `max_axis / 128.0` — the exact minimum factor needed. As the scene grows from 128 to 256 BU, voxel_size increases linearly (0.125 → 0.25) instead of snapping to 0.25 immediately.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Replaced auto-coarsening doubling loop in `end_sync()` with smooth linear scaling: `voxel_size_ *= float(max_axis) / float(SDF_MAX_GRID_RES)`. Recomputes chunk_size, grid_min/max, grid_res once with the new voxel_size |

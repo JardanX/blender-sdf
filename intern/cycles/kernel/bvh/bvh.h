@@ -104,6 +104,11 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
 
   bool hit = false;
 
+  /* Ensure isect->t is initialized to ray->tmax so that intersection routines
+   * that run outside BVH traversal (e.g. SDF ray march) have a valid max
+   * distance even when the BVH traversal is skipped (no BVH nodes). */
+  isect->t = ray->tmax;
+
 #  ifdef __EMBREE__
   IF_USING_EMBREE
   {
