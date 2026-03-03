@@ -44,6 +44,11 @@ class SDFGeometry : public Geometry {
   float3 scene_min;
   float3 scene_max;
 
+  /* Set by GeometryManager::device_update to mark which SDFGeometry instance
+   * was actually uploaded to the device. device_impl.cpp must use this same
+   * instance for building BLAS AABBs so the brick_map stays in sync. */
+  bool is_active_atlas = false;
+
   SDFGeometry();
   ~SDFGeometry() override;
 

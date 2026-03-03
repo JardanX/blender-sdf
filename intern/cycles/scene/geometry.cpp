@@ -952,6 +952,39 @@ void GeometryManager::device_update(Device *device,
     }
   }
 
+  /* Determine which SDFGeometry is the "active atlas" BEFORE the BVH build,
+   * because the OptiX TLAS code in device_impl.cpp uses is_active_atlas to
+   * find the correct SDFGeometry for building the SDF BLAS.
+   *
+   * Selection priority:
+   *  1. Freshly synced (need_update_rebuild): has the most recent atlas data.
+   *  2. Previously active (is_active_atlas): keeps selection stable when no
+   *     SDF changed but device_update runs due to other object changes.
+   *  3. First non-empty fallback: initial render or after atlas removal. */
+  SDFGeometry *first_sdf = nullptr;
+  bool found_rebuild = false;
+  for (Geometry *geom : scene->geometry) {
+    if (geom->is_sdf()) {
+      SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
+      if (!sdf->indirection_data.empty()) {
+        if (sdf->need_update_rebuild) {
+          first_sdf = sdf;
+          found_rebuild = true;
+        }
+        else if (!found_rebuild) {
+          if (first_sdf == nullptr || sdf->is_active_atlas) {
+            first_sdf = sdf;
+          }
+        }
+      }
+    }
+  }
+  for (Geometry *geom : scene->geometry) {
+    if (geom->is_sdf()) {
+      static_cast<SDFGeometry *>(geom)->is_active_atlas = (geom == first_sdf);
+    }
+  }
+
   /* Update the BVH even when there is no geometry so the kernel's BVH data is still valid,
    * especially when removing all of the objects during interactive renders.
    * Also update the BVH if the transformations change, we cannot rely on tagging the Geometry
@@ -1050,24 +1083,8 @@ void GeometryManager::device_update(Device *device,
    * All SDF Blender objects are baked into a single shared atlas by sync_sdf().
    * Each SDFGeometry instance contains the same combined atlas, so we only
    * upload one as a single KernelSDF entry (num_sdfs=1).
-   * Prefer a modified (freshly re-baked) SDFGeometry to ensure we get
-   * the latest atlas after transforms/property changes. */
+   * first_sdf and is_active_atlas were determined above (before BVH build). */
   {
-    SDFGeometry *first_sdf = nullptr;
-    for (Geometry *geom : scene->geometry) {
-      if (geom->is_sdf()) {
-        SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-        if (!sdf->indirection_data.empty()) {
-          /* Prefer a freshly re-baked SDFGeometry (need_update_rebuild is set
-           * by tag_update in sync_sdf). This ensures we get the latest atlas
-           * when one SDF object was modified but others weren't re-synced. */
-          if (first_sdf == nullptr || sdf->need_update_rebuild) {
-            first_sdf = sdf;
-          }
-        }
-      }
-    }
-
     if (first_sdf != nullptr) {
       const int num_sdfs = 1;
 
@@ -1086,13 +1103,12 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_matid.alloc(first_sdf->matid_data.size());
       int *matid_ptr = dscene->sdf_matid.data();
 
-      /* Find the Cycles object index for the first SDF object so that
-       * sd->object references valid object_flag data in the kernel. */
+      /* Find the Cycles object that uses the active atlas SDFGeometry so that
+       * sd->object references valid object_flag data in the kernel.
+       * Must match the object used for the TLAS instance in device_impl.cpp. */
       int sdf_object_id = 0;
       for (size_t oi = 0; oi < scene->objects.size(); oi++) {
-        if (scene->objects[oi]->get_geometry() &&
-            scene->objects[oi]->get_geometry()->is_sdf())
-        {
+        if (scene->objects[oi]->get_geometry() == first_sdf) {
           sdf_object_id = (int)oi;
           break;
         }
@@ -1198,6 +1214,15 @@ void GeometryManager::device_update(Device *device,
   for (Geometry *geom : scene->geometry) {
     geom->clear_modified();
     geom->attributes.clear_modified();
+
+    /* SDF geometries don't build individual BVHs (need_build_bvh returns false),
+     * so compute_bvh() is never pushed for them when only need_update_rebuild is
+     * set (not is_modified via socket changes). Clear the flag explicitly here
+     * to prevent stale flags from causing wrong first_sdf selection on subsequent
+     * frames. Non-SDF types are left alone — their flag is managed by compute_bvh(). */
+    if (geom->is_sdf()) {
+      geom->need_update_rebuild = false;
+    }
 
     if (geom->is_mesh()) {
       Mesh *mesh = static_cast<Mesh *>(geom);
