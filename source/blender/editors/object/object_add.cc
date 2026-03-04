@@ -2420,7 +2420,10 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
       continue;
     }
 
-    if (ID_REAL_USERS(ob) <= 1 && ID_EXTRA_USERS(ob) == 0 &&
+    /* MATHOPS: Skip the expensive indirect-use scan for SDF objects.
+     * BKE_library_ID_is_indirectly_used() iterates ALL IDs in bmain, making bulk
+     * deletion O(N²). SDF objects cannot be indirectly linked in this fork. */
+    if (ob->type != OB_SDF && ID_REAL_USERS(ob) <= 1 && ID_EXTRA_USERS(ob) == 0 &&
         BKE_library_ID_is_indirectly_used(bmain, ob))
     {
       BKE_reportf(op->reports,

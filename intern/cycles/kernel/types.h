@@ -1612,12 +1612,16 @@ struct KernelSDFShape {
 };
 static_assert_align(KernelSDFShape, 16);
 
-/* Per-instance data for TLAS/BLAS instanced SDF rendering. */
+/* Per-instance data for TLAS/BLAS instanced SDF rendering.
+ * Stores transforms for CPU/CUDA ray transformation (OptiX uses hardware TLAS). */
 struct KernelSDFInstance {
   int shape_id;   /* Index into sdf_shape_objects[]. */
   int shader_id;  /* Cycles shader ID. */
   int object_id;  /* Cycles object index (for sd->object). */
   int pad;
+
+  Transform world_to_local; /* Maps world-space ray to shape's normalized local space. */
+  Transform local_to_world; /* Maps local-space hit back to world space. */
 };
 static_assert_align(KernelSDFInstance, 16);
 

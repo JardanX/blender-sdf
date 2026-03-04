@@ -50,9 +50,15 @@ void SDFGeometry::compute_bounds()
   BoundBox bnds = BoundBox::empty;
 
   if (grid_res > 0 && voxel_size > 0.0f) {
+    /* World-space atlas mode. */
     const float extent = float(grid_res * 8) * voxel_size;
     bnds.grow(origin);
     bnds.grow(origin + make_float3(extent, extent, extent));
+  }
+  else if (use_instanced && !shapes.empty()) {
+    /* Instanced TLAS/BLAS mode — use scene extents from bake. */
+    bnds.grow(scene_min);
+    bnds.grow(scene_max);
   }
 
   if (!bnds.valid()) {

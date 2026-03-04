@@ -200,7 +200,8 @@ ccl_device bool sdf_has_cubic_root(const float c[4], const float tfar)
 /* -------------------------------------------------------------------- */
 /* Trilinear Gradient (for normals). */
 
-/* Compute the gradient of trilinear interpolation at point p in [0,1]^3. */
+/* Compute the gradient of trilinear interpolation at point p.
+ * p is typically in [0,1]^3 but may extend outside for dual voxel evaluation. */
 ccl_device_inline float3 sdf_trilinear_gradient(const float s[8], const float3 p)
 {
   const float k1 = s[1] - s[0];
@@ -214,6 +215,70 @@ ccl_device_inline float3 sdf_trilinear_gradient(const float s[8], const float3 p
   return make_float3(k1 + k4 * p.y + k5 * p.z + k7 * p.y * p.z,
                      k2 + k4 * p.x + k6 * p.z + k7 * p.x * p.z,
                      k3 + k5 * p.x + k6 * p.y + k7 * p.x * p.y);
+}
+
+/* -------------------------------------------------------------------- */
+/* Dual Voxel Normal (Section 3.2, Hansson-Soderlund et al. JCGT 2022). */
+
+/* Compute smooth normals by blending analytic trilinear gradients from
+ * the 2x2x2 voxels overlapping the dual voxel that contains the hit point.
+ *
+ * vals[27]: pre-fetched 3x3x3 neighborhood of SDF values, indexed as
+ *   vals[k*9 + j*3 + i] where (i,j,k) ∈ {0,1,2}^3.
+ * grid_pos: hit point in brick-local grid space (continuous coordinates).
+ * dc: dual voxel center = floor(grid_pos + 0.5).
+ *
+ * Each of the 8 overlapping voxels has its analytic gradient evaluated at the
+ * hit point (which may lie outside [0,1]^3 for 7 of 8 voxels), normalized,
+ * then trilinearly blended using the hit point's position within the dual voxel.
+ * This yields C0-continuous normals across voxel boundaries. */
+ccl_device_inline float3 sdf_dual_voxel_normal(const float vals[27],
+                                                const float3 grid_pos,
+                                                const int3 dc)
+{
+  /* Position within the dual voxel [0,1]^3. */
+  const float3 uvw = make_float3(grid_pos.x + 0.5f - float(dc.x),
+                                  grid_pos.y + 0.5f - float(dc.y),
+                                  grid_pos.z + 0.5f - float(dc.z));
+
+  float3 blended = zero_float3();
+
+  for (int kk = 0; kk < 2; kk++) {
+    for (int jj = 0; jj < 2; jj++) {
+      for (int ii = 0; ii < 2; ii++) {
+        /* Extract 8 corners for voxel (ii,jj,kk) from the 3x3x3 grid. */
+        float s[8];
+        s[0] = vals[(kk) * 9 + (jj) * 3 + (ii)];
+        s[1] = vals[(kk) * 9 + (jj) * 3 + (ii + 1)];
+        s[2] = vals[(kk) * 9 + (jj + 1) * 3 + (ii)];
+        s[3] = vals[(kk) * 9 + (jj + 1) * 3 + (ii + 1)];
+        s[4] = vals[(kk + 1) * 9 + (jj) * 3 + (ii)];
+        s[5] = vals[(kk + 1) * 9 + (jj) * 3 + (ii + 1)];
+        s[6] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii)];
+        s[7] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii + 1)];
+
+        /* Hit point in this voxel's local space.
+         * May be outside [0,1]^3 for 7 of 8 voxels — that's intended. */
+        float3 local_p = make_float3(grid_pos.x - float(dc.x - 1 + ii),
+                                      grid_pos.y - float(dc.y - 1 + jj),
+                                      grid_pos.z - float(dc.z - 1 + kk));
+
+        float3 grad = sdf_trilinear_gradient(s, local_p);
+        float l = len(grad);
+        float3 n = (l > 1e-8f) ? grad / l : make_float3(0.0f, 0.0f, 1.0f);
+
+        /* Trilinear blend weight. */
+        float w = ((ii == 0) ? (1.0f - uvw.x) : uvw.x) *
+                  ((jj == 0) ? (1.0f - uvw.y) : uvw.y) *
+                  ((kk == 0) ? (1.0f - uvw.z) : uvw.z);
+
+        blended = blended + n * w;
+      }
+    }
+  }
+
+  float l = len(blended);
+  return (l > 1e-8f) ? blended / l : make_float3(0.0f, 0.0f, 1.0f);
 }
 
 CCL_NAMESPACE_END

@@ -26,9 +26,9 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 
-/** Max brick-level DDA steps. Non-cubic grids up to 128/axis -> diagonal ~ 222. */
+/** Max brick-level DDA steps (must cover grid diagonal). */
 #define MAX_BRICK_STEPS 256
-/** Max voxel-level DDA steps within one brick (8 * sqrt(3) ~ 14). */
+/** Max voxel-level DDA steps within one brick. */
 #define MAX_VOXEL_STEPS 24
 /** Max BVH traversal stack depth for instance traversal. */
 #define MAX_INST_STACK 32
@@ -89,18 +89,16 @@ float3 computeNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int 
 }
 
 /**
- * Compute smooth normal via quadratic B-spline gradient of the SDF field.
+ * Compute smooth normal via dual voxel interpolation.
+ * (Section 3.2, Hansson-Soderlund et al. JCGT 2022)
  *
- * Instead of the paper's dual voxel method (Section 3.2) which computes 8
- * separate trilinear gradients, normalizes each, and interpolates — we compute
- * the gradient of a quadratic B-spline reconstruction of the SDF field.
+ * The hit point falls inside a dual voxel (shifted by half a voxel width).
+ * We evaluate the analytic trilinear gradient in each of the 2x2x2 overlapping
+ * voxels at the hit point, normalize each, then trilinearly blend using the
+ * hit point's position within the dual voxel.
  *
- * The B-spline gives a C1-continuous scalar field (C0-continuous gradient),
- * providing the same boundary smoothness as dual voxels but with:
- *   - ~90 FMAs vs ~176 ops (2x fewer ALU)
- *   - 1 sqrt vs 8 sqrts (normalization)
- *   - Same 27 texture fetches
- *   - Separable tensor-product evaluation
+ * This yields C0-continuous normals across voxel boundaries.  27 texture
+ * fetches (3x3x3 neighborhood), 8 gradient evaluations + 8 normalizations.
  *
  * The 12^3 brick storage provides the required 3x3x3 neighborhood: for any
  * cell [0..7], we need positions (cell-1)..(cell+1), which spans [-1..8] —
@@ -108,66 +106,65 @@ float3 computeNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int 
  */
 float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
 {
-  /* Current cell and fractional position within it. */
-  int3 cell = int3(floor(grid_pos_in_brick));
-  cell = clamp(cell, int3(0), int3(BRICK_SIZE - 1));
-  float3 t = grid_pos_in_brick - float3(cell);
-  t = clamp(t, float3(0.0f), float3(1.0f));
+  /* Dual voxel center: nearest grid corner to the hit point. */
+  float3 shifted = grid_pos_in_brick + float3(0.5f);
+  int3 dc = int3(floor(shifted));
 
-  /* Quadratic B-spline basis weights per axis.
-   * N_{-1}(t) = 0.5*(1-t)^2
-   * N_0(t)    = (1-t)*t + 0.5 = -t^2 + t + 0.5
-   * N_1(t)    = 0.5*t^2
-   *
-   * Derivative weights:
-   * N'_{-1}(t) = -(1-t)
-   * N'_0(t)    = 1 - 2t
-   * N'_1(t)    = t
-   */
-  float3 om = 1.0f - t;
-  float3 Wx = float3(0.5f * om.x * om.x, om.x * t.x + 0.5f, 0.5f * t.x * t.x);
-  float3 Wy = float3(0.5f * om.y * om.y, om.y * t.y + 0.5f, 0.5f * t.y * t.y);
-  float3 Wz = float3(0.5f * om.z * om.z, om.z * t.z + 0.5f, 0.5f * t.z * t.z);
-  float3 Dx = float3(-om.x, om.x - t.x, t.x);
-  float3 Dy = float3(-om.y, om.y - t.y, t.y);
-  float3 Dz = float3(-om.z, om.z - t.z, t.z);
+  /* Position within the dual voxel [0,1]^3. */
+  float3 uvw = shifted - float3(dc);
 
-  /* Atlas base for the 3x3x3 neighborhood centered on hit cell.
-   * cell-1 is the lower-left corner of the stencil. */
-  int3 cb = gridToCompact(brick, cell - int3(1), slot, bpa);
+  /* Atlas base for the 3x3x3 neighborhood.
+   * Corner positions range from (dc-1) to (dc+1). */
+  int3 cb = gridToCompact(brick, dc - int3(1), slot, bpa);
 
-  /* Separable tensor-product gradient evaluation.
-   * Process z-slices -> y-rows -> x-values.
-   * Each value is fetched once and used immediately for two weighted sums
-   * (Wx and Dx), keeping register pressure low (no 27-element array). */
-  float3 grad = float3(0.0f);
-
+  /* Fetch 3x3x3 neighborhood values. */
+  float vals[27];
   for (int k = 0; k < 3; k++) {
-    float yz_dx = 0.0f, yz_dy = 0.0f, yz_dz = 0.0f;
-
     for (int j = 0; j < 3; j++) {
-      float v0 = texelFetch(compact_atlas, cb + int3(0, j, k), 0).r;
-      float v1 = texelFetch(compact_atlas, cb + int3(1, j, k), 0).r;
-      float v2 = texelFetch(compact_atlas, cb + int3(2, j, k), 0).r;
-
-      /* x-reduction: Wx-weighted sum (for df/dy, df/dz) and Dx-weighted (for df/dx). */
-      float sx  = Wx.x * v0 + Wx.y * v1 + Wx.z * v2;
-      float sdx = Dx.x * v0 + Dx.y * v1 + Dx.z * v2;
-
-      /* y-accumulation with appropriate weights per component. */
-      yz_dx += Wy[j] * sdx;
-      yz_dy += Dy[j] * sx;
-      yz_dz += Wy[j] * sx;
+      vals[k * 9 + j * 3 + 0] = texelFetch(compact_atlas, cb + int3(0, j, k), 0).r;
+      vals[k * 9 + j * 3 + 1] = texelFetch(compact_atlas, cb + int3(1, j, k), 0).r;
+      vals[k * 9 + j * 3 + 2] = texelFetch(compact_atlas, cb + int3(2, j, k), 0).r;
     }
-
-    /* z-accumulation. */
-    grad.x += Wz[k] * yz_dx;
-    grad.y += Wz[k] * yz_dy;
-    grad.z += Dz[k] * yz_dz;
   }
 
-  float len = length(grad);
-  return len > 1e-8f ? grad / len : float3(0.0f, 0.0f, 1.0f);
+  /* Evaluate analytic trilinear gradient in each of 8 overlapping voxels,
+   * normalize each, then trilinearly blend. */
+  float3 blended = float3(0.0f);
+
+  for (int kk = 0; kk < 2; kk++) {
+    for (int jj = 0; jj < 2; jj++) {
+      for (int ii = 0; ii < 2; ii++) {
+        /* Extract 8 corners for voxel (ii,jj,kk) from the 3x3x3 grid. */
+        float s[8];
+        s[0] = vals[(kk) * 9 + (jj) * 3 + (ii)];
+        s[1] = vals[(kk) * 9 + (jj) * 3 + (ii + 1)];
+        s[2] = vals[(kk) * 9 + (jj + 1) * 3 + (ii)];
+        s[3] = vals[(kk) * 9 + (jj + 1) * 3 + (ii + 1)];
+        s[4] = vals[(kk + 1) * 9 + (jj) * 3 + (ii)];
+        s[5] = vals[(kk + 1) * 9 + (jj) * 3 + (ii + 1)];
+        s[6] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii)];
+        s[7] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii + 1)];
+
+        /* Hit point in this voxel's local space.
+         * May be outside [0,1]^3 for 7 of 8 voxels — that's intended. */
+        float3 local_p = grid_pos_in_brick - float3(dc - int3(1) + int3(ii, jj, kk));
+
+        float3 grad = trilinearGradient(s, local_p);
+        float l = length(grad);
+        float3 n = l > 1e-8f ? grad / l : float3(0.0f, 0.0f, 1.0f);
+
+        /* Trilinear blend weight. */
+        float wu = ii == 0 ? (1.0f - uvw.x) : uvw.x;
+        float wv = jj == 0 ? (1.0f - uvw.y) : uvw.y;
+        float ww = kk == 0 ? (1.0f - uvw.z) : uvw.z;
+
+        blended += n * (wu * wv * ww);
+      }
+    }
+  }
+
+  float l = length(blended);
+  return l > 1e-8f ? blended / l : float3(0.0f, 0.0f, 1.0f);
 }
 
 /* ---- Inner DDA march (shared by both modes) ---- */
