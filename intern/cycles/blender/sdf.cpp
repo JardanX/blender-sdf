@@ -414,6 +414,19 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
       gr.y = clamp((int)ceilf(2.0f * half_extent.y / chunk), 1, MAX_SHAPE_GRID_RES);
       gr.z = clamp((int)ceilf(2.0f * half_extent.z / chunk), 1, MAX_SHAPE_GRID_RES);
 
+      /* When grid resolution is capped, increase voxel size so the grid still
+       * covers the full SDF extent. Without this, the surface can lie entirely
+       * outside the grid, producing zero active bricks and invisible objects. */
+      {
+        float needed_vs = max(2.0f * half_extent.x / float(gr.x * BRICK_SIZE),
+                              max(2.0f * half_extent.y / float(gr.y * BRICK_SIZE),
+                                  2.0f * half_extent.z / float(gr.z * BRICK_SIZE)));
+        if (needed_vs > local_vs) {
+          local_vs = needed_vs;
+          brick_half_diag = float(BRICK_SIZE) * local_vs * 0.866025f;
+        }
+      }
+
       float3 local_origin = make_float3(-float(gr.x), -float(gr.y), -float(gr.z)) *
                              float(BRICK_SIZE) * local_vs * 0.5f;
 

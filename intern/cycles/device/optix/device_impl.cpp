@@ -1713,9 +1713,30 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
       return;
     }
 
+    /* Count additional SDF TLAS instances needed beyond regular BVH objects.
+     * In instanced mode each SDF object instance becomes a separate TLAS entry;
+     * in world-space mode there is one extra TLAS entry for the combined SDF BLAS. */
+    size_t sdf_extra_instances = 0;
+    {
+      for (Geometry *geom : bvh->geometry) {
+        if (geom->is_sdf()) {
+          SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
+          if (sdf->is_active_atlas) {
+            if (sdf->use_instanced && !sdf->shape_brick_map_data.empty()) {
+              sdf_extra_instances = sdf->instances.size();
+            }
+            else if (!sdf->indirection_data.empty()) {
+              sdf_extra_instances = 1;
+            }
+            break;
+          }
+        }
+      }
+    }
+
     /* Fill instance descriptions. */
     device_vector<OptixInstance> instances(this, "optix tlas instances", MEM_READ_ONLY);
-    instances.alloc(bvh->objects.size());
+    instances.alloc(bvh->objects.size() + sdf_extra_instances);
 
     /* Calculate total motion transform size and allocate memory for them. */
     size_t motion_transform_offset = 0;

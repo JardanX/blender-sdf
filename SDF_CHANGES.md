@@ -1582,3 +1582,73 @@ When `prev_scene_hash` matches, `sync_sdf()` returns immediately, skipping the e
 | `draw/engines/sdf/sdf_engine.cc` | Wire up incremental bake in world-space pipeline: `assign_persistent_slots()` → `compute_dirty_objects()` → `compute_dirty_brick_set()` → `dispatch_bake_dirty()`. Instanced pipeline: `prev_shape_fingerprints_` tracking, `dispatch_shape_bake_all()` accepts optional dirty set to skip clean shapes |
 | `intern/cycles/blender/sdf.cpp` | Scene hash computation after object collection, early return when hash matches `prev_scene_hash` |
 | `intern/cycles/scene/sdf.h` | Added `prev_scene_hash` member to `SDFGeometry` for cross-sync change detection |
+
+---
+
+## Fix: CPU/CUDA Instanced SDF Rendering (Cycles)
+
+Instanced SDF objects (the default mode when no blend > 0) were invisible on all backends
+(CPU, CUDA, OptiX). The instanced intersection path only existed in OptiX (via hardware TLAS);
+CPU/CUDA had no codepath for it.
+
+### Root Causes
+
+1. **Missing intersection dispatch**: `scene_intersect` in `bvh/bvh.h` only checked `num_sdfs > 0`.
+   In instanced mode `num_sdfs = 0` (no world-space atlas), so SDF intersection was skipped entirely.
+2. **Missing transforms in kernel struct**: `KernelSDFInstance` had no world-to-local/local-to-world
+   transforms — OptiX gets these from hardware TLAS, but CPU/CUDA need them explicitly.
+3. **Wrong local_hit in shader_setup**: `sdf_shader_setup` used `sd->P` (world-space) as the
+   local-space hit point for normal computation, producing garbage normals.
+4. **Empty bounds**: `compute_bounds()` returned empty for instanced mode since `grid_res == 0`.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/types.h` | Added `Transform world_to_local` and `Transform local_to_world` fields to `KernelSDFInstance` |
+| `intern/cycles/scene/geometry.cpp` | Upload instance transforms from `InstanceInfo` to `KernelSDFInstance` |
+| `intern/cycles/kernel/geom/sdf.h` | Added `sdf_fetch_shape_indirection` helper, `sdf_intersect_instanced`, `sdf_intersect_all_instanced`, shadow variants; fixed `sdf_shader_setup` to transform `sd->P` to local space |
+| `intern/cycles/kernel/bvh/bvh.h` | Added `else if (num_sdf_shapes > 0)` branches in `scene_intersect` and `scene_intersect_shadow` for instanced path |
+| `intern/cycles/scene/sdf.cpp` | Added instanced mode branch in `compute_bounds()` using `scene_min`/`scene_max` |
+
+---
+
+## Unified Cross-Backend SDF Performance Timers
+
+Replaced dual-path GL queries / SSBO fence timer system with a single unified approach using `GPU_finish()` + `BLI_time_now_seconds()`. Fixes macOS Metal backend where `GPU_storagebuf_read()` doesn't reliably drain the pipeline.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Removed `GPU_context.hh` and `<epoxy/gl.h>` includes. Removed GL double-buffer infrastructure (`perf_use_gl_queries_`, `perf_queries_[2][N]`, `perf_queries_valid_[2]`, `perf_frame_idx_`, `perf_fence_ssbo_`, `perf_pass_start_time_`). Flattened `perf_pass_active_[2][N]` → `perf_pass_active_[N]`, `perf_slot_baked_[2]` → `perf_currently_baking_`. Added `perf_pass_start_[N]` per-pass timestamps. Rewrote `perf_begin_pass()`/`perf_end_pass()` to use `GPU_finish()` + wall-clock. Simplified `perf_ensure_queries()` → `perf_init()`, `perf_end_frame()`, `perf_cleanup()`. Eliminated all raw GL calls |
+
+---
+
+## Dual Voxel Normal Interpolation
+
+Replaced normal computation with the dual voxel method from Section 3.2 of
+"Ray Tracing of Signed Distance Function Grids" (Hansson-Soderlund, Evans,
+Akenine-Moller, JCGT 2022). Instead of computing the trilinear gradient from
+a single voxel (C0-discontinuous at boundaries), the new method:
+
+1. Finds the dual voxel (shifted by half a voxel) containing the hit point
+2. Evaluates the analytic trilinear gradient in each of the 2×2×2 overlapping voxels
+3. Normalizes each gradient independently
+4. Trilinearly blends using the hit point's position within the dual voxel
+
+This yields C0-continuous normals across voxel boundaries. Cost: 27 fetches
+(3×3×3 neighborhood) + 8 gradient evaluations + 8 normalizations, vs the
+previous 8 fetches + 1 gradient.
+
+The draw engine's previous B-spline gradient approach (quadratic B-spline
+reconstruction) has been replaced with the paper's method for consistency
+between Cycles and the draw engine.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/geom/sdf_lib.h` | Added `sdf_dual_voxel_normal()`: takes pre-fetched 27 values + grid_pos + dual_center, evaluates 8 trilinear gradients in overlapping voxels, normalizes each, trilinearly blends. Updated `sdf_trilinear_gradient()` comment to note p may extend outside [0,1]^3 |
+| `intern/cycles/kernel/geom/sdf.h` | Rewrote `sdf_compute_normal()`: now fetches 3×3×3 neighborhood via `sdf_fetch_distance()` loop, delegates to `sdf_dual_voxel_normal()`. Rewrote instanced mode normal computation: same 3×3×3 fetch from shape atlas (uint16 decode), same `sdf_dual_voxel_normal()` call, then world-space transform |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced B-spline `computeDualVoxelNormal()` with paper's dual voxel method: fetches 27 values into array, evaluates 8 analytic gradients via `trilinearGradient()`, normalizes each, trilinearly blends. Same 27 texture fetches, different math (8 gradients + 8 sqrts vs separable tensor-product) |

@@ -1136,6 +1136,8 @@ void GeometryManager::device_update(Device *device,
         ki.shader_id = default_shader;
         ki.object_id = sdf_object_id;
         ki.pad = 0;
+        ki.world_to_local = inst.world_to_local;
+        ki.local_to_world = inst.local_to_world;
       }
 
       /* Upload concatenated per-shape data arrays. */

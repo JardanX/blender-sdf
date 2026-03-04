@@ -156,6 +156,11 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
       hit = true;
     }
   }
+  else if (kernel_data.num_sdf_shapes > 0) {
+    if (sdf_intersect_all_instanced(kg, ray, isect, visibility)) {
+      hit = true;
+    }
+  }
 
   return hit;
 }
@@ -214,6 +219,12 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
   if (kernel_data.num_sdfs > 0) {
     const float shadow_tmax = hit ? isect.t : ray->tmax;
     if (sdf_intersect_all_shadow(kg, ray, shadow_tmax, visibility)) {
+      hit = true;
+    }
+  }
+  else if (kernel_data.num_sdf_shapes > 0) {
+    const float shadow_tmax = hit ? isect.t : ray->tmax;
+    if (sdf_intersect_all_instanced_shadow(kg, ray, shadow_tmax, visibility)) {
       hit = true;
     }
   }
@@ -327,29 +338,36 @@ ccl_device_intersect bool scene_intersect_shadow_all(KernelGlobals kg,
 
   IF_NOT_USING_EMBREE
   {
+    /* Skip BVH traversal if no BVH nodes exist (e.g. scene with only SDF objects). */
+    if (kernel_data.bvh.have_bvh_nodes) {
 #    ifdef __OBJECT_MOTION__
-    if (kernel_data.bvh.have_motion) {
+      if (kernel_data.bvh.have_motion) {
 #      ifdef __HAIR__
-      if (kernel_data.bvh.have_curves) {
-        return bvh_intersect_shadow_all_hair_motion(
-            kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
-      }
+        if (kernel_data.bvh.have_curves) {
+          return bvh_intersect_shadow_all_hair_motion(
+              kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
+        }
 #      endif /* __HAIR__ */
 
-      return bvh_intersect_shadow_all_motion(
-          kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
-    }
+        return bvh_intersect_shadow_all_motion(
+            kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
+      }
 #    endif /* __OBJECT_MOTION__ */
 
 #    ifdef __HAIR__
-    if (kernel_data.bvh.have_curves) {
-      return bvh_intersect_shadow_all_hair(
-          kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
-    }
+      if (kernel_data.bvh.have_curves) {
+        return bvh_intersect_shadow_all_hair(
+            kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
+      }
 #    endif /* __HAIR__ */
 
-    return bvh_intersect_shadow_all(
-        kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
+      return bvh_intersect_shadow_all(
+          kg, ray, state, visibility, max_transparent_hits, num_recorded_hits, throughput);
+    }
+
+    *num_recorded_hits = 0;
+    *throughput = 1.0f;
+    return false;
   }
 
   kernel_assert(false);

@@ -55,10 +55,6 @@
 
 #include "BLI_time.h"
 
-#include "GPU_context.hh"
-
-#include <epoxy/gl.h>
-
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -335,25 +331,13 @@ class Instance : public DrawEngine {
   /** Performance overlay state. */
   bool perf_enabled_ = false;
   bool perf_queries_created_ = false;
-  /** True if using GL_TIME_ELAPSED queries (OpenGL only).
-   * False → CPU wall-clock fallback via storagebuf-read fence. */
-  bool perf_use_gl_queries_ = false;
-  /** Wall-clock pass start time for fallback (non-GL) timing. */
-  double perf_pass_start_time_ = 0.0;
-  /** Tiny SSBO used as a pipeline fence on non-GL backends.
-   * GPU_storagebuf_read forces Vulkan to submit + wait for all pending work. */
-  gpu::StorageBuf *perf_fence_ssbo_ = nullptr;
-  /** Double-buffered GL_TIME_ELAPSED queries: [frame_idx][pass_idx]. */
-  GLuint perf_queries_[2][PERF_PASS_COUNT] = {};
-  /** Whether queries have been issued for each frame slot. */
-  bool perf_queries_valid_[2] = {false, false};
-  /** Which passes were active (issued) on each frame slot. */
-  bool perf_pass_active_[2][PERF_PASS_COUNT] = {};
-  /** Per-slot flag: whether bake passes ran on this slot's frame. */
-  bool perf_slot_baked_[2] = {false, false};
-  /** Current frame index (alternates 0/1). */
-  int perf_frame_idx_ = 0;
-  /** Whether the DISPLAYED data is from a bake frame (set during readback). */
+  /** Per-pass wall-clock start timestamps (set by perf_begin_pass). */
+  double perf_pass_start_[PERF_PASS_COUNT] = {};
+  /** Which passes were active this frame. */
+  bool perf_pass_active_[PERF_PASS_COUNT] = {};
+  /** Whether the current frame is baking. */
+  bool perf_currently_baking_ = false;
+  /** Whether the DISPLAYED data is from a bake frame. */
   bool perf_prev_baked_ = false;
   /** Timing results (from previous frame's queries). */
   double perf_classify_ms_ = 0.0;
@@ -771,7 +755,7 @@ class Instance : public DrawEngine {
                     (draw_ctx_->v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) &&
                     !(draw_ctx_->v3d->flag2 & V3D_HIDE_OVERLAYS);
     if (perf_enabled_) {
-      perf_ensure_queries();
+      perf_init();
       perf_begin_frame();
     }
 
@@ -796,12 +780,12 @@ class Instance : public DrawEngine {
       needs_upload_ = false;
     }
 
-    /* Reset per-frame pass activity flags and record bake status for this slot. */
+    /* Reset per-frame pass activity flags and record bake status. */
     if (perf_enabled_) {
       for (int i = 0; i < PERF_PASS_COUNT; i++) {
-        perf_pass_active_[perf_frame_idx_][i] = false;
+        perf_pass_active_[i] = false;
       }
-      perf_slot_baked_[perf_frame_idx_] = needs_bake_;
+      perf_currently_baking_ = needs_bake_;
     }
 
     if (needs_bake_) {
@@ -2285,6 +2269,10 @@ class Instance : public DrawEngine {
     GPU_face_culling(GPU_CULL_NONE);
     GPU_stencil_test(GPU_STENCIL_NONE);
 
+    /* TODO: Scissor rect optimization disabled — needs correct AABB projection.
+     * Was clipping SDF rendering incorrectly. Re-enable once debugged. */
+    bool scissor_set = false;
+
     GPU_shader_bind(march_sh_);
 
     /* Bind compact atlas as sampler. */
@@ -2332,7 +2320,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
-    GPU_shader_uniform_1i(march_sh_, "normal_quality", 0); /* 0=fast, 1=smooth */
+    GPU_shader_uniform_1i(march_sh_, "normal_quality", 1); /* 0=fast, 1=smooth */
     GPU_shader_uniform_1i(march_sh_, "debug_mode", (debug_grid_ == 2) ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "use_instanced", use_instanced_ ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "instance_count", int(instances_.size()));
@@ -2373,6 +2361,10 @@ class Instance : public DrawEngine {
     }
     GPU_batch_set_shader(fullscreen_batch_, march_sh_);
     GPU_batch_draw(fullscreen_batch_);
+
+    if (scissor_set) {
+      GPU_scissor_test(false);
+    }
 
     if (compact_atlas_tx_) {
       GPU_texture_unbind(compact_atlas_tx_);
@@ -2450,6 +2442,7 @@ class Instance : public DrawEngine {
     GPU_shader_bind(fxaa_sh_);
 
     int color_slot = GPU_shader_get_sampler_binding(fxaa_sh_, "color_tx");
+    GPU_texture_filter_mode(march_color_tx_, true);
     GPU_texture_bind(march_color_tx_, color_slot);
 
     float2 rcp = float2(1.0f / float(fxaa_viewport_size_.x),
@@ -3212,36 +3205,18 @@ class Instance : public DrawEngine {
 
   /* ---- Performance overlay helpers ---- */
 
-  /** Lazily initialize timing backend.
-   * OpenGL: double-buffered GL_TIME_ELAPSED queries (accurate GPU timing).
-   * Non-GL (Vulkan/Metal): CPU wall-clock via storagebuf-read fences. */
-  void perf_ensure_queries()
+  /** Initialize perf tracking state (idempotent). */
+  void perf_init()
   {
     if (perf_queries_created_) {
       return;
     }
-    /* Mark as initialized regardless of backend to avoid re-entering. */
     perf_queries_created_ = true;
-    if (GPU_backend_get_type() == GPU_BACKEND_OPENGL) {
-      for (int f = 0; f < 2; f++) {
-        glGenQueries(PERF_PASS_COUNT, perf_queries_[f]);
-      }
-      perf_use_gl_queries_ = true;
-    }
-    else {
-      /* Non-GL: create a tiny SSBO as a pipeline fence.
-       * GPU_storagebuf_read() on Vulkan triggers flush_render_graph with
-       * SUBMIT | WAIT_FOR_COMPLETION — the only reliable GPU sync. */
-      uint32_t zero = 0;
-      perf_fence_ssbo_ = GPU_storagebuf_create_ex(
-          sizeof(uint32_t), &zero, GPU_USAGE_DYNAMIC, "sdf_perf_fence");
-    }
   }
 
-  /** Read back the previous frame's query results (non-blocking) and update FPS. */
+  /** Update wall-clock FPS rolling average. */
   void perf_begin_frame()
   {
-    /* Compute wall-clock FPS. */
     double now = BLI_time_now_seconds();
     if (perf_last_draw_time_ > 0.0) {
       double dt = now - perf_last_draw_time_;
@@ -3261,124 +3236,50 @@ class Instance : public DrawEngine {
       }
     }
     perf_last_draw_time_ = now;
-
-    /* GL path: read back previous frame's double-buffered query results. */
-    if (perf_use_gl_queries_) {
-      int prev = 1 - perf_frame_idx_;
-      if (!perf_queries_valid_[prev]) {
-        return;
-      }
-
-      /* Read each pass that was active on the previous frame (blocking).
-       * With double-buffering the previous frame's GPU work should be complete,
-       * so a blocking GL_QUERY_RESULT read is effectively free. */
-      auto read_pass = [&](int pass, double &out_ms) {
-        if (perf_pass_active_[prev][pass]) {
-          GLuint64 elapsed_ns = 0;
-          glGetQueryObjectui64v(perf_queries_[prev][pass], GL_QUERY_RESULT, &elapsed_ns);
-          out_ms = double(elapsed_ns) * 1e-6;
-        }
-        else {
-          out_ms = 0.0;
-        }
-      };
-      read_pass(PERF_PASS_CLASSIFY, perf_classify_ms_);
-      read_pass(PERF_PASS_BAKE, perf_bake_ms_);
-      read_pass(PERF_PASS_GRID, perf_grid_ms_);
-      read_pass(PERF_PASS_MARCH, perf_march_ms_);
-      read_pass(PERF_PASS_FXAA, perf_fxaa_ms_);
-
-      /* Associate baked status with the data we just read, not the current frame.
-       * This fixes the one-frame mismatch where perf_prev_baked_ was set from
-       * the current frame's needs_bake_ but the displayed data is from the
-       * previous frame's queries. */
-      perf_prev_baked_ = perf_slot_baked_[prev];
-
-      /* Update persistent cache when the previous frame actually baked. */
-      if (perf_prev_baked_) {
-        perf_last_classify_ms_ = perf_classify_ms_;
-        perf_last_bake_ms_ = perf_bake_ms_;
-        perf_last_grid_ms_ = perf_grid_ms_;
-        perf_has_bake_data_ = true;
-      }
-    }
-    /* Fallback path: timing was stored directly by perf_end_pass().
-     * Nothing to read back — results are already in perf_*_ms_. */
   }
 
-  /** Drain the GPU pipeline via storagebuf readback (non-GL fence). */
-  void perf_fence_sync()
-  {
-    if (perf_fence_ssbo_) {
-      uint32_t dummy;
-      GPU_storagebuf_read(perf_fence_ssbo_, &dummy);
-    }
-  }
-
-  /** Begin timing for the given pass.
-   * GL: starts a GL_TIME_ELAPSED query.
-   * Fallback: storagebuf-read fence to drain pipeline, then wall-clock snapshot. */
+  /** Begin timing for the given pass. Snapshots wall-clock time. */
   void perf_begin_pass(int pass)
   {
-    if (perf_use_gl_queries_) {
-      glBeginQuery(GL_TIME_ELAPSED, perf_queries_[perf_frame_idx_][pass]);
-    }
-    else {
-      perf_fence_sync();
-      perf_pass_start_time_ = BLI_time_now_seconds();
-    }
-    perf_pass_active_[perf_frame_idx_][pass] = true;
+    perf_pass_start_[pass] = BLI_time_now_seconds();
+    perf_pass_active_[pass] = true;
   }
 
   /** End timing for the given pass.
-   * GL: ends the GL_TIME_ELAPSED query (result read back next frame).
-   * Fallback: storagebuf-read fence to drain pipeline, then wall-clock delta. */
+   * Flushes command queue and waits for GPU completion, then computes elapsed time. */
   void perf_end_pass(int pass)
   {
-    if (perf_use_gl_queries_) {
-      glEndQuery(GL_TIME_ELAPSED);
-    }
-    else {
-      perf_fence_sync();
-      double elapsed_ms = (BLI_time_now_seconds() - perf_pass_start_time_) * 1000.0;
-      switch (pass) {
-        case PERF_PASS_CLASSIFY:
-          perf_classify_ms_ = elapsed_ms;
-          break;
-        case PERF_PASS_BAKE:
-          perf_bake_ms_ = elapsed_ms;
-          break;
-        case PERF_PASS_GRID:
-          perf_grid_ms_ = elapsed_ms;
-          break;
-        case PERF_PASS_MARCH:
-          perf_march_ms_ = elapsed_ms;
-          break;
-        case PERF_PASS_FXAA:
-          perf_fxaa_ms_ = elapsed_ms;
-          break;
-      }
+    GPU_flush();
+    GPU_finish();
+    double elapsed_ms = (BLI_time_now_seconds() - perf_pass_start_[pass]) * 1000.0;
+    switch (pass) {
+      case PERF_PASS_CLASSIFY:
+        perf_classify_ms_ = elapsed_ms;
+        break;
+      case PERF_PASS_BAKE:
+        perf_bake_ms_ = elapsed_ms;
+        break;
+      case PERF_PASS_GRID:
+        perf_grid_ms_ = elapsed_ms;
+        break;
+      case PERF_PASS_MARCH:
+        perf_march_ms_ = elapsed_ms;
+        break;
+      case PERF_PASS_FXAA:
+        perf_fxaa_ms_ = elapsed_ms;
+        break;
     }
   }
 
-  /** Format results and swap frame index. */
+  /** Format results and update bake cache. */
   void perf_end_frame(bool /*currently_baking*/)
   {
-    if (perf_use_gl_queries_) {
-      /* GL path: mark slot valid and swap for double-buffered readback. */
-      perf_queries_valid_[perf_frame_idx_] = true;
-      perf_frame_idx_ = 1 - perf_frame_idx_;
-    }
-    else {
-      /* Fallback path: timing already stored in perf_*_ms_ by perf_end_pass().
-       * Set bake status from the current frame (no double-buffer delay). */
-      perf_prev_baked_ = perf_slot_baked_[perf_frame_idx_];
-      if (perf_prev_baked_) {
-        perf_last_classify_ms_ = perf_classify_ms_;
-        perf_last_bake_ms_ = perf_bake_ms_;
-        perf_last_grid_ms_ = perf_grid_ms_;
-        perf_has_bake_data_ = true;
-      }
+    perf_prev_baked_ = perf_currently_baking_;
+    if (perf_prev_baked_) {
+      perf_last_classify_ms_ = perf_classify_ms_;
+      perf_last_bake_ms_ = perf_bake_ms_;
+      perf_last_grid_ms_ = perf_grid_ms_;
+      perf_has_bake_data_ = true;
     }
 
     /* Format the text. */
@@ -3434,20 +3335,10 @@ class Instance : public DrawEngine {
     s_perf_active = true;
   }
 
-  /** Delete GL query objects and reset state. */
+  /** Reset perf state. */
   void perf_cleanup()
   {
-    if (perf_use_gl_queries_) {
-      for (int f = 0; f < 2; f++) {
-        glDeleteQueries(PERF_PASS_COUNT, perf_queries_[f]);
-      }
-    }
-    if (perf_fence_ssbo_) {
-      GPU_storagebuf_free(perf_fence_ssbo_);
-      perf_fence_ssbo_ = nullptr;
-    }
     perf_queries_created_ = false;
-    perf_use_gl_queries_ = false;
     s_perf_active = false;
     s_perf_text[0] = '\0';
   }
