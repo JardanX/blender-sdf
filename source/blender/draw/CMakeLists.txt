@@ -283,6 +283,7 @@ set(GLSL_SRC
   engines/overlay/shaders/infos/overlay_outline_infos.hh
   engines/overlay/shaders/infos/overlay_paint_infos.hh
   engines/overlay/shaders/infos/overlay_sculpt_curves_infos.hh
+  engines/overlay/shaders/infos/overlay_sdf_infos.hh
   engines/overlay/shaders/infos/overlay_sculpt_infos.hh
   engines/overlay/shaders/infos/overlay_viewer_attribute_infos.hh
   engines/overlay/shaders/infos/overlay_volume_infos.hh
@@ -527,6 +528,8 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_sculpt_curves_cage_vert.glsl
   engines/overlay/shaders/overlay_sculpt_curves_selection_frag.glsl
   engines/overlay/shaders/overlay_sculpt_curves_selection_vert.glsl
+  engines/overlay/shaders/overlay_sdf_pick_frag.glsl
+  engines/overlay/shaders/overlay_sdf_pick_vert.glsl
   engines/overlay/shaders/overlay_sculpt_mask_frag.glsl
   engines/overlay/shaders/overlay_sculpt_mask_vert.glsl
 

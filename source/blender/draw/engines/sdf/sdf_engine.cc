@@ -463,6 +463,7 @@ class Instance : public DrawEngine {
     gpu_obj.bevel = bevel;
 
     gpu_obj.blend = sdf_data->blend;
+    gpu_obj.sdf_type = sdf_data->sdf_type;
 
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);

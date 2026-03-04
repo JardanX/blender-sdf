@@ -24,7 +24,8 @@ struct SDFObjectGPU {
   float bevel;
   /** Smooth blend radius. */
   float blend;
-  float _pad1;
+  /** SDF primitive type (eSDFType: 0=box, 1=sphere, 4=capsule, 5=torus). */
+  int sdf_type;
   float _pad2;
   /** Object color RGBA. */
   float4 color;
