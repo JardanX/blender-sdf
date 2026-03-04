@@ -168,7 +168,7 @@ class Instance : public DrawEngine {
   /** Grid resolution in bricks per axis (per-axis, world-aligned). */
   int3 grid_res_ = int3(32);
   /** Total voxel resolution from UI. */
-  int sdf_resolution_ = 256;
+  int sdf_resolution_ = 128;
   /** Active brick count after classify pass. */
   int active_brick_count_ = 0;
   /** Bricks per axis in compact atlas layout. */
@@ -188,6 +188,8 @@ class Instance : public DrawEngine {
    * the expensive dense-float extraction, so we can skip it when unchanged). */
   uint64_t grid_hash_ = 0;
   bool needs_bake_ = true;
+  /** Whether object/BVH SSBOs need re-upload (set when scene hash changes). */
+  bool needs_upload_ = true;
 
   /** Mesh-to-SDF grid objects pending processing. */
   struct PendingGridObject {
@@ -545,18 +547,32 @@ class Instance : public DrawEngine {
     }
 
     /* Build local-space transforms.
-     * local_to_world: scale normalized shape back to effective size, then apply rotation + position.
-     * world_to_local: inverse of the above. */
+     * The shape atlas is in normalized space (max dimension = 1.0).
+     * world_to_local must include 1/max_dim scaling so ray coordinates
+     * match the atlas coordinate system.
+     * local_to_world is the inverse: scales from normalized back to world. */
     float max_dim = math::reduce_max(math::abs(effective_size));
     if (max_dim < 1e-8f) {
       max_dim = 1.0f;
     }
 
+    /* Build normalization scale matrix: maps Blender-unit local → normalized local. */
+    float inv_max = 1.0f / max_dim;
+    float4x4 norm_scale = float4x4::identity();
+    norm_scale[0][0] = inv_max;
+    norm_scale[1][1] = inv_max;
+    norm_scale[2][2] = inv_max;
+
+    float4x4 inv_norm_scale = float4x4::identity();
+    inv_norm_scale[0][0] = max_dim;
+    inv_norm_scale[1][1] = max_dim;
+    inv_norm_scale[2][2] = max_dim;
+
     InstanceInfo inst;
     inst.shape_id = shape_id;
     inst.object_id = object_index;
-    inst.local_to_world = mat; /* Full object_to_world transform. */
-    inst.world_to_local = math::invert(mat);
+    inst.world_to_local = norm_scale * math::invert(mat);
+    inst.local_to_world = mat * inv_norm_scale;
     inst.color = gpu_obj.color;
     inst.blend = sdf_data->blend;
     inst.world_scale = max_dim;
@@ -712,6 +728,7 @@ class Instance : public DrawEngine {
     if (hash != scene_hash_) {
       scene_hash_ = hash;
       needs_bake_ = true;
+      needs_upload_ = true;
     }
     else {
       needs_bake_ = false;
@@ -727,7 +744,9 @@ class Instance : public DrawEngine {
         break;
       }
     }
-    use_instanced_ = !any_blend && !shapes_.is_empty() && grid_objects_.is_empty() &&
+    /* TODO: instanced mode disabled until coordinate/bake pipeline is verified.
+     * Force world-space mode for now. */
+    use_instanced_ = false && !any_blend && !shapes_.is_empty() && grid_objects_.is_empty() &&
                      pending_grid_objects_.is_empty();
 
     /* Compute per-shape atlas parameters and CPU classify when in instanced mode. */
@@ -769,11 +788,12 @@ class Instance : public DrawEngine {
 
     DRW_submission_start();
 
-    if (!objects_.is_empty()) {
+    if (!objects_.is_empty() && needs_upload_) {
       upload_objects();
       upload_shapes_instances();
       build_bvh();
       upload_bvh();
+      needs_upload_ = false;
     }
 
     /* Reset per-frame pass activity flags and record bake status for this slot. */
@@ -880,10 +900,15 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_CLASSIFY);
         }
 
-        /* Assign persistent slots and determine if partial rebake is possible. */
-        bool can_partial = false;
+        /* Size atlas from classify output (simple sequential assignment). */
         if (!objects_.is_empty() && active_brick_count_ > 0) {
-          can_partial = assign_persistent_slots();
+          total_slots_allocated_ = active_brick_count_;
+          int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
+          if (new_bpa < 1) {
+            new_bpa = 1;
+          }
+          bricks_per_axis_ = new_bpa;
+          prev_bricks_per_axis_ = new_bpa;
         }
         else {
           total_slots_allocated_ = 0;
@@ -895,37 +920,12 @@ class Instance : public DrawEngine {
 
         ensure_compact_atlas();
 
-        /* Phase 2: Bake SDFs into atlas (full or partial). */
+        /* Phase 2: Bake SDFs into atlas. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
         if (!objects_.is_empty()) {
-          if (can_partial && !grid_objects_.is_empty()) {
-            /* Grid objects blend globally — can't do partial bake safely. */
-            can_partial = false;
-          }
-          if (can_partial) {
-            Set<int> dirty_objs = compute_dirty_objects();
-            if (dirty_objs.is_empty()) {
-              /* Hash changed but no individual object is dirty — edge case
-               * (e.g. only grid_hash changed). Full bake as fallback. */
-              dispatch_bake();
-            }
-            else if (int(dirty_objs.size()) == int(objects_.size())) {
-              /* All objects dirty: full bake is faster than building dirty set. */
-              dispatch_bake();
-            }
-            else {
-              Set<int64_t> dirty_bricks = compute_dirty_brick_set(dirty_objs);
-              build_dirty_bricks_ssbo(dirty_bricks);
-              if (dirty_brick_count_ > 0) {
-                dispatch_bake_dirty();
-              }
-            }
-          }
-          else {
-            dispatch_bake();
-          }
+          dispatch_bake();
         }
         else {
           clear_compact_atlas();
@@ -946,8 +946,8 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Save object states for next frame's dirty comparison. */
-      save_object_states();
+      /* save_object_states() — disabled: incremental baking is deferred.
+       * Function body kept for future use. */
       force_full_rebake_ = false;
     }
 
@@ -1013,13 +1013,14 @@ class Instance : public DrawEngine {
      * are computed in end_sync() from chunk-snapped scene bounds. */
     int new_res = int(shading.sdf_resolution);
     if (new_res == 0) {
-      new_res = 256;
+      new_res = 128;
     }
-    new_res = math::clamp(new_res, 64, 512);
+    new_res = math::clamp(new_res, 32, 128);
 
     if (new_res != sdf_resolution_) {
       sdf_resolution_ = new_res;
       needs_bake_ = true;
+      needs_upload_ = true;
       scene_hash_ = 0;
       force_full_rebake_ = true;
       brick_slot_map_.clear();
@@ -1028,7 +1029,20 @@ class Instance : public DrawEngine {
     }
 
     debug_grid_ = int(shading.sdf_debug_grid);
-    fxaa_enabled_ = (U.sdf_fxaa != 0);
+    bool new_fxaa = (U.sdf_fxaa != 0);
+    if (!new_fxaa && fxaa_enabled_) {
+      /* FXAA toggled off — free offscreen target to reclaim VRAM. */
+      if (march_color_tx_) {
+        GPU_texture_free(march_color_tx_);
+        march_color_tx_ = nullptr;
+      }
+      if (march_fb_) {
+        GPU_framebuffer_free(march_fb_);
+        march_fb_ = nullptr;
+      }
+      fxaa_viewport_size_ = int2(0);
+    }
+    fxaa_enabled_ = new_fxaa;
 
     /* Surface margin: percentage → multiplier. Treat 0 (unset) as 100%. */
     int margin_pct = int(shading.sdf_surface_margin);
@@ -2129,7 +2143,11 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    /* Readback active brick count from SSBO. */
+    /* Readback active brick count from SSBO (synchronous GPU→CPU stall).
+     * This is intentional: we need the brick count to size the compact atlas
+     * before the bake dispatch. Blender's GPU API has no indirect dispatch,
+     * so we can't launch bake with a GPU-side count. The stall is small
+     * (~16 bytes) and happens once per bake, not per frame. */
     BrickCounter readback = {};
     GPU_storagebuf_read(brick_counter_, &readback);
     active_brick_count_ = int(readback.count);
@@ -2314,6 +2332,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
+    GPU_shader_uniform_1i(march_sh_, "normal_quality", 0); /* 0=fast, 1=smooth */
     GPU_shader_uniform_1i(march_sh_, "debug_mode", (debug_grid_ == 2) ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "use_instanced", use_instanced_ ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "instance_count", int(instances_.size()));

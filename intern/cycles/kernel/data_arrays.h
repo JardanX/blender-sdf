@@ -102,7 +102,7 @@ KERNEL_DATA_ARRAY(int4, sdf_brick_map)
 KERNEL_DATA_ARRAY(KernelSDFShape, sdf_shape_objects)
 KERNEL_DATA_ARRAY(KernelSDFInstance, sdf_shape_instances)
 KERNEL_DATA_ARRAY(int, sdf_shape_indirection)
-KERNEL_DATA_ARRAY(float, sdf_shape_atlas)
+KERNEL_DATA_ARRAY(uint16_t, sdf_shape_atlas)
 KERNEL_DATA_ARRAY(int4, sdf_shape_brick_map)
 
 #undef KERNEL_DATA_ARRAY
