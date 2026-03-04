@@ -18,6 +18,12 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 #define BRICK_STORAGE 12
 #define MAX_CANDIDATES 64
 
+/* Shared candidate list: BVH traversal done once per workgroup by thread 0,
+ * then all 144 threads read from shared memory. Eliminates 143 redundant
+ * BVH traversals per brick. */
+shared int shared_candidates[MAX_CANDIDATES];
+shared int shared_num_candidates;
+
 void main()
 {
   /* Active-brick-only dispatch: one workgroup per active brick.
@@ -45,74 +51,77 @@ void main()
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
                       float3(max_blend);
 
+  /* Elect thread 0 to collect candidates for the entire workgroup.
+   * All threads in the brick share the same AABB, so the candidate list
+   * is identical — no need for each thread to traverse independently. */
+  if (gl_LocalInvocationIndex == 0u) {
+    shared_num_candidates = 0;
+
+    if (bvh_node_count > 0) {
+      int stack[BVH_MAX_STACK];
+      int sp = 0;
+      stack[sp++] = 0;
+
+      while (sp > 0) {
+        int node_idx = stack[--sp];
+        BVHNodeGPU node = bvh_nodes[node_idx];
+
+        if (!aabb_overlap(
+                brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz))
+        {
+          continue;
+        }
+
+        int left = bvh_decode_int(node.min_and_left.w);
+        int right = bvh_decode_int(node.max_and_right.w);
+
+        if (left == -1) {
+          if (shared_num_candidates < MAX_CANDIDATES) {
+            shared_candidates[shared_num_candidates++] = right;
+          }
+        }
+        else {
+          if (sp < BVH_MAX_STACK - 1) {
+            stack[sp++] = left;
+            stack[sp++] = right;
+          }
+        }
+      }
+
+      /* Sort candidates by object index (insertion sort, small N). */
+      for (int i = 1; i < shared_num_candidates; i++) {
+        int key = shared_candidates[i];
+        int j = i - 1;
+        while (j >= 0 && shared_candidates[j] > key) {
+          shared_candidates[j + 1] = shared_candidates[j];
+          j--;
+        }
+        shared_candidates[j + 1] = key;
+      }
+    }
+    else {
+      /* Fallback: linear scan collects all AABB-overlapping objects. */
+      for (int i = 0; i < object_count; i++) {
+        SDFObjectGPU obj = objects[i];
+
+        if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
+            any(lessThan(brick_max, obj.bbox_min.xyz)))
+        {
+          continue;
+        }
+
+        if (shared_num_candidates < MAX_CANDIDATES) {
+          shared_candidates[shared_num_candidates++] = i;
+        }
+      }
+      /* Already in index order, no sort needed. */
+    }
+  }
+  barrier();
+
   /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
-  if (any(greaterThanEqual(local_xy, int2(BRICK_STORAGE)))) {
-    return;
-  }
-
-  /* Collect candidate objects from BVH (per-brick AABB culling), then sort
-   * by index for deterministic evaluation order. This ensures consistent
-   * blending when objects have different blend values. */
-  int candidates[MAX_CANDIDATES];
-  int num_candidates = 0;
-
-  if (bvh_node_count > 0) {
-    int stack[BVH_MAX_STACK];
-    int sp = 0;
-    stack[sp++] = 0;
-
-    while (sp > 0) {
-      int node_idx = stack[--sp];
-      BVHNodeGPU node = bvh_nodes[node_idx];
-
-      if (!aabb_overlap(brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz)) {
-        continue;
-      }
-
-      int left = bvh_decode_int(node.min_and_left.w);
-      int right = bvh_decode_int(node.max_and_right.w);
-
-      if (left == -1) {
-        if (num_candidates < MAX_CANDIDATES) {
-          candidates[num_candidates++] = right;
-        }
-      }
-      else {
-        if (sp < BVH_MAX_STACK - 1) {
-          stack[sp++] = left;
-          stack[sp++] = right;
-        }
-      }
-    }
-
-    /* Sort candidates by object index (insertion sort, small N). */
-    for (int i = 1; i < num_candidates; i++) {
-      int key = candidates[i];
-      int j = i - 1;
-      while (j >= 0 && candidates[j] > key) {
-        candidates[j + 1] = candidates[j];
-        j--;
-      }
-      candidates[j + 1] = key;
-    }
-  }
-  else {
-    /* Fallback: linear scan collects all AABB-overlapping objects. */
-    for (int i = 0; i < object_count; i++) {
-      SDFObjectGPU obj = objects[i];
-
-      if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
-          any(lessThan(brick_max, obj.bbox_min.xyz))) {
-        continue;
-      }
-
-      if (num_candidates < MAX_CANDIDATES) {
-        candidates[num_candidates++] = i;
-      }
-    }
-    /* Already in index order, no sort needed. */
-  }
+  int num_candidates = shared_num_candidates;
 
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
@@ -128,7 +137,7 @@ void main()
 
     /* Evaluate candidates in deterministic index order. */
     for (int c = 0; c < num_candidates; c++) {
-      int i = candidates[c];
+      int i = shared_candidates[c];
       SDFObjectGPU obj = objects[i];
 
       float3 local_pos = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
