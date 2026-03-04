@@ -1465,6 +1465,19 @@ Result: C0-continuous normals across voxel boundaries. Cost: 27 texel fetches + 
 |------|--------|
 | `intern/cycles/kernel/geom/sdf.h` | **Replaced dual-voxel normal computation (27 fetches + 8 gradients + trilinear blend) with single-voxel analytical gradient (8 fetches + 1 gradient).** Uses the 8 corners of the hit voxel and `sdf_trilinear_gradient()` for an exact gradient within the voxel. Trade-off: C0 continuity at voxel boundaries (vs C1 dual-voxel), visually negligible at typical resolutions. ~3.4x fewer texture fetches per primary ray hit |
 
+### Instanced Atlas: float4→float Packing + Helper Dedup
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/data_arrays.h` | Changed `sdf_shape_atlas` from `float4` to `float` — instanced atlas stores distance only, no color. **4x memory reduction and cache efficiency** |
+| `intern/cycles/scene/devicescene.h` | Added missing `sdf_shape_*` device_vector declarations for instanced mode |
+| `intern/cycles/scene/devicescene.cpp` | Added initializers for instanced device vectors |
+| `intern/cycles/scene/sdf.h` | Changed `shape_atlas_data` from `vector<float4>` to `vector<float>` |
+| `intern/cycles/blender/sdf.cpp` | Changed per-shape bake from `make_float4(d,0,0,0)` to scalar `d` |
+| `intern/cycles/scene/geometry.cpp` | Changed upload from `sizeof(float4)` to `sizeof(float)` |
+| `intern/cycles/kernel/geom/sdf.h` | Added `sdf_fetch_corners_shape()` helper with pre-computed plane offsets. Replaced 3x8=24 inline fetches with 3 helper calls. Removed `.x` member access (now scalar) |
+| `intern/cycles/kernel/device/optix/bvh.h` | Fixed const-correctness for instanced SDF in shadow/closesthit/visibility handlers |
+
 ---
 
 ## Object-Space Atlas Baking (Instanced Mode)
