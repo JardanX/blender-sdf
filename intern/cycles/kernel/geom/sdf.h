@@ -76,29 +76,39 @@ ccl_device_inline int sdf_fetch_matid(KernelGlobals kg,
   return kernel_data_fetch(sdf_matid, idx);
 }
 
-/* Convert grid-space brick + local voxel to compact atlas coordinate. */
-ccl_device_inline int3 sdf_grid_to_compact(const int3 local_voxel,
-                                            const int brick_slot,
-                                            const int bpa)
+/* Compute the atlas-space base coordinate for a brick slot.
+ * This involves 3 integer divides + 3 modulos, so call once per brick
+ * and reuse the result for all voxel fetches within that brick. */
+ccl_device_inline int3 sdf_slot_origin(const int brick_slot, const int bpa)
 {
   const int sx = brick_slot % bpa;
   const int sy = (brick_slot / bpa) % bpa;
   const int sz = brick_slot / (bpa * bpa);
-  return make_int3(sx * SDF_BRICK_STORAGE + local_voxel.x + SDF_BRICK_BORDER,
-                   sy * SDF_BRICK_STORAGE + local_voxel.y + SDF_BRICK_BORDER,
-                   sz * SDF_BRICK_STORAGE + local_voxel.z + SDF_BRICK_BORDER);
+  return make_int3(sx * SDF_BRICK_STORAGE + SDF_BRICK_BORDER,
+                   sy * SDF_BRICK_STORAGE + SDF_BRICK_BORDER,
+                   sz * SDF_BRICK_STORAGE + SDF_BRICK_BORDER);
 }
 
-/* Fetch 8 corner SDF values for a voxel cell. */
+/* Convert grid-space local voxel to compact atlas coordinate using
+ * pre-computed slot origin (from sdf_slot_origin). */
+ccl_device_inline int3 sdf_grid_to_compact(const int3 local_voxel,
+                                            const int3 slot_org)
+{
+  return make_int3(slot_org.x + local_voxel.x,
+                   slot_org.y + local_voxel.y,
+                   slot_org.z + local_voxel.z);
+}
+
+/* Fetch 8 corner SDF values for a voxel cell.
+ * slot_org is the pre-computed atlas base from sdf_slot_origin(). */
 ccl_device void sdf_fetch_corners(KernelGlobals kg,
                                    const int atlas_offset,
                                    const int3 local_cell,
-                                   const int brick_slot,
-                                   const int bpa,
+                                   const int3 slot_org,
                                    const int atlas_dim,
                                    float s[8])
 {
-  const int3 base = sdf_grid_to_compact(local_cell, brick_slot, bpa);
+  const int3 base = sdf_grid_to_compact(local_cell, slot_org);
   s[0] = sdf_fetch_distance(kg, atlas_offset, base.x, base.y, base.z, atlas_dim);
   s[1] = sdf_fetch_distance(kg, atlas_offset, base.x + 1, base.y, base.z, atlas_dim);
   s[2] = sdf_fetch_distance(kg, atlas_offset, base.x, base.y + 1, base.z, atlas_dim);
@@ -116,8 +126,7 @@ ccl_device void sdf_fetch_corners(KernelGlobals kg,
 ccl_device float3 sdf_compute_normal(KernelGlobals kg,
                                       const int atlas_offset,
                                       const float3 grid_pos_in_brick,
-                                      const int brick_slot,
-                                      const int bpa,
+                                      const int3 slot_org,
                                       const int atlas_dim)
 {
   /* Dual voxel base: shift by -0.5 then floor.
@@ -135,13 +144,10 @@ ccl_device float3 sdf_compute_normal(KernelGlobals kg,
                            grid_pos_in_brick.z - 0.5f - float(base.z));
   uvw = clamp(uvw, zero_float3(), one_float3());
 
-  /* Compact atlas base. */
-  const int sx = brick_slot % bpa;
-  const int sy = (brick_slot / bpa) % bpa;
-  const int sz = brick_slot / (bpa * bpa);
-  const int3 atlas_base = make_int3(sx * SDF_BRICK_STORAGE + base.x + SDF_BRICK_BORDER,
-                                    sy * SDF_BRICK_STORAGE + base.y + SDF_BRICK_BORDER,
-                                    sz * SDF_BRICK_STORAGE + base.z + SDF_BRICK_BORDER);
+  /* Compact atlas base using pre-computed slot origin. */
+  const int3 atlas_base = make_int3(slot_org.x + base.x,
+                                    slot_org.y + base.y,
+                                    slot_org.z + base.z);
 
   /* Fetch 3x3x3 = 27 neighborhood. */
   float v[27];
@@ -253,6 +259,7 @@ ccl_device bool sdf_intersect_brick(KernelGlobals kg,
 
   /* Active brick: voxel-level DDA only. */
   const float inv_voxel = 1.0f / voxel_size;
+  const int3 slot_org = sdf_slot_origin(brick_slot, bpa);
 
   const float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
                                                      float(brick_cell.y * SDF_BRICK_SIZE),
@@ -323,7 +330,7 @@ ccl_device bool sdf_intersect_brick(KernelGlobals kg,
 
     /* Fetch 8 corners. */
     float s[8];
-    sdf_fetch_corners(kg, atlas_off, vcell, brick_slot, bpa, atlas_dim, s);
+    sdf_fetch_corners(kg, atlas_off, vcell, slot_org, atlas_dim, s);
 
     float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                      min(min(s[4], s[5]), min(s[6], s[7])));
@@ -460,6 +467,7 @@ ccl_device bool sdf_intersect_brick_shadow(KernelGlobals kg,
 
   /* Active brick: voxel-level DDA. */
   const float inv_voxel = 1.0f / voxel_size;
+  const int3 slot_org = sdf_slot_origin(brick_slot, bpa);
   const float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
                                                      float(brick_cell.y * SDF_BRICK_SIZE),
                                                      float(brick_cell.z * SDF_BRICK_SIZE)) *
@@ -526,7 +534,7 @@ ccl_device bool sdf_intersect_brick_shadow(KernelGlobals kg,
     vt_cell_exit = min(vt_cell_exit, t_brick_exit);
 
     float s[8];
-    sdf_fetch_corners(kg, atlas_off, vcell, brick_slot, bpa, atlas_dim, s);
+    sdf_fetch_corners(kg, atlas_off, vcell, slot_org, atlas_dim, s);
 
     float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                      min(min(s[4], s[5]), min(s[6], s[7])));
@@ -711,6 +719,7 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
 
     if (slot >= 0) {
       /* Active brick: voxel-level DDA. */
+      const int3 slot_org = sdf_slot_origin(slot, bpa);
       float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
                                                   float(brick_cell.y * SDF_BRICK_SIZE),
                                                   float(brick_cell.z * SDF_BRICK_SIZE)) *
@@ -756,7 +765,7 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
 
         /* Fetch 8 corners. */
         float s[8];
-        sdf_fetch_corners(kg, atlas_off, vcell, slot, bpa, atlas_dim, s);
+        sdf_fetch_corners(kg, atlas_off, vcell, slot_org, atlas_dim, s);
 
         float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                          min(min(s[4], s[5]), min(s[6], s[7])));
@@ -1014,6 +1023,7 @@ ccl_device bool sdf_intersect_shadow(KernelGlobals kg,
 
     if (slot >= 0) {
       /* Active brick: voxel-level DDA with shadow fast path. */
+      const int3 slot_org = sdf_slot_origin(slot, bpa);
       float3 brick_origin = origin + make_float3(float(brick_cell.x * SDF_BRICK_SIZE),
                                                   float(brick_cell.y * SDF_BRICK_SIZE),
                                                   float(brick_cell.z * SDF_BRICK_SIZE)) *
@@ -1057,7 +1067,7 @@ ccl_device bool sdf_intersect_shadow(KernelGlobals kg,
         vt_cell_exit = min(vt_cell_exit, t_brick_exit);
 
         float s[8];
-        sdf_fetch_corners(kg, atlas_off, vcell, slot, bpa, atlas_dim, s);
+        sdf_fetch_corners(kg, atlas_off, vcell, slot_org, atlas_dim, s);
 
         float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                          min(min(s[4], s[5]), min(s[6], s[7])));
@@ -1223,9 +1233,12 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
                                         float(SDF_BRICK_SIZE) - 0.01f,
                                         float(SDF_BRICK_SIZE) - 0.01f));
 
+  /* Compute slot origin once for both normal and matid lookups. */
+  const int3 slot_org = (brick_slot >= 0) ? sdf_slot_origin(brick_slot, bpa) : make_int3(0, 0, 0);
+
   /* Normal from dual voxel gradient. */
   if (brick_slot >= 0) {
-    sd->Ng = sdf_compute_normal(kg, atlas_off, grid_pos_in_brick, brick_slot, bpa, atlas_dim);
+    sd->Ng = sdf_compute_normal(kg, atlas_off, grid_pos_in_brick, slot_org, atlas_dim);
   }
   else {
     /* Fully-inside brick (slot=-2) or fallback: use ray direction as normal. */
@@ -1245,8 +1258,7 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
         make_int3((int)floorf(grid_pos_in_brick.x),
                   (int)floorf(grid_pos_in_brick.y),
                   (int)floorf(grid_pos_in_brick.z)),
-        brick_slot,
-        bpa);
+        slot_org);
     atlas_coord.x = clamp(atlas_coord.x, 0, atlas_dim - 1);
     atlas_coord.y = clamp(atlas_coord.y, 0, atlas_dim - 1);
     atlas_coord.z = clamp(atlas_coord.z, 0, atlas_dim - 1);

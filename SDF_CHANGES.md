@@ -1452,3 +1452,9 @@ Result: C0-continuous normals across voxel boundaries. Cost: 27 texel fetches + 
 | File | Change |
 |------|--------|
 | `intern/cycles/blender/sdf.cpp` | **Phase 1 (classify):** Added per-brick AABB culling — each brick's expanded AABB (half-diagonal + max_blend) is tested against object AABBs before evaluating SDF distance. **Phase 2 (bake):** Added per-brick candidate list — computes brick storage AABB (including border + blend expansion), filters objects by AABB overlap once per brick, then only evaluates candidates at each voxel. Reduces per-voxel work from O(all_objects) to O(overlapping_objects) |
+
+### Pre-Computed Slot Origin in Cycles DDA Kernel
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/geom/sdf.h` | **Slot→atlas lookup optimization.** Added `sdf_slot_origin()` helper that computes the atlas base coordinate (3 integer divides + 3 modulos) once per brick entry. Updated `sdf_fetch_corners()`, `sdf_compute_normal()`, and `sdf_grid_to_compact()` to accept pre-computed `int3 slot_org` instead of `(brick_slot, bpa)`. Eliminates redundant div/mod per voxel step in all 4 DDA paths (primary, shadow, brick-only, and shader setup) |
