@@ -1151,7 +1151,7 @@ void GeometryManager::device_update(Device *device,
         dscene->sdf_shape_atlas.alloc(first_sdf->shape_atlas_data.size());
         memcpy(dscene->sdf_shape_atlas.data(),
                first_sdf->shape_atlas_data.data(),
-               first_sdf->shape_atlas_data.size() * sizeof(float4));
+               first_sdf->shape_atlas_data.size() * sizeof(float));
         dscene->sdf_shape_atlas.copy_to_device();
       }
 

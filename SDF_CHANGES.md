@@ -1494,3 +1494,46 @@ Based on "Ray Tracing of Signed Distance Function Grids"
 | `draw/engines/sdf/shaders/sdf_march_frag.glsl` | **Major rewrite.** Factored inner DDA into `dda_march()` function with mode parameter (indir_offset: -1=texture, ≥0=SSBO). Added `march_instanced()` with BVH traversal over instances (ordered child processing for early termination). `InstanceHit` struct tracks closest hit across instances. Normal transform: `normalize(mat3(transpose(world_to_local)) * local_normal)`. Main dispatches based on `use_instanced` flag |
 | `draw/engines/sdf/sdf_engine.cc` | **Per-shape atlas pipeline.** Added `use_instanced_` mode selection (no blend, no grid objects). New functions: `compute_shape_atlas_params()` (per-shape grid_res/voxel_size), `shape_classify_cpu()` (CPU-side brick classification via sdBox), `upload_shape_indirection()` (flat int SSBO), `dispatch_shape_bake_all()` (per-shape bake dispatch). Modified `end_sync()` for mode selection, `draw()` for dual pipeline, `draw_march()` for SSBO binding and push constants. `ShapeInfo` expanded with grid_res, local_origin, local_voxel_size, indir_offset, slot_offset, active_brick_count |
 | `draw/CMakeLists.txt` | Added `sdf_shape_bake_comp.glsl` to shader list |
+
+---
+
+## Two-Level BVH (TLAS/BLAS) for Cycles OptiX (Step 4)
+
+Per-shape instanced BVH for Cycles OptiX rendering. When no objects use smooth blending,
+each unique SDF shape gets its own BLAS (local-space brick AABBs), and each instance becomes
+a TLAS entry with its world transform. Reduces BVH memory from O(total_bricks) to
+O(unique_shape_bricks) + O(instances).
+
+Dual pipeline: instanced mode (no blend) vs world-space mode (blend > 0), mutually exclusive.
+CPU-side per-shape atlas baking with multithreaded `parallel_for`.
+
+### New Kernel Structs
+
+| Struct | Size | Fields |
+|--------|------|--------|
+| `KernelSDFShape` | 48 bytes | indirection_offset, atlas_offset, brick_map_offset, active_bricks, grid_res_xyz, bricks_per_axis, voxel_size, origin |
+| `KernelSDFInstance` | 16 bytes | shape_id, shader_id, object_id, pad |
+
+### New Kernel Data Arrays
+
+| Array | Type | Purpose |
+|-------|------|---------|
+| `sdf_shape_objects` | `KernelSDFShape` | Per-shape atlas parameters |
+| `sdf_shape_instances` | `KernelSDFInstance` | Per-instance shape/shader/object mapping |
+| `sdf_shape_indirection` | `int` | Concatenated per-shape brick indirection grids |
+| `sdf_shape_atlas` | `float4` | Concatenated per-shape SDF atlas data |
+| `sdf_shape_brick_map` | `int4` | Concatenated per-shape brick map entries |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/types.h` | Added `KernelSDFShape` (48B) and `KernelSDFInstance` (16B) structs. Replaced `pad3`/`pad4` in `KernelData` with `num_sdf_shapes`/`num_sdf_instances` |
+| `intern/cycles/kernel/data_arrays.h` | Added 5 new kernel data arrays for per-shape instanced data |
+| `intern/cycles/scene/sdf.h` | Extended `ShapeInfo` with per-shape atlas fields (grid_res, voxel_size, origin, bricks_per_axis, active_bricks, offsets). Added `use_instanced` flag and concatenated per-shape data vectors to `SDFGeometry` |
+| `intern/cycles/blender/sdf.cpp` | Added per-shape local atlas baking in instanced mode: CPU-side classify (sdBox at brick centers), multithreaded bake via `parallel_for`, `local_to_world`/`world_to_local` transform computation per instance. Early return skips world-space bake path |
+| `intern/cycles/scene/geometry.cpp` | Added instanced mode upload path: builds `KernelSDFShape`/`KernelSDFInstance` arrays, uploads concatenated per-shape indirection/atlas/brick_map data. Clears cross-mode arrays to avoid stale data |
+| `intern/cycles/device/optix/device_impl.cpp` | Per-shape BLAS building (one BLAS per unique shape with local-space brick AABBs via `optixAccelBuild`). Per-instance TLAS entries with `local_to_world` transform. Preserved world-space BLAS path as fallback |
+| `intern/cycles/device/optix/device_impl.h` | Added `sdf_shape_blas_handles` and `sdf_shape_blas_data` member vectors |
+| `intern/cycles/kernel/device/optix/bvh.h` | `__intersection__sdf()`: branches on `num_sdf_shapes` for instanced vs world-space. Instanced uses `optixGetInstanceId()` → `KernelSDFInstance` → `KernelSDFShape` → per-shape brick_map. Updated anyhit (shadow_all_hit) and closest-hit to resolve instance_id/object_id in instanced mode |
+| `intern/cycles/kernel/geom/sdf.h` | Added `sdf_intersect_brick_shape()` and `sdf_intersect_brick_shape_shadow()` for per-shape DDA. Updated `sdf_shader_setup()` to branch on instanced mode for normal computation and shader resolution |

@@ -435,7 +435,7 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
       size_t atlas_total = (size_t)atlas_dim * atlas_dim * atlas_dim;
 
       /* Bake per-shape local atlas. */
-      vector<float4> shape_atlas(atlas_total, make_float4(100.0f, 0.0f, 0.0f, 0.0f));
+      vector<float> shape_atlas(atlas_total, 100.0f);
 
       parallel_for(0, grid_volume, [&](int idx) {
         int slot = shape_indir[idx];
@@ -466,7 +466,7 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
               int3 ac = slot_origin + make_int3(lx, ly, lz);
               size_t ai = (size_t)ac.z * atlas_dim * atlas_dim +
                           (size_t)ac.y * atlas_dim + (size_t)ac.x;
-              shape_atlas[ai] = make_float4(d, 0.0f, 0.0f, 0.0f);
+              shape_atlas[ai] = d;
             }
           }
         }

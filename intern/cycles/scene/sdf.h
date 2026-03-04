@@ -86,7 +86,7 @@ class SDFGeometry : public Geometry {
   /* Per-shape instanced mode (TLAS/BLAS). Active when use_instanced = true. */
   bool use_instanced = false;
   vector<int> shape_indirection_data;    /* Concatenated per-shape indirection. */
-  vector<float4> shape_atlas_data;       /* Concatenated per-shape atlas (dist+padding). */
+  vector<float> shape_atlas_data;        /* Concatenated per-shape atlas (distance only). */
   vector<int4> shape_brick_map_data;     /* Concatenated per-shape brick maps. */
 
   SDFGeometry();
