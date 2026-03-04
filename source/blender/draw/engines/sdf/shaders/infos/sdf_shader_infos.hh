@@ -85,6 +85,28 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Shape Bake Compute Shader (per-shape local-space bake)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_shape_bake)
+DO_STATIC_COMPILATION()
+LOCAL_GROUP_SIZE(12, 12, 1)
+STORAGE_BUF(0, read, ActiveBrick, active_bricks[])
+IMAGE(0, SFLOAT_16_16_16_16, write, image3D, compact_atlas)
+PUSH_CONSTANT(float3, shape_size)
+PUSH_CONSTANT(float, shape_bevel)
+PUSH_CONSTANT(float3, local_origin)
+PUSH_CONSTANT(float, local_voxel_size)
+PUSH_CONSTANT(int, bricks_per_axis)
+PUSH_CONSTANT(int, active_brick_count)
+PUSH_CONSTANT(int, dispatch_width)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_shape_bake_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Ray-March Fragment Shader
  * \{ */
 
@@ -94,6 +116,10 @@ SAMPLER(0, sampler3D, compact_atlas)
 SAMPLER(1, isampler3D, indirection_tx)
 SAMPLER(2, sampler2DArray, matcap_tx)
 SAMPLER(3, isampler3D, object_id_tx)
+STORAGE_BUF(0, read, SDFShapeGPU, shapes[])
+STORAGE_BUF(1, read, SDFInstanceGPU, instances[])
+STORAGE_BUF(2, read, BVHNodeGPU, bvh_nodes[])
+STORAGE_BUF(3, read, int, shape_indir[])
 PUSH_CONSTANT(float, voxel_size)
 PUSH_CONSTANT(float3, atlas_origin)
 PUSH_CONSTANT(float3, atlas_extent)
@@ -103,6 +129,9 @@ PUSH_CONSTANT(int, lighting_type)
 PUSH_CONSTANT(int, use_specular)
 PUSH_CONSTANT(int, use_matcap_flip)
 PUSH_CONSTANT(int, debug_mode)
+PUSH_CONSTANT(int, use_instanced)
+PUSH_CONSTANT(int, instance_count)
+PUSH_CONSTANT(int, bvh_node_count)
 PUSH_CONSTANT(float4, studio_light0)
 PUSH_CONSTANT(float4, studio_light1)
 PUSH_CONSTANT(float4, studio_light2)

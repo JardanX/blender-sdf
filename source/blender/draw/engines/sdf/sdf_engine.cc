@@ -207,6 +207,7 @@ class Instance : public DrawEngine {
   /** Cached shaders. */
   gpu::Shader *classify_sh_ = nullptr;
   gpu::Shader *bake_sh_ = nullptr;
+  gpu::Shader *shape_bake_sh_ = nullptr;
   gpu::Shader *march_sh_ = nullptr;
   gpu::Shader *grid_blend_sh_ = nullptr;
   gpu::Shader *fxaa_sh_ = nullptr;
@@ -255,6 +256,14 @@ class Instance : public DrawEngine {
     float3 size_normalized; /* Aspect ratio (max = 1.0). */
     float bevel_normalized; /* bevel / max_size. */
     float world_scale;      /* Max effective size for first instance (representative). */
+
+    /* Per-shape atlas params (filled by compute_shape_atlas_params / shape_classify_cpu). */
+    int3 grid_res = int3(0);        /* Per-axis brick grid resolution. */
+    float3 local_origin = float3(0); /* Local atlas origin. */
+    float local_voxel_size = 0.0f;  /* Voxel size in local space. */
+    int indir_offset = 0;           /* Offset into shape_indir_data_. */
+    int slot_offset = 0;            /* First compact atlas slot for this shape. */
+    int active_brick_count = 0;     /* Number of active bricks. */
   };
   Vector<ShapeInfo> shapes_;
   /** Fingerprint → shape index mapping. */
@@ -272,9 +281,24 @@ class Instance : public DrawEngine {
   };
   Vector<InstanceInfo> instances_;
 
-  /** GPU SSBOs for shape/instance tables (uploaded in end_sync, consumed in Step 3+). */
+  /** GPU SSBOs for shape/instance tables. */
   gpu::StorageBuf *shape_ssbo_ = nullptr;
   gpu::StorageBuf *instance_ssbo_ = nullptr;
+
+  /** Instanced rendering mode: per-shape local atlas + BVH instance traversal.
+   * Activated when no objects use smooth blending (blend > 0). */
+  bool use_instanced_ = false;
+
+  /** Per-shape indirection data (flat int array, all shapes concatenated).
+   * shape_indir_data_[shapes_[i].indir_offset + bx + by*gx + bz*gx*gy] = slot or -1. */
+  Vector<int> shape_indir_data_;
+  gpu::StorageBuf *shape_indir_ssbo_ = nullptr;
+
+  /** Per-shape active brick lists (concatenated, with global slot offsets). */
+  Vector<ActiveBrick> shape_active_bricks_;
+
+  /** Total active bricks across all shapes (for instanced mode). */
+  int total_shape_active_bricks_ = 0;
 
   /** Fullscreen triangle batch (cached). */
   gpu::Batch *fullscreen_batch_ = nullptr;
@@ -688,6 +712,25 @@ class Instance : public DrawEngine {
     else {
       needs_bake_ = false;
     }
+
+    /* Decide instanced vs world-space mode.
+     * Instanced mode: per-shape local atlas + BVH instance traversal.
+     * Requires: no smooth blending, at least one shape, no grid objects. */
+    bool any_blend = false;
+    for (const InstanceInfo &inst : instances_) {
+      if (inst.blend > 0.0f) {
+        any_blend = true;
+        break;
+      }
+    }
+    use_instanced_ = !any_blend && !shapes_.is_empty() && grid_objects_.is_empty() &&
+                     pending_grid_objects_.is_empty();
+
+    /* Compute per-shape atlas parameters and CPU classify when in instanced mode. */
+    if (use_instanced_ && needs_bake_) {
+      compute_shape_atlas_params();
+      shape_classify_cpu();
+    }
   }
 
   void draw(Manager & /*manager*/) final
@@ -748,71 +791,112 @@ class Instance : public DrawEngine {
         bvh_batch_ = nullptr;
       }
 
-      /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
-      if (perf_enabled_) {
-        perf_begin_pass(PERF_PASS_CLASSIFY);
-      }
-      ensure_indirection();
-      if (!objects_.is_empty()) {
-        /* Clear indirection to -1 (outside) before classify to guarantee no
-         * stale slot IDs survive if a driver drops an imageStore write.
-         * GPU_texture_clear maps to glClearTexImage — fast GPU-side fill. */
-        int32_t clear_val = -1;
-        GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
-        dispatch_classify();
-      }
-      else {
-        clear_indirection();
-      }
-      if (perf_enabled_) {
-        perf_end_pass(PERF_PASS_CLASSIFY);
-      }
+      if (use_instanced_) {
+        /* ---- Instanced pipeline: per-shape local atlas ---- */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_CLASSIFY);
+        }
+        /* shape_classify_cpu() was already called in end_sync(). */
+        upload_shape_indirection();
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_CLASSIFY);
+        }
 
-      /* Size atlas from classify output. Classify already wrote sequential
-       * slots to indirection_tex and active_bricks[].coord.w, so no CPU
-       * readback or hash map processing is needed. */
-      if (!objects_.is_empty() && active_brick_count_ > 0) {
-        total_slots_allocated_ = active_brick_count_;
+        /* Size compact atlas from total shape bricks. */
+        total_slots_allocated_ = total_shape_active_bricks_;
         int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
         if (new_bpa < 1) {
           new_bpa = 1;
         }
         bricks_per_axis_ = new_bpa;
         prev_bricks_per_axis_ = new_bpa;
+
+        /* Create world-space indirection texture (needed for non-instanced fallback
+         * paths like grid objects). Ensure it exists but don't classify into it. */
+        ensure_indirection();
+        int32_t clear_val = -1;
+        GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
+
+        ensure_compact_atlas();
+
+        /* Bake all shapes. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_BAKE);
+        }
+        dispatch_shape_bake_all();
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_BAKE);
+        }
+
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_GRID);
+          perf_end_pass(PERF_PASS_GRID);
+        }
       }
       else {
-        total_slots_allocated_ = 0;
-      }
+        /* ---- World-space pipeline (original) ---- */
 
-      if (!grid_objects_.is_empty()) {
-        augment_indirection_for_grids();
-      }
+        /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_CLASSIFY);
+        }
+        ensure_indirection();
+        if (!objects_.is_empty()) {
+          int32_t clear_val = -1;
+          GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
+          dispatch_classify();
+        }
+        else {
+          clear_indirection();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_CLASSIFY);
+        }
 
-      ensure_compact_atlas();
+        /* Size atlas from classify output. */
+        if (!objects_.is_empty() && active_brick_count_ > 0) {
+          total_slots_allocated_ = active_brick_count_;
+          int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
+          if (new_bpa < 1) {
+            new_bpa = 1;
+          }
+          bricks_per_axis_ = new_bpa;
+          prev_bricks_per_axis_ = new_bpa;
+        }
+        else {
+          total_slots_allocated_ = 0;
+        }
 
-      /* Phase 2: Bake SDFs into atlas. */
-      if (perf_enabled_) {
-        perf_begin_pass(PERF_PASS_BAKE);
-      }
-      if (!objects_.is_empty()) {
-        dispatch_bake();
-      }
-      else {
-        clear_compact_atlas();
-      }
-      if (perf_enabled_) {
-        perf_end_pass(PERF_PASS_BAKE);
-      }
+        if (!grid_objects_.is_empty()) {
+          augment_indirection_for_grids();
+        }
 
-      /* Blend grid objects into atlas. */
-      if (perf_enabled_) {
-        perf_begin_pass(PERF_PASS_GRID);
-      }
-      if (!grid_objects_.is_empty()) {
-        dispatch_grid_blends();
-      }
-      if (perf_enabled_) {
-        perf_end_pass(PERF_PASS_GRID);
+        ensure_compact_atlas();
+
+        /* Phase 2: Bake SDFs into atlas. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_BAKE);
+        }
+        if (!objects_.is_empty()) {
+          dispatch_bake();
+        }
+        else {
+          clear_compact_atlas();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_BAKE);
+        }
+
+        /* Blend grid objects into atlas. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_GRID);
+        }
+        if (!grid_objects_.is_empty()) {
+          dispatch_grid_blends();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_GRID);
+        }
       }
 
       /* Save object states for next frame's dirty comparison. */
@@ -1044,6 +1128,9 @@ class Instance : public DrawEngine {
     if (bake_sh_ == nullptr) {
       bake_sh_ = GPU_shader_create_from_info_name("sdf_bake");
     }
+    if (shape_bake_sh_ == nullptr) {
+      shape_bake_sh_ = GPU_shader_create_from_info_name("sdf_shape_bake");
+    }
     if (march_sh_ == nullptr) {
       march_sh_ = GPU_shader_create_from_info_name("sdf_march");
     }
@@ -1144,9 +1231,7 @@ class Instance : public DrawEngine {
     }
   }
 
-  /** Upload shape/instance tables to GPU SSBOs.
-   * These are populated during object_sync() via fingerprinting.
-   * Currently uploaded for debugging/stats; consumed by shaders in Step 3+. */
+  /** Upload shape/instance tables to GPU SSBOs. */
   void upload_shapes_instances()
   {
     /* Build GPU shape array. */
@@ -1156,8 +1241,11 @@ class Instance : public DrawEngine {
       gs.size_normalized = float4(shapes_[i].size_normalized, 0.0f);
       gs.bevel_normalized = shapes_[i].bevel_normalized;
       gs.sdf_type = shapes_[i].sdf_type;
-      gs.atlas_index = -1; /* Not yet baked (Step 3). */
+      gs.slot_offset = shapes_[i].slot_offset;
       gs.world_scale = shapes_[i].world_scale;
+      gs.grid_params = int4(shapes_[i].grid_res, shapes_[i].indir_offset);
+      gs.local_params = float4(shapes_[i].local_origin, shapes_[i].local_voxel_size);
+      gs.atlas_params = int4(bricks_per_axis_, shapes_[i].active_brick_count, 0, 0);
     }
 
     /* Build GPU instance array. */
@@ -1565,6 +1653,198 @@ class Instance : public DrawEngine {
     }
   }
 
+  /* ---- Per-Shape Atlas Pipeline (instanced mode) ---- */
+
+  /** Compute per-shape local atlas parameters.
+   * For each unique shape, determines the local grid resolution and voxel size
+   * based on the shape's world_scale and the global resolution setting. */
+  void compute_shape_atlas_params()
+  {
+    float base_voxel = 1.0f / float(sdf_resolution_);
+
+    for (ShapeInfo &shape : shapes_) {
+      /* Local voxel size: world voxel density scaled by shape's world size. */
+      float local_vs = base_voxel / math::max(shape.world_scale, 1e-6f);
+
+      /* Local extent per axis: size_normalized + bevel margin + overlap border.
+       * The shape's SDF spans [-size, +size] in local space (half-extents).
+       * Add bevel, brick_half_diag for classify margin, and 2 voxels for overlap. */
+      float brick_half_diag = float(SDF_BRICK_SIZE) * local_vs * 0.866025f;
+      float margin = brick_half_diag + 2.0f * local_vs;
+      float3 half_extent = shape.size_normalized + float3(shape.bevel_normalized + margin);
+
+      /* Grid resolution per axis. */
+      float chunk = float(SDF_BRICK_SIZE) * local_vs;
+      int3 gr;
+      gr.x = math::clamp(int(std::ceil(2.0f * half_extent.x / chunk)), 1, SDF_MAX_SHAPE_GRID_RES);
+      gr.y = math::clamp(int(std::ceil(2.0f * half_extent.y / chunk)), 1, SDF_MAX_SHAPE_GRID_RES);
+      gr.z = math::clamp(int(std::ceil(2.0f * half_extent.z / chunk)), 1, SDF_MAX_SHAPE_GRID_RES);
+
+      /* Snap local origin to brick boundaries (centered on shape origin). */
+      float3 local_origin = -float3(gr) * float(SDF_BRICK_SIZE) * local_vs * 0.5f;
+
+      shape.grid_res = gr;
+      shape.local_origin = local_origin;
+      shape.local_voxel_size = local_vs;
+    }
+  }
+
+  /** CPU-side classify for all shapes.
+   * For each shape, evaluates sdBox at each brick center to determine active bricks.
+   * Builds the flat indirection array and active brick lists with global slot offsets. */
+  void shape_classify_cpu()
+  {
+    shape_indir_data_.clear();
+    shape_active_bricks_.clear();
+    total_shape_active_bricks_ = 0;
+
+    int global_indir_offset = 0;
+    int global_slot_offset = 0;
+
+    for (ShapeInfo &shape : shapes_) {
+      int3 gr = shape.grid_res;
+      float local_vs = shape.local_voxel_size;
+      float3 local_orig = shape.local_origin;
+      int grid_volume = gr.x * gr.y * gr.z;
+
+      /* Record offset into flat indirection array. */
+      shape.indir_offset = global_indir_offset;
+      shape.slot_offset = global_slot_offset;
+
+      /* Allocate space in the flat indirection array. */
+      int indir_start = int(shape_indir_data_.size());
+      shape_indir_data_.resize(indir_start + grid_volume, -1);
+
+      /* Classify: evaluate single SDF at each brick center. */
+      float3 box_size = shape.size_normalized - float3(shape.bevel_normalized);
+      box_size = math::max(box_size, float3(0.001f));
+
+      float brick_half_diag = float(SDF_BRICK_SIZE) * local_vs * 0.866025f;
+      brick_half_diag *= surface_margin_;
+
+      int shape_active = 0;
+      for (int bz = 0; bz < gr.z; bz++) {
+        for (int by = 0; by < gr.y; by++) {
+          for (int bx = 0; bx < gr.x; bx++) {
+            float3 brick_center = local_orig +
+                                  (float3(float(bx), float(by), float(bz)) *
+                                       float(SDF_BRICK_SIZE) +
+                                   float(SDF_BRICK_SIZE) * 0.5f) *
+                                      local_vs;
+
+            /* sdBox evaluation. */
+            float3 q = math::abs(brick_center) - box_size;
+            float dist = math::length(math::max(q, float3(0.0f))) +
+                         math::min(math::max(q.x, math::max(q.y, q.z)), 0.0f) -
+                         shape.bevel_normalized;
+
+            if (math::abs(dist) < brick_half_diag) {
+              /* Active brick: assign global slot. */
+              int slot = global_slot_offset + shape_active;
+              int flat_idx = bx + by * gr.x + bz * gr.x * gr.y;
+              shape_indir_data_[indir_start + flat_idx] = slot;
+
+              ActiveBrick ab;
+              ab.coord = int4(bx, by, bz, slot);
+              shape_active_bricks_.append(ab);
+              shape_active++;
+            }
+          }
+        }
+      }
+
+      shape.active_brick_count = shape_active;
+      global_slot_offset += shape_active;
+      global_indir_offset += grid_volume;
+    }
+
+    total_shape_active_bricks_ = global_slot_offset;
+  }
+
+  /** Upload the flat shape indirection SSBO. */
+  void upload_shape_indirection()
+  {
+    if (shape_indir_data_.is_empty()) {
+      return;
+    }
+    const size_t buf_size = shape_indir_data_.size() * sizeof(int);
+    if (shape_indir_ssbo_) {
+      GPU_storagebuf_free(shape_indir_ssbo_);
+    }
+    shape_indir_ssbo_ = GPU_storagebuf_create_ex(
+        buf_size, shape_indir_data_.data(), GPU_USAGE_DYNAMIC, "sdf_shape_indir_ssbo");
+  }
+
+  /** Dispatch per-shape bake for all shapes in instanced mode. */
+  void dispatch_shape_bake_all()
+  {
+    if (total_shape_active_bricks_ <= 0 || shape_bake_sh_ == nullptr) {
+      return;
+    }
+
+    /* Upload the concatenated active bricks SSBO. */
+    gpu::StorageBuf *shape_ab_ssbo = GPU_storagebuf_create_ex(
+        shape_active_bricks_.size() * sizeof(ActiveBrick),
+        shape_active_bricks_.data(),
+        GPU_USAGE_DEVICE_ONLY,
+        "sdf_shape_active_bricks");
+
+    GPU_shader_bind(shape_bake_sh_);
+
+    /* Bind active bricks SSBO. */
+    int ab_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "active_bricks");
+    GPU_storagebuf_bind(shape_ab_ssbo, ab_slot);
+
+    /* Bind compact atlas as image. */
+    GPU_texture_image_bind(compact_atlas_tx_, 0);
+
+    /* Dispatch once per shape. */
+    int brick_offset = 0;
+    for (const ShapeInfo &shape : shapes_) {
+      if (shape.active_brick_count <= 0) {
+        continue;
+      }
+
+      /* Push shape-specific constants. */
+      GPU_shader_uniform_3fv(shape_bake_sh_, "shape_size", shape.size_normalized);
+      GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
+      GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
+      GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
+      GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);
+      GPU_shader_uniform_1i(shape_bake_sh_, "active_brick_count", shape.active_brick_count);
+
+      /* 2D dispatch to avoid 65535 limit. */
+      uint bake_x = uint(math::min(shape.active_brick_count, 65535));
+      uint bake_y = uint(divide_ceil_u(shape.active_brick_count, 65535));
+      GPU_shader_uniform_1i(shape_bake_sh_, "dispatch_width", int(bake_x));
+      GPU_compute_dispatch(shape_bake_sh_, bake_x, bake_y, 1);
+
+      /* Memory barrier between shapes to ensure writes are visible. */
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+
+      /* Rebind active bricks for next shape with offset.
+       * Since all shapes' bricks are in one SSBO, and the shader reads
+       * active_bricks[brick_idx], we need to offset. We do this by
+       * creating a sub-view or by re-uploading with offset.
+       * For simplicity, we re-upload just this shape's bricks. */
+      brick_offset += shape.active_brick_count;
+      if (brick_offset < int(shape_active_bricks_.size())) {
+        /* Update SSBO data pointer for next shape's bricks. */
+        GPU_storagebuf_free(shape_ab_ssbo);
+        shape_ab_ssbo = GPU_storagebuf_create_ex(
+            (shape_active_bricks_.size() - brick_offset) * sizeof(ActiveBrick),
+            shape_active_bricks_.data() + brick_offset,
+            GPU_USAGE_DEVICE_ONLY,
+            "sdf_shape_active_bricks");
+        GPU_storagebuf_bind(shape_ab_ssbo, ab_slot);
+      }
+    }
+
+    GPU_texture_image_unbind(compact_atlas_tx_);
+    GPU_shader_unbind();
+    GPU_storagebuf_free(shape_ab_ssbo);
+  }
+
   /** After classify: read back active bricks, assign persistent slots,
    * write back stable active_bricks SSBO and indirection texture.
    * Returns true if partial rebake is possible, false if full rebake needed. */
@@ -1958,6 +2238,24 @@ class Instance : public DrawEngine {
       GPU_texture_bind(object_id_tx_, objid_slot);
     }
 
+    /* Bind instanced mode SSBOs. */
+    if (shape_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "shapes");
+      GPU_storagebuf_bind(shape_ssbo_, slot);
+    }
+    if (instance_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "instances");
+      GPU_storagebuf_bind(instance_ssbo_, slot);
+    }
+    if (bvh_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "bvh_nodes");
+      GPU_storagebuf_bind(bvh_ssbo_, slot);
+    }
+    if (shape_indir_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "shape_indir");
+      GPU_storagebuf_bind(shape_indir_ssbo_, slot);
+    }
+
     /* Push constants. */
     GPU_shader_uniform_1f(march_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_origin", atlas_origin_);
@@ -1968,6 +2266,9 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
     GPU_shader_uniform_1i(march_sh_, "debug_mode", (debug_grid_ == 2) ? 1 : 0);
+    GPU_shader_uniform_1i(march_sh_, "use_instanced", use_instanced_ ? 1 : 0);
+    GPU_shader_uniform_1i(march_sh_, "instance_count", int(instances_.size()));
+    GPU_shader_uniform_1i(march_sh_, "bvh_node_count", int(bvh_nodes_.size()));
 
     GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
     GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
@@ -3126,6 +3427,9 @@ class Instance : public DrawEngine {
     }
     if (instance_ssbo_) {
       GPU_storagebuf_free(instance_ssbo_);
+    }
+    if (shape_indir_ssbo_) {
+      GPU_storagebuf_free(shape_indir_ssbo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);

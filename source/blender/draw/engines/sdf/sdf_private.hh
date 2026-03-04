@@ -26,5 +26,7 @@ static constexpr int SDF_BRICK_STORAGE = 12;
 static constexpr int SDF_MAX_BRICKS = 8192;
 /** Max bricks per axis for the indirection grid. 128^3 = 2M entries (~8MB). */
 static constexpr int SDF_MAX_GRID_RES = 128;
+/** Max bricks per axis for per-shape local grids (instanced rendering). */
+static constexpr int SDF_MAX_SHAPE_GRID_RES = 32;
 
 }  // namespace blender::draw::sdf

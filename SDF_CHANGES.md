@@ -1458,3 +1458,33 @@ Result: C0-continuous normals across voxel boundaries. Cost: 27 texel fetches + 
 | File | Change |
 |------|--------|
 | `intern/cycles/kernel/geom/sdf.h` | **Slot→atlas lookup optimization.** Added `sdf_slot_origin()` helper that computes the atlas base coordinate (3 integer divides + 3 modulos) once per brick entry. Updated `sdf_fetch_corners()`, `sdf_compute_normal()`, and `sdf_grid_to_compact()` to accept pre-computed `int3 slot_org` instead of `(brick_slot, bpa)`. Eliminates redundant div/mod per voxel step in all 4 DDA paths (primary, shadow, brick-only, and shader setup) |
+
+---
+
+## Object-Space Atlas Baking (Instanced Mode)
+
+Per-shape local-space atlas baking with instance-aware ray marching. When no objects use
+smooth blending (blend=0), the engine switches from world-space to instanced mode:
+each unique shape is baked once in normalized local space and shared by all instances.
+Atlas memory scales with O(unique_shapes) instead of O(instances).
+
+Based on "Ray Tracing of Signed Distance Function Grids"
+(Hansson-Soderlund, Evans, Akenine-Moller, JCGT 2022).
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_shape_bake_comp.glsl` | Per-shape local-space bake compute shader. Evaluates single sdBox+bevel per voxel, no BVH traversal. One workgroup per active brick, 12x12 threads cover XY, loops Z. Color not stored (comes from per-instance data at march time) |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_private.hh` | Added `SDF_MAX_SHAPE_GRID_RES = 32` constant for per-shape grid resolution cap |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Expanded `SDFShapeGPU` from 32→80 bytes: added `grid_params` (grid_res + indirection offset), `local_params` (origin + voxel_size), `atlas_params` (bricks_per_axis + active_brick_count). Renamed `atlas_index` to `slot_offset` |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Added `ray_aabb_intersect()` helper for BVH traversal in march shader |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_shape_bake` shader info (12x12x1 workgroup, per-shape push constants). Modified `sdf_march` to include 4 SSBOs (shapes[], instances[], bvh_nodes[], shape_indir[]) and 3 push constants (use_instanced, instance_count, bvh_node_count) |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | **Major rewrite.** Factored inner DDA into `dda_march()` function with mode parameter (indir_offset: -1=texture, ≥0=SSBO). Added `march_instanced()` with BVH traversal over instances (ordered child processing for early termination). `InstanceHit` struct tracks closest hit across instances. Normal transform: `normalize(mat3(transpose(world_to_local)) * local_normal)`. Main dispatches based on `use_instanced` flag |
+| `draw/engines/sdf/sdf_engine.cc` | **Per-shape atlas pipeline.** Added `use_instanced_` mode selection (no blend, no grid objects). New functions: `compute_shape_atlas_params()` (per-shape grid_res/voxel_size), `shape_classify_cpu()` (CPU-side brick classification via sdBox), `upload_shape_indirection()` (flat int SSBO), `dispatch_shape_bake_all()` (per-shape bake dispatch). Modified `end_sync()` for mode selection, `draw()` for dual pipeline, `draw_march()` for SSBO binding and push constants. `ShapeInfo` expanded with grid_res, local_origin, local_voxel_size, indir_offset, slot_offset, active_brick_count |
+| `draw/CMakeLists.txt` | Added `sdf_shape_bake_comp.glsl` to shader list |

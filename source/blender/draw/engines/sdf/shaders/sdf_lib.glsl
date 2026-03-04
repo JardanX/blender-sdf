@@ -39,6 +39,31 @@ bool aabb_overlap(float3 a_min, float3 a_max, float3 b_min, float3 b_max)
   return all(lessThanEqual(a_min, b_max)) && all(greaterThanEqual(a_max, b_min));
 }
 
+/** Ray-AABB intersection test (slab method).
+ * Returns true if the ray intersects the AABB, with entry/exit t values.
+ * \param origin: ray origin.
+ * \param inv_dir: 1.0 / ray_direction (precomputed).
+ * \param aabb_min: AABB minimum corner.
+ * \param aabb_max: AABB maximum corner.
+ * \param t_near: output entry t (may be negative if origin is inside).
+ * \param t_far: output exit t.
+ */
+bool ray_aabb_intersect(float3 origin,
+                        float3 inv_dir,
+                        float3 aabb_min,
+                        float3 aabb_max,
+                        out float t_near,
+                        out float t_far)
+{
+  float3 t0 = (aabb_min - origin) * inv_dir;
+  float3 t1 = (aabb_max - origin) * inv_dir;
+  float3 tlo = min(t0, t1);
+  float3 thi = max(t0, t1);
+  t_near = max(max(tlo.x, tlo.y), tlo.z);
+  t_far = min(min(thi.x, thi.y), thi.z);
+  return t_near <= t_far && t_far > 0.0f;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

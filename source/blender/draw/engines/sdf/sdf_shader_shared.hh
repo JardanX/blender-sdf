@@ -55,7 +55,7 @@ struct BVHNodeGPU {
 /** GPU-side SDF shape descriptor (unique primitive geometry).
  * Each unique combination of (type, size, bevel) defines a shape.
  * Multiple instances can reference the same shape, sharing atlas data.
- * Used for instanced rendering (Step 3+). */
+ * Used for instanced rendering. */
 struct SDFShapeGPU {
   /** SDF primitive size (unscaled, normalized: max component = 1.0). */
   float4 size_normalized;
@@ -63,12 +63,18 @@ struct SDFShapeGPU {
   float bevel_normalized;
   /** SDF primitive type (eSDFType). */
   int sdf_type;
-  /** Index into per-shape atlas pool (-1 = not yet baked). */
-  int atlas_index;
+  /** Slot offset in the shared compact atlas (first brick slot for this shape). */
+  int slot_offset;
   /** World-space scale factor to map normalized shape to world. */
   float world_scale;
+  /** Per-shape grid: xyz = grid_res per axis, w = offset into shape_indirection SSBO. */
+  int4 grid_params;
+  /** Local-space atlas: xyz = local origin, w = local_voxel_size. */
+  float4 local_params;
+  /** Atlas layout: x = global bricks_per_axis, y = active_brick_count, zw = 0. */
+  int4 atlas_params;
 };
-/* 16 + 16 = 32 bytes, 16-byte aligned. */
+/* 16 + 16 + 16 + 16 + 16 = 80 bytes, 16-byte aligned. */
 
 /** GPU-side SDF instance (one per scene object).
  * References a shape and adds per-instance transform + appearance. */
