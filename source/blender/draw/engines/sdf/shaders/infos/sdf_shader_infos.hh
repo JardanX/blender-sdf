@@ -28,7 +28,6 @@ PUSH_CONSTANT(int3, grid_resolution)
 PUSH_CONSTANT(float, brick_half_diag)
 PUSH_CONSTANT(float, max_blend)
 PUSH_CONSTANT(int, bvh_node_count)
-PUSH_CONSTANT(float, coarse_threshold)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_classify_comp.glsl")
 GPU_SHADER_CREATE_END()
@@ -122,6 +121,22 @@ DEPTH_WRITE(DepthWrite::ANY)
 ADDITIONAL_INFO(gpu_fullscreen)
 ADDITIONAL_INFO(draw_view)
 FRAGMENT_SOURCE("sdf_march_frag.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF FXAA Post-Process Fragment Shader
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_fxaa)
+DO_STATIC_COMPILATION()
+DEFINE_VALUE("FXAA_QUALITY__PRESET", "39")
+SAMPLER(0, sampler2D, color_tx)
+PUSH_CONSTANT(float2, rcpFrame)
+FRAGMENT_OUT(0, float4, out_color)
+ADDITIONAL_INFO(gpu_fullscreen)
+FRAGMENT_SOURCE("sdf_fxaa_frag.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */

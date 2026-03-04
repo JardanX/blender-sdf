@@ -1409,3 +1409,46 @@ Result: C0-continuous normals across voxel boundaries. Cost: 27 texel fetches + 
 | File | Change |
 |------|--------|
 | `draw/engines/sdf/sdf_engine.cc` | Replaced auto-coarsening doubling loop in `end_sync()` with smooth linear scaling: `voxel_size_ *= float(max_axis) / float(SDF_MAX_GRID_RES)`. Recomputes chunk_size, grid_min/max, grid_res once with the new voxel_size |
+
+---
+
+### FXAA Post-Processing Pass
+
+**Problem:** SDF ray-marching renders directly to the viewport framebuffer with no anti-aliasing. At low voxel resolutions or on brick boundaries, the output shows jagged edges.
+
+**Fix:** Added an FXAA post-processing pass using Blender's bundled NVIDIA FXAA 3.11 library. The march pass now renders to an offscreen RGBA16F texture instead of the default framebuffer. A fullscreen FXAA fragment shader then reads the offscreen texture and composites the anti-aliased result to the default framebuffer with alpha blending (so background/overlays show through). Uses max quality preset 39, hardcoded parameters. Toggled on/off via `View3DShading.sdf_fxaa` (default on). Timing integrated into the SDF performance debugger.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_fxaa_frag.glsl` | **New.** Fragment shader wrapping `draw_fxaa_lib.glsl` with preset 39 (max quality). Reads offscreen march color texture, applies FXAA, outputs anti-aliased color |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `GPU_SHADER_CREATE_INFO(sdf_fxaa)` with `DEFINE_VALUE("FXAA_QUALITY__PRESET", "39")` — sampler, push constant for rcpFrame, fullscreen triangle |
+| `draw/engines/sdf/sdf_engine.cc` | Added FXAA shader, offscreen texture/framebuffer, `ensure_fxaa_target()`, `draw_fxaa()`. March renders to offscreen texture when FXAA enabled, direct to default FB when disabled. FXAA composites to default FB with alpha blending. Added `PERF_PASS_FXAA` timing to performance overlay. Reads `sdf_fxaa` setting in `sync_sdf_settings()` |
+| `draw/CMakeLists.txt` | Added `sdf_fxaa_frag.glsl` to shader sources |
+| `makesdna/DNA_view3d_types.h` | Added `char sdf_fxaa` to `View3DShading` (reused padding from `short→char` change of `sdf_debug_grid`) |
+| `makesdna/DNA_view3d_defaults.h` | Default `.sdf_fxaa = 1` (on) |
+| `makesrna/intern/rna_space.cc` | Added `sdf_fxaa` boolean RNA property on `View3DShading` |
+| `blenloader/intern/versioning_500.cc` | Set `sdf_fxaa = 1` for existing .blend files |
+| `scripts/startup/bl_ui/properties_render.py` | Added FXAA checkbox to SDF Ray Marcher panel |
+
+---
+
+## SDF Pipeline Performance Optimizations
+
+### Shared-Memory BVH Traversal in Bake Shader
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | **Shared-memory candidate list.** BVH traversal and candidate sorting now done once by thread 0 per workgroup, stored in `shared int shared_candidates[]`. All 144 threads read from shared memory instead of each traversing the BVH independently. Eliminates 143 redundant BVH traversals per brick |
+
+### Dead Code Removal: Unused `coarse_threshold` Push Constant
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Removed computation and upload of `coarse_threshold` push constant (was set but never read by any shader) |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed `PUSH_CONSTANT(float, coarse_threshold)` from `sdf_classify` shader info |
+
+### Per-Brick AABB Culling in Cycles CPU Bake
+
+| File | Change |
+|------|--------|
+| `intern/cycles/blender/sdf.cpp` | **Phase 1 (classify):** Added per-brick AABB culling — each brick's expanded AABB (half-diagonal + max_blend) is tested against object AABBs before evaluating SDF distance. **Phase 2 (bake):** Added per-brick candidate list — computes brick storage AABB (including border + blend expansion), filters objects by AABB overlap once per brick, then only evaluates candidates at each voxel. Reduces per-voxel work from O(all_objects) to O(overlapping_objects) |

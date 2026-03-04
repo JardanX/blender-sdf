@@ -323,13 +323,19 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   float voxel_size = max_axis / float(total_res);
   float3 atlas_origin = scene_center - make_float3(max_axis * 0.5f, max_axis * 0.5f, max_axis * 0.5f);
 
-  /* ---- Phase 1: Classify bricks ---- */
+  /* ---- Phase 1: Classify bricks (with per-brick AABB culling) ---- */
   const int num_bricks = grid_res * grid_res * grid_res;
   vector<int> indirection(num_bricks, -1);
   int active_count = 0;
 
   const float brick_world = float(BRICK_SIZE) * voxel_size;
   const float brick_half_diag = brick_world * 0.866025f; /* sqrt(3)/2 */
+
+  /* Compute max blend radius for AABB expansion. */
+  float max_blend = 0.0f;
+  for (size_t i = 0; i < sdf_objects.size(); i++) {
+    max_blend = max(max_blend, sdf_objects[i].blend);
+  }
 
   for (int bz = 0; bz < grid_res; bz++) {
     for (int by = 0; by < grid_res; by++) {
@@ -341,9 +347,25 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
                                           float(bz) * BRICK_SIZE + BRICK_SIZE * 0.5f) *
                                   voxel_size;
 
-        /* Evaluate SDF at brick center (smooth union of all objects). */
+        /* Expanded brick AABB for object culling: half-diagonal + blend radius. */
+        float expand = brick_half_diag + max_blend;
+        float3 brick_min = brick_center - make_float3(expand, expand, expand);
+        float3 brick_max = brick_center + make_float3(expand, expand, expand);
+
+        /* Evaluate SDF at brick center (only overlapping objects). */
         float acc_dist = 1e10f;
         for (size_t i = 0; i < sdf_objects.size(); i++) {
+          /* AABB culling: skip objects that can't contribute to this brick. */
+          if (sdf_objects[i].bbox_min.x > brick_max.x ||
+              sdf_objects[i].bbox_min.y > brick_max.y ||
+              sdf_objects[i].bbox_min.z > brick_max.z ||
+              sdf_objects[i].bbox_max.x < brick_min.x ||
+              sdf_objects[i].bbox_max.y < brick_min.y ||
+              sdf_objects[i].bbox_max.z < brick_min.z)
+          {
+            continue;
+          }
+
           float dist = evaluate_sdf_object(sdf_objects[i], brick_center);
           float k = sdf_objects[i].blend;
           if (k > 0.0f && acc_dist < 1e9f) {
@@ -402,6 +424,38 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     int sz = slot / (bricks_per_axis * bricks_per_axis);
     int3 slot_origin = make_int3(sx * BRICK_STORAGE, sy * BRICK_STORAGE, sz * BRICK_STORAGE);
 
+    /* Per-brick AABB including 2-voxel border + blend expansion.
+     * Pre-filter candidates once per brick instead of evaluating all objects
+     * for every voxel (mirrors the GPU bake shader's BVH culling). */
+    float3 brick_min_w = atlas_origin +
+                         make_float3(float(bx * BRICK_SIZE - BRICK_BORDER),
+                                     float(by * BRICK_SIZE - BRICK_BORDER),
+                                     float(bz * BRICK_SIZE - BRICK_BORDER)) *
+                             voxel_size -
+                         make_float3(max_blend, max_blend, max_blend);
+    float3 brick_max_w = atlas_origin +
+                         make_float3(float(bx * BRICK_SIZE + BRICK_SIZE + BRICK_BORDER),
+                                     float(by * BRICK_SIZE + BRICK_SIZE + BRICK_BORDER),
+                                     float(bz * BRICK_SIZE + BRICK_SIZE + BRICK_BORDER)) *
+                             voxel_size +
+                         make_float3(max_blend, max_blend, max_blend);
+
+    /* Build per-brick candidate list. */
+    vector<int> candidates;
+    candidates.reserve(sdf_objects.size());
+    for (size_t i = 0; i < sdf_objects.size(); i++) {
+      if (sdf_objects[i].bbox_min.x > brick_max_w.x ||
+          sdf_objects[i].bbox_min.y > brick_max_w.y ||
+          sdf_objects[i].bbox_min.z > brick_max_w.z ||
+          sdf_objects[i].bbox_max.x < brick_min_w.x ||
+          sdf_objects[i].bbox_max.y < brick_min_w.y ||
+          sdf_objects[i].bbox_max.z < brick_min_w.z)
+      {
+        continue;
+      }
+      candidates.push_back((int)i);
+    }
+
     for (int lz = 0; lz < BRICK_STORAGE; lz++) {
       for (int ly = 0; ly < BRICK_STORAGE; ly++) {
         for (int lx = 0; lx < BRICK_STORAGE; lx++) {
@@ -416,7 +470,8 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
           int closest_obj = 0;
           float closest_raw = 1e10f;
 
-          for (size_t i = 0; i < sdf_objects.size(); i++) {
+          for (size_t c = 0; c < candidates.size(); c++) {
+            int i = candidates[c];
             float dist = evaluate_sdf_object(sdf_objects[i], world_pos);
             float k = sdf_objects[i].blend;
 
@@ -434,7 +489,7 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
 
             if (dist < closest_raw) {
               closest_raw = dist;
-              closest_obj = (int)i;
+              closest_obj = i;
             }
           }
 
