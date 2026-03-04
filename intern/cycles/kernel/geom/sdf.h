@@ -900,7 +900,7 @@ ccl_device bool sdf_intersect(KernelGlobals kg,
 ccl_device bool sdf_intersect_all(KernelGlobals kg,
                                    ccl_private const Ray *ray,
                                    ccl_private Intersection *isect,
-                                   const uint visibility)
+                                   const uint /*visibility*/)
 {
   bool hit = false;
   const int num_sdfs = kernel_data.num_sdfs;
@@ -1164,7 +1164,7 @@ ccl_device bool sdf_intersect_shadow(KernelGlobals kg,
 ccl_device bool sdf_intersect_all_shadow(KernelGlobals kg,
                                           ccl_private const Ray *ray,
                                           const float t_max,
-                                          const uint visibility)
+                                          const uint /*visibility*/)
 {
   const int num_sdfs = kernel_data.num_sdfs;
   for (int i = 0; i < num_sdfs; i++) {

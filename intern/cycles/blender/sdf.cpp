@@ -16,6 +16,7 @@
 
 #include "util/hash.h"
 #include "util/log.h"
+#include "util/map.h"
 #include "util/math.h"
 #include "util/task.h"
 #include "util/transform.h"
@@ -102,6 +103,35 @@ static float evaluate_sdf_object(const SDFObjectData &obj, const float3 world_po
       break;
   }
   return dist;
+}
+
+/* -------------------------------------------------------------------- */
+/* Shape fingerprinting for instancing. */
+
+static uint64_t sdf_shape_fingerprint(int sdf_type, const float3 &effective_size, float effective_bevel)
+{
+  /* Normalize by max component for scale-independence. */
+  float max_dim = max(max(fabsf(effective_size.x), fabsf(effective_size.y)),
+                      fabsf(effective_size.z));
+  if (max_dim < 1e-8f) {
+    max_dim = 1.0f;
+  }
+
+  /* Quantize to 0.01% precision. */
+  const int Q = 10000;
+  int sx = (int)roundf(effective_size.x / max_dim * Q);
+  int sy = (int)roundf(effective_size.y / max_dim * Q);
+  int sz = (int)roundf(effective_size.z / max_dim * Q);
+  int sb = (int)roundf(effective_bevel / max_dim * Q);
+
+  /* FNV-1a 64-bit hash. */
+  uint64_t h = 14695981039346656037ULL;
+  h ^= (uint64_t)sdf_type;  h *= 1099511628211ULL;
+  h ^= (uint64_t)sx;        h *= 1099511628211ULL;
+  h ^= (uint64_t)sy;        h *= 1099511628211ULL;
+  h ^= (uint64_t)sz;        h *= 1099511628211ULL;
+  h ^= (uint64_t)sb;        h *= 1099511628211ULL;
+  return h;
 }
 
 /* -------------------------------------------------------------------- */
@@ -228,6 +258,56 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   if (sdf_objects.empty()) {
     sdf_geom->clear();
     return;
+  }
+
+  /* ---- Build shape/instance tables ---- */
+  sdf_geom->shapes.clear();
+  sdf_geom->instances.clear();
+  unordered_map<uint64_t, int> fingerprint_to_shape;
+
+  for (size_t i = 0; i < sdf_objects.size(); i++) {
+    const SDFObjectData &obj = sdf_objects[i];
+    uint64_t fp = sdf_shape_fingerprint(obj.sdf_type, obj.sdf_size, obj.bevel);
+
+    int shape_id;
+    auto it = fingerprint_to_shape.find(fp);
+    if (it != fingerprint_to_shape.end()) {
+      shape_id = it->second;
+    }
+    else {
+      float max_dim = max(max(fabsf(obj.sdf_size.x), fabsf(obj.sdf_size.y)),
+                          fabsf(obj.sdf_size.z));
+      if (max_dim < 1e-8f) {
+        max_dim = 1.0f;
+      }
+
+      SDFGeometry::ShapeInfo shape;
+      shape.fingerprint = fp;
+      shape.sdf_type = obj.sdf_type;
+      shape.size_normalized = obj.sdf_size / max_dim;
+      shape.bevel_normalized = obj.bevel / max_dim;
+      shape.world_scale = max_dim;
+      shape.atlas_index = -1;
+
+      shape_id = (int)sdf_geom->shapes.size();
+      sdf_geom->shapes.push_back(shape);
+      fingerprint_to_shape[fp] = shape_id;
+    }
+
+    SDFGeometry::InstanceInfo inst;
+    inst.shape_id = shape_id;
+    inst.object_id = (int)i;
+    /* Full transform for world_to_local / local_to_world will be needed in Step 4.
+     * For now, store the rotation-only inverse and position for reference. */
+    inst.local_to_world = transform_identity();
+    inst.world_to_local = transform_identity();
+    inst.color = make_float4(obj.color.x, obj.color.y, obj.color.z, 1.0f);
+    inst.blend = obj.blend;
+    float max_dim = max(max(fabsf(obj.sdf_size.x), fabsf(obj.sdf_size.y)),
+                        fabsf(obj.sdf_size.z));
+    inst.world_scale = max(max_dim, 1e-8f);
+
+    sdf_geom->instances.push_back(inst);
   }
 
   /* Compute atlas parameters. */

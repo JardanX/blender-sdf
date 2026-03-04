@@ -26,6 +26,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_enums.h"
 #include "DNA_view3d_types.h"
 
@@ -66,14 +67,58 @@ namespace blender::draw::sdf {
 
 using namespace draw;
 
+/* ---- Shape fingerprinting ---- */
+
+/**
+ * Compute a 64-bit fingerprint for an SDF shape.
+ * Two objects with the same fingerprint can share atlas data (instancing).
+ *
+ * The fingerprint captures normalized shape geometry:
+ * - SDF type (box, sphere, capsule, torus)
+ * - Aspect ratio (size normalized so max component = 1.0)
+ * - Relative bevel (bevel / max_size)
+ *
+ * This means an object with size (2,1,1) at scale 1 and size (1,0.5,0.5) at scale 2
+ * produce the same fingerprint — they're the same shape at different scales.
+ */
+static uint64_t sdf_shape_fingerprint(int sdf_type,
+                                       const float3 &effective_size,
+                                       float effective_bevel)
+{
+  /* Normalize by max component to make scale-independent. */
+  float max_dim = math::reduce_max(math::abs(effective_size));
+  if (max_dim < 1e-8f) {
+    max_dim = 1.0f;
+  }
+
+  /* Quantize to avoid floating-point comparison issues.
+   * 10000x gives 0.01% precision — more than enough for visual identity. */
+  const int Q = 10000;
+  int sx = int(roundf(effective_size.x / max_dim * Q));
+  int sy = int(roundf(effective_size.y / max_dim * Q));
+  int sz = int(roundf(effective_size.z / max_dim * Q));
+  int sb = int(roundf(effective_bevel / max_dim * Q));
+
+  /* FNV-1a 64-bit hash. */
+  uint64_t h = 14695981039346656037ULL;
+  auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+  mix(uint64_t(sdf_type));
+  mix(uint64_t(sx));
+  mix(uint64_t(sy));
+  mix(uint64_t(sz));
+  mix(uint64_t(sb));
+  return h;
+}
+
 /* ---- Performance overlay static state ---- */
 
-/** Number of per-pass elapsed-time queries: classify, bake, grid blend, march. */
-static constexpr int PERF_PASS_COUNT = 4;
+/** Number of per-pass elapsed-time queries: classify, bake, grid blend, march, fxaa. */
+static constexpr int PERF_PASS_COUNT = 5;
 static constexpr int PERF_PASS_CLASSIFY = 0;
 static constexpr int PERF_PASS_BAKE = 1;
 static constexpr int PERF_PASS_GRID = 2;
 static constexpr int PERF_PASS_MARCH = 3;
+static constexpr int PERF_PASS_FXAA = 4;
 /** Number of FPS samples for smoothing. */
 static constexpr int PERF_FPS_SAMPLES = 8;
 
@@ -130,6 +175,8 @@ class Instance : public DrawEngine {
   int bricks_per_axis_ = 1;
   /** Debug grid mode from UI. */
   int debug_grid_ = 0;
+  /** Whether FXAA post-processing is enabled (from UI toggle). */
+  bool fxaa_enabled_ = true;
   /** Surface margin multiplier (1.0 = default, from UI percentage). */
   float surface_margin_ = 1.0f;
   /** Max blend radius across all objects (computed in classify, used in bake). */
@@ -162,6 +209,12 @@ class Instance : public DrawEngine {
   gpu::Shader *bake_sh_ = nullptr;
   gpu::Shader *march_sh_ = nullptr;
   gpu::Shader *grid_blend_sh_ = nullptr;
+  gpu::Shader *fxaa_sh_ = nullptr;
+
+  /** FXAA offscreen target: march renders here, then FXAA composites to default FB. */
+  gpu::Texture *march_color_tx_ = nullptr;
+  gpu::FrameBuffer *march_fb_ = nullptr;
+  int2 fxaa_viewport_size_ = int2(0);
 
   /** Object SSBO. */
   gpu::StorageBuf *object_ssbo_ = nullptr;
@@ -195,6 +248,34 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *dirty_bricks_ssbo_ = nullptr;
   int dirty_brick_count_ = 0;
 
+  /** Shape table: unique SDF shapes identified by fingerprint. */
+  struct ShapeInfo {
+    uint64_t fingerprint;
+    int sdf_type;
+    float3 size_normalized; /* Aspect ratio (max = 1.0). */
+    float bevel_normalized; /* bevel / max_size. */
+    float world_scale;      /* Max effective size for first instance (representative). */
+  };
+  Vector<ShapeInfo> shapes_;
+  /** Fingerprint → shape index mapping. */
+  Map<uint64_t, int> shape_fingerprint_map_;
+
+  /** Instance table: per-object instance referencing a shape. */
+  struct InstanceInfo {
+    int shape_id;        /* Index into shapes_. */
+    int object_id;       /* Index into objects_. */
+    float4x4 world_to_local;
+    float4x4 local_to_world;
+    float4 color;
+    float blend;
+    float world_scale;   /* max(effective_size) for this specific instance. */
+  };
+  Vector<InstanceInfo> instances_;
+
+  /** GPU SSBOs for shape/instance tables (uploaded in end_sync, consumed in Step 3+). */
+  gpu::StorageBuf *shape_ssbo_ = nullptr;
+  gpu::StorageBuf *instance_ssbo_ = nullptr;
+
   /** Fullscreen triangle batch (cached). */
   gpu::Batch *fullscreen_batch_ = nullptr;
 
@@ -224,6 +305,14 @@ class Instance : public DrawEngine {
   /** Performance overlay state. */
   bool perf_enabled_ = false;
   bool perf_queries_created_ = false;
+  /** True if using GL_TIME_ELAPSED queries (OpenGL only).
+   * False → CPU wall-clock fallback via storagebuf-read fence. */
+  bool perf_use_gl_queries_ = false;
+  /** Wall-clock pass start time for fallback (non-GL) timing. */
+  double perf_pass_start_time_ = 0.0;
+  /** Tiny SSBO used as a pipeline fence on non-GL backends.
+   * GPU_storagebuf_read forces Vulkan to submit + wait for all pending work. */
+  gpu::StorageBuf *perf_fence_ssbo_ = nullptr;
   /** Double-buffered GL_TIME_ELAPSED queries: [frame_idx][pass_idx]. */
   GLuint perf_queries_[2][PERF_PASS_COUNT] = {};
   /** Whether queries have been issued for each frame slot. */
@@ -241,6 +330,7 @@ class Instance : public DrawEngine {
   double perf_bake_ms_ = 0.0;
   double perf_grid_ms_ = 0.0;
   double perf_march_ms_ = 0.0;
+  double perf_fxaa_ms_ = 0.0;
   double perf_frame_ms_ = 0.0;
   double perf_fps_ = 0.0;
   /** Persistent last-bake timing (updated only when a bake frame is read). */
@@ -273,6 +363,9 @@ class Instance : public DrawEngine {
     object_uids_.clear();
     object_aabbs_.clear();
     pending_grid_objects_.clear();
+    shapes_.clear();
+    shape_fingerprint_map_.clear();
+    instances_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
   }
@@ -389,9 +482,58 @@ class Instance : public DrawEngine {
     scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
     scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
+    const int object_index = objects_.size();
     objects_.append(gpu_obj);
     object_uids_.append(ob->id.session_uid);
     object_aabbs_.append({world_min, world_max});
+
+    /* Build shape fingerprint and instance entry. */
+    float3 effective_size = float3(gpu_obj.sdf_size);
+    float effective_bevel = gpu_obj.bevel;
+    uint64_t fp = sdf_shape_fingerprint(sdf_data->sdf_type, effective_size, effective_bevel);
+
+    int shape_id;
+    const int *existing = shape_fingerprint_map_.lookup_ptr(fp);
+    if (existing) {
+      shape_id = *existing;
+    }
+    else {
+      /* New unique shape. */
+      float max_dim = math::reduce_max(math::abs(effective_size));
+      if (max_dim < 1e-8f) {
+        max_dim = 1.0f;
+      }
+
+      ShapeInfo shape;
+      shape.fingerprint = fp;
+      shape.sdf_type = sdf_data->sdf_type;
+      shape.size_normalized = effective_size / max_dim;
+      shape.bevel_normalized = effective_bevel / max_dim;
+      shape.world_scale = max_dim;
+
+      shape_id = shapes_.size();
+      shapes_.append(shape);
+      shape_fingerprint_map_.add(fp, shape_id);
+    }
+
+    /* Build local-space transforms.
+     * local_to_world: scale normalized shape back to effective size, then apply rotation + position.
+     * world_to_local: inverse of the above. */
+    float max_dim = math::reduce_max(math::abs(effective_size));
+    if (max_dim < 1e-8f) {
+      max_dim = 1.0f;
+    }
+
+    InstanceInfo inst;
+    inst.shape_id = shape_id;
+    inst.object_id = object_index;
+    inst.local_to_world = mat; /* Full object_to_world transform. */
+    inst.world_to_local = math::invert(mat);
+    inst.color = gpu_obj.color;
+    inst.blend = sdf_data->blend;
+    inst.world_scale = max_dim;
+
+    instances_.append(inst);
   }
 
   void end_sync() final
@@ -582,6 +724,7 @@ class Instance : public DrawEngine {
 
     if (!objects_.is_empty()) {
       upload_objects();
+      upload_shapes_instances();
       build_bvh();
       upload_bvh();
     }
@@ -686,6 +829,15 @@ class Instance : public DrawEngine {
       perf_end_pass(PERF_PASS_MARCH);
     }
 
+    /* FXAA post-process (runs every frame after march). */
+    if (perf_enabled_) {
+      perf_begin_pass(PERF_PASS_FXAA);
+    }
+    draw_fxaa();
+    if (perf_enabled_) {
+      perf_end_pass(PERF_PASS_FXAA);
+    }
+
     /* Skip debug grid in Cycles rendered view — it draws on top of the
      * path-traced image since the SDF draw engine only provides depth. */
     if (!draw_ctx_->v3d || draw_ctx_->v3d->shading.type != OB_RENDER) {
@@ -745,6 +897,7 @@ class Instance : public DrawEngine {
     }
 
     debug_grid_ = int(shading.sdf_debug_grid);
+    fxaa_enabled_ = (U.sdf_fxaa != 0);
 
     /* Surface margin: percentage → multiplier. Treat 0 (unset) as 100%. */
     int margin_pct = int(shading.sdf_surface_margin);
@@ -897,6 +1050,9 @@ class Instance : public DrawEngine {
     if (grid_blend_sh_ == nullptr) {
       grid_blend_sh_ = GPU_shader_create_from_info_name("sdf_grid_blend");
     }
+    if (fxaa_sh_ == nullptr) {
+      fxaa_sh_ = GPU_shader_create_from_info_name("sdf_fxaa");
+    }
   }
 
   void ensure_indirection()
@@ -985,6 +1141,63 @@ class Instance : public DrawEngine {
     }
     else {
       GPU_storagebuf_update(object_ssbo_, objects_.data());
+    }
+  }
+
+  /** Upload shape/instance tables to GPU SSBOs.
+   * These are populated during object_sync() via fingerprinting.
+   * Currently uploaded for debugging/stats; consumed by shaders in Step 3+. */
+  void upload_shapes_instances()
+  {
+    /* Build GPU shape array. */
+    Vector<SDFShapeGPU> gpu_shapes(shapes_.size());
+    for (int i = 0; i < shapes_.size(); i++) {
+      SDFShapeGPU &gs = gpu_shapes[i];
+      gs.size_normalized = float4(shapes_[i].size_normalized, 0.0f);
+      gs.bevel_normalized = shapes_[i].bevel_normalized;
+      gs.sdf_type = shapes_[i].sdf_type;
+      gs.atlas_index = -1; /* Not yet baked (Step 3). */
+      gs.world_scale = shapes_[i].world_scale;
+    }
+
+    /* Build GPU instance array. */
+    Vector<SDFInstanceGPU> gpu_instances(instances_.size());
+    for (int i = 0; i < instances_.size(); i++) {
+      SDFInstanceGPU &gi = gpu_instances[i];
+      gi.world_to_local = instances_[i].world_to_local;
+      gi.local_to_world = instances_[i].local_to_world;
+      gi.color = instances_[i].color;
+      gi.blend = instances_[i].blend;
+      gi.shape_id = instances_[i].shape_id;
+      gi.object_id = instances_[i].object_id;
+      gi._pad0 = 0.0f;
+    }
+
+    /* Upload shapes SSBO. */
+    {
+      const size_t buf_size = math::max(gpu_shapes.size(), int64_t(1)) * sizeof(SDFShapeGPU);
+      if (shape_ssbo_) {
+        GPU_storagebuf_free(shape_ssbo_);
+      }
+      shape_ssbo_ = GPU_storagebuf_create_ex(
+          buf_size,
+          gpu_shapes.is_empty() ? nullptr : gpu_shapes.data(),
+          GPU_USAGE_DYNAMIC,
+          "sdf_shapes_ssbo");
+    }
+
+    /* Upload instances SSBO. */
+    {
+      const size_t buf_size = math::max(gpu_instances.size(), int64_t(1)) *
+                              sizeof(SDFInstanceGPU);
+      if (instance_ssbo_) {
+        GPU_storagebuf_free(instance_ssbo_);
+      }
+      instance_ssbo_ = GPU_storagebuf_create_ex(
+          buf_size,
+          gpu_instances.is_empty() ? nullptr : gpu_instances.data(),
+          GPU_USAGE_DYNAMIC,
+          "sdf_instances_ssbo");
     }
   }
 
@@ -1577,13 +1790,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(classify_sh_, "max_blend", max_blend_);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
 
-    /* Coarse threshold for super-brick (4x4x4 bricks = 32^3 voxels) early-out.
-     * Half-diagonal of super-brick with 2x Lipschitz safety factor, plus the
-     * fine brick_half_diag so that bricks at the super-brick edge are covered. */
-    float super_half_diag = 2.0f * float(SDF_BRICK_SIZE) * voxel_size_ * 1.732051f; /* 2*8*vs*sqrt(3) */
-    float coarse_threshold = super_half_diag * 2.0f + brick_half_diag;
-    GPU_shader_uniform_1f(classify_sh_, "coarse_threshold", coarse_threshold);
-
     /* Dispatch: one thread per brick, local group size is 4x4x4. */
     GPU_compute_dispatch(classify_sh_,
                          divide_ceil_u(grid_res_.x, 4),
@@ -1713,8 +1919,16 @@ class Instance : public DrawEngine {
        * provides the color and we only contribute depth for the overlay grid. */
       GPU_framebuffer_bind(dfbl->depth_only_fb);
     }
+    else if (fxaa_enabled_) {
+      /* Solid / wireframe with FXAA: render to offscreen texture for post-processing.
+       * Depth is shared with the viewport so depth writes still land correctly. */
+      ensure_fxaa_target();
+      GPU_framebuffer_bind(march_fb_);
+      float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      GPU_framebuffer_clear_color(march_fb_, clear_color);
+    }
     else {
-      /* Solid / wireframe: write both color and depth. */
+      /* Solid / wireframe without FXAA: render directly to default framebuffer. */
       GPU_framebuffer_bind(dfbl->default_fb);
     }
 
@@ -1804,6 +2018,88 @@ class Instance : public DrawEngine {
       GPU_texture_unbind(matcap_tx_);
     }
     GPU_shader_unbind();
+  }
+
+  /* ---- FXAA post-process ---- */
+
+  /** Ensure the offscreen color texture and framebuffer for march → FXAA exist
+   * and match the current viewport size. */
+  void ensure_fxaa_target()
+  {
+    const int2 vp = int2(draw_ctx_->viewport_size_get());
+    if (march_color_tx_ != nullptr && fxaa_viewport_size_ == vp) {
+      return;
+    }
+
+    /* (Re)create on size change. */
+    if (march_color_tx_) {
+      GPU_texture_free(march_color_tx_);
+      march_color_tx_ = nullptr;
+    }
+    if (march_fb_) {
+      GPU_framebuffer_free(march_fb_);
+      march_fb_ = nullptr;
+    }
+
+    fxaa_viewport_size_ = vp;
+
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
+    march_color_tx_ = GPU_texture_create_2d(
+        "sdf_march_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+
+    /* Build framebuffer: offscreen color + viewport depth (shared). */
+    DefaultTextureList *dtxl = draw_ctx_->viewport_texture_list_get();
+    march_fb_ = GPU_framebuffer_create("sdf_march_fb");
+    GPU_framebuffer_texture_attach(march_fb_, march_color_tx_, 0, 0);
+    GPU_framebuffer_texture_attach(march_fb_, dtxl->depth, 0, 0);
+  }
+
+  /** Apply FXAA to the offscreen march result and composite to the default FB. */
+  void draw_fxaa()
+  {
+    if (!fxaa_enabled_ || fxaa_sh_ == nullptr) {
+      return;
+    }
+
+    /* Skip in depth-only or Cycles rendered mode (matches draw_march behavior). */
+    if (draw_ctx_->is_depth() ||
+        (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER))
+    {
+      return;
+    }
+
+    DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
+    GPU_framebuffer_bind(dfbl->default_fb);
+
+    /* FXAA is screen-space color only — depth was already written by march. */
+    GPU_depth_test(GPU_DEPTH_NONE);
+    GPU_depth_mask(false);
+    GPU_blend(GPU_BLEND_ALPHA);
+    GPU_face_culling(GPU_CULL_NONE);
+    GPU_stencil_test(GPU_STENCIL_NONE);
+
+    GPU_shader_bind(fxaa_sh_);
+
+    int color_slot = GPU_shader_get_sampler_binding(fxaa_sh_, "color_tx");
+    GPU_texture_bind(march_color_tx_, color_slot);
+
+    float2 rcp = float2(1.0f / float(fxaa_viewport_size_.x),
+                        1.0f / float(fxaa_viewport_size_.y));
+    GPU_shader_uniform_2fv(fxaa_sh_, "rcpFrame", rcp);
+
+    if (fullscreen_batch_ == nullptr) {
+      fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
+    }
+    GPU_batch_set_shader(fullscreen_batch_, fxaa_sh_);
+    GPU_batch_draw(fullscreen_batch_);
+
+    GPU_texture_unbind(march_color_tx_);
+    GPU_shader_unbind();
+
+    /* Restore depth state for subsequent passes (debug grid, overlays). */
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
   }
 
   /* ---- Debug grid wireframe ---- */
@@ -2547,19 +2843,30 @@ class Instance : public DrawEngine {
 
   /* ---- Performance overlay helpers ---- */
 
-  /** Lazily create GL elapsed-time query objects. Only on OpenGL backend. */
+  /** Lazily initialize timing backend.
+   * OpenGL: double-buffered GL_TIME_ELAPSED queries (accurate GPU timing).
+   * Non-GL (Vulkan/Metal): CPU wall-clock via storagebuf-read fences. */
   void perf_ensure_queries()
   {
     if (perf_queries_created_) {
       return;
     }
-    if (GPU_backend_get_type() != GPU_BACKEND_OPENGL) {
-      return;
-    }
-    for (int f = 0; f < 2; f++) {
-      glGenQueries(PERF_PASS_COUNT, perf_queries_[f]);
-    }
+    /* Mark as initialized regardless of backend to avoid re-entering. */
     perf_queries_created_ = true;
+    if (GPU_backend_get_type() == GPU_BACKEND_OPENGL) {
+      for (int f = 0; f < 2; f++) {
+        glGenQueries(PERF_PASS_COUNT, perf_queries_[f]);
+      }
+      perf_use_gl_queries_ = true;
+    }
+    else {
+      /* Non-GL: create a tiny SSBO as a pipeline fence.
+       * GPU_storagebuf_read() on Vulkan triggers flush_render_graph with
+       * SUBMIT | WAIT_FOR_COMPLETION — the only reliable GPU sync. */
+      uint32_t zero = 0;
+      perf_fence_ssbo_ = GPU_storagebuf_create_ex(
+          sizeof(uint32_t), &zero, GPU_USAGE_DYNAMIC, "sdf_perf_fence");
+    }
   }
 
   /** Read back the previous frame's query results (non-blocking) and update FPS. */
@@ -2586,75 +2893,124 @@ class Instance : public DrawEngine {
     }
     perf_last_draw_time_ = now;
 
-    if (!perf_queries_created_) {
-      return;
-    }
-
-    /* Read back previous frame's elapsed-time results.
-     * With double-buffering the previous frame's GPU work should be complete,
-     * so a blocking GL_QUERY_RESULT read is effectively free.  The old
-     * non-blocking GL_QUERY_RESULT_AVAILABLE check was unreliable and caused
-     * intermittent readback failures that left timing displays stale. */
-    int prev = 1 - perf_frame_idx_;
-    if (!perf_queries_valid_[prev]) {
-      return;
-    }
-
-    /* Read each pass that was active on the previous frame (blocking). */
-    auto read_pass = [&](int pass, double &out_ms) {
-      if (perf_pass_active_[prev][pass]) {
-        GLuint64 elapsed_ns = 0;
-        glGetQueryObjectui64v(perf_queries_[prev][pass], GL_QUERY_RESULT, &elapsed_ns);
-        out_ms = double(elapsed_ns) * 1e-6;
+    /* GL path: read back previous frame's double-buffered query results. */
+    if (perf_use_gl_queries_) {
+      int prev = 1 - perf_frame_idx_;
+      if (!perf_queries_valid_[prev]) {
+        return;
       }
-      else {
-        out_ms = 0.0;
+
+      /* Read each pass that was active on the previous frame (blocking).
+       * With double-buffering the previous frame's GPU work should be complete,
+       * so a blocking GL_QUERY_RESULT read is effectively free. */
+      auto read_pass = [&](int pass, double &out_ms) {
+        if (perf_pass_active_[prev][pass]) {
+          GLuint64 elapsed_ns = 0;
+          glGetQueryObjectui64v(perf_queries_[prev][pass], GL_QUERY_RESULT, &elapsed_ns);
+          out_ms = double(elapsed_ns) * 1e-6;
+        }
+        else {
+          out_ms = 0.0;
+        }
+      };
+      read_pass(PERF_PASS_CLASSIFY, perf_classify_ms_);
+      read_pass(PERF_PASS_BAKE, perf_bake_ms_);
+      read_pass(PERF_PASS_GRID, perf_grid_ms_);
+      read_pass(PERF_PASS_MARCH, perf_march_ms_);
+      read_pass(PERF_PASS_FXAA, perf_fxaa_ms_);
+
+      /* Associate baked status with the data we just read, not the current frame.
+       * This fixes the one-frame mismatch where perf_prev_baked_ was set from
+       * the current frame's needs_bake_ but the displayed data is from the
+       * previous frame's queries. */
+      perf_prev_baked_ = perf_slot_baked_[prev];
+
+      /* Update persistent cache when the previous frame actually baked. */
+      if (perf_prev_baked_) {
+        perf_last_classify_ms_ = perf_classify_ms_;
+        perf_last_bake_ms_ = perf_bake_ms_;
+        perf_last_grid_ms_ = perf_grid_ms_;
+        perf_has_bake_data_ = true;
       }
-    };
-    read_pass(PERF_PASS_CLASSIFY, perf_classify_ms_);
-    read_pass(PERF_PASS_BAKE, perf_bake_ms_);
-    read_pass(PERF_PASS_GRID, perf_grid_ms_);
-    read_pass(PERF_PASS_MARCH, perf_march_ms_);
+    }
+    /* Fallback path: timing was stored directly by perf_end_pass().
+     * Nothing to read back — results are already in perf_*_ms_. */
+  }
 
-    /* Associate baked status with the data we just read, not the current frame.
-     * This fixes the one-frame mismatch where perf_prev_baked_ was set from
-     * the current frame's needs_bake_ but the displayed data is from the
-     * previous frame's queries. */
-    perf_prev_baked_ = perf_slot_baked_[prev];
-
-    /* Update persistent cache when the previous frame actually baked. */
-    if (perf_prev_baked_) {
-      perf_last_classify_ms_ = perf_classify_ms_;
-      perf_last_bake_ms_ = perf_bake_ms_;
-      perf_last_grid_ms_ = perf_grid_ms_;
-      perf_has_bake_data_ = true;
+  /** Drain the GPU pipeline via storagebuf readback (non-GL fence). */
+  void perf_fence_sync()
+  {
+    if (perf_fence_ssbo_) {
+      uint32_t dummy;
+      GPU_storagebuf_read(perf_fence_ssbo_, &dummy);
     }
   }
 
-  /** Begin a GL_TIME_ELAPSED query for the given pass. */
+  /** Begin timing for the given pass.
+   * GL: starts a GL_TIME_ELAPSED query.
+   * Fallback: storagebuf-read fence to drain pipeline, then wall-clock snapshot. */
   void perf_begin_pass(int pass)
   {
-    if (!perf_queries_created_) {
-      return;
+    if (perf_use_gl_queries_) {
+      glBeginQuery(GL_TIME_ELAPSED, perf_queries_[perf_frame_idx_][pass]);
     }
-    glBeginQuery(GL_TIME_ELAPSED, perf_queries_[perf_frame_idx_][pass]);
+    else {
+      perf_fence_sync();
+      perf_pass_start_time_ = BLI_time_now_seconds();
+    }
     perf_pass_active_[perf_frame_idx_][pass] = true;
   }
 
-  /** End the current GL_TIME_ELAPSED query. */
-  void perf_end_pass(int /*pass*/)
+  /** End timing for the given pass.
+   * GL: ends the GL_TIME_ELAPSED query (result read back next frame).
+   * Fallback: storagebuf-read fence to drain pipeline, then wall-clock delta. */
+  void perf_end_pass(int pass)
   {
-    if (!perf_queries_created_) {
-      return;
+    if (perf_use_gl_queries_) {
+      glEndQuery(GL_TIME_ELAPSED);
     }
-    glEndQuery(GL_TIME_ELAPSED);
+    else {
+      perf_fence_sync();
+      double elapsed_ms = (BLI_time_now_seconds() - perf_pass_start_time_) * 1000.0;
+      switch (pass) {
+        case PERF_PASS_CLASSIFY:
+          perf_classify_ms_ = elapsed_ms;
+          break;
+        case PERF_PASS_BAKE:
+          perf_bake_ms_ = elapsed_ms;
+          break;
+        case PERF_PASS_GRID:
+          perf_grid_ms_ = elapsed_ms;
+          break;
+        case PERF_PASS_MARCH:
+          perf_march_ms_ = elapsed_ms;
+          break;
+        case PERF_PASS_FXAA:
+          perf_fxaa_ms_ = elapsed_ms;
+          break;
+      }
+    }
   }
 
   /** Format results and swap frame index. */
   void perf_end_frame(bool /*currently_baking*/)
   {
-    perf_queries_valid_[perf_frame_idx_] = true;
-    perf_frame_idx_ = 1 - perf_frame_idx_;
+    if (perf_use_gl_queries_) {
+      /* GL path: mark slot valid and swap for double-buffered readback. */
+      perf_queries_valid_[perf_frame_idx_] = true;
+      perf_frame_idx_ = 1 - perf_frame_idx_;
+    }
+    else {
+      /* Fallback path: timing already stored in perf_*_ms_ by perf_end_pass().
+       * Set bake status from the current frame (no double-buffer delay). */
+      perf_prev_baked_ = perf_slot_baked_[perf_frame_idx_];
+      if (perf_prev_baked_) {
+        perf_last_classify_ms_ = perf_classify_ms_;
+        perf_last_bake_ms_ = perf_bake_ms_;
+        perf_last_grid_ms_ = perf_grid_ms_;
+        perf_has_bake_data_ = true;
+      }
+    }
 
     /* Format the text. */
     int total_bricks = grid_res_.x * grid_res_.y * grid_res_.z;
@@ -2694,6 +3050,7 @@ class Instance : public DrawEngine {
                   "  bake: %s\n"
                   "  grid blend: %s\n"
                   "  march: %.2f ms\n"
+                  "  fxaa: %.2f ms\n"
                   "  bricks: %d / %d (%.1f%%)",
                   perf_fps_,
                   perf_frame_ms_,
@@ -2701,22 +3058,27 @@ class Instance : public DrawEngine {
                   bake_str,
                   grid_str,
                   perf_march_ms_,
+                  perf_fxaa_ms_,
                   active_brick_count_,
                   total_bricks,
                   brick_pct);
     s_perf_active = true;
   }
 
-  /** Delete GL query objects. */
+  /** Delete GL query objects and reset state. */
   void perf_cleanup()
   {
-    if (!perf_queries_created_) {
-      return;
+    if (perf_use_gl_queries_) {
+      for (int f = 0; f < 2; f++) {
+        glDeleteQueries(PERF_PASS_COUNT, perf_queries_[f]);
+      }
     }
-    for (int f = 0; f < 2; f++) {
-      glDeleteQueries(PERF_PASS_COUNT, perf_queries_[f]);
+    if (perf_fence_ssbo_) {
+      GPU_storagebuf_free(perf_fence_ssbo_);
+      perf_fence_ssbo_ = nullptr;
     }
     perf_queries_created_ = false;
+    perf_use_gl_queries_ = false;
     s_perf_active = false;
     s_perf_text[0] = '\0';
   }
@@ -2726,6 +3088,12 @@ class Instance : public DrawEngine {
   {
     perf_cleanup();
     free_grid_objects();
+    if (march_color_tx_) {
+      GPU_texture_free(march_color_tx_);
+    }
+    if (march_fb_) {
+      GPU_framebuffer_free(march_fb_);
+    }
     if (indirection_tx_) {
       GPU_texture_free(indirection_tx_);
     }
@@ -2752,6 +3120,12 @@ class Instance : public DrawEngine {
     }
     if (dirty_bricks_ssbo_) {
       GPU_storagebuf_free(dirty_bricks_ssbo_);
+    }
+    if (shape_ssbo_) {
+      GPU_storagebuf_free(shape_ssbo_);
+    }
+    if (instance_ssbo_) {
+      GPU_storagebuf_free(instance_ssbo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);
