@@ -1550,3 +1550,35 @@ CPU-side per-shape atlas baking with multithreaded `parallel_for`.
 | `intern/cycles/device/optix/device_impl.h` | Added `sdf_shape_blas_handles` and `sdf_shape_blas_data` member vectors |
 | `intern/cycles/kernel/device/optix/bvh.h` | `__intersection__sdf()`: branches on `num_sdf_shapes` for instanced vs world-space. Instanced uses `optixGetInstanceId()` → `KernelSDFInstance` → `KernelSDFShape` → per-shape brick_map. Updated anyhit (shadow_all_hit) and closest-hit to resolve instance_id/object_id in instanced mode |
 | `intern/cycles/kernel/geom/sdf.h` | Added `sdf_intersect_brick_shape()` and `sdf_intersect_brick_shape_shadow()` for per-shape DDA. Updated `sdf_shader_setup()` to branch on instanced mode for normal computation and shader resolution |
+
+---
+
+## Incremental Baking Pipeline (Step 5)
+
+Avoid full re-bake when only some objects move or change. Three optimizations:
+
+### Draw Engine: World-Space Partial Bake
+When `assign_persistent_slots()` succeeds (atlas not resized, no structural change):
+1. `compute_dirty_objects()` identifies which objects changed since last frame
+2. `compute_dirty_brick_set()` computes brick ranges affected by dirty objects (old + new AABB)
+3. `build_dirty_bricks_ssbo()` filters active bricks to dirty subset
+4. `dispatch_bake_dirty()` rebakes only dirty bricks (~5% of atlas typical)
+
+Falls back to full bake when: atlas resized, grid objects present, all objects dirty, or `force_full_rebake_`.
+
+### Draw Engine: Instanced Shape Skipping
+Tracks `prev_shape_fingerprints_` between frames. When a shape's fingerprint matches the
+previous frame (same type + normalized size + bevel), its atlas data is reused — only new
+or changed shapes get rebaked. Moving instances don't trigger rebake since atlas is in local space.
+
+### Cycles: Scene Hash Early Exit
+FNV-1a hash over all SDF objects (position, transform, size, bevel, blend, color, type).
+When `prev_scene_hash` matches, `sync_sdf()` returns immediately, skipping the entire CPU bake.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Wire up incremental bake in world-space pipeline: `assign_persistent_slots()` → `compute_dirty_objects()` → `compute_dirty_brick_set()` → `dispatch_bake_dirty()`. Instanced pipeline: `prev_shape_fingerprints_` tracking, `dispatch_shape_bake_all()` accepts optional dirty set to skip clean shapes |
+| `intern/cycles/blender/sdf.cpp` | Scene hash computation after object collection, early return when hash matches `prev_scene_hash` |
+| `intern/cycles/scene/sdf.h` | Added `prev_scene_hash` member to `SDFGeometry` for cross-sync change detection |

@@ -300,6 +300,10 @@ class Instance : public DrawEngine {
   /** Total active bricks across all shapes (for instanced mode). */
   int total_shape_active_bricks_ = 0;
 
+  /** Previous frame's shape fingerprints for incremental instanced bake.
+   * If a shape's fingerprint matches the previous frame, skip its rebake. */
+  Set<uint64_t> prev_shape_fingerprints_;
+
   /** Fullscreen triangle batch (cached). */
   gpu::Batch *fullscreen_batch_ = nullptr;
 
@@ -819,11 +823,34 @@ class Instance : public DrawEngine {
 
         ensure_compact_atlas();
 
-        /* Bake all shapes. */
+        /* Bake shapes (incremental: skip shapes whose fingerprints haven't changed). */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
-        dispatch_shape_bake_all();
+        if (!prev_shape_fingerprints_.is_empty() && !force_full_rebake_) {
+          /* Find shapes that are new or changed since last frame. */
+          Set<uint64_t> dirty_shapes;
+          for (const ShapeInfo &shape : shapes_) {
+            if (!prev_shape_fingerprints_.contains(shape.fingerprint)) {
+              dirty_shapes.add(shape.fingerprint);
+            }
+          }
+          if (dirty_shapes.is_empty()) {
+            /* All shapes existed before — only instance transforms changed.
+             * No rebake needed (atlas data is reusable). */
+          }
+          else {
+            dispatch_shape_bake_all(&dirty_shapes);
+          }
+        }
+        else {
+          dispatch_shape_bake_all();
+        }
+        /* Update previous shape fingerprints for next frame. */
+        prev_shape_fingerprints_.clear();
+        for (const ShapeInfo &shape : shapes_) {
+          prev_shape_fingerprints_.add(shape.fingerprint);
+        }
         if (perf_enabled_) {
           perf_end_pass(PERF_PASS_BAKE);
         }
@@ -834,7 +861,7 @@ class Instance : public DrawEngine {
         }
       }
       else {
-        /* ---- World-space pipeline (original) ---- */
+        /* ---- World-space pipeline with incremental bake ---- */
 
         /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
         if (perf_enabled_) {
@@ -853,15 +880,10 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_CLASSIFY);
         }
 
-        /* Size atlas from classify output. */
+        /* Assign persistent slots and determine if partial rebake is possible. */
+        bool can_partial = false;
         if (!objects_.is_empty() && active_brick_count_ > 0) {
-          total_slots_allocated_ = active_brick_count_;
-          int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
-          if (new_bpa < 1) {
-            new_bpa = 1;
-          }
-          bricks_per_axis_ = new_bpa;
-          prev_bricks_per_axis_ = new_bpa;
+          can_partial = assign_persistent_slots();
         }
         else {
           total_slots_allocated_ = 0;
@@ -873,12 +895,37 @@ class Instance : public DrawEngine {
 
         ensure_compact_atlas();
 
-        /* Phase 2: Bake SDFs into atlas. */
+        /* Phase 2: Bake SDFs into atlas (full or partial). */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
         if (!objects_.is_empty()) {
-          dispatch_bake();
+          if (can_partial && !grid_objects_.is_empty()) {
+            /* Grid objects blend globally — can't do partial bake safely. */
+            can_partial = false;
+          }
+          if (can_partial) {
+            Set<int> dirty_objs = compute_dirty_objects();
+            if (dirty_objs.is_empty()) {
+              /* Hash changed but no individual object is dirty — edge case
+               * (e.g. only grid_hash changed). Full bake as fallback. */
+              dispatch_bake();
+            }
+            else if (int(dirty_objs.size()) == int(objects_.size())) {
+              /* All objects dirty: full bake is faster than building dirty set. */
+              dispatch_bake();
+            }
+            else {
+              Set<int64_t> dirty_bricks = compute_dirty_brick_set(dirty_objs);
+              build_dirty_bricks_ssbo(dirty_bricks);
+              if (dirty_brick_count_ > 0) {
+                dispatch_bake_dirty();
+              }
+            }
+          }
+          else {
+            dispatch_bake();
+          }
         }
         else {
           clear_compact_atlas();
@@ -1776,7 +1823,9 @@ class Instance : public DrawEngine {
   }
 
   /** Dispatch per-shape bake for all shapes in instanced mode. */
-  void dispatch_shape_bake_all()
+  /** Dispatch bake for shapes, optionally skipping clean shapes.
+   * @param dirty_only If non-null, only bake shapes whose fingerprints are in this set. */
+  void dispatch_shape_bake_all(const Set<uint64_t> *dirty_only = nullptr)
   {
     if (total_shape_active_bricks_ <= 0 || shape_bake_sh_ == nullptr) {
       return;
@@ -1805,28 +1854,28 @@ class Instance : public DrawEngine {
         continue;
       }
 
-      /* Push shape-specific constants. */
-      GPU_shader_uniform_3fv(shape_bake_sh_, "shape_size", shape.size_normalized);
-      GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
-      GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
-      GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
-      GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);
-      GPU_shader_uniform_1i(shape_bake_sh_, "active_brick_count", shape.active_brick_count);
+      bool skip = dirty_only && !dirty_only->contains(shape.fingerprint);
 
-      /* 2D dispatch to avoid 65535 limit. */
-      uint bake_x = uint(math::min(shape.active_brick_count, 65535));
-      uint bake_y = uint(divide_ceil_u(shape.active_brick_count, 65535));
-      GPU_shader_uniform_1i(shape_bake_sh_, "dispatch_width", int(bake_x));
-      GPU_compute_dispatch(shape_bake_sh_, bake_x, bake_y, 1);
+      if (!skip) {
+        /* Push shape-specific constants. */
+        GPU_shader_uniform_3fv(shape_bake_sh_, "shape_size", shape.size_normalized);
+        GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
+        GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
+        GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
+        GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);
+        GPU_shader_uniform_1i(shape_bake_sh_, "active_brick_count", shape.active_brick_count);
 
-      /* Memory barrier between shapes to ensure writes are visible. */
-      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+        /* 2D dispatch to avoid 65535 limit. */
+        uint bake_x = uint(math::min(shape.active_brick_count, 65535));
+        uint bake_y = uint(divide_ceil_u(shape.active_brick_count, 65535));
+        GPU_shader_uniform_1i(shape_bake_sh_, "dispatch_width", int(bake_x));
+        GPU_compute_dispatch(shape_bake_sh_, bake_x, bake_y, 1);
 
-      /* Rebind active bricks for next shape with offset.
-       * Since all shapes' bricks are in one SSBO, and the shader reads
-       * active_bricks[brick_idx], we need to offset. We do this by
-       * creating a sub-view or by re-uploading with offset.
-       * For simplicity, we re-upload just this shape's bricks. */
+        /* Memory barrier between shapes to ensure writes are visible. */
+        GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+      }
+
+      /* Advance brick offset regardless of skip — offsets are computed for all shapes. */
       brick_offset += shape.active_brick_count;
       if (brick_offset < int(shape_active_bricks_.size())) {
         /* Update SSBO data pointer for next shape's bricks. */

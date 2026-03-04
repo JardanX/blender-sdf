@@ -257,7 +257,38 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
 
   if (sdf_objects.empty()) {
     sdf_geom->clear();
+    sdf_geom->prev_scene_hash = 0;
     return;
+  }
+
+  /* ---- Scene hash for change detection ---- */
+  {
+    uint64_t h = uint64_t(sdf_objects.size()) * 997;
+    for (const SDFObjectData &obj : sdf_objects) {
+      const auto mix = [&](float v) {
+        h = h * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(&v);
+      };
+      mix(obj.position.x);
+      mix(obj.position.y);
+      mix(obj.position.z);
+      mix(obj.sdf_size.x);
+      mix(obj.sdf_size.y);
+      mix(obj.sdf_size.z);
+      mix(obj.bevel);
+      mix(obj.blend);
+      mix(obj.itfm.x.x);
+      mix(obj.itfm.y.y);
+      mix(obj.itfm.z.z);
+      mix(obj.color.x);
+      mix(obj.color.y);
+      mix(obj.color.z);
+      h = h * 6364136223846793005ULL + uint64_t(obj.sdf_type);
+    }
+    if (h == sdf_geom->prev_scene_hash && !sdf_geom->shapes.empty()) {
+      /* Nothing changed: skip expensive bake, keep existing atlas data. */
+      return;
+    }
+    sdf_geom->prev_scene_hash = h;
   }
 
   /* ---- Build shape/instance tables ---- */
