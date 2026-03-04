@@ -91,13 +91,20 @@ class DeviceScene {
   device_vector<int> volume_tree_root_ids;
   device_vector<float> volume_step_size;
 
-  /* SDF. */
+  /* SDF (world-space atlas mode). */
   device_vector<KernelSDF> sdf_objects;
   device_vector<int> sdf_shader_map;
   device_vector<int> sdf_indirection;
   device_vector<float4> sdf_atlas;
   device_vector<int> sdf_matid;
   device_vector<int4> sdf_brick_map;
+
+  /* SDF (per-shape TLAS/BLAS instanced mode). */
+  device_vector<KernelSDFShape> sdf_shape_objects;
+  device_vector<KernelSDFInstance> sdf_shape_instances;
+  device_vector<int> sdf_shape_indirection;
+  device_vector<float4> sdf_shape_atlas;
+  device_vector<int4> sdf_shape_brick_map;
 
   KernelData data;
 

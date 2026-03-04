@@ -63,7 +63,12 @@ DeviceScene::DeviceScene(Device *device)
       sdf_indirection(device, "sdf_indirection", MEM_GLOBAL),
       sdf_atlas(device, "sdf_atlas", MEM_GLOBAL),
       sdf_matid(device, "sdf_matid", MEM_GLOBAL),
-      sdf_brick_map(device, "sdf_brick_map", MEM_GLOBAL)
+      sdf_brick_map(device, "sdf_brick_map", MEM_GLOBAL),
+      sdf_shape_objects(device, "sdf_shape_objects", MEM_GLOBAL),
+      sdf_shape_instances(device, "sdf_shape_instances", MEM_GLOBAL),
+      sdf_shape_indirection(device, "sdf_shape_indirection", MEM_GLOBAL),
+      sdf_shape_atlas(device, "sdf_shape_atlas", MEM_GLOBAL),
+      sdf_shape_brick_map(device, "sdf_shape_brick_map", MEM_GLOBAL)
 {
   memset((void *)&data, 0, sizeof(data));
 }

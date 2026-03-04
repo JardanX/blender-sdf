@@ -144,7 +144,7 @@ extern "C" __global__ void __anyhit__kernel_optix_shadow_all_hit()
 {
 #ifdef __SHADOW_RECORD_ALL__
   int prim = optixGetPrimitiveIndex();
-  const uint object = get_object_id();
+  uint object = get_object_id();
 #  ifdef __VISIBILITY_FLAG__
   const uint visibility = optixGetPayload_4();
   if ((kernel_data_fetch(objects, object).visibility & visibility) == 0) {
@@ -162,11 +162,18 @@ extern "C" __global__ void __anyhit__kernel_optix_shadow_all_hit()
     type = kernel_data_fetch(objects, object).primitive_type;
   }
   else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
-    /* SDF — prim is the brick_map index, not the sdf_index.
-     * Must resolve to sdf_index so downstream code (intersection_get_shader_flags,
-     * intersection_skip_self_shadow) indexes sdf_objects[0..num_sdfs-1] correctly. */
-    const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
-    prim = brick_info.z; /* sdf_index */
+    /* SDF: resolve prim from brick_map. In instanced mode, prim = 0 (set below). */
+    if (kernel_data.num_sdf_shapes > 0) {
+      /* Instanced mode: prim stores instance_id for shader_setup. */
+      const int inst_id = optixGetInstanceId();
+      const KernelSDFInstance kinst = kernel_data_fetch(sdf_shape_instances, inst_id);
+      prim = inst_id;
+      object = kinst.object_id;
+    }
+    else {
+      const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
+      prim = brick_info.z;
+    }
     u = __uint_as_float(optixGetAttribute_0());
     v = __uint_as_float(optixGetAttribute_1());
     type = PRIMITIVE_SDF;
@@ -329,11 +336,15 @@ extern "C" __global__ void __anyhit__kernel_optix_visibility_test()
     /* Triangle. */
   }
   else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
-    /* SDF custom primitive — look up the SDF index from the brick map.
-     * With per-brick AABBs, optixGetPrimitiveIndex() is the brick map index,
-     * not the SDF index. We need the SDF index for self-intersection skipping. */
-    const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
-    prim = brick_info.z; /* sdf_index */
+    /* SDF custom primitive — resolve prim for self-intersection skipping. */
+    if (kernel_data.num_sdf_shapes > 0) {
+      /* Instanced mode: use instance_id as prim. */
+      prim = optixGetInstanceId();
+    }
+    else {
+      const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
+      prim = brick_info.z; /* sdf_index */
+    }
   }
 #ifdef __HAIR__
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {
@@ -382,13 +393,23 @@ extern "C" __global__ void __closesthit__kernel_optix_hit()
     optixSetPayload_5(kernel_data_fetch(objects, object).primitive_type);
   }
   else if (optixGetHitKind() == SDF_OPTIX_HIT_KIND) {
-    /* SDF custom intersection — brick info encoded in attributes.
-     * With per-brick AABBs, prim is the brick map index, not the SDF index.
-     * Look up the actual SDF index from the brick map. */
-    const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
-    optixSetPayload_1(optixGetAttribute_0()); /* brick_linear as uint bits */
-    optixSetPayload_2(optixGetAttribute_1()); /* brick_slot as uint bits */
-    optixSetPayload_3(brick_info.z);          /* sdf_index (not brick prim) */
+    /* SDF custom intersection — brick info encoded in attributes. */
+    if (kernel_data.num_sdf_shapes > 0) {
+      /* Instanced: payload_1 = u (inst_id as float bits), payload_2 = v (brick_slot),
+       * payload_3 = instance_id, payload_4 = Cycles object_id. */
+      const int inst_id = optixGetInstanceId();
+      const KernelSDFInstance kinst = kernel_data_fetch(sdf_shape_instances, inst_id);
+      optixSetPayload_1(optixGetAttribute_0());
+      optixSetPayload_2(optixGetAttribute_1());
+      optixSetPayload_3(inst_id);
+      optixSetPayload_4(kinst.object_id);
+    }
+    else {
+      const int4 brick_info = kernel_data_fetch(sdf_brick_map, prim);
+      optixSetPayload_1(optixGetAttribute_0()); /* brick_linear as uint bits */
+      optixSetPayload_2(optixGetAttribute_1()); /* brick_slot as uint bits */
+      optixSetPayload_3(brick_info.z);          /* sdf_index (not brick prim) */
+    }
     optixSetPayload_5(PRIMITIVE_SDF);
   }
   else if ((optixGetHitKind() & (~PRIMITIVE_MOTION)) != PRIMITIVE_POINT) {
@@ -491,54 +512,91 @@ extern "C" __global__ void __intersection__point()
 #endif
 
 /* SDF custom intersection program.
- * Per-brick AABB approach: OptiX hardware BVH has one AABB per active brick.
- * The primitive index maps to sdf_brick_map which gives us the brick
- * coordinates and atlas slot. We only do voxel-level DDA (max 24 steps)
- * instead of the full two-level DDA (256+24 steps).
+ * Two modes:
+ * 1. World-space: sdf_brick_map[prim] -> brick coords + slot, uses KernelSDF.
+ * 2. Per-shape instanced: sdf_shape_brick_map[shape.offset + prim] -> brick + slot,
+ *    ray already in local space (OptiX TLAS transforms automatically).
  *
  * Shadow ray optimization: when visibility flags indicate a shadow ray,
  * uses sdf_intersect_brick_shadow() which skips Newton-Raphson refinement
  * for ~6-14% faster shadow testing (JCGT 2022). */
 extern "C" __global__ void __intersection__sdf()
 {
-  const int brick_prim = optixGetPrimitiveIndex();
-  const int4 brick_info = kernel_data_fetch(sdf_brick_map, brick_prim);
-  const int brick_linear = brick_info.x;
-  const int brick_slot = brick_info.y;
-  const int sdf_index = brick_info.z;
-
   const float3 ray_P = optixGetObjectRayOrigin();
   const float3 ray_D = optixGetObjectRayDirection();
+  const float t_max = optixGetRayTmax();
+  const uint visibility = optixGetPayload_4();
+  const bool is_shadow = (visibility & PATH_RAY_SHADOW) != 0;
 
   Ray ray;
   ray.P = ray_P;
   ray.D = ray_D;
 
-  const float t_max = optixGetRayTmax();
+  if (kernel_data.num_sdf_shapes > 0) {
+    /* ---- Per-shape instanced mode ---- */
+    const int inst_id = optixGetInstanceId();
+    const int brick_prim = optixGetPrimitiveIndex();
 
-  /* Detect shadow rays via visibility payload (p4). */
-  const uint visibility = optixGetPayload_4();
-  const bool is_shadow = (visibility & PATH_RAY_SHADOW) != 0;
+    const KernelSDFInstance kinst = kernel_data_fetch(sdf_shape_instances, inst_id);
+    const KernelSDFShape kshape = kernel_data_fetch(sdf_shape_objects, kinst.shape_id);
 
-  if (is_shadow) {
-    /* Shadow fast path: existence check only, no NR refinement. */
-    if (sdf_intersect_brick_shadow(nullptr, &ray, t_max, sdf_index, brick_linear, brick_slot)) {
-      /* Report at t_max — exact t doesn't matter for shadow rays. */
-      optixReportIntersection(t_max,
-                              SDF_OPTIX_HIT_KIND,
-                              __float_as_uint(0.0f),
-                              __float_as_uint(0.0f));
+    const int4 brick_info = kernel_data_fetch(sdf_shape_brick_map,
+                                               kshape.brick_map_offset + brick_prim);
+    const int brick_linear = brick_info.x;
+    const int brick_slot = brick_info.y;
+
+    if (is_shadow) {
+      if (sdf_intersect_brick_shape_shadow(
+              nullptr, &ray, t_max, kshape, brick_linear, brick_slot))
+      {
+        optixReportIntersection(t_max,
+                                SDF_OPTIX_HIT_KIND,
+                                __float_as_uint(__int_as_float(inst_id)),
+                                __float_as_uint(0.0f));
+      }
+    }
+    else {
+      Intersection isect;
+      isect.t = t_max;
+
+      if (sdf_intersect_brick_shape(
+              nullptr, &ray, &isect, kshape, kinst, brick_linear, brick_slot))
+      {
+        optixReportIntersection(isect.t,
+                                SDF_OPTIX_HIT_KIND,
+                                __float_as_uint(isect.u),
+                                __float_as_uint(isect.v));
+      }
     }
   }
   else {
-    Intersection isect;
-    isect.t = t_max;
+    /* ---- World-space mode (original) ---- */
+    const int brick_prim = optixGetPrimitiveIndex();
+    const int4 brick_info = kernel_data_fetch(sdf_brick_map, brick_prim);
+    const int brick_linear = brick_info.x;
+    const int brick_slot = brick_info.y;
+    const int sdf_index = brick_info.z;
 
-    if (sdf_intersect_brick(nullptr, &ray, &isect, sdf_index, brick_linear, brick_slot)) {
-      optixReportIntersection(isect.t,
-                              SDF_OPTIX_HIT_KIND,
-                              __float_as_uint(isect.u),
-                              __float_as_uint(isect.v));
+    if (is_shadow) {
+      if (sdf_intersect_brick_shadow(
+              nullptr, &ray, t_max, sdf_index, brick_linear, brick_slot))
+      {
+        optixReportIntersection(t_max,
+                                SDF_OPTIX_HIT_KIND,
+                                __float_as_uint(0.0f),
+                                __float_as_uint(0.0f));
+      }
+    }
+    else {
+      Intersection isect;
+      isect.t = t_max;
+
+      if (sdf_intersect_brick(nullptr, &ray, &isect, sdf_index, brick_linear, brick_slot)) {
+        optixReportIntersection(isect.t,
+                                SDF_OPTIX_HIT_KIND,
+                                __float_as_uint(isect.u),
+                                __float_as_uint(isect.v));
+      }
     }
   }
 }
