@@ -966,7 +966,9 @@ void GeometryManager::device_update(Device *device,
   for (Geometry *geom : scene->geometry) {
     if (geom->is_sdf()) {
       SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-      if (!sdf->indirection_data.empty()) {
+      bool has_data = !sdf->indirection_data.empty() ||
+                      (sdf->use_instanced && !sdf->shape_atlas_data.empty());
+      if (has_data) {
         if (sdf->need_update_rebuild) {
           first_sdf = sdf;
           found_rebuild = true;
@@ -1085,7 +1087,100 @@ void GeometryManager::device_update(Device *device,
    * upload one as a single KernelSDF entry (num_sdfs=1).
    * first_sdf and is_active_atlas were determined above (before BVH build). */
   {
-    if (first_sdf != nullptr) {
+    if (first_sdf != nullptr && first_sdf->use_instanced) {
+      /* ---- Per-shape instanced mode (TLAS/BLAS) ---- */
+      const int num_shapes = (int)first_sdf->shapes.size();
+      const int num_instances = (int)first_sdf->instances.size();
+
+      /* Find the Cycles object for sd->object. */
+      int sdf_object_id = 0;
+      for (size_t oi = 0; oi < scene->objects.size(); oi++) {
+        if (scene->objects[oi]->get_geometry() == first_sdf) {
+          sdf_object_id = (int)oi;
+          break;
+        }
+      }
+
+      /* Upload per-shape metadata. */
+      dscene->sdf_shape_objects.alloc(num_shapes);
+      KernelSDFShape *shape_data = dscene->sdf_shape_objects.data();
+      for (int si = 0; si < num_shapes; si++) {
+        const SDFGeometry::ShapeInfo &s = first_sdf->shapes[si];
+        KernelSDFShape &ks = shape_data[si];
+        ks.indirection_offset = s.indirection_offset;
+        ks.atlas_offset = s.atlas_offset;
+        ks.brick_map_offset = s.brick_map_offset;
+        ks.active_bricks = s.active_bricks;
+        ks.grid_res_x = s.grid_res.x;
+        ks.grid_res_y = s.grid_res.y;
+        ks.grid_res_z = s.grid_res.z;
+        ks.bricks_per_axis = s.bricks_per_axis;
+        ks.voxel_size = s.voxel_size;
+        ks.origin.x = s.origin.x;
+        ks.origin.y = s.origin.y;
+        ks.origin.z = s.origin.z;
+      }
+
+      /* Upload per-instance metadata. */
+      dscene->sdf_shape_instances.alloc(num_instances);
+      KernelSDFInstance *inst_data = dscene->sdf_shape_instances.data();
+      int default_shader = 0;
+      if (!first_sdf->get_used_shaders().empty()) {
+        Shader *shader = static_cast<Shader *>(first_sdf->get_used_shaders()[0]);
+        default_shader = scene->shader_manager->get_shader_id(shader);
+      }
+      for (int ii = 0; ii < num_instances; ii++) {
+        const SDFGeometry::InstanceInfo &inst = first_sdf->instances[ii];
+        KernelSDFInstance &ki = inst_data[ii];
+        ki.shape_id = inst.shape_id;
+        ki.shader_id = default_shader;
+        ki.object_id = sdf_object_id;
+        ki.pad = 0;
+      }
+
+      /* Upload concatenated per-shape data arrays. */
+      if (!first_sdf->shape_indirection_data.empty()) {
+        dscene->sdf_shape_indirection.alloc(first_sdf->shape_indirection_data.size());
+        memcpy(dscene->sdf_shape_indirection.data(),
+               first_sdf->shape_indirection_data.data(),
+               first_sdf->shape_indirection_data.size() * sizeof(int));
+        dscene->sdf_shape_indirection.copy_to_device();
+      }
+
+      if (!first_sdf->shape_atlas_data.empty()) {
+        dscene->sdf_shape_atlas.alloc(first_sdf->shape_atlas_data.size());
+        memcpy(dscene->sdf_shape_atlas.data(),
+               first_sdf->shape_atlas_data.data(),
+               first_sdf->shape_atlas_data.size() * sizeof(float4));
+        dscene->sdf_shape_atlas.copy_to_device();
+      }
+
+      if (!first_sdf->shape_brick_map_data.empty()) {
+        dscene->sdf_shape_brick_map.alloc(first_sdf->shape_brick_map_data.size());
+        memcpy(dscene->sdf_shape_brick_map.data(),
+               first_sdf->shape_brick_map_data.data(),
+               first_sdf->shape_brick_map_data.size() * sizeof(int4));
+        dscene->sdf_shape_brick_map.copy_to_device();
+      }
+
+      dscene->sdf_shape_objects.copy_to_device();
+      dscene->sdf_shape_instances.copy_to_device();
+
+      dscene->data.num_sdf_shapes = num_shapes;
+      dscene->data.num_sdf_instances = num_instances;
+
+      /* Clear world-space arrays. */
+      dscene->sdf_objects.free();
+      dscene->sdf_shader_map.free();
+      dscene->sdf_indirection.free();
+      dscene->sdf_atlas.free();
+      dscene->sdf_matid.free();
+      dscene->sdf_brick_map.free();
+      dscene->data.num_sdfs = 0;
+      dscene->data.num_sdf_bricks = 0;
+    }
+    else if (first_sdf != nullptr && !first_sdf->indirection_data.empty()) {
+      /* ---- World-space atlas mode (original) ---- */
       const int num_sdfs = 1;
 
       dscene->sdf_objects.alloc(num_sdfs);
@@ -1103,9 +1198,6 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_matid.alloc(first_sdf->matid_data.size());
       int *matid_ptr = dscene->sdf_matid.data();
 
-      /* Find the Cycles object that uses the active atlas SDFGeometry so that
-       * sd->object references valid object_flag data in the kernel.
-       * Must match the object used for the TLAS instance in device_impl.cpp. */
       int sdf_object_id = 0;
       for (size_t oi = 0; oi < scene->objects.size(); oi++) {
         if (scene->objects[oi]->get_geometry() == first_sdf) {
@@ -1128,7 +1220,6 @@ void GeometryManager::device_update(Device *device,
       ksdf.origin.y = first_sdf->origin.y;
       ksdf.origin.z = first_sdf->origin.z;
 
-      /* Copy flat arrays. */
       memcpy(indirection_ptr,
              first_sdf->indirection_data.data(),
              first_sdf->indirection_data.size() * sizeof(int));
@@ -1141,9 +1232,6 @@ void GeometryManager::device_update(Device *device,
              first_sdf->matid_data.data(),
              first_sdf->matid_data.size() * sizeof(int));
 
-      /* Build per-object shader mapping.
-       * Use the first SDF object's shader for all objects as default,
-       * since each Blender SDF object maps to an entry in the atlas. */
       for (int i = 0; i < first_sdf->num_objects; i++) {
         if (!first_sdf->get_used_shaders().empty()) {
           Shader *shader = static_cast<Shader *>(first_sdf->get_used_shaders()[0]);
@@ -1154,8 +1242,7 @@ void GeometryManager::device_update(Device *device,
         }
       }
 
-      /* Build per-brick map for hardware BVH acceleration.
-       * Each active brick gets an entry so OptiX can build one AABB per brick. */
+      /* Build per-brick map for hardware BVH. */
       {
         const int gr = first_sdf->grid_res;
         vector<int4> brick_entries;
@@ -1195,6 +1282,15 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_matid.copy_to_device();
 
       dscene->data.num_sdfs = num_sdfs;
+
+      /* Clear instanced arrays. */
+      dscene->sdf_shape_objects.free();
+      dscene->sdf_shape_instances.free();
+      dscene->sdf_shape_indirection.free();
+      dscene->sdf_shape_atlas.free();
+      dscene->sdf_shape_brick_map.free();
+      dscene->data.num_sdf_shapes = 0;
+      dscene->data.num_sdf_instances = 0;
     }
     else {
       dscene->sdf_objects.free();
@@ -1203,9 +1299,16 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_atlas.free();
       dscene->sdf_matid.free();
       dscene->sdf_brick_map.free();
+      dscene->sdf_shape_objects.free();
+      dscene->sdf_shape_instances.free();
+      dscene->sdf_shape_indirection.free();
+      dscene->sdf_shape_atlas.free();
+      dscene->sdf_shape_brick_map.free();
 
       dscene->data.num_sdfs = 0;
       dscene->data.num_sdf_bricks = 0;
+      dscene->data.num_sdf_shapes = 0;
+      dscene->data.num_sdf_instances = 0;
     }
   }
 

@@ -613,7 +613,8 @@ typedef struct UserDef {
   char render_display_type;      /* eUserpref_RenderDisplayType */
   char filebrowser_display_type; /* eUserpref_TempSpaceDisplayType */
   char preferences_display_type; /* eUserpref_TempSpaceDisplayType */
-  char _pad18[7];
+  char sdf_fxaa;                 /* SDF FXAA anti-aliasing (0=Off, 1=On) */
+  char _pad18[6];
 
   short sequencer_proxy_setup; /* eUserpref_SeqProxySetup */
   short _pad1;

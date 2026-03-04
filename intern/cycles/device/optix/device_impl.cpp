@@ -1894,26 +1894,25 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
     }
 
     /* Build SDF BLAS with per-brick AABBs for hardware BVH acceleration.
-     * Instead of one AABB for the whole atlas, create one AABB per active brick.
-     * This lets OptiX hardware skip empty bricks, eliminating brick-level DDA
-     * and reducing intersection cost from O(256+24) to O(24) steps.
+     * Two modes:
+     * 1. World-space: One BLAS with all active bricks (original).
+     * 2. Per-shape TLAS/BLAS: One BLAS per unique shape, one TLAS instance per
+     *    object with its transform. Enables hardware instancing for O(shapes) memory.
      * Based on SBS approach from "Ray Tracing of SDF Grids" (JCGT 2022). */
     sdf_blas_handle = 0;
+    sdf_shape_blas_data.clear();
+    sdf_shape_blas_handles.clear();
     {
-      /* Find the SDFGeometry marked as active by GeometryManager::device_update.
-       * This ensures we use the same instance that built the sdf_brick_map,
-       * preventing a count mismatch between BLAS AABBs and brick_map entries. */
       SDFGeometry *first_sdf = nullptr;
       for (Geometry *geom : bvh->geometry) {
         if (geom->is_sdf()) {
           SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-          if (sdf->is_active_atlas && !sdf->indirection_data.empty()) {
+          if (sdf->is_active_atlas) {
             first_sdf = sdf;
             break;
           }
         }
       }
-      /* Find any Object that uses this SDFGeometry (for TLAS instance ID). */
       Object *sdf_object = nullptr;
       if (first_sdf) {
         for (Object *ob : bvh->objects) {
@@ -1924,13 +1923,143 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
         }
       }
 
-      if (sdf_object && first_sdf && !first_sdf->indirection_data.empty()) {
+      if (sdf_object && first_sdf && first_sdf->use_instanced &&
+          !first_sdf->shape_brick_map_data.empty())
+      {
+        /* ---- Per-shape TLAS/BLAS instanced mode ---- */
+        const CUDAContextScope scope(this);
+        const int num_shapes = (int)first_sdf->shapes.size();
+
+        sdf_shape_blas_data.resize(num_shapes);
+        sdf_shape_blas_handles.resize(num_shapes, 0);
+
+        for (int si = 0; si < num_shapes; si++) {
+          const SDFGeometry::ShapeInfo &shape = first_sdf->shapes[si];
+          if (shape.active_bricks <= 0) {
+            continue;
+          }
+
+          /* Build per-shape AABBs in local space. */
+          const float brick_world = float(8) * shape.voxel_size;
+          vector<OptixAabb> aabb_list;
+          aabb_list.reserve(shape.active_bricks);
+
+          const int3 gr = shape.grid_res;
+          for (int bz = 0; bz < gr.z; bz++) {
+            for (int by = 0; by < gr.y; by++) {
+              for (int bx = 0; bx < gr.x; bx++) {
+                const int flat_idx = bx + by * gr.x + bz * gr.x * gr.y;
+                const int slot = first_sdf->shape_indirection_data[shape.indirection_offset +
+                                                                    flat_idx];
+                if (slot >= 0 || slot == -2) {
+                  OptixAabb aabb;
+                  aabb.minX = shape.origin.x + float(bx) * brick_world;
+                  aabb.minY = shape.origin.y + float(by) * brick_world;
+                  aabb.minZ = shape.origin.z + float(bz) * brick_world;
+                  aabb.maxX = shape.origin.x + float(bx + 1) * brick_world;
+                  aabb.maxY = shape.origin.y + float(by + 1) * brick_world;
+                  aabb.maxZ = shape.origin.z + float(bz + 1) * brick_world;
+                  aabb_list.push_back(aabb);
+                }
+              }
+            }
+          }
+
+          const int num_bricks = (int)aabb_list.size();
+          if (num_bricks == 0) {
+            continue;
+          }
+
+          device_vector<OptixAabb> sdf_aabb(this, "sdf shape blas aabb", MEM_READ_ONLY);
+          sdf_aabb.alloc(num_bricks);
+          memcpy(sdf_aabb.data(), aabb_list.data(), num_bricks * sizeof(OptixAabb));
+          sdf_aabb.copy_to_device();
+
+          unsigned int sdf_build_flags = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
+          OptixBuildInput sdf_build_input = {};
+          sdf_build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+          CUdeviceptr aabb_ptr = sdf_aabb.device_pointer;
+          sdf_build_input.customPrimitiveArray.aabbBuffers = &aabb_ptr;
+          sdf_build_input.customPrimitiveArray.numPrimitives = num_bricks;
+          sdf_build_input.customPrimitiveArray.strideInBytes = sizeof(OptixAabb);
+          sdf_build_input.customPrimitiveArray.flags = &sdf_build_flags;
+          sdf_build_input.customPrimitiveArray.numSbtRecords = 1;
+          sdf_build_input.customPrimitiveArray.primitiveIndexOffset = 0;
+
+          OptixAccelBuildOptions accel_options = {};
+          accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE |
+                                     OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+          accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+          OptixAccelBufferSizes sizes = {};
+          optix_assert(optixAccelComputeMemoryUsage(
+              context, &accel_options, &sdf_build_input, 1, &sizes));
+
+          device_only_memory<char> temp_mem(this, "sdf shape blas temp", false);
+          temp_mem.alloc_to_device(sizes.tempSizeInBytes);
+
+          sdf_shape_blas_data[si] = make_unique<device_only_memory<char>>(
+              this, "sdf shape blas", false);
+          sdf_shape_blas_data[si]->alloc_to_device(sizes.outputSizeInBytes);
+
+          optix_assert(optixAccelBuild(context,
+                                       0,
+                                       &accel_options,
+                                       &sdf_build_input,
+                                       1,
+                                       temp_mem.device_pointer,
+                                       sizes.tempSizeInBytes,
+                                       sdf_shape_blas_data[si]->device_pointer,
+                                       sizes.outputSizeInBytes,
+                                       &sdf_shape_blas_handles[si],
+                                       nullptr,
+                                       0));
+        }
+
+        /* Add one TLAS instance per SDF object instance. */
+        for (int ii = 0; ii < (int)first_sdf->instances.size(); ii++) {
+          const SDFGeometry::InstanceInfo &inst = first_sdf->instances[ii];
+          const int shape_id = inst.shape_id;
+
+          if (shape_id < 0 || shape_id >= num_shapes ||
+              sdf_shape_blas_handles[shape_id] == 0)
+          {
+            continue;
+          }
+
+          OptixInstance &sdf_inst = instances[num_instances++];
+          memset(&sdf_inst, 0, sizeof(sdf_inst));
+
+          /* Set transform: local_to_world (OptiX uses 3x4 row-major). */
+          const Transform &tfm = inst.local_to_world;
+          sdf_inst.transform[0] = tfm.x.x;
+          sdf_inst.transform[1] = tfm.x.y;
+          sdf_inst.transform[2] = tfm.x.z;
+          sdf_inst.transform[3] = tfm.x.w;
+          sdf_inst.transform[4] = tfm.y.x;
+          sdf_inst.transform[5] = tfm.y.y;
+          sdf_inst.transform[6] = tfm.y.z;
+          sdf_inst.transform[7] = tfm.y.w;
+          sdf_inst.transform[8] = tfm.z.x;
+          sdf_inst.transform[9] = tfm.z.y;
+          sdf_inst.transform[10] = tfm.z.z;
+          sdf_inst.transform[11] = tfm.z.w;
+
+          /* instanceId encodes the instance index for kernel lookup. */
+          sdf_inst.instanceId = ii;
+          sdf_inst.visibilityMask = 0xFF;
+          sdf_inst.sbtOffset = PG_HITD_SDF - PG_HITD;
+          sdf_inst.flags = OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
+          sdf_inst.traversableHandle = sdf_shape_blas_handles[shape_id];
+        }
+      }
+      else if (sdf_object && first_sdf && !first_sdf->indirection_data.empty()) {
+        /* ---- World-space BLAS (original path) ---- */
         const int grid_res = first_sdf->grid_res;
         const float voxel_size = first_sdf->voxel_size;
-        const float brick_world = float(8) * voxel_size; /* SDF_BRICK_SIZE=8 */
+        const float brick_world = float(8) * voxel_size;
         const float3 origin = first_sdf->origin;
 
-        /* Count active bricks and build AABBs. */
         vector<OptixAabb> aabb_list;
         aabb_list.reserve(grid_res * grid_res * grid_res / 4);
 
@@ -1971,7 +2100,6 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
           sdf_build_input.customPrimitiveArray.numSbtRecords = 1;
           sdf_build_input.customPrimitiveArray.primitiveIndexOffset = 0;
 
-          /* Build SDF BLAS using OptiX API directly. */
           const CUDAContextScope scope(this);
 
           OptixAccelBuildOptions accel_options = {};
@@ -2002,7 +2130,6 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
                                        nullptr,
                                        0));
 
-          /* Add SDF instance to the TLAS. */
           OptixInstance &sdf_instance = instances[num_instances++];
           memset(&sdf_instance, 0, sizeof(sdf_instance));
           sdf_instance.transform[0] = 1.0f;

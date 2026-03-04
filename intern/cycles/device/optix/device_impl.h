@@ -122,9 +122,13 @@ class OptiXDevice : public CUDADevice {
   vector<unique_ptr<device_only_memory<char>>> delayed_free_bvh_memory;
   thread_mutex delayed_free_bvh_mutex;
 
-  /* SDF custom primitive BLAS. */
+  /* SDF custom primitive BLAS (world-space mode). */
   OptixTraversableHandle sdf_blas_handle = 0;
   unique_ptr<device_only_memory<char>> sdf_blas_data;
+
+  /* Per-shape BLAS for TLAS/BLAS instanced mode. */
+  vector<OptixTraversableHandle> sdf_shape_blas_handles;
+  vector<unique_ptr<device_only_memory<char>>> sdf_shape_blas_data;
 
  public:
   OptiXDevice(const DeviceInfo &info, Stats &stats, Profiler &profiler, bool headless);

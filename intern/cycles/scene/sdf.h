@@ -59,6 +59,16 @@ class SDFGeometry : public Geometry {
     float bevel_normalized;   /* bevel / max_size. */
     float world_scale;        /* max(effective_size) for representative instance. */
     int atlas_index;          /* Per-shape atlas slot (-1 = not yet baked). */
+
+    /* Per-shape local atlas parameters (set by per-shape baking). */
+    int3 grid_res;            /* Bricks per axis (non-cubic, capped at 32). */
+    float voxel_size;         /* Local-space voxel size. */
+    float3 origin;            /* Local-space atlas origin. */
+    int bricks_per_axis;      /* ceil(cbrt(active_bricks)) for compact layout. */
+    int active_bricks;        /* Number of active (surface) bricks. */
+    int indirection_offset;   /* Offset into shape_indirection_data. */
+    int atlas_offset;         /* Offset into shape_atlas_data. */
+    int brick_map_offset;     /* Offset into shape_brick_map_data. */
   };
   vector<ShapeInfo> shapes;
 
@@ -72,6 +82,12 @@ class SDFGeometry : public Geometry {
     float world_scale;
   };
   vector<InstanceInfo> instances;
+
+  /* Per-shape instanced mode (TLAS/BLAS). Active when use_instanced = true. */
+  bool use_instanced = false;
+  vector<int> shape_indirection_data;    /* Concatenated per-shape indirection. */
+  vector<float4> shape_atlas_data;       /* Concatenated per-shape atlas (dist+padding). */
+  vector<int4> shape_brick_map_data;     /* Concatenated per-shape brick maps. */
 
   SDFGeometry();
   ~SDFGeometry() override;

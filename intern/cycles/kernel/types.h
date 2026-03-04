@@ -1524,7 +1524,8 @@ struct ccl_align(16) KernelData {
   /* SDF parameters. */
   int num_sdfs;
   int num_sdf_bricks;
-  int pad3, pad4;
+  int num_sdf_shapes;     /* Per-shape TLAS/BLAS instancing (0 = world-space mode). */
+  int num_sdf_instances;
 };
 static_assert_align(KernelData, 16);
 
@@ -1592,6 +1593,33 @@ struct KernelSDF {
   packed_float3 origin;  /* World-space atlas origin. */
 };
 static_assert_align(KernelSDF, 16);
+
+/* Per-shape atlas metadata for TLAS/BLAS instanced SDF rendering.
+ * Each unique SDF shape has its own local-space brick atlas. */
+struct KernelSDFShape {
+  int indirection_offset; /* Start in sdf_shape_indirection array. */
+  int atlas_offset;       /* Start in sdf_shape_atlas array. */
+  int brick_map_offset;   /* Start in sdf_shape_brick_map array. */
+  int active_bricks;      /* Number of active bricks for this shape. */
+
+  int grid_res_x;         /* Bricks per axis (non-cubic). */
+  int grid_res_y;
+  int grid_res_z;
+  int bricks_per_axis;    /* ceil(cbrt(active_bricks)) for compact layout. */
+
+  float voxel_size;       /* Local-space voxel size. */
+  packed_float3 origin;   /* Local-space atlas origin. */
+};
+static_assert_align(KernelSDFShape, 16);
+
+/* Per-instance data for TLAS/BLAS instanced SDF rendering. */
+struct KernelSDFInstance {
+  int shape_id;   /* Index into sdf_shape_objects[]. */
+  int shader_id;  /* Cycles shader ID. */
+  int object_id;  /* Cycles object index (for sd->object). */
+  int pad;
+};
+static_assert_align(KernelSDFInstance, 16);
 
 struct KernelCurve {
   int shader_id;

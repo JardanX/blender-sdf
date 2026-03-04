@@ -265,6 +265,7 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   sdf_geom->instances.clear();
   unordered_map<uint64_t, int> fingerprint_to_shape;
 
+  bool any_blend = false;
   for (size_t i = 0; i < sdf_objects.size(); i++) {
     const SDFObjectData &obj = sdf_objects[i];
     uint64_t fp = sdf_shape_fingerprint(obj.sdf_type, obj.sdf_size, obj.bevel);
@@ -288,6 +289,14 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
       shape.bevel_normalized = obj.bevel / max_dim;
       shape.world_scale = max_dim;
       shape.atlas_index = -1;
+      shape.grid_res = make_int3(0, 0, 0);
+      shape.voxel_size = 0.0f;
+      shape.origin = zero_float3();
+      shape.bricks_per_axis = 0;
+      shape.active_bricks = 0;
+      shape.indirection_offset = 0;
+      shape.atlas_offset = 0;
+      shape.brick_map_offset = 0;
 
       shape_id = (int)sdf_geom->shapes.size();
       sdf_geom->shapes.push_back(shape);
@@ -297,18 +306,224 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     SDFGeometry::InstanceInfo inst;
     inst.shape_id = shape_id;
     inst.object_id = (int)i;
-    /* Full transform for world_to_local / local_to_world will be needed in Step 4.
-     * For now, store the rotation-only inverse and position for reference. */
-    inst.local_to_world = transform_identity();
-    inst.world_to_local = transform_identity();
     inst.color = make_float4(obj.color.x, obj.color.y, obj.color.z, 1.0f);
     inst.blend = obj.blend;
     float max_dim = max(max(fabsf(obj.sdf_size.x), fabsf(obj.sdf_size.y)),
                         fabsf(obj.sdf_size.z));
     inst.world_scale = max(max_dim, 1e-8f);
 
+    /* Compute full local_to_world: maps normalized local space to world.
+     * Local space has the SDF centered at origin with normalized size.
+     * local_to_world = translate(position) * rot * scale(world_scale). */
+    {
+      float ws = inst.world_scale;
+      Transform rot = transform_inverse(obj.itfm);
+      Transform scale_tfm = transform_scale(ws, ws, ws);
+      Transform translate = transform_translate(obj.position);
+
+      inst.local_to_world = translate * rot * scale_tfm;
+      inst.world_to_local = transform_inverse(inst.local_to_world);
+    }
+
+    if (obj.blend > 0.0f) {
+      any_blend = true;
+    }
+
     sdf_geom->instances.push_back(inst);
   }
+
+  /* Decide mode: instanced when no objects use smooth blending. */
+  sdf_geom->use_instanced = !any_blend && sdf_geom->shapes.size() > 0;
+
+  /* ---- Per-shape instanced baking (TLAS/BLAS path) ---- */
+  if (sdf_geom->use_instanced) {
+    sdf_geom->shape_indirection_data.clear();
+    sdf_geom->shape_atlas_data.clear();
+    sdf_geom->shape_brick_map_data.clear();
+
+    constexpr int MAX_SHAPE_GRID_RES = 32;
+    const float base_voxel = 1.0f / 256.0f; /* Match world-space density: 256 voxels/unit. */
+
+    int global_indir_offset = 0;
+    int global_atlas_offset = 0;
+    int global_brick_map_offset = 0;
+
+    for (size_t si = 0; si < sdf_geom->shapes.size(); si++) {
+      SDFGeometry::ShapeInfo &shape = sdf_geom->shapes[si];
+
+      /* Local voxel size based on world_scale. */
+      float local_vs = base_voxel / max(shape.world_scale, 1e-6f);
+
+      /* Local extent per axis: size_normalized + bevel + margin. */
+      float brick_half_diag = float(BRICK_SIZE) * local_vs * 0.866025f;
+      float margin = brick_half_diag + 2.0f * local_vs;
+      float3 half_extent = shape.size_normalized +
+                           make_float3(shape.bevel_normalized + margin,
+                                       shape.bevel_normalized + margin,
+                                       shape.bevel_normalized + margin);
+
+      /* Grid resolution per axis (non-cubic, capped). */
+      float chunk = float(BRICK_SIZE) * local_vs;
+      int3 gr;
+      gr.x = clamp((int)ceilf(2.0f * half_extent.x / chunk), 1, MAX_SHAPE_GRID_RES);
+      gr.y = clamp((int)ceilf(2.0f * half_extent.y / chunk), 1, MAX_SHAPE_GRID_RES);
+      gr.z = clamp((int)ceilf(2.0f * half_extent.z / chunk), 1, MAX_SHAPE_GRID_RES);
+
+      float3 local_origin = make_float3(-float(gr.x), -float(gr.y), -float(gr.z)) *
+                             float(BRICK_SIZE) * local_vs * 0.5f;
+
+      /* Classify bricks: evaluate sdBox at each brick center. */
+      int grid_volume = gr.x * gr.y * gr.z;
+      vector<int> shape_indir(grid_volume, -1);
+      vector<int4> shape_brick_entries;
+
+      float3 box_size = shape.size_normalized -
+                         make_float3(shape.bevel_normalized,
+                                     shape.bevel_normalized,
+                                     shape.bevel_normalized);
+      box_size = max(box_size, make_float3(0.001f, 0.001f, 0.001f));
+
+      int active_count = 0;
+      for (int bz = 0; bz < gr.z; bz++) {
+        for (int by = 0; by < gr.y; by++) {
+          for (int bx = 0; bx < gr.x; bx++) {
+            float3 brick_center = local_origin +
+                                  make_float3(float(bx) * BRICK_SIZE + BRICK_SIZE * 0.5f,
+                                              float(by) * BRICK_SIZE + BRICK_SIZE * 0.5f,
+                                              float(bz) * BRICK_SIZE + BRICK_SIZE * 0.5f) *
+                                      local_vs;
+
+            float dist = sdf_box(brick_center, box_size) - shape.bevel_normalized;
+
+            int flat_idx = bx + by * gr.x + bz * gr.x * gr.y;
+            if (fabsf(dist) < brick_half_diag * 1.5f) {
+              shape_indir[flat_idx] = active_count;
+              int brick_linear = bx + by * gr.x + bz * gr.x * gr.y;
+              shape_brick_entries.push_back(
+                  make_int4(brick_linear, active_count, (int)si, 0));
+              active_count++;
+            }
+            else if (dist < 0.0f) {
+              shape_indir[flat_idx] = -2; /* Fully inside. */
+              int brick_linear = bx + by * gr.x + bz * gr.x * gr.y;
+              shape_brick_entries.push_back(make_int4(brick_linear, -2, (int)si, 0));
+            }
+          }
+        }
+      }
+
+      if (active_count == 0) {
+        shape.grid_res = gr;
+        shape.voxel_size = local_vs;
+        shape.origin = local_origin;
+        shape.bricks_per_axis = 1;
+        shape.active_bricks = 0;
+        shape.indirection_offset = global_indir_offset;
+        shape.atlas_offset = global_atlas_offset;
+        shape.brick_map_offset = global_brick_map_offset;
+
+        /* Still append indirection data. */
+        sdf_geom->shape_indirection_data.insert(
+            sdf_geom->shape_indirection_data.end(),
+            shape_indir.begin(), shape_indir.end());
+        global_indir_offset += grid_volume;
+        continue;
+      }
+
+      int bpa = max((int)ceilf(cbrtf((float)active_count)), 1);
+      int atlas_dim = bpa * BRICK_STORAGE;
+      size_t atlas_total = (size_t)atlas_dim * atlas_dim * atlas_dim;
+
+      /* Bake per-shape local atlas. */
+      vector<float4> shape_atlas(atlas_total, make_float4(100.0f, 0.0f, 0.0f, 0.0f));
+
+      parallel_for(0, grid_volume, [&](int idx) {
+        int slot = shape_indir[idx];
+        if (slot < 0) {
+          return;
+        }
+
+        int bx = idx % gr.x;
+        int by = (idx / gr.x) % gr.y;
+        int bz = idx / (gr.x * gr.y);
+
+        int sx = slot % bpa;
+        int sy = (slot / bpa) % bpa;
+        int sz = slot / (bpa * bpa);
+        int3 slot_origin = make_int3(sx * BRICK_STORAGE, sy * BRICK_STORAGE, sz * BRICK_STORAGE);
+
+        for (int lz = 0; lz < BRICK_STORAGE; lz++) {
+          for (int ly = 0; ly < BRICK_STORAGE; ly++) {
+            for (int lx = 0; lx < BRICK_STORAGE; lx++) {
+              float3 local_pos = local_origin +
+                                 make_float3(float(bx * BRICK_SIZE + lx - BRICK_BORDER) + 0.5f,
+                                             float(by * BRICK_SIZE + ly - BRICK_BORDER) + 0.5f,
+                                             float(bz * BRICK_SIZE + lz - BRICK_BORDER) + 0.5f) *
+                                     local_vs;
+
+              float d = sdf_box(local_pos, box_size) - shape.bevel_normalized;
+
+              int3 ac = slot_origin + make_int3(lx, ly, lz);
+              size_t ai = (size_t)ac.z * atlas_dim * atlas_dim +
+                          (size_t)ac.y * atlas_dim + (size_t)ac.x;
+              shape_atlas[ai] = make_float4(d, 0.0f, 0.0f, 0.0f);
+            }
+          }
+        }
+      });
+
+      /* Store shape parameters. */
+      shape.grid_res = gr;
+      shape.voxel_size = local_vs;
+      shape.origin = local_origin;
+      shape.bricks_per_axis = bpa;
+      shape.active_bricks = active_count;
+      shape.indirection_offset = global_indir_offset;
+      shape.atlas_offset = global_atlas_offset;
+      shape.brick_map_offset = global_brick_map_offset;
+
+      /* Append to concatenated arrays. */
+      sdf_geom->shape_indirection_data.insert(
+          sdf_geom->shape_indirection_data.end(),
+          shape_indir.begin(), shape_indir.end());
+
+      sdf_geom->shape_atlas_data.insert(
+          sdf_geom->shape_atlas_data.end(),
+          shape_atlas.begin(), shape_atlas.end());
+
+      sdf_geom->shape_brick_map_data.insert(
+          sdf_geom->shape_brick_map_data.end(),
+          shape_brick_entries.begin(), shape_brick_entries.end());
+
+      global_indir_offset += grid_volume;
+      global_atlas_offset += (int)atlas_total;
+      global_brick_map_offset += (int)shape_brick_entries.size();
+    }
+
+    /* For instanced mode, we still need minimal world-space data for fallback.
+     * Set grid parameters but skip the expensive world-space bake. */
+    sdf_geom->origin = scene_min_acc;
+    sdf_geom->voxel_size = 0.0f;
+    sdf_geom->grid_res = 0;
+    sdf_geom->bricks_per_axis = 0;
+    sdf_geom->num_objects = (int)sdf_objects.size();
+    sdf_geom->scene_min = scene_min_acc;
+    sdf_geom->scene_max = scene_max_acc;
+    sdf_geom->indirection_data.clear();
+    sdf_geom->atlas_data.clear();
+    sdf_geom->matid_data.clear();
+
+    sdf_geom->object_shader_ids.resize(sdf_objects.size());
+    for (size_t i = 0; i < sdf_objects.size(); i++) {
+      sdf_geom->object_shader_ids[i] = 0;
+    }
+
+    sdf_geom->compute_bounds();
+    sdf_geom->tag_update(scene, true);
+    return;
+  }
+
+  /* ---- World-space baking (original path, used when blend > 0) ---- */
 
   /* Compute atlas parameters. */
   const int grid_res = 32; /* Bricks per axis (32 * 8 = 256 voxels per axis). */
