@@ -52,6 +52,43 @@ struct BVHNodeGPU {
   float4 max_and_right; /* xyz = AABB max, w = intBitsToFloat(right_child or obj_idx) */
 };
 
+/** GPU-side SDF shape descriptor (unique primitive geometry).
+ * Each unique combination of (type, size, bevel) defines a shape.
+ * Multiple instances can reference the same shape, sharing atlas data.
+ * Used for instanced rendering (Step 3+). */
+struct SDFShapeGPU {
+  /** SDF primitive size (unscaled, normalized: max component = 1.0). */
+  float4 size_normalized;
+  /** Bevel radius (normalized relative to max size component). */
+  float bevel_normalized;
+  /** SDF primitive type (eSDFType). */
+  int sdf_type;
+  /** Index into per-shape atlas pool (-1 = not yet baked). */
+  int atlas_index;
+  /** World-space scale factor to map normalized shape to world. */
+  float world_scale;
+};
+/* 16 + 16 = 32 bytes, 16-byte aligned. */
+
+/** GPU-side SDF instance (one per scene object).
+ * References a shape and adds per-instance transform + appearance. */
+struct SDFInstanceGPU {
+  /** World-to-local transform (maps world ray into shape's [-1,1]^3 space). */
+  float4x4 world_to_local;
+  /** Local-to-world transform (maps shape-space positions to world). */
+  float4x4 local_to_world;
+  /** Per-instance display color RGBA. */
+  float4 color;
+  /** Smooth blend radius (world-space). */
+  float blend;
+  /** Index into shapes[] array. */
+  int shape_id;
+  /** Original object index in objects[] (for selection/debug). */
+  int object_id;
+  float _pad0;
+};
+/* 64 + 64 + 16 + 16 = 160 bytes, 16-byte aligned. */
+
 /** Push constants for the classify compute shader. */
 struct SDFClassifyParams {
   float4 atlas_origin;

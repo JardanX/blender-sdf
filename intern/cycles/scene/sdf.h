@@ -49,6 +49,30 @@ class SDFGeometry : public Geometry {
    * instance for building BLAS AABBs so the brick_map stays in sync. */
   bool is_active_atlas = false;
 
+  /* Shape/instance tables for instanced rendering.
+   * Each unique SDF shape (identified by fingerprint) can be shared across
+   * multiple instances, reducing atlas memory and enabling TLAS/BLAS. */
+  struct ShapeInfo {
+    uint64_t fingerprint;
+    int sdf_type;
+    float3 size_normalized;   /* Aspect ratio (max = 1.0). */
+    float bevel_normalized;   /* bevel / max_size. */
+    float world_scale;        /* max(effective_size) for representative instance. */
+    int atlas_index;          /* Per-shape atlas slot (-1 = not yet baked). */
+  };
+  vector<ShapeInfo> shapes;
+
+  struct InstanceInfo {
+    int shape_id;             /* Index into shapes[]. */
+    int object_id;            /* Blender object index in the SDF scene. */
+    Transform world_to_local;
+    Transform local_to_world;
+    float4 color;
+    float blend;
+    float world_scale;
+  };
+  vector<InstanceInfo> instances;
+
   SDFGeometry();
   ~SDFGeometry() override;
 
