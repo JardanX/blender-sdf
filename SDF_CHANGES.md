@@ -1459,6 +1459,12 @@ Result: C0-continuous normals across voxel boundaries. Cost: 27 texel fetches + 
 |------|--------|
 | `intern/cycles/kernel/geom/sdf.h` | **Slot→atlas lookup optimization.** Added `sdf_slot_origin()` helper that computes the atlas base coordinate (3 integer divides + 3 modulos) once per brick entry. Updated `sdf_fetch_corners()`, `sdf_compute_normal()`, and `sdf_grid_to_compact()` to accept pre-computed `int3 slot_org` instead of `(brick_slot, bpa)`. Eliminates redundant div/mod per voxel step in all 4 DDA paths (primary, shadow, brick-only, and shader setup) |
 
+### Single-Voxel Analytical Normal in Cycles DDA
+
+| File | Change |
+|------|--------|
+| `intern/cycles/kernel/geom/sdf.h` | **Replaced dual-voxel normal computation (27 fetches + 8 gradients + trilinear blend) with single-voxel analytical gradient (8 fetches + 1 gradient).** Uses the 8 corners of the hit voxel and `sdf_trilinear_gradient()` for an exact gradient within the voxel. Trade-off: C0 continuity at voxel boundaries (vs C1 dual-voxel), visually negligible at typical resolutions. ~3.4x fewer texture fetches per primary ray hit |
+
 ---
 
 ## Object-Space Atlas Baking (Instanced Mode)

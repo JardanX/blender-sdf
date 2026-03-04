@@ -6059,6 +6059,13 @@ static void rna_def_userdef_system(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
+  prop = RNA_def_property(srna, "sdf_fxaa", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_fxaa", 1);
+  RNA_def_property_ui_text(
+      prop, "SDF Anti-Aliasing", "Apply FXAA anti-aliasing to SDF ray-march output");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   prop = RNA_def_property(srna, "solid_lights", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "light_param", "");
   RNA_def_property_struct_type(prop, "UserSolidLight");

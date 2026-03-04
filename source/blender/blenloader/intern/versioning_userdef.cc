@@ -1739,6 +1739,11 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->dupflag |= USER_DUP_SDF;
   }
 
+  /* SDF FXAA defaults to on for existing prefs that predate the setting. */
+  if (userdef->sdf_fxaa == 0) {
+    userdef->sdf_fxaa = 1;
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

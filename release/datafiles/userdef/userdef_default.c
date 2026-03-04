@@ -196,6 +196,7 @@ const UserDef U_default = {
     .filebrowser_display_type = USER_TEMP_SPACE_DISPLAY_WINDOW,
     .preferences_display_type = USER_TEMP_SPACE_DISPLAY_WINDOW,
     .viewport_aa = 8,
+    .sdf_fxaa = 1,
 
     .walk_navigation =
         {
