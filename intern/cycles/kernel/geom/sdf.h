@@ -2145,11 +2145,17 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
                                                   float(brick_cell.z * SDF_BRICK_SIZE)) *
                                          voxel_size;
     float3 grid_pos_in_brick = (local_hit - brick_origin_l) / voxel_size;
+    /* Gentle clamp — keep within the range reachable by the 2-voxel border.
+     * The dual voxel stencil accesses dc-1..dc+1 where dc = floor(pos+0.5),
+     * so the minimum atlas offset is -1 and maximum is BRICK_SIZE.
+     * With border=2 the atlas stores [-2, BRICK_SIZE+1], giving ample margin.
+     * Using [-0.49, BRICK_SIZE+0.49] ensures dc stays in [0, BRICK_SIZE]
+     * while keeping boundary continuity (no 0.01-epsilon gap). */
     grid_pos_in_brick = clamp(grid_pos_in_brick,
-                              make_float3(0.01f, 0.01f, 0.01f),
-                              make_float3(float(SDF_BRICK_SIZE) - 0.01f,
-                                          float(SDF_BRICK_SIZE) - 0.01f,
-                                          float(SDF_BRICK_SIZE) - 0.01f));
+                              make_float3(-0.49f, -0.49f, -0.49f),
+                              make_float3(float(SDF_BRICK_SIZE) + 0.49f,
+                                          float(SDF_BRICK_SIZE) + 0.49f,
+                                          float(SDF_BRICK_SIZE) + 0.49f));
 
     if (brick_slot >= 0) {
       const int3 slot_org = sdf_slot_origin(brick_slot, bpa);
@@ -2210,11 +2216,12 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
                                                   float(brick_cell.z * SDF_BRICK_SIZE)) *
                                          voxel_size;
     float3 grid_pos_in_brick = (sd->P - brick_origin_w) / voxel_size;
+    /* Same gentle clamp as instanced path — see comment above. */
     grid_pos_in_brick = clamp(grid_pos_in_brick,
-                              make_float3(0.01f, 0.01f, 0.01f),
-                              make_float3(float(SDF_BRICK_SIZE) - 0.01f,
-                                          float(SDF_BRICK_SIZE) - 0.01f,
-                                          float(SDF_BRICK_SIZE) - 0.01f));
+                              make_float3(-0.49f, -0.49f, -0.49f),
+                              make_float3(float(SDF_BRICK_SIZE) + 0.49f,
+                                          float(SDF_BRICK_SIZE) + 0.49f,
+                                          float(SDF_BRICK_SIZE) + 0.49f));
 
     const int3 slot_org = (brick_slot >= 0) ? sdf_slot_origin(brick_slot, bpa) :
                                                make_int3(0, 0, 0);
