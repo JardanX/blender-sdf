@@ -103,7 +103,7 @@ class DeviceScene {
   device_vector<KernelSDFShape> sdf_shape_objects;
   device_vector<KernelSDFInstance> sdf_shape_instances;
   device_vector<int> sdf_shape_indirection;
-  device_vector<float4> sdf_shape_atlas;
+  device_vector<float> sdf_shape_atlas;
   device_vector<int4> sdf_shape_brick_map;
 
   KernelData data;
