@@ -25,6 +25,20 @@
 CCL_NAMESPACE_BEGIN
 
 /* -------------------------------------------------------------------- */
+/* uint16 distance encoding. */
+
+/* Range in voxel-units: covers full brick storage diagonal (12*sqrt(3)/2 ≈ 10.4). */
+static constexpr float SDF_DIST16_RANGE = 12.0f;
+
+static inline uint16_t sdf_encode_dist16(float d, float voxel_size)
+{
+  float d_voxels = d / voxel_size;
+  float t = (d_voxels + SDF_DIST16_RANGE) / (2.0f * SDF_DIST16_RANGE);
+  t = max(0.0f, min(1.0f, t));
+  return (uint16_t)(t * 65535.0f + 0.5f);
+}
+
+/* -------------------------------------------------------------------- */
 /* SDF math primitives (ported from sdf_lib.glsl). */
 
 static float sdf_box(const float3 p, const float3 b)
@@ -465,8 +479,9 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
       int atlas_dim = bpa * BRICK_STORAGE;
       size_t atlas_total = (size_t)atlas_dim * atlas_dim * atlas_dim;
 
-      /* Bake per-shape local atlas. */
-      vector<float> shape_atlas(atlas_total, 100.0f);
+      /* Bake per-shape local atlas (uint16 encoded distances). */
+      const uint16_t dist16_max = sdf_encode_dist16(100.0f * local_vs, local_vs);
+      vector<uint16_t> shape_atlas(atlas_total, dist16_max);
 
       parallel_for(0, grid_volume, [&](int idx) {
         int slot = shape_indir[idx];
@@ -497,7 +512,7 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
               int3 ac = slot_origin + make_int3(lx, ly, lz);
               size_t ai = (size_t)ac.z * atlas_dim * atlas_dim +
                           (size_t)ac.y * atlas_dim + (size_t)ac.x;
-              shape_atlas[ai] = d;
+              shape_atlas[ai] = sdf_encode_dist16(d, local_vs);
             }
           }
         }

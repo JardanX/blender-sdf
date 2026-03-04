@@ -89,85 +89,85 @@ float3 computeNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int 
 }
 
 /**
- * Compute smooth normal using the dual voxel method.
- * (Section 3.2, Hansson-Soderlund, Evans, Akenine-Moller, JCGT 2022)
+ * Compute smooth normal via quadratic B-spline gradient of the SDF field.
+ *
+ * Instead of the paper's dual voxel method (Section 3.2) which computes 8
+ * separate trilinear gradients, normalizes each, and interpolates — we compute
+ * the gradient of a quadratic B-spline reconstruction of the SDF field.
+ *
+ * The B-spline gives a C1-continuous scalar field (C0-continuous gradient),
+ * providing the same boundary smoothness as dual voxels but with:
+ *   - ~90 FMAs vs ~176 ops (2x fewer ALU)
+ *   - 1 sqrt vs 8 sqrts (normalization)
+ *   - Same 27 texture fetches
+ *   - Separable tensor-product evaluation
+ *
+ * The 12^3 brick storage provides the required 3x3x3 neighborhood: for any
+ * cell [0..7], we need positions (cell-1)..(cell+1), which spans [-1..8] —
+ * well within the [-2..9] padding range.
  */
 float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
 {
-  float3 shifted = grid_pos_in_brick - float3(0.5f);
-  int3 base = int3(floor(shifted));
-  float3 uvw = shifted - float3(base);
+  /* Current cell and fractional position within it. */
+  int3 cell = int3(floor(grid_pos_in_brick));
+  cell = clamp(cell, int3(0), int3(BRICK_SIZE - 1));
+  float3 t = grid_pos_in_brick - float3(cell);
+  t = clamp(t, float3(0.0f), float3(1.0f));
 
-  base = clamp(base, int3(-1), int3(BRICK_SIZE - 1));
-  uvw = clamp(uvw, float3(0.0f), float3(1.0f));
+  /* Quadratic B-spline basis weights per axis.
+   * N_{-1}(t) = 0.5*(1-t)^2
+   * N_0(t)    = (1-t)*t + 0.5 = -t^2 + t + 0.5
+   * N_1(t)    = 0.5*t^2
+   *
+   * Derivative weights:
+   * N'_{-1}(t) = -(1-t)
+   * N'_0(t)    = 1 - 2t
+   * N'_1(t)    = t
+   */
+  float3 om = 1.0f - t;
+  float3 Wx = float3(0.5f * om.x * om.x, om.x * t.x + 0.5f, 0.5f * t.x * t.x);
+  float3 Wy = float3(0.5f * om.y * om.y, om.y * t.y + 0.5f, 0.5f * t.y * t.y);
+  float3 Wz = float3(0.5f * om.z * om.z, om.z * t.z + 0.5f, 0.5f * t.z * t.z);
+  float3 Dx = float3(-om.x, om.x - t.x, t.x);
+  float3 Dy = float3(-om.y, om.y - t.y, t.y);
+  float3 Dz = float3(-om.z, om.z - t.z, t.z);
 
-  int3 cb = gridToCompact(brick, base, slot, bpa);
+  /* Atlas base for the 3x3x3 neighborhood centered on hit cell.
+   * cell-1 is the lower-left corner of the stencil. */
+  int3 cb = gridToCompact(brick, cell - int3(1), slot, bpa);
 
-  float d[27];
-  d[ 0] = texelFetch(compact_atlas, cb + int3(0, 0, 0), 0).r;
-  d[ 1] = texelFetch(compact_atlas, cb + int3(1, 0, 0), 0).r;
-  d[ 2] = texelFetch(compact_atlas, cb + int3(2, 0, 0), 0).r;
-  d[ 3] = texelFetch(compact_atlas, cb + int3(0, 1, 0), 0).r;
-  d[ 4] = texelFetch(compact_atlas, cb + int3(1, 1, 0), 0).r;
-  d[ 5] = texelFetch(compact_atlas, cb + int3(2, 1, 0), 0).r;
-  d[ 6] = texelFetch(compact_atlas, cb + int3(0, 2, 0), 0).r;
-  d[ 7] = texelFetch(compact_atlas, cb + int3(1, 2, 0), 0).r;
-  d[ 8] = texelFetch(compact_atlas, cb + int3(2, 2, 0), 0).r;
-  d[ 9] = texelFetch(compact_atlas, cb + int3(0, 0, 1), 0).r;
-  d[10] = texelFetch(compact_atlas, cb + int3(1, 0, 1), 0).r;
-  d[11] = texelFetch(compact_atlas, cb + int3(2, 0, 1), 0).r;
-  d[12] = texelFetch(compact_atlas, cb + int3(0, 1, 1), 0).r;
-  d[13] = texelFetch(compact_atlas, cb + int3(1, 1, 1), 0).r;
-  d[14] = texelFetch(compact_atlas, cb + int3(2, 1, 1), 0).r;
-  d[15] = texelFetch(compact_atlas, cb + int3(0, 2, 1), 0).r;
-  d[16] = texelFetch(compact_atlas, cb + int3(1, 2, 1), 0).r;
-  d[17] = texelFetch(compact_atlas, cb + int3(2, 2, 1), 0).r;
-  d[18] = texelFetch(compact_atlas, cb + int3(0, 0, 2), 0).r;
-  d[19] = texelFetch(compact_atlas, cb + int3(1, 0, 2), 0).r;
-  d[20] = texelFetch(compact_atlas, cb + int3(2, 0, 2), 0).r;
-  d[21] = texelFetch(compact_atlas, cb + int3(0, 1, 2), 0).r;
-  d[22] = texelFetch(compact_atlas, cb + int3(1, 1, 2), 0).r;
-  d[23] = texelFetch(compact_atlas, cb + int3(2, 1, 2), 0).r;
-  d[24] = texelFetch(compact_atlas, cb + int3(0, 2, 2), 0).r;
-  d[25] = texelFetch(compact_atlas, cb + int3(1, 2, 2), 0).r;
-  d[26] = texelFetch(compact_atlas, cb + int3(2, 2, 2), 0).r;
+  /* Separable tensor-product gradient evaluation.
+   * Process z-slices -> y-rows -> x-values.
+   * Each value is fetched once and used immediately for two weighted sums
+   * (Wx and Dx), keeping register pressure low (no 27-element array). */
+  float3 grad = float3(0.0f);
 
-  float3 normals[8];
-  for (int idx = 0; idx < 8; idx++) {
-    int di = idx & 1;
-    int dj = (idx >> 1) & 1;
-    int dk = (idx >> 2) & 1;
+  for (int k = 0; k < 3; k++) {
+    float yz_dx = 0.0f, yz_dy = 0.0f, yz_dz = 0.0f;
 
-    int oz = dk * 9, oy = dj * 3, ox = di;
-    float s[8];
-    s[0] = d[oz     + oy     + ox    ];
-    s[1] = d[oz     + oy     + ox + 1];
-    s[2] = d[oz     + oy + 3 + ox    ];
-    s[3] = d[oz     + oy + 3 + ox + 1];
-    s[4] = d[oz + 9 + oy     + ox    ];
-    s[5] = d[oz + 9 + oy     + ox + 1];
-    s[6] = d[oz + 9 + oy + 3 + ox    ];
-    s[7] = d[oz + 9 + oy + 3 + ox + 1];
+    for (int j = 0; j < 3; j++) {
+      float v0 = texelFetch(compact_atlas, cb + int3(0, j, k), 0).r;
+      float v1 = texelFetch(compact_atlas, cb + int3(1, j, k), 0).r;
+      float v2 = texelFetch(compact_atlas, cb + int3(2, j, k), 0).r;
 
-    float3 p = grid_pos_in_brick - float3(base + int3(di, dj, dk));
+      /* x-reduction: Wx-weighted sum (for df/dy, df/dz) and Dx-weighted (for df/dx). */
+      float sx  = Wx.x * v0 + Wx.y * v1 + Wx.z * v2;
+      float sdx = Dx.x * v0 + Dx.y * v1 + Dx.z * v2;
 
-    float3 grad = trilinearGradient(s, p);
-    float glen = length(grad);
-    normals[idx] = glen > 1e-8f ? grad / glen : float3(0.0f, 0.0f, 1.0f);
+      /* y-accumulation with appropriate weights per component. */
+      yz_dx += Wy[j] * sdx;
+      yz_dy += Dy[j] * sx;
+      yz_dz += Wy[j] * sx;
+    }
+
+    /* z-accumulation. */
+    grad.x += Wz[k] * yz_dx;
+    grad.y += Wz[k] * yz_dy;
+    grad.z += Dz[k] * yz_dz;
   }
 
-  float u = uvw.x, w0 = uvw.y, w1 = uvw.z;
-  float3 n = (1.0f - u) * (1.0f - w0) * (1.0f - w1) * normals[0]
-           + u          * (1.0f - w0) * (1.0f - w1) * normals[1]
-           + (1.0f - u) * w0          * (1.0f - w1) * normals[2]
-           + u          * w0          * (1.0f - w1) * normals[3]
-           + (1.0f - u) * (1.0f - w0) * w1          * normals[4]
-           + u          * (1.0f - w0) * w1          * normals[5]
-           + (1.0f - u) * w0          * w1          * normals[6]
-           + u          * w0          * w1          * normals[7];
-
-  float nlen = length(n);
-  return nlen > 1e-8f ? n / nlen : float3(0.0f, 0.0f, 1.0f);
+  float len = length(grad);
+  return len > 1e-8f ? grad / len : float3(0.0f, 0.0f, 1.0f);
 }
 
 /* ---- Inner DDA march (shared by both modes) ---- */
@@ -638,8 +638,13 @@ void main()
                                  float3(ihit.hit_brick * BRICK_SIZE) * shape_vs;
     float3 hit_in_brick = (ihit.local_hit_pos - brick_origin_local) / shape_vs;
 
-    float3 local_normal = computeDualVoxelNormal(
-        hit_in_brick, ihit.hit_brick, ihit.hit_slot, bricks_per_axis);
+    float3 local_normal;
+    if (normal_quality == 0) {
+      local_normal = computeNormalCompact(hit_in_brick, ihit.hit_brick, ihit.hit_slot, bricks_per_axis);
+    }
+    else {
+      local_normal = computeDualVoxelNormal(hit_in_brick, ihit.hit_brick, ihit.hit_slot, bricks_per_axis);
+    }
 
     /* Transform normal: N_world = normalize(transpose(world_to_local) * N_local). */
     hit_normal = normalize(mat3(transpose(inst.world_to_local)) * local_normal);
@@ -691,7 +696,12 @@ void main()
 
     /* Compute normal. */
     float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
-    hit_normal = computeDualVoxelNormal(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
+    if (normal_quality == 0) {
+      hit_normal = computeNormalCompact(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
+    }
+    else {
+      hit_normal = computeDualVoxelNormal(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
+    }
   }
 
   /* ---- Debug: Object ID visualization ---- */

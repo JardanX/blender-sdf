@@ -22,6 +22,12 @@ CCL_NAMESPACE_BEGIN
 #define SDF_MAX_BRICK_STEPS 256
 #define SDF_MAX_VOXEL_STEPS 24
 
+/* uint16 distance encoding: maps [-SDF_DIST16_RANGE, +SDF_DIST16_RANGE] voxel-units
+ * to [0, 65535].  Range of 12 covers the full brick storage diagonal
+ * (12 * sqrt(3)/2 ≈ 10.4 voxels).  65536 levels over 24 voxel-units gives
+ * ~0.000366 voxels per quantization step — negligible precision loss. */
+#define SDF_DIST16_RANGE 12.0f
+
 /* -------------------------------------------------------------------- */
 /* Flat array access helpers.
  *
@@ -120,13 +126,23 @@ ccl_device void sdf_fetch_corners(KernelGlobals kg,
       kg, atlas_offset, base.x + 1, base.y + 1, base.z + 1, atlas_dim);
 }
 
+/* Decode a uint16 distance value to local-space float.
+ * Reverses the encoding in sdf.cpp: uint16 -> [-RANGE, +RANGE] voxel-units -> * voxel_size. */
+ccl_device_inline float sdf_decode_dist16(const uint16_t raw, const float voxel_size)
+{
+  return ((float(raw) * (1.0f / 65535.0f)) * 2.0f * SDF_DIST16_RANGE - SDF_DIST16_RANGE) *
+         voxel_size;
+}
+
 /* Fetch 8 corner SDF values from the per-shape atlas (instanced mode).
- * Same layout as sdf_fetch_corners but reads from sdf_shape_atlas (float). */
+ * Same layout as sdf_fetch_corners but reads uint16 from sdf_shape_atlas
+ * and decodes to local-space float via sdf_decode_dist16. */
 ccl_device void sdf_fetch_corners_shape(KernelGlobals kg,
                                          const int atlas_offset,
                                          const int3 local_cell,
                                          const int3 slot_org,
                                          const int atlas_dim,
+                                         const float voxel_size,
                                          float s[8])
 {
   const int3 base = sdf_grid_to_compact(local_cell, slot_org);
@@ -134,14 +150,14 @@ ccl_device void sdf_fetch_corners_shape(KernelGlobals kg,
   const int zy1 = zy0 + atlas_dim;           /* base.y + 1 */
   const int zy2 = zy0 + atlas_dim * atlas_dim; /* base.z + 1 */
   const int zy3 = zy2 + atlas_dim;           /* base.y + 1, base.z + 1 */
-  s[0] = kernel_data_fetch(sdf_shape_atlas, zy0 + base.x);
-  s[1] = kernel_data_fetch(sdf_shape_atlas, zy0 + base.x + 1);
-  s[2] = kernel_data_fetch(sdf_shape_atlas, zy1 + base.x);
-  s[3] = kernel_data_fetch(sdf_shape_atlas, zy1 + base.x + 1);
-  s[4] = kernel_data_fetch(sdf_shape_atlas, zy2 + base.x);
-  s[5] = kernel_data_fetch(sdf_shape_atlas, zy2 + base.x + 1);
-  s[6] = kernel_data_fetch(sdf_shape_atlas, zy3 + base.x);
-  s[7] = kernel_data_fetch(sdf_shape_atlas, zy3 + base.x + 1);
+  s[0] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy0 + base.x), voxel_size);
+  s[1] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy0 + base.x + 1), voxel_size);
+  s[2] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy1 + base.x), voxel_size);
+  s[3] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy1 + base.x + 1), voxel_size);
+  s[4] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy2 + base.x), voxel_size);
+  s[5] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy2 + base.x + 1), voxel_size);
+  s[6] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy3 + base.x), voxel_size);
+  s[7] = sdf_decode_dist16(kernel_data_fetch(sdf_shape_atlas, zy3 + base.x + 1), voxel_size);
 }
 
 /* -------------------------------------------------------------------- */
@@ -706,7 +722,7 @@ ccl_device bool sdf_intersect_brick_shape(KernelGlobals kg,
     vt_cell_exit = min(vt_cell_exit, t_brick_exit);
 
     float s[8];
-    sdf_fetch_corners_shape(kg, atlas_off, vcell, slot_org, atlas_dim, s);
+    sdf_fetch_corners_shape(kg, atlas_off, vcell, slot_org, atlas_dim, voxel_size, s);
 
     float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                      min(min(s[4], s[5]), min(s[6], s[7])));
@@ -884,7 +900,7 @@ ccl_device bool sdf_intersect_brick_shape_shadow(KernelGlobals kg,
     vt_cell_exit = min(vt_cell_exit, t_brick_exit);
 
     float s[8];
-    sdf_fetch_corners_shape(kg, atlas_off, vcell, slot_org, atlas_dim, s);
+    sdf_fetch_corners_shape(kg, atlas_off, vcell, slot_org, atlas_dim, voxel_size, s);
 
     float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
                      min(min(s[4], s[5]), min(s[6], s[7])));
@@ -1577,7 +1593,7 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
       frac = clamp(frac, zero_float3(), one_float3());
 
       float s[8];
-      sdf_fetch_corners_shape(kg, atlas_off, cell, slot_org, atlas_dim, s);
+      sdf_fetch_corners_shape(kg, atlas_off, cell, slot_org, atlas_dim, voxel_size, s);
 
       float3 grad = sdf_trilinear_gradient(s, frac);
       float l = len(grad);

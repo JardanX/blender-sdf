@@ -4744,10 +4744,9 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
 
   /* SDF draw engine settings. */
   static const EnumPropertyItem sdf_resolution_items[] = {
+      {32, "RES_32", 0, "32", "32 voxel resolution (4 bricks per axis)"},
       {64, "RES_64", 0, "64", "64 voxel resolution (8 bricks per axis)"},
       {128, "RES_128", 0, "128", "128 voxel resolution (16 bricks per axis)"},
-      {256, "RES_256", 0, "256", "256 voxel resolution (32 bricks per axis)"},
-      {512, "RES_512", 0, "512", "512 voxel resolution (64 bricks per axis)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
