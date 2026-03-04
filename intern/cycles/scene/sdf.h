@@ -89,6 +89,10 @@ class SDFGeometry : public Geometry {
   vector<float> shape_atlas_data;        /* Concatenated per-shape atlas (distance only). */
   vector<int4> shape_brick_map_data;     /* Concatenated per-shape brick maps. */
 
+  /** Scene hash from the last successful bake.
+   * When the hash matches, sync_sdf() can skip the expensive CPU bake. */
+  uint64_t prev_scene_hash = 0;
+
   SDFGeometry();
   ~SDFGeometry() override;
 
