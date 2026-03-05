@@ -32,6 +32,7 @@
 #include "DNA_particle_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_volume_types.h"
 
@@ -362,6 +363,10 @@ Material ***BKE_object_material_array_p(Object *ob)
     GreasePencil *grease_pencil = static_cast<GreasePencil *>(ob->data);
     return &(grease_pencil->material_array);
   }
+  if (ob->type == OB_SDF) {
+    SDF *sdf = static_cast<SDF *>(ob->data);
+    return &(sdf->mat);
+  }
   return nullptr;
 }
 
@@ -391,6 +396,10 @@ short *BKE_object_material_len_p(Object *ob)
     GreasePencil *grease_pencil = static_cast<GreasePencil *>(ob->data);
     return &(grease_pencil->material_array_num);
   }
+  if (ob->type == OB_SDF) {
+    SDF *sdf = static_cast<SDF *>(ob->data);
+    return &(sdf->totcol);
+  }
   return nullptr;
 }
 
@@ -416,6 +425,8 @@ Material ***BKE_id_material_array_p(ID *id)
       return &(((Volume *)id)->mat);
     case ID_GP:
       return &(((GreasePencil *)id)->material_array);
+    case ID_SF:
+      return &(((SDF *)id)->mat);
     default:
       break;
   }
@@ -444,6 +455,8 @@ short *BKE_id_material_len_p(ID *id)
       return &(((Volume *)id)->totcol);
     case ID_GP:
       return &(((GreasePencil *)id)->material_array_num);
+    case ID_SF:
+      return &(((SDF *)id)->totcol);
     default:
       break;
   }
@@ -469,6 +482,7 @@ static void material_data_index_remove_id(ID *id, short index)
     case ID_CV:
     case ID_PT:
     case ID_VO:
+    case ID_SF:
       /* No material indices for these object data types. */
       break;
     default:
@@ -501,6 +515,9 @@ bool BKE_object_material_slot_used(Object *object, short actcol)
     case ID_MB:
       /* Meta-elements don't support materials at the moment. */
       return false;
+    case ID_SF:
+      /* SDF objects use a single material per object, always "used". */
+      return true;
     case ID_GP:
       return BKE_grease_pencil_material_index_used(reinterpret_cast<GreasePencil *>(ob_data),
                                                    actcol - 1);
@@ -525,6 +542,7 @@ static void material_data_index_clear_id(ID *id)
     case ID_CV:
     case ID_PT:
     case ID_VO:
+    case ID_SF:
       /* No material indices for these object data types. */
       break;
     default:
@@ -1244,6 +1262,9 @@ void BKE_object_material_remap(Object *ob, const uint *remap)
   }
   else if (ob->type == OB_GREASE_PENCIL) {
     BKE_grease_pencil_material_remap(static_cast<GreasePencil *>(ob->data), remap, ob->totcol);
+  }
+  else if (ob->type == OB_SDF) {
+    /* SDF objects have no per-face material indices to remap. */
   }
   else {
     /* add support for this object data! */

@@ -41,7 +41,10 @@ void SDFGeometry::clear(bool preserve_shaders)
   indirection_data.clear();
   atlas_data.clear();
   matid_data.clear();
+  blend_id_data.clear();
+  blend_factor_data.clear();
   object_shader_ids.clear();
+  object_shaders.clear();
 }
 
 void SDFGeometry::compute_bounds()

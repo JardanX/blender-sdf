@@ -4871,7 +4871,8 @@ bool BKE_object_supports_material_slots(Object *ob)
               OB_CURVES,
               OB_POINTCLOUD,
               OB_VOLUME,
-              OB_GREASE_PENCIL);
+              OB_GREASE_PENCIL,
+              OB_SDF);
 }
 
 /** \} */

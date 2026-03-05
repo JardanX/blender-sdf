@@ -63,6 +63,8 @@ DeviceScene::DeviceScene(Device *device)
       sdf_indirection(device, "sdf_indirection", MEM_GLOBAL),
       sdf_atlas(device, "sdf_atlas", MEM_GLOBAL),
       sdf_matid(device, "sdf_matid", MEM_GLOBAL),
+      sdf_blend_id(device, "sdf_blend_id", MEM_GLOBAL),
+      sdf_blend_factor(device, "sdf_blend_factor", MEM_GLOBAL),
       sdf_brick_map(device, "sdf_brick_map", MEM_GLOBAL),
       sdf_shape_objects(device, "sdf_shape_objects", MEM_GLOBAL),
       sdf_shape_instances(device, "sdf_shape_instances", MEM_GLOBAL),

@@ -1178,6 +1178,47 @@ ccl_device void surface_shader_eval(KernelGlobals kg,
   {
 #ifdef __SVM__
     svm_eval_nodes<node_feature_mask, SHADER_TYPE_SURFACE>(kg, state, sd, buffer, path_flag);
+
+    /* SDF material blending: mix closures from two shaders (Mix Shader logic).
+     * If the SDF hit is in a smooth-union blend zone, evaluate the secondary
+     * object's shader and combine closures weighted by blend factor. */
+    if (sd->sdf_blend_shader >= 0 && sd->sdf_blend_factor > 0.001f &&
+        sd->type == PRIMITIVE_SDF && max_closures > 0)
+    {
+      const float fac = sd->sdf_blend_factor;
+      const float inv_fac = 1.0f - fac;
+
+      /* Scale primary shader's closures by (1 - blend_factor). */
+      const int num_primary = sd->num_closure;
+      for (int i = 0; i < num_primary; i++) {
+        sd->closure[i].weight *= inv_fac;
+        sd->closure[i].sample_weight *= inv_fac;
+      }
+      const Spectrum primary_emission = sd->closure_emission_background * inv_fac;
+      const Spectrum primary_transparent = sd->closure_transparent_extinction * inv_fac;
+
+      /* Evaluate secondary shader (appends closures to existing array). */
+      const int orig_shader = sd->shader;
+      sd->shader = sd->sdf_blend_shader;
+      sd->closure_emission_background = zero_spectrum();
+      sd->closure_transparent_extinction = zero_spectrum();
+      svm_eval_nodes<node_feature_mask, SHADER_TYPE_SURFACE>(kg, state, sd, buffer, path_flag);
+
+      /* Scale secondary shader's new closures by blend_factor. */
+      for (int i = num_primary; i < sd->num_closure; i++) {
+        sd->closure[i].weight *= fac;
+        sd->closure[i].sample_weight *= fac;
+      }
+
+      /* Combine emission and transparency from both shaders. */
+      sd->closure_emission_background = primary_emission +
+                                         sd->closure_emission_background * fac;
+      sd->closure_transparent_extinction = primary_transparent +
+                                            sd->closure_transparent_extinction * fac;
+
+      /* Restore original shader ID. */
+      sd->shader = orig_shader;
+    }
 #else
     if (sd->object == OBJECT_NONE) {
       sd->closure_emission_background = make_spectrum(0.8f);

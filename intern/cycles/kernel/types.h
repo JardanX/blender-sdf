@@ -1218,6 +1218,11 @@ struct ccl_align(16) ShaderData {
   Spectrum closure_emission_background;
   Spectrum closure_transparent_extinction;
 
+  /* SDF material blending: secondary shader ID and blend weight.
+   * Set by sdf_shader_setup when hit is in a smooth-union blend zone. */
+  int sdf_blend_shader;    /* Secondary shader ID (-1 = no blend). */
+  float sdf_blend_factor;  /* Weight of secondary shader (0 = primary only). */
+
   /* At the end so we can adjust size in ShaderDataTinyStorage. */
   struct ShaderClosure closure[MAX_CLOSURE];
 };
@@ -1591,6 +1596,11 @@ struct KernelSDF {
 
   float voxel_size;      /* World-space voxel size. */
   packed_float3 origin;  /* World-space atlas origin. */
+
+  int blend_offset;      /* Offset into sdf_blend_id/sdf_blend_factor (-1 = none). */
+  int pad1;
+  int pad2;
+  int pad3;
 };
 static_assert_align(KernelSDF, 16);
 

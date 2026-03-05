@@ -151,10 +151,12 @@ void BlenderSync::sync_recalc(BL::Depsgraph &b_depsgraph,
 
           /* Need to recompute geometry if the geometry changed, or the transform changed
            * and using adaptive subdivision, or this is an SDF object (world-space baked atlas
-           * must be rebuilt when any SDF transform changes). */
+           * must be rebuilt when any SDF transform changes, and shader map must be
+           * refreshed when materials/shading change). */
           const bool is_sdf_object = (b_ob.type() == BL::Object::type_SDF);
           if (updated_geometry || (updated_transform && use_adaptive_subdiv) ||
-              (updated_transform && is_sdf_object)) {
+              (updated_transform && is_sdf_object) ||
+              (b_update.is_updated_shading() && is_sdf_object)) {
             BL::ID const key = BKE_object_is_modified(b_ob) ?
                                    b_ob :
                                    object_get_data(b_ob, use_adaptive_subdiv);

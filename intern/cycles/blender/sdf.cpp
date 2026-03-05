@@ -10,6 +10,7 @@
 #include "scene/image.h"
 #include "scene/object.h"
 #include "scene/scene.h"
+#include "scene/shader.h"
 
 #include "blender/sync.h"
 #include "blender/util.h"
@@ -89,6 +90,7 @@ struct SDFObjectData {
   float3 bbox_max;    /* World AABB max. */
   int sdf_type;       /* eSDFType enum. */
   int shader_index;   /* Cycles shader index for this object. */
+  Shader *shader;     /* Resolved Cycles shader (from material slot). */
 };
 
 /* Evaluate SDF distance for a single object at a world-space point. */
@@ -193,27 +195,28 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     /* Read object transform. */
     Transform tfm = get_transform(b_ob.matrix_world());
 
-    /* Decompose: extract scale, build rotation-only inverse. */
+    /* Decompose: extract per-axis scale from column lengths of the 3x3 part.
+     * For M = T * R * S, column j has length s_j. */
     float3 scale;
-    scale.x = len(make_float3(tfm.x.x, tfm.x.y, tfm.x.z));
-    scale.y = len(make_float3(tfm.y.x, tfm.y.y, tfm.y.z));
-    scale.z = len(make_float3(tfm.z.x, tfm.z.y, tfm.z.z));
+    scale.x = len(make_float3(tfm.x.x, tfm.y.x, tfm.z.x));
+    scale.y = len(make_float3(tfm.x.y, tfm.y.y, tfm.z.y));
+    scale.z = len(make_float3(tfm.x.z, tfm.y.z, tfm.z.z));
 
-    /* Build rotation-only matrix. */
+    /* Build rotation-only matrix by dividing each column by its scale. */
     Transform rot_tfm = tfm;
     if (scale.x > 0.0f) {
       rot_tfm.x.x /= scale.x;
-      rot_tfm.x.y /= scale.x;
-      rot_tfm.x.z /= scale.x;
+      rot_tfm.y.x /= scale.x;
+      rot_tfm.z.x /= scale.x;
     }
     if (scale.y > 0.0f) {
-      rot_tfm.y.x /= scale.y;
+      rot_tfm.x.y /= scale.y;
       rot_tfm.y.y /= scale.y;
-      rot_tfm.y.z /= scale.y;
+      rot_tfm.z.y /= scale.y;
     }
     if (scale.z > 0.0f) {
-      rot_tfm.z.x /= scale.z;
-      rot_tfm.z.y /= scale.z;
+      rot_tfm.x.z /= scale.z;
+      rot_tfm.y.z /= scale.z;
       rot_tfm.z.z /= scale.z;
     }
     /* Zero translation for the rotation matrix. */
@@ -263,8 +266,12 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     scene_min_acc = min(scene_min_acc, obj.bbox_min);
     scene_max_acc = max(scene_max_acc, obj.bbox_max);
 
-    /* Shader index will be resolved later. For now store 0. */
+    /* Resolve per-object shader from material slot. */
     obj.shader_index = 0;
+    {
+      array<Node *> used = find_used_shaders(b_ob);
+      obj.shader = used.size() > 0 ? static_cast<Shader *>(used[0]) : scene->default_surface;
+    }
 
     sdf_objects.push_back(obj);
   }
@@ -273,6 +280,25 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     sdf_geom->clear();
     sdf_geom->prev_scene_hash = 0;
     return;
+  }
+
+  /* ---- Register per-object shaders on the SDFGeometry ---- */
+  {
+    array<Node *> unique_shaders;
+    for (size_t i = 0; i < sdf_objects.size(); i++) {
+      Shader *s = sdf_objects[i].shader;
+      bool found = false;
+      for (size_t j = 0; j < unique_shaders.size(); j++) {
+        if (unique_shaders[j] == s) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        unique_shaders.push_back_slow(s);
+      }
+    }
+    sdf_geom->set_used_shaders(unique_shaders);
   }
 
   /* ---- Scene hash for change detection ---- */
@@ -291,15 +317,46 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
       mix(obj.bevel);
       mix(obj.blend);
       mix(obj.itfm.x.x);
+      mix(obj.itfm.x.y);
+      mix(obj.itfm.x.z);
+      mix(obj.itfm.y.x);
       mix(obj.itfm.y.y);
+      mix(obj.itfm.y.z);
+      mix(obj.itfm.z.x);
+      mix(obj.itfm.z.y);
       mix(obj.itfm.z.z);
       mix(obj.color.x);
       mix(obj.color.y);
       mix(obj.color.z);
       h = h * 6364136223846793005ULL + uint64_t(obj.sdf_type);
+      /* Include shader pointer so material changes invalidate the hash. */
+      h = h * 6364136223846793005ULL + uint64_t(uintptr_t(obj.shader));
     }
-    if (h == sdf_geom->prev_scene_hash && !sdf_geom->shapes.empty()) {
-      /* Nothing changed: skip expensive bake, keep existing atlas data. */
+    const bool has_atlas_data = !sdf_geom->shapes.empty() ||
+                                !sdf_geom->indirection_data.empty();
+    if (h == sdf_geom->prev_scene_hash && has_atlas_data) {
+      /* Nothing changed: skip expensive bake, keep existing atlas data.
+       * Refresh shader pointers and IDs so device upload resolves correctly.
+       * (IDs cached here may still be stale — device upload re-resolves
+       * from the Shader* pointers after shader_manager assigns final IDs.) */
+      sdf_geom->object_shader_ids.resize(sdf_objects.size());
+      sdf_geom->object_shaders.resize(sdf_objects.size());
+      for (size_t i = 0; i < sdf_objects.size(); i++) {
+        sdf_geom->object_shaders[i] = sdf_objects[i].shader;
+        sdf_geom->object_shader_ids[i] = scene->shader_manager->get_shader_id(
+            sdf_objects[i].shader);
+      }
+      /* Also refresh instanced mode shader pointers/IDs. */
+      for (size_t ii = 0; ii < sdf_geom->instances.size(); ii++) {
+        int obj_idx = sdf_geom->instances[ii].object_id;
+        if (obj_idx >= 0 && obj_idx < (int)sdf_objects.size()) {
+          sdf_geom->instances[ii].shader = sdf_objects[obj_idx].shader;
+          sdf_geom->instances[ii].shader_id = scene->shader_manager->get_shader_id(
+              sdf_objects[obj_idx].shader);
+        }
+      }
+      /* Tag geometry so the device re-uploads the shader map. */
+      sdf_geom->tag_update(scene, true);
       return;
     }
     sdf_geom->prev_scene_hash = h;
@@ -351,6 +408,8 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     SDFGeometry::InstanceInfo inst;
     inst.shape_id = shape_id;
     inst.object_id = (int)i;
+    inst.shader = obj.shader;
+    inst.shader_id = scene->shader_manager->get_shader_id(obj.shader);
     inst.color = make_float4(obj.color.x, obj.color.y, obj.color.z, 1.0f);
     inst.blend = obj.blend;
     float max_dim = max(max(fabsf(obj.sdf_size.x), fabsf(obj.sdf_size.y)),
@@ -573,8 +632,11 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
     sdf_geom->matid_data.clear();
 
     sdf_geom->object_shader_ids.resize(sdf_objects.size());
+    sdf_geom->object_shaders.resize(sdf_objects.size());
     for (size_t i = 0; i < sdf_objects.size(); i++) {
-      sdf_geom->object_shader_ids[i] = 0;
+      sdf_geom->object_shaders[i] = sdf_objects[i].shader;
+      sdf_geom->object_shader_ids[i] = scene->shader_manager->get_shader_id(
+          sdf_objects[i].shader);
     }
 
     sdf_geom->compute_bounds();
@@ -677,11 +739,15 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   /* ---- Phase 2: Bake atlas (multithreaded) ---- */
   vector<float4> atlas(atlas_total, make_float4(100.0f, 0.0f, 0.0f, 0.0f));
   vector<int> matid(atlas_total, -1);
+  vector<int> blend_id(atlas_total, -1);
+  vector<float> blend_fac(atlas_total, 0.0f);
 
   /* Each brick writes to its own atlas region, so bricks are independent.
    * Parallelize over the flat brick index for good load balance. */
   float4 *atlas_data = atlas.data();
   int *matid_data = matid.data();
+  int *blend_id_data = blend_id.data();
+  float *blend_fac_data = blend_fac.data();
 
   parallel_for(0, num_bricks, [&](int idx) {
     int slot = indirection[idx];
@@ -741,8 +807,10 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
 
           float acc_dist = 1e10f;
           float3 acc_color = zero_float3();
-          int closest_obj = 0;
-          float closest_raw = 1e10f;
+
+          /* Track two closest objects for material blending. */
+          int obj_a = -1, obj_b = -1;
+          float dist_a = 1e10f, dist_b = 1e10f;
 
           for (size_t c = 0; c < candidates.size(); c++) {
             int i = candidates[c];
@@ -761,9 +829,27 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
               }
             }
 
-            if (dist < closest_raw) {
-              closest_raw = dist;
-              closest_obj = i;
+            /* Maintain two closest objects by raw distance. */
+            if (dist < dist_a) {
+              dist_b = dist_a;
+              obj_b = obj_a;
+              dist_a = dist;
+              obj_a = i;
+            }
+            else if (dist < dist_b) {
+              dist_b = dist;
+              obj_b = i;
+            }
+          }
+
+          /* Compute blend factor between the two closest objects.
+           * Uses smooth union weight: obj_b contributes when within blend radius. */
+          float mat_blend_fac = 0.0f;
+          if (obj_a >= 0 && obj_b >= 0) {
+            float k = max(sdf_objects[obj_a].blend, sdf_objects[obj_b].blend);
+            if (k > 0.0f) {
+              float h = clamp(0.5f + 0.5f * (dist_b - dist_a) / k, 0.0f, 1.0f);
+              mat_blend_fac = 1.0f - h; /* Weight of secondary object (obj_b). */
             }
           }
 
@@ -774,7 +860,9 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
 
           atlas_data[atlas_idx] = make_float4(
               acc_dist, acc_color.x, acc_color.y, acc_color.z);
-          matid_data[atlas_idx] = closest_obj;
+          matid_data[atlas_idx] = max(obj_a, 0);
+          blend_id_data[atlas_idx] = obj_b;
+          blend_fac_data[atlas_idx] = mat_blend_fac;
         }
       }
     }
@@ -792,11 +880,17 @@ void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
   sdf_geom->indirection_data = std::move(indirection);
   sdf_geom->atlas_data = std::move(atlas);
   sdf_geom->matid_data = std::move(matid);
+  sdf_geom->blend_id_data = std::move(blend_id);
+  sdf_geom->blend_factor_data = std::move(blend_fac);
 
-  /* Per-object shader mapping (will be resolved during device_update). */
+  /* Per-object shader mapping: resolve each object's material to a shader.
+   * Store both shader IDs (for early-return refresh) and Shader pointers
+   * (for re-resolving at device upload, since IDs may be stale). */
   sdf_geom->object_shader_ids.resize(sdf_objects.size());
+  sdf_geom->object_shaders.resize(sdf_objects.size());
   for (size_t i = 0; i < sdf_objects.size(); i++) {
-    sdf_geom->object_shader_ids[i] = 0; /* Default shader. */
+    sdf_geom->object_shaders[i] = sdf_objects[i].shader;
+    sdf_geom->object_shader_ids[i] = scene->shader_manager->get_shader_id(sdf_objects[i].shader);
   }
 
   sdf_geom->compute_bounds();
