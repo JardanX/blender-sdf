@@ -1735,7 +1735,7 @@ void blo_do_versions_userdef(UserDef *userdef)
         userdef, "NODE_AST_compositor", "Utilities");
   }
 
-  if (!USER_VERSION_ATLEAST(500, 123)) {
+  if (!USER_VERSION_ATLEAST(500, 125)) {
     userdef->dupflag |= USER_DUP_SDF;
   }
 

@@ -2116,6 +2116,10 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
   sd->u = 0.0f;
   sd->v = 0.0f;
 
+  /* Default: no material blend. */
+  sd->sdf_blend_shader = -1;
+  sd->sdf_blend_factor = 0.0f;
+
   if (kernel_data.num_sdf_shapes > 0) {
     /* ---- Per-shape instanced mode ---- */
     const int inst_id = isect->prim; /* Stored by intersection program. */
@@ -2249,6 +2253,19 @@ ccl_device void sdf_shader_setup(KernelGlobals kg,
           kg, matid_off, atlas_coord.x, atlas_coord.y, atlas_coord.z, atlas_dim);
       if (obj_id >= 0 && obj_id < ksdf.num_objects) {
         sd->shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset + obj_id);
+      }
+
+      /* Read blend data for material mixing (only when blend arrays exist). */
+      if (ksdf.blend_offset >= 0) {
+        const int flat_idx = ksdf.blend_offset + atlas_coord.z * atlas_dim * atlas_dim +
+                             atlas_coord.y * atlas_dim + atlas_coord.x;
+        const int blend_obj = kernel_data_fetch(sdf_blend_id, flat_idx);
+        const float blend_fac = kernel_data_fetch(sdf_blend_factor, flat_idx);
+        if (blend_obj >= 0 && blend_obj < ksdf.num_objects && blend_fac > 0.001f) {
+          sd->sdf_blend_shader = kernel_data_fetch(sdf_shader_map,
+                                                    ksdf.shader_offset + blend_obj);
+          sd->sdf_blend_factor = blend_fac;
+        }
       }
     }
   }

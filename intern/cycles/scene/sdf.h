@@ -35,10 +35,15 @@ class SDFGeometry : public Geometry {
   /* Baked data (CPU-side, uploaded to device as flat arrays). */
   vector<int> indirection_data;   /* grid_res^3 ints. */
   vector<float4> atlas_data;      /* Compact atlas voxels (dist, r, g, b). */
-  vector<int> matid_data;         /* Compact atlas material IDs. */
+  vector<int> matid_data;         /* Compact atlas material IDs (primary object). */
+  vector<int> blend_id_data;     /* Secondary object ID for blend (-1 = no blend). */
+  vector<float> blend_factor_data; /* Blend weight of secondary object (0-1). */
 
-  /* Per-object shader mapping: [blender_obj_index] -> cycles_shader_id. */
+  /* Per-object shader mapping: [blender_obj_index] -> cycles_shader_id.
+   * NOTE: these IDs may be stale (cached during sync, before shader_manager
+   * reassigns IDs). Use object_shaders[] + get_shader_id() at device upload. */
   vector<int> object_shader_ids;
+  vector<Shader *> object_shaders; /* Per-object Shader pointers for re-resolving. */
 
   /* Scene bounding box. */
   float3 scene_min;
@@ -75,6 +80,8 @@ class SDFGeometry : public Geometry {
   struct InstanceInfo {
     int shape_id;             /* Index into shapes[]. */
     int object_id;            /* Blender object index in the SDF scene. */
+    int shader_id;            /* Resolved Cycles shader ID (may be stale, re-resolve at upload). */
+    Shader *shader;           /* Shader pointer for re-resolving ID at device upload time. */
     Transform world_to_local;
     Transform local_to_world;
     float4 color;

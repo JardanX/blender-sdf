@@ -97,6 +97,8 @@ class DeviceScene {
   device_vector<int> sdf_indirection;
   device_vector<float4> sdf_atlas;
   device_vector<int> sdf_matid;
+  device_vector<int> sdf_blend_id;
+  device_vector<float> sdf_blend_factor;
   device_vector<int4> sdf_brick_map;
 
   /* SDF (per-shape TLAS/BLAS instanced mode). */

@@ -177,10 +177,10 @@ The SDF entry now occupies metaball's former position in the Add menu.
 
 | File | Change |
 |------|--------|
-| `blenkernel/intern/object.cc` | Removed 7 `OB_MBALL` cases + 2 `ID_MB` edit mode cases. Kept `ID_MB` texspace case (file compat). |
+| `blenkernel/intern/object.cc` | Removed 7 `OB_MBALL` cases + 2 `ID_MB` edit mode cases. Kept `ID_MB` texspace case (file compat). Added `OB_SDF` to `BKE_object_supports_material_slots`. |
 | `blenkernel/intern/object_update.cc` | Removed `BKE_mball_data_update` dispatch and batch cache case |
 | `blenkernel/intern/object_dupli.cc` | Removed metaball instance guard. Kept `ID_MB` no-draw guard (file compat). |
-| `blenkernel/intern/material.cc` | Kept 6 `ID_MB` cases (file compat — material array/count access for old .blend files) |
+| `blenkernel/intern/material.cc` | Kept 6 `ID_MB` cases (file compat). Added `OB_SDF`/`ID_SF` support: `BKE_object_material_array_p`, `BKE_object_material_len_p`, `BKE_id_material_array_p`, `BKE_id_material_len_p`, `material_data_index_remove_id`, `material_data_index_clear_id`, `BKE_object_material_slot_used`, `BKE_object_material_remap` — enables material slot assignment on SDF objects |
 | `blenkernel/intern/mesh_convert.cc` | Removed `mesh_new_from_mball_object` function and case |
 | `blenkernel/intern/lib_remap.cc` | Removed `BKE_mball_is_basis` remapping logic |
 | `blenkernel/intern/lib_id.cc` | Removed `OB_MBALL` geometry tag |
@@ -1652,3 +1652,27 @@ between Cycles and the draw engine.
 | `intern/cycles/kernel/geom/sdf_lib.h` | Added `sdf_dual_voxel_normal()`: takes pre-fetched 27 values + grid_pos + dual_center, evaluates 8 trilinear gradients in overlapping voxels, normalizes each, trilinearly blends. Updated `sdf_trilinear_gradient()` comment to note p may extend outside [0,1]^3 |
 | `intern/cycles/kernel/geom/sdf.h` | Rewrote `sdf_compute_normal()`: now fetches 3×3×3 neighborhood via `sdf_fetch_distance()` loop, delegates to `sdf_dual_voxel_normal()`. Rewrote instanced mode normal computation: same 3×3×3 fetch from shape atlas (uint16 decode), same `sdf_dual_voxel_normal()` call, then world-space transform |
 | `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced B-spline `computeDualVoxelNormal()` with paper's dual voxel method: fetches 27 values into array, evaluates 8 analytic gradients via `trilinearGradient()`, normalizes each, trilinearly blends. Same 27 texture fetches, different math (8 gradients + 8 sqrts vs separable tensor-product) |
+
+---
+
+## Fix: SDF Shader Resolution and Material Change Detection
+
+**Problem:** SDF objects render black with default material, and material changes don't update the render (must duplicate the SDF to force update).
+
+**Root causes:**
+1. **Stale shader IDs:** `sync_sdf()` caches shader IDs during the Blender sync phase, BEFORE `shader_manager->device_update_pre()` reassigns `shader->id` values. The uploaded shader IDs point to the wrong shader (e.g. background shader → black).
+2. **Missing shading recalc trigger:** When a material is changed on an SDF object, `is_updated_shading()` is true but the code only triggers `geometry_map.set_recalc` for geometry or transform changes — not shading. So `sync_sdf` is never re-called for material-only changes.
+
+**Fix:**
+1. Store `Shader*` pointers alongside cached shader IDs, re-resolve IDs at device upload time (when `shader->id` values are correct).
+2. Add `is_updated_shading() && is_sdf_object` as a trigger for `geometry_map.set_recalc`.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `intern/cycles/scene/sdf.h` | Added `Shader *shader` to `InstanceInfo`, added `vector<Shader *> object_shaders` for per-object shader pointers |
+| `intern/cycles/scene/sdf.cpp` | Clear `object_shaders` in `clear()` |
+| `intern/cycles/blender/sdf.cpp` | Store `Shader*` in instances and `object_shaders` in all code paths (instanced bake, world-space bake, early return). Fixed instanced mode `object_shader_ids` from hardcoded 0 to actual resolved IDs |
+| `intern/cycles/scene/geometry.cpp` | Re-resolve shader IDs from `Shader*` at device upload time via `get_shader_id()` for both instanced and world-space paths |
+| `intern/cycles/blender/sync.cpp` | Added `(b_update.is_updated_shading() && is_sdf_object)` to geometry re-sync trigger |

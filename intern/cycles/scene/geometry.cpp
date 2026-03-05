@@ -1121,19 +1121,19 @@ void GeometryManager::device_update(Device *device,
         ks.origin.z = s.origin.z;
       }
 
-      /* Upload per-instance metadata. */
+      /* Upload per-instance metadata.
+       * Re-resolve shader IDs here because sync_sdf caches them during
+       * the Blender sync phase, BEFORE shader_manager->device_update_pre()
+       * reassigns shader->id values. Using the cached IDs would point to
+       * the wrong shader (e.g. background instead of default_surface). */
       dscene->sdf_shape_instances.alloc(num_instances);
       KernelSDFInstance *inst_data = dscene->sdf_shape_instances.data();
-      int default_shader = 0;
-      if (!first_sdf->get_used_shaders().empty()) {
-        Shader *shader = static_cast<Shader *>(first_sdf->get_used_shaders()[0]);
-        default_shader = scene->shader_manager->get_shader_id(shader);
-      }
       for (int ii = 0; ii < num_instances; ii++) {
         const SDFGeometry::InstanceInfo &inst = first_sdf->instances[ii];
         KernelSDFInstance &ki = inst_data[ii];
         ki.shape_id = inst.shape_id;
-        ki.shader_id = default_shader;
+        ki.shader_id = scene->shader_manager->get_shader_id(
+            inst.shader ? inst.shader : scene->default_surface);
         ki.object_id = sdf_object_id;
         ki.pad = 0;
         ki.world_to_local = inst.world_to_local;
@@ -1177,6 +1177,8 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_indirection.free();
       dscene->sdf_atlas.free();
       dscene->sdf_matid.free();
+      dscene->sdf_blend_id.free();
+      dscene->sdf_blend_factor.free();
       dscene->sdf_brick_map.free();
       dscene->data.num_sdfs = 0;
       dscene->data.num_sdf_bricks = 0;
@@ -1200,6 +1202,13 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_matid.alloc(first_sdf->matid_data.size());
       int *matid_ptr = dscene->sdf_matid.data();
 
+      /* Blend data for material mixing. */
+      const bool has_blend = !first_sdf->blend_id_data.empty();
+      if (has_blend) {
+        dscene->sdf_blend_id.alloc(first_sdf->blend_id_data.size());
+        dscene->sdf_blend_factor.alloc(first_sdf->blend_factor_data.size());
+      }
+
       int sdf_object_id = 0;
       for (size_t oi = 0; oi < scene->objects.size(); oi++) {
         if (scene->objects[oi]->get_geometry() == first_sdf) {
@@ -1217,6 +1226,10 @@ void GeometryManager::device_update(Device *device,
       ksdf.num_objects = first_sdf->num_objects;
       ksdf.shader_offset = 0;
       ksdf.object_id = sdf_object_id;
+      ksdf.blend_offset = has_blend ? 0 : -1;
+      ksdf.pad1 = 0;
+      ksdf.pad2 = 0;
+      ksdf.pad3 = 0;
       ksdf.voxel_size = first_sdf->voxel_size;
       ksdf.origin.x = first_sdf->origin.x;
       ksdf.origin.y = first_sdf->origin.y;
@@ -1234,13 +1247,27 @@ void GeometryManager::device_update(Device *device,
              first_sdf->matid_data.data(),
              first_sdf->matid_data.size() * sizeof(int));
 
+      if (has_blend) {
+        memcpy(dscene->sdf_blend_id.data(),
+               first_sdf->blend_id_data.data(),
+               first_sdf->blend_id_data.size() * sizeof(int));
+        memcpy(dscene->sdf_blend_factor.data(),
+               first_sdf->blend_factor_data.data(),
+               first_sdf->blend_factor_data.size() * sizeof(float));
+      }
+
+      /* Re-resolve shader IDs at device upload time (sync_sdf caches them
+       * before shader_manager reassigns IDs, so cached values may be stale). */
       for (int i = 0; i < first_sdf->num_objects; i++) {
-        if (!first_sdf->get_used_shaders().empty()) {
+        if (i < (int)first_sdf->object_shaders.size() && first_sdf->object_shaders[i]) {
+          shader_map[i] = scene->shader_manager->get_shader_id(first_sdf->object_shaders[i]);
+        }
+        else if (!first_sdf->get_used_shaders().empty()) {
           Shader *shader = static_cast<Shader *>(first_sdf->get_used_shaders()[0]);
           shader_map[i] = scene->shader_manager->get_shader_id(shader);
         }
         else {
-          shader_map[i] = 0;
+          shader_map[i] = scene->shader_manager->get_shader_id(scene->default_surface);
         }
       }
 
@@ -1282,6 +1309,14 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_indirection.copy_to_device();
       dscene->sdf_atlas.copy_to_device();
       dscene->sdf_matid.copy_to_device();
+      if (has_blend) {
+        dscene->sdf_blend_id.copy_to_device();
+        dscene->sdf_blend_factor.copy_to_device();
+      }
+      else {
+        dscene->sdf_blend_id.free();
+        dscene->sdf_blend_factor.free();
+      }
 
       dscene->data.num_sdfs = num_sdfs;
 
@@ -1300,6 +1335,8 @@ void GeometryManager::device_update(Device *device,
       dscene->sdf_indirection.free();
       dscene->sdf_atlas.free();
       dscene->sdf_matid.free();
+      dscene->sdf_blend_id.free();
+      dscene->sdf_blend_factor.free();
       dscene->sdf_brick_map.free();
       dscene->sdf_shape_objects.free();
       dscene->sdf_shape_instances.free();
