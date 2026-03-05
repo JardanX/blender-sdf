@@ -1,0 +1,10 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff" fill-rule="evenodd">
+    <!-- A outline -->
+    <path d="M 150,150 H 950 V 950 H 150 Z M 250,250 V 850 H 850 V 250 Z"/>
+    <!-- B outline -->
+    <path d="M 650,650 H 1450 V 1450 H 650 Z M 750,750 V 1350 H 1350 V 750 Z"/>
+    <!-- Intersection: only the overlap is filled -->
+    <path d="M 650,650 H 950 V 950 H 650 Z"/>
+  </g>
+</svg>
