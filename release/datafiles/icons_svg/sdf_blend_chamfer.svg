@@ -1,0 +1,6 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff">
+    <!-- Chamfer: 45-degree diagonal bevel at corner -->
+    <path d="M 350,200 H 500 V 700 L 900,1100 H 1400 V 1250 H 840 L 350,760 Z"/>
+  </g>
+</svg>

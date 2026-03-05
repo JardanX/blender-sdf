@@ -1,0 +1,6 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff">
+    <!-- Linear: sharp right-angle corner (no blending) -->
+    <path d="M 350,200 H 500 V 1100 H 1400 V 1250 H 350 Z"/>
+  </g>
+</svg>
