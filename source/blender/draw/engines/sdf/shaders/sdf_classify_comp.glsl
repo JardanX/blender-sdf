@@ -18,6 +18,63 @@ COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 #define BRICK_SIZE 8
 #define MAX_CANDIDATES 64
 
+/* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
+#define SDF_TYPE_BOX 0
+#define SDF_TYPE_SPHERE 1
+#define SDF_TYPE_CAPSULE 4
+#define SDF_TYPE_TORUS 5
+
+float sdSphere(float3 p, float r)
+{
+  return length(p) - r;
+}
+
+float sdCapsule(float3 p, float3 size)
+{
+  float h = size.y;
+  float r = size.x;
+  p.y -= clamp(p.y, -h, h);
+  return length(p) - r;
+}
+
+float sdTorus(float3 p, float2 t)
+{
+  float2 q = float2(length(p.xz) - t.x, p.y);
+  return length(q) - t.y;
+}
+
+/** Evaluate the actual SDF primitive for an object (not just box). */
+float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
+{
+  float3 size = obj.sdf_size.xyz;
+  float bevel = obj.bevel;
+  float dist;
+
+  if (obj.sdf_type == SDF_TYPE_SPHERE) {
+    dist = sdSphere(local_pos, size.x - bevel);
+  }
+  else if (obj.sdf_type == SDF_TYPE_CAPSULE) {
+    float3 cap_size = size - float3(bevel);
+    cap_size = max(cap_size, float3(0.001f));
+    dist = sdCapsule(local_pos, cap_size);
+  }
+  else if (obj.sdf_type == SDF_TYPE_TORUS) {
+    float major = size.x - bevel;
+    float minor = size.y - bevel;
+    major = max(major, 0.001f);
+    minor = max(minor, 0.001f);
+    dist = sdTorus(local_pos, float2(major, minor));
+  }
+  else {
+    /* SDF_TYPE_BOX (default). */
+    float3 box_size = size - float3(bevel);
+    box_size = max(box_size, float3(0.001f));
+    dist = sdBox(local_pos, box_size);
+  }
+
+  return dist - bevel;
+}
+
 void main()
 {
   int3 brick = int3(gl_GlobalInvocationID);
@@ -109,9 +166,9 @@ void main()
 
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
 
-    float3 size = obj.sdf_size.xyz - obj.bevel;
-    size = max(size, float3(0.001f));
-    float dist = sdBox(local_pos, size) - obj.bevel;
+    /* Evaluate actual SDF primitive (not just box proxy). Reduces
+     * false-positive active bricks for spheres, capsules, and tori. */
+    float dist = evalSDFPrimitive(local_pos, obj);
 
     float k = obj.blend;
     if (k > 0.0f && acc_dist < 1e9f) {
