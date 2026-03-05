@@ -84,9 +84,10 @@ shared int shared_num_candidates;
 void main()
 {
   /* Active-brick-only dispatch: one workgroup per active brick.
-   * 2D dispatch to avoid GL's 65535 workgroup limit per axis. */
+   * 2D dispatch to avoid GL's 65535 workgroup limit per axis.
+   * Read active count from SSBO (avoids CPU readback stall between classify and bake). */
   int brick_idx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * dispatch_width;
-  if (brick_idx >= active_brick_count) {
+  if (brick_idx >= int(brick_counter.count)) {
     return;
   }
 

@@ -165,8 +165,12 @@ class Instance : public DrawEngine {
   int3 grid_res_ = int3(32);
   /** Total voxel resolution from UI. */
   int sdf_resolution_ = 128;
-  /** Active brick count after classify pass. */
+  /** Active brick count (set after bake via deferred readback). */
   int active_brick_count_ = 0;
+  /** Previous frame's active brick count (for atlas pre-sizing). */
+  int prev_active_brick_count_ = 0;
+  /** Grow-only atlas capacity (active bricks that fit in current atlas). */
+  int atlas_capacity_ = 0;
   /** Bricks per axis in compact atlas layout. */
   int bricks_per_axis_ = 1;
   /** Debug grid mode from UI. */
@@ -647,6 +651,8 @@ class Instance : public DrawEngine {
         GPU_texture_free(object_id_tx_);
         object_id_tx_ = nullptr;
       }
+      atlas_capacity_ = 0;
+      prev_active_brick_count_ = 0;
     }
 
     /* Compute scene hash for dirty tracking (analytic + grid combined). */
@@ -856,9 +862,19 @@ class Instance : public DrawEngine {
           augment_indirection_for_grids();
         }
 
-        /* Size atlas from active brick count (may include grid bricks). */
-        if (active_brick_count_ > 0) {
-          int new_bpa = int(std::ceil(std::cbrt(double(active_brick_count_))));
+        /* Pre-size atlas using previous frame's count with headroom.
+         * The bake shader reads the actual count from brick_counter SSBO,
+         * so the atlas just needs to be large enough. Grow-only policy:
+         * never shrink the atlas capacity to avoid thrashing. */
+        {
+          int estimated = math::max(active_brick_count_, prev_active_brick_count_);
+          /* Add 50% headroom (minimum 64) to absorb count fluctuations. */
+          int capacity = math::max(estimated + estimated / 2, 64);
+          /* Never shrink below previous allocation. */
+          if (capacity > atlas_capacity_) {
+            atlas_capacity_ = capacity;
+          }
+          int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
           if (new_bpa < 1) {
             new_bpa = 1;
           }
@@ -873,6 +889,20 @@ class Instance : public DrawEngine {
         }
         if (!objects_.is_empty()) {
           dispatch_bake();
+          /* dispatch_bake does deferred readback: active_brick_count_ is now set. */
+
+          /* If actual count exceeds atlas capacity, resize and re-bake. */
+          if (active_brick_count_ > atlas_capacity_) {
+            atlas_capacity_ = active_brick_count_ + active_brick_count_ / 2;
+            int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
+            if (new_bpa < 1) {
+              new_bpa = 1;
+            }
+            bricks_per_axis_ = new_bpa;
+            ensure_compact_atlas();
+            dispatch_bake();
+          }
+          prev_active_brick_count_ = active_brick_count_;
         }
         else {
           clear_compact_atlas();
@@ -966,6 +996,8 @@ class Instance : public DrawEngine {
       needs_bake_ = true;
       needs_upload_ = true;
       scene_hash_ = 0;
+      atlas_capacity_ = 0;
+      prev_active_brick_count_ = 0;
     }
 
     debug_grid_ = int(shading.sdf_debug_grid);
@@ -1792,42 +1824,50 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    /* Readback active brick count from SSBO (synchronous GPU→CPU stall).
-     * This is intentional: we need the brick count to size the compact atlas
-     * before the bake dispatch. Blender's GPU API has no indirect dispatch,
-     * so we can't launch bake with a GPU-side count. The stall is small
-     * (~16 bytes) and happens once per bake, not per frame. */
-    BrickCounter readback = {};
-    GPU_storagebuf_read(brick_counter_, &readback);
-    active_brick_count_ = int(readback.count);
+    /* Deferred readback: the bake shader reads brick_counter.count from the
+     * SSBO directly, avoiding the GPU→CPU pipeline stall in the common case.
+     * active_brick_count_ is updated after bake in dispatch_bake().
+     *
+     * Exception: when grid objects need augmenting, we must know the count now
+     * because augment_indirection_for_grids() assigns sequential slots starting
+     * from active_brick_count_. In that case, do the synchronous readback. */
+    if (!grid_objects_.is_empty()) {
+      BrickCounter readback = {};
+      GPU_storagebuf_read(brick_counter_, &readback);
+      active_brick_count_ = int(readback.count);
+    }
   }
 
   void dispatch_bake()
   {
-    if (active_brick_count_ <= 0) {
+    /* Over-dispatch with capacity: the bake shader reads the actual active
+     * count from brick_counter SSBO and early-exits surplus workgroups.
+     * This avoids the GPU→CPU readback stall between classify and bake. */
+    int dispatch_count = active_bricks_capacity_;
+    if (dispatch_count <= 0) {
       return;
     }
 
     GPU_shader_bind(bake_sh_);
 
-    /* Bind object SSBO. */
+    /* Bind SSBOs. */
     int ssbo_slot = GPU_shader_get_ssbo_binding(bake_sh_, "objects");
     GPU_storagebuf_bind(object_ssbo_, ssbo_slot);
 
-    /* Bind active bricks SSBO. */
     int ab_slot = GPU_shader_get_ssbo_binding(bake_sh_, "active_bricks");
     GPU_storagebuf_bind(active_bricks_, ab_slot);
 
-    /* Bind BVH SSBO. */
     if (bvh_ssbo_) {
       int bvh_slot = GPU_shader_get_ssbo_binding(bake_sh_, "bvh_nodes");
       GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
     }
 
-    /* Bind compact atlas as image. */
-    GPU_texture_image_bind(compact_atlas_tx_, 0);
+    /* Bind brick counter SSBO (bake shader reads count from here). */
+    int counter_slot = GPU_shader_get_ssbo_binding(bake_sh_, "brick_counter");
+    GPU_storagebuf_bind(brick_counter_, counter_slot);
 
-    /* Bind object ID atlas as image (unit 1). */
+    /* Bind atlas images. */
+    GPU_texture_image_bind(compact_atlas_tx_, 0);
     if (object_id_tx_) {
       GPU_texture_image_bind(object_id_tx_, 1);
     }
@@ -1838,22 +1878,28 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
-    GPU_shader_uniform_1i(bake_sh_, "active_brick_count", active_brick_count_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
 
-    /* Active-brick-only dispatch: one workgroup per active brick.
-     * Use 2D dispatch to avoid GL's 65535 workgroup limit per axis. */
-    uint bake_x = uint(math::min(active_brick_count_, 65535));
-    uint bake_y = uint(divide_ceil_u(active_brick_count_, 65535));
+    /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
+     * early-exit after reading brick_counter.count from SSBO. */
+    uint bake_x = uint(math::min(dispatch_count, 65535));
+    uint bake_y = uint(divide_ceil_u(dispatch_count, 65535));
     GPU_shader_uniform_1i(bake_sh_, "dispatch_width", int(bake_x));
     GPU_compute_dispatch(bake_sh_, bake_x, bake_y, 1);
 
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
     GPU_texture_image_unbind(compact_atlas_tx_);
     if (object_id_tx_) {
       GPU_texture_image_unbind(object_id_tx_);
     }
     GPU_shader_unbind();
+
+    /* Deferred readback: now that bake is dispatched and barrier issued,
+     * read the actual brick count for atlas sizing and perf stats.
+     * No stall here — the bake barrier already flushed the pipeline. */
+    BrickCounter readback = {};
+    GPU_storagebuf_read(brick_counter_, &readback);
+    active_brick_count_ = int(readback.count);
   }
 
 
