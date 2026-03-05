@@ -43,8 +43,8 @@ float sdTorus(float3 p, float2 t)
   return length(q) - t.y;
 }
 
-/** Evaluate the actual SDF primitive for an object (not just box). */
-float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
+/** Evaluate the actual SDF primitive (reads from shared memory cache). */
+float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
 {
   float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
@@ -75,11 +75,26 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
   return dist - bevel;
 }
 
-/* Shared candidate list: BVH traversal done once per workgroup by thread 0,
- * then all 144 threads read from shared memory. Eliminates 143 redundant
- * BVH traversals per brick. */
+/* Compact per-object data cached in shared memory.
+ * Only the fields needed for SDF evaluation — avoids re-reading the
+ * full 160-byte SDFObjectGPU struct from SSBO for every voxel. */
+struct SharedObj {
+  float4x4 inverse_matrix;
+  float4 position;
+  float4 sdf_size;
+  float4 color;
+  float bevel;
+  float blend;
+  int sdf_type;
+  int obj_index;
+};
+
+/* Shared candidate list and object cache: BVH traversal done once per
+ * workgroup by thread 0, object data loaded cooperatively by all threads.
+ * Eliminates redundant SSBO reads across 144 threads x 12 Z iterations. */
 shared int shared_candidates[MAX_CANDIDATES];
 shared int shared_num_candidates;
+shared SharedObj shared_objs[MAX_CANDIDATES];
 
 void main()
 {
@@ -177,9 +192,28 @@ void main()
   }
   barrier();
 
+  /* Cooperatively load candidate object data into shared memory.
+   * Each thread loads one object; if num_candidates > 144 (workgroup size),
+   * threads loop. This replaces 144 * 12 = 1728 redundant SSBO reads
+   * per brick with at most MAX_CANDIDATES reads total. */
+  int num_candidates = shared_num_candidates;
+  uint tid = gl_LocalInvocationIndex;
+  for (int c = int(tid); c < num_candidates; c += 144) {
+    int i = shared_candidates[c];
+    SDFObjectGPU obj = objects[i];
+    shared_objs[c].inverse_matrix = obj.inverse_matrix;
+    shared_objs[c].position = obj.position;
+    shared_objs[c].sdf_size = obj.sdf_size;
+    shared_objs[c].color = obj.color;
+    shared_objs[c].bevel = obj.bevel;
+    shared_objs[c].blend = obj.blend;
+    shared_objs[c].sdf_type = obj.sdf_type;
+    shared_objs[c].obj_index = i;
+  }
+  barrier();
+
   /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
-  int num_candidates = shared_num_candidates;
 
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
@@ -194,31 +228,29 @@ void main()
     int acc_obj_id = -1;
     float closest_raw_dist = 1e10f;
 
-    /* Evaluate candidates in deterministic index order. */
+    /* Evaluate candidates from shared memory cache. */
     for (int c = 0; c < num_candidates; c++) {
-      int i = shared_candidates[c];
-      SDFObjectGPU obj = objects[i];
+      SharedObj sobj = shared_objs[c];
 
-      float3 local_pos = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
 
-      /* Evaluate actual SDF primitive (not just box). */
-      float dist = evalSDFPrimitive(local_pos, obj);
+      float dist = evalSDFPrimitiveSh(local_pos, sobj);
 
       /* Track which object's raw surface is closest for accurate ownership. */
       if (dist < closest_raw_dist) {
         closest_raw_dist = dist;
-        acc_obj_id = i;
+        acc_obj_id = sobj.obj_index;
       }
 
-      float k = obj.blend;
+      float k = sobj.blend;
       if (k > 0.0f && acc_dist < 1e9f) {
         float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-        acc_color = mix(acc_color, obj.color.rgb, h);
+        acc_color = mix(acc_color, sobj.color.rgb, h);
         acc_dist = mix(acc_dist, dist, h) - k * h * (1.0f - h);
       }
       else {
         if (dist < acc_dist) {
-          acc_color = obj.color.rgb;
+          acc_color = sobj.color.rgb;
           acc_dist = dist;
         }
       }
