@@ -190,6 +190,10 @@ class Instance : public DrawEngine {
   bool needs_bake_ = true;
   /** Whether object/BVH SSBOs need re-upload (set when scene hash changes). */
   bool needs_upload_ = true;
+  /** True when running in a depth-only pass (gizmo picking, snapping).
+   * In depth mode the engine reuses the cached atlas from the last regular
+   * draw and only runs the ray-march for depth writes. */
+  bool depth_mode_ = false;
 
   /** Mesh-to-SDF grid objects pending processing. */
   struct PendingGridObject {
@@ -343,6 +347,13 @@ class Instance : public DrawEngine {
   int perf_fps_sample_count_ = 0;
 
  public:
+  Instance()
+  {
+    if (G.debug & G_DEBUG_GPU) {
+      printf("[SDF] engine instance created (default res=%d)\n", sdf_resolution_);
+    }
+  }
+
   blender::StringRefNull name_get() final
   {
     return "SDF";
@@ -351,10 +362,22 @@ class Instance : public DrawEngine {
   void init() final
   {
     draw_ctx_ = DRW_context_get();
+
+    /* Read SDF settings early (before end_sync computes grid params and hash).
+     * Previously this ran in draw(), after end_sync had already computed the
+     * grid using stale sdf_resolution_ / surface_margin_ defaults. */
+    sync_sdf_settings();
   }
 
   void begin_sync() final
   {
+    /* In depth mode, preserve all cached state so depth passes don't
+     * invalidate the bake cache with a different object subset. */
+    depth_mode_ = draw_ctx_->is_depth();
+    if (depth_mode_) {
+      return;
+    }
+
     objects_.clear();
     pending_grid_objects_.clear();
     shapes_.clear();
@@ -366,6 +389,10 @@ class Instance : public DrawEngine {
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
   {
+    if (depth_mode_) {
+      return;
+    }
+
     Object *ob = ob_ref.object;
 
     /* Detect mesh objects with volume grids (from "Mesh to SDF Grid" modifier). */
@@ -545,6 +572,12 @@ class Instance : public DrawEngine {
 
   void end_sync() final
   {
+    /* In depth mode, reuse cached atlas — don't recompute anything. */
+    if (depth_mode_) {
+      needs_bake_ = false;
+      return;
+    }
+
     /* Compute a lightweight hash from pending grid objects BEFORE doing the
      * expensive dense-float extraction. This lets us skip grid processing
      * entirely when nothing changed (saves 40ms+ per frame at fine voxel sizes).
@@ -686,6 +719,14 @@ class Instance : public DrawEngine {
     hash = hash * 6364136223846793005ULL + uint64_t(grid_res_.z);
 
     if (hash != scene_hash_) {
+      if (G.debug & G_DEBUG_GPU) {
+        printf("[SDF] scene hash changed: %016llx -> %016llx  (objs=%d grids=%d res=%d)\n",
+               (unsigned long long)scene_hash_,
+               (unsigned long long)hash,
+               int(objects_.size()),
+               int(grid_objects_.size()),
+               sdf_resolution_);
+      }
       scene_hash_ = hash;
       needs_bake_ = true;
       needs_upload_ = true;
@@ -722,7 +763,23 @@ class Instance : public DrawEngine {
       return;
     }
 
-    sync_sdf_settings();
+    /* In depth mode, skip bake — only march with cached atlas for depth. */
+    if (depth_mode_) {
+      if (compact_atlas_tx_ == nullptr) {
+        return; /* No atlas yet — nothing to march. */
+      }
+      sync_shading();
+      ensure_shaders();
+      if (march_sh_ == nullptr) {
+        return;
+      }
+      DRW_submission_start();
+      draw_march();
+      DRW_submission_end();
+      return;
+    }
+
+    /* sync_sdf_settings() moved to init() so end_sync() uses correct values. */
     sync_shading();
     ensure_shaders();
 
@@ -992,6 +1049,9 @@ class Instance : public DrawEngine {
     new_res = math::clamp(new_res, 32, 128);
 
     if (new_res != sdf_resolution_) {
+      if (G.debug & G_DEBUG_GPU) {
+        printf("[SDF] resolution changed: %d -> %d\n", sdf_resolution_, new_res);
+      }
       sdf_resolution_ = new_res;
       needs_bake_ = true;
       needs_upload_ = true;
