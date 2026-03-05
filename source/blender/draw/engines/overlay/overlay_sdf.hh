@@ -54,6 +54,16 @@ class Sdfs : Overlay {
  public:
   Sdfs(const SelectionType selection_type) : selection_type_(selection_type) {};
 
+  ~Sdfs()
+  {
+    if (map_ssbo_) {
+      GPU_storagebuf_free(map_ssbo_);
+    }
+    if (fullscreen_batch_) {
+      GPU_batch_discard(fullscreen_batch_);
+    }
+  }
+
   void begin_sync(Resources & /*res*/, const State &state) final
   {
     enabled_ = state.is_space_v3d() && (selection_type_ != SelectionType::DISABLED);
