@@ -2769,7 +2769,9 @@ class Instance : public DrawEngine {
     if (!new_bricks.is_empty()) {
       int classify_count = next_slot - int(new_bricks.size());
 
-      Vector<ActiveBrick> all_bricks(active_brick_count_);
+      /* Read existing bricks from the SSBO. The read returns the full SSBO
+       * (active_bricks_capacity_ entries), so the buffer must be large enough. */
+      Vector<ActiveBrick> all_bricks(math::max(active_brick_count_, active_bricks_capacity_));
       if (classify_count > 0 && active_bricks_) {
         GPU_storagebuf_read(active_bricks_, all_bricks.data());
       }
@@ -2792,21 +2794,13 @@ class Instance : public DrawEngine {
   void clear_compact_atlas()
   {
     /* For grid-only scenes, initialize the compact atlas to large distance (1e10)
-     * so that grid blend's min-union works correctly. */
+     * so that grid blend's min-union works correctly.
+     * R = 1e10 (large distance), GBA = 0 (no color). */
     if (!compact_atlas_tx_) {
       return;
     }
-
-    int atlas_dim = bricks_per_axis_ * SDF_BRICK_STORAGE;
-    int total_voxels = atlas_dim * atlas_dim * atlas_dim;
-    Vector<float> clear_data(total_voxels * 4);
-    for (int i = 0; i < total_voxels; i++) {
-      clear_data[i * 4 + 0] = 1e10f;  /* distance */
-      clear_data[i * 4 + 1] = 0.0f;   /* color.r */
-      clear_data[i * 4 + 2] = 0.0f;   /* color.g */
-      clear_data[i * 4 + 3] = 0.0f;   /* color.b */
-    }
-    GPU_texture_update(compact_atlas_tx_, GPU_DATA_FLOAT, clear_data.data());
+    float clear_val[4] = {1e10f, 0.0f, 0.0f, 0.0f};
+    GPU_texture_clear(compact_atlas_tx_, GPU_DATA_FLOAT, clear_val);
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
   }
 
@@ -3005,6 +2999,14 @@ class Instance : public DrawEngine {
   {
     perf_cleanup();
     free_grid_objects();
+
+    /* Clear static pointers BEFORE freeing resources to prevent
+     * dangling access from overlay/selection code. */
+    s_compact_atlas = nullptr;
+    s_indirection = nullptr;
+    s_object_id_atlas = nullptr;
+    s_object_ssbo = nullptr;
+    s_perf_active = false;
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);
     }

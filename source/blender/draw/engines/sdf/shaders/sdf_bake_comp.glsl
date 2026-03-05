@@ -43,6 +43,20 @@ float sdTorus(float3 p, float2 t)
   return length(q) - t.y;
 }
 
+/* Compact per-object data cached in shared memory.
+ * Only the fields needed for SDF evaluation — avoids re-reading the
+ * full 160-byte SDFObjectGPU struct from SSBO for every voxel. */
+struct SharedObj {
+  float4x4 inverse_matrix;
+  float4 position;
+  float4 sdf_size;
+  float4 color;
+  float bevel;
+  float blend;
+  int sdf_type;
+  int obj_index;
+};
+
 /** Evaluate the actual SDF primitive (reads from shared memory cache). */
 float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
 {
@@ -74,20 +88,6 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
 
   return dist - bevel;
 }
-
-/* Compact per-object data cached in shared memory.
- * Only the fields needed for SDF evaluation — avoids re-reading the
- * full 160-byte SDFObjectGPU struct from SSBO for every voxel. */
-struct SharedObj {
-  float4x4 inverse_matrix;
-  float4 position;
-  float4 sdf_size;
-  float4 color;
-  float bevel;
-  float blend;
-  int sdf_type;
-  int obj_index;
-};
 
 /* Shared candidate list and object cache: BVH traversal done once per
  * workgroup by thread 0, object data loaded cooperatively by all threads.
