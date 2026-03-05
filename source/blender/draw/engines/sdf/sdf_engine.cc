@@ -224,28 +224,6 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *bvh_ssbo_ = nullptr;
   int bvh_ssbo_count_ = 0;
 
-  /** Persistent brick slot mapping (brick_coord_key → slot index).
-   * Stable slot assignment enables partial rebake: clean bricks preserve atlas data. */
-  Map<int64_t, int> brick_slot_map_;
-  Vector<int> free_slots_;
-  int total_slots_allocated_ = 0;
-  /** Previous bricks_per_axis for atlas resize detection. */
-  int prev_bricks_per_axis_ = 0;
-
-  /** Per-object dirty tracking for incremental rebake.
-   * Maps session_uid → hash of object state (position, size, bevel, blend, rotation). */
-  Map<uint, uint64_t> prev_object_states_;
-  /** Maps session_uid → previous world AABB (for computing dirty brick ranges). */
-  Map<uint, std::pair<float3, float3>> prev_object_aabbs_;
-  /** Session UIDs parallel to objects_ vector (same order/index). */
-  Vector<uint> object_uids_;
-  /** World AABBs parallel to objects_ vector (for dirty brick computation). */
-  Vector<std::pair<float3, float3>> object_aabbs_;
-  /** Whether a full rebake is needed (structural change). */
-  bool force_full_rebake_ = true;
-  /** Dirty bricks SSBO for partial bake dispatch. */
-  gpu::StorageBuf *dirty_bricks_ssbo_ = nullptr;
-  int dirty_brick_count_ = 0;
 
   /** Shape table: unique SDF shapes identified by fingerprint. */
   struct ShapeInfo {
@@ -374,8 +352,6 @@ class Instance : public DrawEngine {
   void begin_sync() final
   {
     objects_.clear();
-    object_uids_.clear();
-    object_aabbs_.clear();
     pending_grid_objects_.clear();
     shapes_.clear();
     shape_fingerprint_map_.clear();
@@ -499,8 +475,6 @@ class Instance : public DrawEngine {
 
     const int object_index = objects_.size();
     objects_.append(gpu_obj);
-    object_uids_.append(ob->id.session_uid);
-    object_aabbs_.append({world_min, world_max});
 
     /* Build shape fingerprint and instance entry. */
     float3 effective_size = float3(gpu_obj.sdf_size);
@@ -673,11 +647,6 @@ class Instance : public DrawEngine {
         GPU_texture_free(object_id_tx_);
         object_id_tx_ = nullptr;
       }
-      /* Grid structure changed: invalidate persistent slot assignments. */
-      force_full_rebake_ = true;
-      brick_slot_map_.clear();
-      free_slots_.clear();
-      total_slots_allocated_ = 0;
     }
 
     /* Compute scene hash for dirty tracking (analytic + grid combined). */
@@ -812,13 +781,11 @@ class Instance : public DrawEngine {
         }
 
         /* Size compact atlas from total shape bricks. */
-        total_slots_allocated_ = total_shape_active_bricks_;
-        int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
+        int new_bpa = int(std::ceil(std::cbrt(double(total_shape_active_bricks_))));
         if (new_bpa < 1) {
           new_bpa = 1;
         }
         bricks_per_axis_ = new_bpa;
-        prev_bricks_per_axis_ = new_bpa;
 
         /* Create world-space indirection texture (needed for non-instanced fallback
          * paths like grid objects). Ensure it exists but don't classify into it. */
@@ -832,7 +799,7 @@ class Instance : public DrawEngine {
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
-        if (!prev_shape_fingerprints_.is_empty() && !force_full_rebake_) {
+        if (!prev_shape_fingerprints_.is_empty()) {
           /* Find shapes that are new or changed since last frame. */
           Set<uint64_t> dirty_shapes;
           for (const ShapeInfo &shape : shapes_) {
@@ -866,7 +833,7 @@ class Instance : public DrawEngine {
         }
       }
       else {
-        /* ---- World-space pipeline with incremental bake ---- */
+        /* ---- World-space pipeline ---- */
 
         /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
         if (perf_enabled_) {
@@ -885,22 +852,17 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_CLASSIFY);
         }
 
-        /* Size atlas from classify output (simple sequential assignment). */
-        if (!objects_.is_empty() && active_brick_count_ > 0) {
-          total_slots_allocated_ = active_brick_count_;
-          int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
+        if (!grid_objects_.is_empty()) {
+          augment_indirection_for_grids();
+        }
+
+        /* Size atlas from active brick count (may include grid bricks). */
+        if (active_brick_count_ > 0) {
+          int new_bpa = int(std::ceil(std::cbrt(double(active_brick_count_))));
           if (new_bpa < 1) {
             new_bpa = 1;
           }
           bricks_per_axis_ = new_bpa;
-          prev_bricks_per_axis_ = new_bpa;
-        }
-        else {
-          total_slots_allocated_ = 0;
-        }
-
-        if (!grid_objects_.is_empty()) {
-          augment_indirection_for_grids();
         }
 
         ensure_compact_atlas();
@@ -931,9 +893,6 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* save_object_states() — disabled: incremental baking is deferred.
-       * Function body kept for future use. */
-      force_full_rebake_ = false;
     }
 
     /* Ray march (runs every frame, even when cached). */
@@ -1007,10 +966,6 @@ class Instance : public DrawEngine {
       needs_bake_ = true;
       needs_upload_ = true;
       scene_hash_ = 0;
-      force_full_rebake_ = true;
-      brick_slot_map_.clear();
-      free_slots_.clear();
-      total_slots_allocated_ = 0;
     }
 
     debug_grid_ = int(shading.sdf_debug_grid);
@@ -1204,28 +1159,19 @@ class Instance : public DrawEngine {
                                             nullptr);
   }
 
-  /** Ensure compact atlas and object ID atlas exist with correct dimensions.
-   * Returns true if the atlas was recreated (requires full rebake). */
-  bool ensure_compact_atlas()
+  /** Ensure compact atlas and object ID atlas exist with correct dimensions. */
+  void ensure_compact_atlas()
   {
-    int needed_bpa;
-    if (total_slots_allocated_ <= 0) {
-      needed_bpa = 1;
+    if (bricks_per_axis_ < 1) {
+      bricks_per_axis_ = 1;
     }
-    else {
-      needed_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
-      if (needed_bpa < 1) {
-        needed_bpa = 1;
-      }
-    }
-    bricks_per_axis_ = needed_bpa;
     int atlas_dim = bricks_per_axis_ * SDF_BRICK_STORAGE;
 
     /* Check if existing textures have correct dimensions. */
     if (compact_atlas_tx_ != nullptr) {
       int existing_dim = GPU_texture_width(compact_atlas_tx_);
       if (existing_dim == atlas_dim) {
-        return false; /* Atlas preserved — partial rebake possible. */
+        return;
       }
       /* Dimensions changed: must recreate. */
       GPU_texture_free(compact_atlas_tx_);
@@ -1254,7 +1200,6 @@ class Instance : public DrawEngine {
                                           gpu::TextureFormat::SINT_32,
                                           usage,
                                           nullptr);
-    return true; /* Atlas recreated — full rebake needed. */
   }
 
   void upload_objects()
@@ -1565,139 +1510,6 @@ class Instance : public DrawEngine {
     }
   }
 
-  /* ---- Dirty Tracking + Persistent Slot Assignment ---- */
-
-  /** Encode brick coordinate into a unique 64-bit key. */
-  static int64_t brick_key(int x, int y, int z)
-  {
-    return int64_t(x) | (int64_t(y) << 20) | (int64_t(z) << 40);
-  }
-
-  /** Compute a hash for one object's current state. */
-  static uint64_t hash_object_state(const SDFObjectGPU &obj)
-  {
-    uint64_t h = 0;
-    const auto mix = [&](const void *ptr) {
-      h = h * 6364136223846793005ULL + *reinterpret_cast<const uint32_t *>(ptr);
-    };
-    mix(&obj.position.x);
-    mix(&obj.position.y);
-    mix(&obj.position.z);
-    mix(&obj.sdf_size.x);
-    mix(&obj.sdf_size.y);
-    mix(&obj.sdf_size.z);
-    mix(&obj.bevel);
-    mix(&obj.blend);
-    mix(&obj.inverse_matrix[0][0]);
-    mix(&obj.inverse_matrix[1][1]);
-    mix(&obj.inverse_matrix[2][2]);
-    mix(&obj.color.x);
-    mix(&obj.color.y);
-    mix(&obj.color.z);
-    return h;
-  }
-
-  /** Detect which objects changed since the last frame.
-   * Returns set of object indices that are dirty (new, removed, or modified). */
-  Set<int> compute_dirty_objects()
-  {
-    Set<int> dirty;
-    Set<uint> current_uids;
-    for (int i = 0; i < int(object_uids_.size()); i++) {
-      current_uids.add(object_uids_[i]);
-    }
-
-    /* Detect modified or new objects. */
-    for (int i = 0; i < int(objects_.size()); i++) {
-      uint uid = object_uids_[i];
-      uint64_t state = hash_object_state(objects_[i]);
-
-      const uint64_t *prev = prev_object_states_.lookup_ptr(uid);
-      if (!prev || *prev != state) {
-        dirty.add(i);
-      }
-    }
-
-    /* Detect removed objects: UIDs in prev that aren't in current.
-     * Mark all objects as dirty (removed objects affect all nearby bricks). */
-    for (const auto &item : prev_object_states_.items()) {
-      if (!current_uids.contains(item.key)) {
-        /* Removed object: mark ALL objects as dirty to force full rebake.
-         * This is conservative but correct. */
-        for (int i = 0; i < int(objects_.size()); i++) {
-          dirty.add(i);
-        }
-        break;
-      }
-    }
-
-    return dirty;
-  }
-
-  /** Compute the set of brick coordinates affected by dirty objects.
-   * Uses both old and new AABBs so both the vacated and occupied regions are rebaked. */
-  Set<int64_t> compute_dirty_brick_set(const Set<int> &dirty_objects)
-  {
-    Set<int64_t> dirty_bricks;
-    float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
-
-    for (int i : dirty_objects) {
-      /* New AABB. */
-      const auto &[new_min, new_max] = object_aabbs_[i];
-      /* Expand by max_blend + brick_half_diag for safety. */
-      float expand = max_blend_ + float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f;
-      float3 exp_min = new_min - float3(expand);
-      float3 exp_max = new_max + float3(expand);
-
-      int3 bmin = int3(math::floor((exp_min - atlas_origin_) / brick_world));
-      int3 bmax = int3(math::floor((exp_max - atlas_origin_) / brick_world));
-      bmin = math::max(bmin, int3(0));
-      bmax = math::min(bmax, grid_res_ - int3(1));
-
-      for (int bz = bmin.z; bz <= bmax.z; bz++) {
-        for (int by = bmin.y; by <= bmax.y; by++) {
-          for (int bx = bmin.x; bx <= bmax.x; bx++) {
-            dirty_bricks.add(brick_key(bx, by, bz));
-          }
-        }
-      }
-
-      /* Old AABB (if exists). */
-      uint uid = object_uids_[i];
-      const auto *prev_aabb = prev_object_aabbs_.lookup_ptr(uid);
-      if (prev_aabb) {
-        float3 old_min = prev_aabb->first - float3(expand);
-        float3 old_max = prev_aabb->second + float3(expand);
-
-        bmin = int3(math::floor((old_min - atlas_origin_) / brick_world));
-        bmax = int3(math::floor((old_max - atlas_origin_) / brick_world));
-        bmin = math::max(bmin, int3(0));
-        bmax = math::min(bmax, grid_res_ - int3(1));
-
-        for (int bz = bmin.z; bz <= bmax.z; bz++) {
-          for (int by = bmin.y; by <= bmax.y; by++) {
-            for (int bx = bmin.x; bx <= bmax.x; bx++) {
-              dirty_bricks.add(brick_key(bx, by, bz));
-            }
-          }
-        }
-      }
-    }
-
-    return dirty_bricks;
-  }
-
-  /** Save current object states for next frame's dirty comparison. */
-  void save_object_states()
-  {
-    prev_object_states_.clear();
-    prev_object_aabbs_.clear();
-    for (int i = 0; i < int(objects_.size()); i++) {
-      uint uid = object_uids_[i];
-      prev_object_states_.add(uid, hash_object_state(objects_[i]));
-      prev_object_aabbs_.add(uid, object_aabbs_[i]);
-    }
-  }
 
   /* ---- Per-Shape Atlas Pipeline (instanced mode) ---- */
 
@@ -1893,154 +1705,6 @@ class Instance : public DrawEngine {
     GPU_storagebuf_free(shape_ab_ssbo);
   }
 
-  /** After classify: read back active bricks, assign persistent slots,
-   * write back stable active_bricks SSBO and indirection texture.
-   * Returns true if partial rebake is possible, false if full rebake needed. */
-  bool assign_persistent_slots()
-  {
-    if (active_brick_count_ <= 0) {
-      return false;
-    }
-
-    if (brick_slot_map_.is_empty() && total_slots_allocated_ > 0) {
-      /* Coming back from fast path: reset so sequential assignment starts from 0. */
-      total_slots_allocated_ = 0;
-    }
-
-    /* Read back active brick coords from GPU (written by classify shader).
-     * IMPORTANT: GPU_storagebuf_read reads the full buffer (active_bricks_capacity_
-     * entries), not just active_brick_count_ entries. The destination must match
-     * the SSBO size to avoid heap buffer overflow. */
-    Vector<ActiveBrick> gpu_bricks(active_bricks_capacity_);
-    GPU_storagebuf_read(active_bricks_, gpu_bricks.data());
-
-    /* Build set of currently active brick keys. */
-    Set<int64_t> current_active;
-    for (int i = 0; i < active_brick_count_; i++) {
-      int3 c = int3(gpu_bricks[i].coord);
-      current_active.add(brick_key(c.x, c.y, c.z));
-    }
-
-    /* Release slots for deactivated bricks. */
-    Vector<int64_t> to_remove;
-    for (const auto &item : brick_slot_map_.items()) {
-      if (!current_active.contains(item.key)) {
-        free_slots_.append(item.value);
-        to_remove.append(item.key);
-      }
-    }
-    for (int64_t key : to_remove) {
-      brick_slot_map_.remove(key);
-    }
-
-    /* Assign slots for newly active bricks. */
-    bool new_bricks_added = false;
-    for (int i = 0; i < active_brick_count_; i++) {
-      int3 c = int3(gpu_bricks[i].coord);
-      int64_t key = brick_key(c.x, c.y, c.z);
-      if (!brick_slot_map_.contains(key)) {
-        int slot;
-        if (!free_slots_.is_empty()) {
-          slot = free_slots_.pop_last();
-        }
-        else {
-          slot = total_slots_allocated_++;
-        }
-        brick_slot_map_.add(key, slot);
-        new_bricks_added = true;
-      }
-    }
-
-    /* Compute bricks_per_axis from total_slots_allocated_. */
-    int new_bpa = int(std::ceil(std::cbrt(double(total_slots_allocated_))));
-    if (new_bpa < 1) {
-      new_bpa = 1;
-    }
-    bool atlas_resized = (new_bpa != prev_bricks_per_axis_);
-    prev_bricks_per_axis_ = new_bpa;
-    bricks_per_axis_ = new_bpa;
-
-    /* Build the stable active_bricks list with slot IDs in .w field. */
-    Vector<ActiveBrick> stable_bricks(active_brick_count_);
-    for (int i = 0; i < active_brick_count_; i++) {
-      int3 c = int3(gpu_bricks[i].coord);
-      int64_t key = brick_key(c.x, c.y, c.z);
-      int slot = brick_slot_map_.lookup(key);
-      stable_bricks[i].coord = int4(c, slot);
-    }
-
-    /* Upload stable active_bricks SSBO. */
-    if (active_bricks_) {
-      GPU_storagebuf_free(active_bricks_);
-    }
-    active_bricks_ = GPU_storagebuf_create_ex(active_brick_count_ * sizeof(ActiveBrick),
-                                               stable_bricks.data(),
-                                               GPU_USAGE_DYNAMIC,
-                                               "sdf_active_bricks");
-    active_bricks_capacity_ = active_brick_count_;
-
-    /* Upload stable indirection texture from CPU. */
-    int total_bricks = grid_res_.x * grid_res_.y * grid_res_.z;
-    Vector<int32_t> indir_data(total_bricks, -1);
-    for (const auto &item : brick_slot_map_.items()) {
-      /* Decode brick key back to coordinates. */
-      int64_t key = item.key;
-      int bx = int(key & 0xFFFFF);
-      int by = int((key >> 20) & 0xFFFFF);
-      int bz = int((key >> 40) & 0xFFFFF);
-      /* Handle sign extension for brick_key encoding. */
-      if (bx >= (1 << 19)) {
-        bx -= (1 << 20);
-      }
-      if (by >= (1 << 19)) {
-        by -= (1 << 20);
-      }
-      if (bz >= (1 << 19)) {
-        bz -= (1 << 20);
-      }
-      if (bx >= 0 && bx < grid_res_.x && by >= 0 && by < grid_res_.y && bz >= 0 &&
-          bz < grid_res_.z)
-      {
-        int idx = bx + by * grid_res_.x + bz * grid_res_.x * grid_res_.y;
-        indir_data[idx] = item.value;
-      }
-    }
-    GPU_texture_update(indirection_tx_, GPU_DATA_INT, indir_data.data());
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
-
-    return !atlas_resized && !force_full_rebake_;
-  }
-
-  /** Build dirty bricks SSBO for partial bake dispatch.
-   * Only includes active bricks that overlap the dirty region. */
-  void build_dirty_bricks_ssbo(const Set<int64_t> &dirty_brick_set)
-  {
-    /* Read back the stable active bricks we just uploaded. */
-    Vector<ActiveBrick> all_bricks(active_brick_count_);
-    GPU_storagebuf_read(active_bricks_, all_bricks.data());
-
-    Vector<ActiveBrick> dirty_list;
-    for (int i = 0; i < active_brick_count_; i++) {
-      int3 c = int3(all_bricks[i].coord);
-      if (dirty_brick_set.contains(brick_key(c.x, c.y, c.z))) {
-        dirty_list.append(all_bricks[i]); /* slot ID preserved in .w */
-      }
-    }
-
-    dirty_brick_count_ = int(dirty_list.size());
-    if (dirty_brick_count_ == 0) {
-      return;
-    }
-
-    if (dirty_bricks_ssbo_) {
-      GPU_storagebuf_free(dirty_bricks_ssbo_);
-    }
-    dirty_bricks_ssbo_ = GPU_storagebuf_create_ex(dirty_brick_count_ * sizeof(ActiveBrick),
-                                                    dirty_list.data(),
-                                                    GPU_USAGE_DEVICE_ONLY,
-                                                    "sdf_dirty_bricks");
-    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-  }
 
   void dispatch_classify()
   {
@@ -2192,53 +1856,7 @@ class Instance : public DrawEngine {
     GPU_shader_unbind();
   }
 
-  /** Dispatch bake only for dirty bricks (partial rebake). */
-  void dispatch_bake_dirty()
-  {
-    if (dirty_brick_count_ <= 0 || dirty_bricks_ssbo_ == nullptr) {
-      return;
-    }
 
-    GPU_shader_bind(bake_sh_);
-
-    int ssbo_slot = GPU_shader_get_ssbo_binding(bake_sh_, "objects");
-    GPU_storagebuf_bind(object_ssbo_, ssbo_slot);
-
-    /* Bind dirty bricks in the active_bricks slot — the shader reads from
-     * active_bricks[], and we're giving it only the dirty subset. */
-    int ab_slot = GPU_shader_get_ssbo_binding(bake_sh_, "active_bricks");
-    GPU_storagebuf_bind(dirty_bricks_ssbo_, ab_slot);
-
-    if (bvh_ssbo_) {
-      int bvh_slot = GPU_shader_get_ssbo_binding(bake_sh_, "bvh_nodes");
-      GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
-    }
-
-    GPU_texture_image_bind(compact_atlas_tx_, 0);
-    if (object_id_tx_) {
-      GPU_texture_image_bind(object_id_tx_, 1);
-    }
-
-    GPU_shader_uniform_1i(bake_sh_, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1f(bake_sh_, "voxel_size", voxel_size_);
-    GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
-    GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
-    GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
-    GPU_shader_uniform_1i(bake_sh_, "active_brick_count", dirty_brick_count_);
-    GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
-
-    uint bake_x = uint(math::min(dirty_brick_count_, 65535));
-    uint bake_y = uint(divide_ceil_u(dirty_brick_count_, 65535));
-    GPU_shader_uniform_1i(bake_sh_, "dispatch_width", int(bake_x));
-    GPU_compute_dispatch(bake_sh_, bake_x, bake_y, 1);
-
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    GPU_texture_image_unbind(compact_atlas_tx_);
-    if (object_id_tx_) {
-      GPU_texture_image_unbind(object_id_tx_);
-    }
-    GPU_shader_unbind();
-  }
 
   void draw_march()
   {
@@ -3049,14 +2667,15 @@ class Instance : public DrawEngine {
   void augment_indirection_for_grids()
   {
     /* Mark all bricks overlapping each grid object's world AABB as active.
-     * Uses the persistent slot system so grid bricks get stable slots too. */
+     * Uses simple sequential slot assignment. */
     float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
 
-    /* Read current indirection (already written by assign_persistent_slots or clear). */
+    /* Read current indirection (already written by classify or clear). */
     int32_t *data = static_cast<int32_t *>(
         GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
 
     Vector<ActiveBrick> new_bricks;
+    int next_slot = active_brick_count_;
 
     for (const GridObject &grid : grid_objects_) {
       float4x4 tex_to_world = math::invert(grid.world_to_texture);
@@ -3078,31 +2697,22 @@ class Instance : public DrawEngine {
       for (int bz = bmin.z; bz <= bmax.z; bz++) {
         for (int by = bmin.y; by <= bmax.y; by++) {
           for (int bx = bmin.x; bx <= bmax.x; bx++) {
-            int64_t key = brick_key(bx, by, bz);
-            if (brick_slot_map_.contains(key)) {
+            int idx = bx + by * grid_res_.x + bz * grid_res_.x * grid_res_.y;
+            if (data[idx] >= 0) {
               continue; /* Already active from analytic classify. */
             }
-            /* Assign persistent slot for this grid brick. */
-            int slot;
-            if (!free_slots_.is_empty()) {
-              slot = free_slots_.pop_last();
-            }
-            else {
-              slot = total_slots_allocated_++;
-            }
-            brick_slot_map_.add(key, slot);
-
-            int idx = bx + by * grid_res_.x + bz * grid_res_.x * grid_res_.y;
+            int slot = next_slot++;
             data[idx] = slot;
 
             ActiveBrick ab = {};
             ab.coord = int4(bx, by, bz, slot);
             new_bricks.append(ab);
-            active_brick_count_++;
           }
         }
       }
     }
+
+    active_brick_count_ = next_slot;
 
     /* Re-upload modified indirection. */
     GPU_texture_update(indirection_tx_, GPU_DATA_INT, data);
@@ -3111,7 +2721,7 @@ class Instance : public DrawEngine {
 
     /* Append grid bricks to the active_bricks SSBO. */
     if (!new_bricks.is_empty()) {
-      int classify_count = active_brick_count_ - int(new_bricks.size());
+      int classify_count = next_slot - int(new_bricks.size());
 
       Vector<ActiveBrick> all_bricks(active_brick_count_);
       if (classify_count > 0 && active_bricks_) {
@@ -3378,9 +2988,6 @@ class Instance : public DrawEngine {
     }
     if (bvh_ssbo_) {
       GPU_storagebuf_free(bvh_ssbo_);
-    }
-    if (dirty_bricks_ssbo_) {
-      GPU_storagebuf_free(dirty_bricks_ssbo_);
     }
     if (shape_ssbo_) {
       GPU_storagebuf_free(shape_ssbo_);
