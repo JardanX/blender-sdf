@@ -409,3 +409,28 @@ float3 trilinearGradient(float s[8], float3 p)
 }
 
 /** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Spatial Hash Table
+ * \{ */
+
+#define SDF_HASH_TABLE_SIZE 1048576
+
+/** Hash an int3 coordinate to a uint32 key for the spatial hash table.
+ * Uses murmur3-style mixing for good distribution. With typical active
+ * brick counts (<10K), birthday-paradox collision probability is <0.001%. */
+uint hashBrickKey(int3 p) {
+  uint h = uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ uint(p.z) * 83492791u;
+  h ^= h >> 16u;
+  h *= 0x85ebca6bu;
+  h ^= h >> 13u;
+  h *= 0xc2b2ae35u;
+  h ^= h >> 16u;
+  return h;
+}
+
+/* hashInsert() and hashLookup() are defined locally in the shaders that use them
+ * (sdf_classify_comp.glsl, sdf_march_frag.glsl, sdf_select_march_frag.glsl)
+ * because they reference the hash_table SSBO which is not available in all shaders. */
+
+/** \} */

@@ -151,11 +151,15 @@ class Sdfs : Overlay {
     int atlas_slot = GPU_shader_get_sampler_binding(select_march_sh_, "compact_atlas");
     GPU_texture_bind(sdf::sdf_atlas_get(), atlas_slot);
 
-    int indir_slot = GPU_shader_get_sampler_binding(select_march_sh_, "indirection_tx");
-    GPU_texture_bind(sdf::sdf_indirection_get(), indir_slot);
-
     int objid_slot = GPU_shader_get_sampler_binding(select_march_sh_, "object_id_tx");
     GPU_texture_bind(sdf::sdf_object_id_atlas_get(), objid_slot);
+
+    /* Bind hash table SSBO for brick-to-slot lookups. */
+    gpu::StorageBuf *ht = sdf::sdf_hash_table_get();
+    if (ht) {
+      int ht_slot = GPU_shader_get_ssbo_binding(select_march_sh_, "hash_table");
+      GPU_storagebuf_bind(ht, ht_slot);
+    }
 
     /* Bind select ID map SSBO. */
     int map_slot = GPU_shader_get_ssbo_binding(select_march_sh_, "select_id_map_buf");
@@ -179,15 +183,16 @@ class Sdfs : Overlay {
     /* Push atlas params. */
     float voxel_size;
     float3 origin, extent;
-    int3 grid_res;
+    int3 grid_res, bo;
     int bpa;
-    sdf::sdf_atlas_params_get(&voxel_size, &origin, &extent, &grid_res, &bpa);
+    sdf::sdf_atlas_params_get(&voxel_size, &origin, &extent, &grid_res, &bo, &bpa);
     GPU_shader_uniform_1f(select_march_sh_, "voxel_size", voxel_size);
     GPU_shader_uniform_3fv(select_march_sh_, "atlas_origin", origin);
     GPU_shader_uniform_3fv(select_march_sh_, "atlas_extent", extent);
     GPU_shader_uniform_3iv(select_march_sh_, "grid_resolution", grid_res);
     GPU_shader_uniform_1i(select_march_sh_, "bricks_per_axis", bpa);
     GPU_shader_uniform_1i(select_march_sh_, "object_count", sdf::sdf_object_count_get());
+    GPU_shader_uniform_1f(select_march_sh_, "bounds_margin", sdf::sdf_bounds_margin_get());
 
     /* Bind the view UBO for camera matrices. */
     view.matrices_ubo_get().push_update();
@@ -202,7 +207,6 @@ class Sdfs : Overlay {
 
     /* Cleanup. */
     GPU_texture_unbind(sdf::sdf_atlas_get());
-    GPU_texture_unbind(sdf::sdf_indirection_get());
     GPU_texture_unbind(sdf::sdf_object_id_atlas_get());
     GPU_shader_unbind();
   }

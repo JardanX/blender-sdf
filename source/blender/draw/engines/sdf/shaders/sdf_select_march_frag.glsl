@@ -19,6 +19,22 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
+int hashLookup(int3 p) {
+  uint key = hashBrickKey(p);
+  uint start_idx = key % uint(SDF_HASH_TABLE_SIZE);
+  for (uint i = 0u; i < 32u; i++) {
+    uint idx = (start_idx + i) % uint(SDF_HASH_TABLE_SIZE);
+    uint k = hash_table[idx].key;
+    if (k == key) {
+      return hash_table[idx].value;
+    }
+    if (k == 0xFFFFFFFFu) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 
@@ -57,7 +73,7 @@ int readObjectIdAtPos(float3 world_pos)
     return -1;
   }
 
-  int slot = texelFetch(indirection_tx, brick, 0).r;
+  int slot = hashLookup(brick);
   if (slot < 0) {
     return -1;
   }
@@ -113,222 +129,442 @@ void main()
   float3 ray_origin = world_near.xyz;
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
 
-  /* ---- 2. Clip ray to total voxel volume ---- */
+  /* ---- 2. Clip ray to object AABBs and DDA within those intervals ---- */
   int3 grid_res = grid_resolution;
   int3 total_res = grid_res * BRICK_SIZE;
   float3 grid_world_min = atlas_origin;
   float3 grid_world_max = atlas_origin + float3(total_res) * voxel_size;
 
   float3 inv_dir = 1.0f / ray_dir;
-  float3 t0 = (grid_world_min - ray_origin) * inv_dir;
-  float3 t1 = (grid_world_max - ray_origin) * inv_dir;
-  float3 t_lo = min(t0, t1);
-  float3 t_hi = max(t0, t1);
-  float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
-  float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
-
-  if (t_enter > t_exit || t_exit < 0.0f) {
-    discard;
-    return;
-  }
-
-  t_enter = max(t_enter, 0.0f);
-
-  /* ---- 3. Brick-level DDA setup ---- */
   float inv_voxel = 1.0f / voxel_size;
   float brick_world_size = float(BRICK_SIZE) * voxel_size;
   float inv_brick = 1.0f / brick_world_size;
 
-  float3 B = (ray_origin - atlas_origin) * inv_brick;
-  float3 BD = ray_dir * inv_brick;
-
-  float3 B_enter = B + t_enter * BD;
-  int3 brick_cell = int3(floor(B_enter));
-  brick_cell = clamp(brick_cell, int3(0), grid_res - int3(1));
-
-  int3 brick_step;
-  brick_step.x = BD.x > 0.0f ? 1 : (BD.x < 0.0f ? -1 : 0);
-  brick_step.y = BD.y > 0.0f ? 1 : (BD.y < 0.0f ? -1 : 0);
-  brick_step.z = BD.z > 0.0f ? 1 : (BD.z < 0.0f ? -1 : 0);
-
-  float3 brick_tDelta = float3(BD.x != 0.0f ? abs(1.0f / BD.x) : 1e30f,
-                                BD.y != 0.0f ? abs(1.0f / BD.y) : 1e30f,
-                                BD.z != 0.0f ? abs(1.0f / BD.z) : 1e30f);
-
-  float3 brick_boundary;
-  brick_boundary.x = BD.x > 0.0f ? float(brick_cell.x + 1) : float(brick_cell.x);
-  brick_boundary.y = BD.y > 0.0f ? float(brick_cell.y + 1) : float(brick_cell.y);
-  brick_boundary.z = BD.z > 0.0f ? float(brick_cell.z + 1) : float(brick_cell.z);
-
-  float3 brick_tMax;
-  brick_tMax.x = BD.x != 0.0f ? (brick_boundary.x - B.x) / BD.x : 1e30f;
-  brick_tMax.y = BD.y != 0.0f ? (brick_boundary.y - B.y) / BD.y : 1e30f;
-  brick_tMax.z = BD.z != 0.0f ? (brick_boundary.z - B.z) / BD.z : 1e30f;
-
-  /* ---- 4. Single-hit DDA traversal (find first surface) ---- */
   float hit_t = -1.0f;
   float3 hit_pos;
 
-  for (int bstep = 0; bstep < MAX_BRICK_STEPS; bstep++) {
-    if (any(lessThan(brick_cell, int3(0))) || any(greaterThanEqual(brick_cell, grid_res))) {
-      break;
-    }
+  if (object_count > 0) {
+    /* Object-guided DDA: scan object AABBs, DDA only within expanded bounds.
+     * Skips empty space between distant objects. */
+    float best_t = 1e30f;
 
-    float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
-    t_brick_exit = min(t_brick_exit, t_exit);
+    for (int obj_i = 0; obj_i < object_count; obj_i++) {
+      float3 obj_min = max(sdf_objects[obj_i].bbox_min.xyz - float3(bounds_margin), grid_world_min);
+      float3 obj_max = min(sdf_objects[obj_i].bbox_max.xyz + float3(bounds_margin), grid_world_max);
 
-    int slot = texelFetch(indirection_tx, brick_cell, 0).r;
+      float obj_t_near, obj_t_far;
+      if (!ray_aabb_intersect(ray_origin, inv_dir, obj_min, obj_max,
+                               obj_t_near, obj_t_far))
+      {
+        continue;
+      }
+      if (obj_t_near > best_t) {
+        continue;
+      }
+      obj_t_near = max(obj_t_near, 0.0f);
 
-    if (slot == -2) {
-      break;
-    }
+      /* Inline DDA within this object's interval. */
+      float3 B = (ray_origin - atlas_origin) * inv_brick;
+      float3 BD = ray_dir * inv_brick;
 
-    if (slot >= 0) {
-      float3 brick_origin = atlas_origin + float3(brick_cell * BRICK_SIZE) * voxel_size;
-      float3 V = (ray_origin - brick_origin) * inv_voxel;
-      float3 VD = ray_dir * inv_voxel;
+      float3 B_enter = B + obj_t_near * BD;
+      int3 brick_cell = int3(floor(B_enter));
+      brick_cell = clamp(brick_cell, int3(0), grid_res - int3(1));
 
-      float3 V_enter = V + t_enter * VD;
-      int3 vcell = int3(floor(V_enter));
-      vcell = clamp(vcell, int3(0), int3(BRICK_SIZE - 1));
+      int3 brick_step;
+      brick_step.x = BD.x > 0.0f ? 1 : (BD.x < 0.0f ? -1 : 0);
+      brick_step.y = BD.y > 0.0f ? 1 : (BD.y < 0.0f ? -1 : 0);
+      brick_step.z = BD.z > 0.0f ? 1 : (BD.z < 0.0f ? -1 : 0);
 
-      int3 vstep;
-      vstep.x = VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0);
-      vstep.y = VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0);
-      vstep.z = VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0);
+      float3 brick_tDelta = float3(BD.x != 0.0f ? abs(1.0f / BD.x) : 1e30f,
+                                    BD.y != 0.0f ? abs(1.0f / BD.y) : 1e30f,
+                                    BD.z != 0.0f ? abs(1.0f / BD.z) : 1e30f);
 
-      float3 vtDelta = float3(VD.x != 0.0f ? abs(1.0f / VD.x) : 1e30f,
-                               VD.y != 0.0f ? abs(1.0f / VD.y) : 1e30f,
-                               VD.z != 0.0f ? abs(1.0f / VD.z) : 1e30f);
+      float3 brick_boundary;
+      brick_boundary.x = BD.x > 0.0f ? float(brick_cell.x + 1) : float(brick_cell.x);
+      brick_boundary.y = BD.y > 0.0f ? float(brick_cell.y + 1) : float(brick_cell.y);
+      brick_boundary.z = BD.z > 0.0f ? float(brick_cell.z + 1) : float(brick_cell.z);
 
-      float3 vbound;
-      vbound.x = VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x);
-      vbound.y = VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y);
-      vbound.z = VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z);
+      float3 brick_tMax;
+      brick_tMax.x = BD.x != 0.0f ? (brick_boundary.x - B.x) / BD.x : 1e30f;
+      brick_tMax.y = BD.y != 0.0f ? (brick_boundary.y - B.y) / BD.y : 1e30f;
+      brick_tMax.z = BD.z != 0.0f ? (brick_boundary.z - B.z) / BD.z : 1e30f;
 
-      float3 vtMax;
-      vtMax.x = VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f;
-      vtMax.y = VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f;
-      vtMax.z = VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f;
+      float t_current = obj_t_near;
+      bool found_obj_hit = false;
 
-      float vt_current = t_enter;
-
-      for (int vstep_i = 0; vstep_i < MAX_VOXEL_STEPS; vstep_i++) {
-        if (any(lessThan(vcell, int3(0))) || any(greaterThan(vcell, int3(BRICK_SIZE - 1)))) {
+      for (int bstep = 0; bstep < MAX_BRICK_STEPS; bstep++) {
+        if (any(lessThan(brick_cell, int3(0))) || any(greaterThanEqual(brick_cell, grid_res))) {
           break;
         }
 
-        float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
-        vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+        float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
+        t_brick_exit = min(t_brick_exit, obj_t_far);
 
-        float s[8];
-        fetchCornersCompact(brick_cell, vcell, slot, bricks_per_axis, s);
+        int slot = hashLookup(brick_cell);
 
-        float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
-                         min(min(s[4], s[5]), min(s[6], s[7])));
+        if (slot >= 0) {
+          float3 brick_origin = atlas_origin + float3(brick_cell * BRICK_SIZE) * voxel_size;
+          float3 V = (ray_origin - brick_origin) * inv_voxel;
+          float3 VD = ray_dir * inv_voxel;
 
-        if (smin <= 0.0f) {
-          float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
-                           max(max(s[4], s[5]), max(s[6], s[7])));
+          float3 V_enter = V + t_current * VD;
+          int3 vcell = int3(floor(V_enter));
+          vcell = clamp(vcell, int3(0), int3(BRICK_SIZE - 1));
 
-          if (smax < 0.0f) {
-            hit_t = vt_current;
-          }
-          else {
-            float T_max = vt_cell_exit - vt_current;
-            if (T_max > 1e-8f) {
-              float k[8];
-              computeTrilinearCoeffs(s, k);
+          int3 vstep;
+          vstep.x = VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0);
+          vstep.y = VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0);
+          vstep.z = VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0);
 
-              float3 o_local = V + vt_current * VD - float3(vcell);
-              o_local = clamp(o_local, float3(0.0f), float3(1.0f));
-              float3 d_scaled = VD * T_max;
+          float3 vtDelta = float3(VD.x != 0.0f ? abs(1.0f / VD.x) : 1e30f,
+                                   VD.y != 0.0f ? abs(1.0f / VD.y) : 1e30f,
+                                   VD.z != 0.0f ? abs(1.0f / VD.z) : 1e30f);
 
-              float c[4];
-              computeCubicCoeffs(k, o_local, d_scaled, c);
+          float3 vbound;
+          vbound.x = VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x);
+          vbound.y = VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y);
+          vbound.z = VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z);
 
-              if (c[0] <= 0.0f) {
-                hit_t = vt_current;
+          float3 vtMax;
+          vtMax.x = VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f;
+          vtMax.y = VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f;
+          vtMax.z = VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f;
+
+          float vt_current = t_current;
+
+          for (int vstep_i = 0; vstep_i < MAX_VOXEL_STEPS; vstep_i++) {
+            if (any(lessThan(vcell, int3(0))) || any(greaterThan(vcell, int3(BRICK_SIZE - 1)))) {
+              break;
+            }
+
+            float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
+            vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+
+            float s[8];
+            fetchCornersCompact(brick_cell, vcell, slot, bricks_per_axis, s);
+
+            float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
+                             min(min(s[4], s[5]), min(s[6], s[7])));
+
+            if (smin <= 0.0f) {
+              float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
+                               max(max(s[4], s[5]), max(s[6], s[7])));
+
+              float local_hit_t = -1.0f;
+              if (smax < 0.0f) {
+                local_hit_t = vt_current;
               }
               else {
-                float u_hit = solveCubicMarmittNR(c, 1.0f);
-                if (u_hit >= 0.0f) {
-                  hit_t = vt_current + u_hit * T_max;
+                float T_max = vt_cell_exit - vt_current;
+                if (T_max > 1e-8f) {
+                  float k[8];
+                  computeTrilinearCoeffs(s, k);
+
+                  float3 o_local = V + vt_current * VD - float3(vcell);
+                  o_local = clamp(o_local, float3(0.0f), float3(1.0f));
+                  float3 d_scaled = VD * T_max;
+
+                  float c[4];
+                  computeCubicCoeffs(k, o_local, d_scaled, c);
+
+                  if (c[0] <= 0.0f) {
+                    local_hit_t = vt_current;
+                  }
+                  else {
+                    float u_hit = solveCubicMarmittNR(c, 1.0f);
+                    if (u_hit >= 0.0f) {
+                      local_hit_t = vt_current + u_hit * T_max;
+                    }
+                  }
                 }
               }
+
+              if (local_hit_t >= 0.0f && local_hit_t < best_t) {
+                best_t = local_hit_t;
+                hit_t = local_hit_t;
+                hit_pos = ray_origin + ray_dir * hit_t;
+                found_obj_hit = true;
+                break;
+              }
+            }
+
+            /* Advance voxel DDA. */
+            if (vtMax.x < vtMax.y) {
+              if (vtMax.x < vtMax.z) {
+                vt_current = vtMax.x;
+                vcell.x += vstep.x;
+                vtMax.x += vtDelta.x;
+              }
+              else {
+                vt_current = vtMax.z;
+                vcell.z += vstep.z;
+                vtMax.z += vtDelta.z;
+              }
+            }
+            else {
+              if (vtMax.y < vtMax.z) {
+                vt_current = vtMax.y;
+                vcell.y += vstep.y;
+                vtMax.y += vtDelta.y;
+              }
+              else {
+                vt_current = vtMax.z;
+                vcell.z += vstep.z;
+                vtMax.z += vtDelta.z;
+              }
+            }
+
+            if (vt_current >= t_brick_exit) {
+              break;
             }
           }
 
-          if (hit_t >= 0.0f) {
-            hit_pos = ray_origin + ray_dir * hit_t;
+          if (found_obj_hit) {
             break;
           }
         }
 
-        /* Advance voxel DDA. */
-        if (vtMax.x < vtMax.y) {
-          if (vtMax.x < vtMax.z) {
-            vt_current = vtMax.x;
-            vcell.x += vstep.x;
-            vtMax.x += vtDelta.x;
+        if (found_obj_hit) {
+          break;
+        }
+
+        /* Advance brick-level DDA. */
+        if (brick_tMax.x < brick_tMax.y) {
+          if (brick_tMax.x < brick_tMax.z) {
+            t_current = brick_tMax.x;
+            brick_cell.x += brick_step.x;
+            brick_tMax.x += brick_tDelta.x;
           }
           else {
-            vt_current = vtMax.z;
-            vcell.z += vstep.z;
-            vtMax.z += vtDelta.z;
+            t_current = brick_tMax.z;
+            brick_cell.z += brick_step.z;
+            brick_tMax.z += brick_tDelta.z;
           }
         }
         else {
-          if (vtMax.y < vtMax.z) {
-            vt_current = vtMax.y;
-            vcell.y += vstep.y;
-            vtMax.y += vtDelta.y;
+          if (brick_tMax.y < brick_tMax.z) {
+            t_current = brick_tMax.y;
+            brick_cell.y += brick_step.y;
+            brick_tMax.y += brick_tDelta.y;
           }
           else {
-            vt_current = vtMax.z;
-            vcell.z += vstep.z;
-            vtMax.z += vtDelta.z;
+            t_current = brick_tMax.z;
+            brick_cell.z += brick_step.z;
+            brick_tMax.z += brick_tDelta.z;
           }
         }
 
-        if (vt_current >= t_brick_exit) {
+        if (t_current > obj_t_far) {
+          break;
+        }
+      }
+    }
+  }
+  else {
+    /* Fallback: full grid DDA (no objects). */
+    float3 t0 = (grid_world_min - ray_origin) * inv_dir;
+    float3 t1 = (grid_world_max - ray_origin) * inv_dir;
+    float3 t_lo = min(t0, t1);
+    float3 t_hi = max(t0, t1);
+    float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+    float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
+
+    if (t_enter > t_exit || t_exit < 0.0f) {
+      discard;
+      return;
+    }
+    t_enter = max(t_enter, 0.0f);
+
+    float3 B = (ray_origin - atlas_origin) * inv_brick;
+    float3 BD = ray_dir * inv_brick;
+
+    float3 B_enter = B + t_enter * BD;
+    int3 brick_cell = int3(floor(B_enter));
+    brick_cell = clamp(brick_cell, int3(0), grid_res - int3(1));
+
+    int3 brick_step;
+    brick_step.x = BD.x > 0.0f ? 1 : (BD.x < 0.0f ? -1 : 0);
+    brick_step.y = BD.y > 0.0f ? 1 : (BD.y < 0.0f ? -1 : 0);
+    brick_step.z = BD.z > 0.0f ? 1 : (BD.z < 0.0f ? -1 : 0);
+
+    float3 brick_tDelta = float3(BD.x != 0.0f ? abs(1.0f / BD.x) : 1e30f,
+                                  BD.y != 0.0f ? abs(1.0f / BD.y) : 1e30f,
+                                  BD.z != 0.0f ? abs(1.0f / BD.z) : 1e30f);
+
+    float3 brick_boundary;
+    brick_boundary.x = BD.x > 0.0f ? float(brick_cell.x + 1) : float(brick_cell.x);
+    brick_boundary.y = BD.y > 0.0f ? float(brick_cell.y + 1) : float(brick_cell.y);
+    brick_boundary.z = BD.z > 0.0f ? float(brick_cell.z + 1) : float(brick_cell.z);
+
+    float3 brick_tMax;
+    brick_tMax.x = BD.x != 0.0f ? (brick_boundary.x - B.x) / BD.x : 1e30f;
+    brick_tMax.y = BD.y != 0.0f ? (brick_boundary.y - B.y) / BD.y : 1e30f;
+    brick_tMax.z = BD.z != 0.0f ? (brick_boundary.z - B.z) / BD.z : 1e30f;
+
+    float t_current = t_enter;
+
+    for (int bstep = 0; bstep < MAX_BRICK_STEPS; bstep++) {
+      if (any(lessThan(brick_cell, int3(0))) || any(greaterThanEqual(brick_cell, grid_res))) {
+        break;
+      }
+
+      float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
+      t_brick_exit = min(t_brick_exit, t_exit);
+
+      int slot = hashLookup(brick_cell);
+
+      if (slot == -2) {
+        break;
+      }
+
+      if (slot >= 0) {
+        float3 brick_origin = atlas_origin + float3(brick_cell * BRICK_SIZE) * voxel_size;
+        float3 V = (ray_origin - brick_origin) * inv_voxel;
+        float3 VD = ray_dir * inv_voxel;
+
+        float3 V_enter = V + t_current * VD;
+        int3 vcell = int3(floor(V_enter));
+        vcell = clamp(vcell, int3(0), int3(BRICK_SIZE - 1));
+
+        int3 vstep;
+        vstep.x = VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0);
+        vstep.y = VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0);
+        vstep.z = VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0);
+
+        float3 vtDelta = float3(VD.x != 0.0f ? abs(1.0f / VD.x) : 1e30f,
+                                 VD.y != 0.0f ? abs(1.0f / VD.y) : 1e30f,
+                                 VD.z != 0.0f ? abs(1.0f / VD.z) : 1e30f);
+
+        float3 vbound;
+        vbound.x = VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x);
+        vbound.y = VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y);
+        vbound.z = VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z);
+
+        float3 vtMax;
+        vtMax.x = VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f;
+        vtMax.y = VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f;
+        vtMax.z = VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f;
+
+        float vt_current = t_current;
+
+        for (int vstep_i = 0; vstep_i < MAX_VOXEL_STEPS; vstep_i++) {
+          if (any(lessThan(vcell, int3(0))) || any(greaterThan(vcell, int3(BRICK_SIZE - 1)))) {
+            break;
+          }
+
+          float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
+          vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+
+          float s[8];
+          fetchCornersCompact(brick_cell, vcell, slot, bricks_per_axis, s);
+
+          float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
+                           min(min(s[4], s[5]), min(s[6], s[7])));
+
+          if (smin <= 0.0f) {
+            float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
+                             max(max(s[4], s[5]), max(s[6], s[7])));
+
+            if (smax < 0.0f) {
+              hit_t = vt_current;
+            }
+            else {
+              float T_max = vt_cell_exit - vt_current;
+              if (T_max > 1e-8f) {
+                float k[8];
+                computeTrilinearCoeffs(s, k);
+
+                float3 o_local = V + vt_current * VD - float3(vcell);
+                o_local = clamp(o_local, float3(0.0f), float3(1.0f));
+                float3 d_scaled = VD * T_max;
+
+                float c[4];
+                computeCubicCoeffs(k, o_local, d_scaled, c);
+
+                if (c[0] <= 0.0f) {
+                  hit_t = vt_current;
+                }
+                else {
+                  float u_hit = solveCubicMarmittNR(c, 1.0f);
+                  if (u_hit >= 0.0f) {
+                    hit_t = vt_current + u_hit * T_max;
+                  }
+                }
+              }
+            }
+
+            if (hit_t >= 0.0f) {
+              hit_pos = ray_origin + ray_dir * hit_t;
+              break;
+            }
+          }
+
+          /* Advance voxel DDA. */
+          if (vtMax.x < vtMax.y) {
+            if (vtMax.x < vtMax.z) {
+              vt_current = vtMax.x;
+              vcell.x += vstep.x;
+              vtMax.x += vtDelta.x;
+            }
+            else {
+              vt_current = vtMax.z;
+              vcell.z += vstep.z;
+              vtMax.z += vtDelta.z;
+            }
+          }
+          else {
+            if (vtMax.y < vtMax.z) {
+              vt_current = vtMax.y;
+              vcell.y += vstep.y;
+              vtMax.y += vtDelta.y;
+            }
+            else {
+              vt_current = vtMax.z;
+              vcell.z += vstep.z;
+              vtMax.z += vtDelta.z;
+            }
+          }
+
+          if (vt_current >= t_brick_exit) {
+            break;
+          }
+        }
+
+        if (hit_t >= 0.0f) {
           break;
         }
       }
 
-      if (hit_t >= 0.0f) {
+      /* Advance brick-level DDA. */
+      if (brick_tMax.x < brick_tMax.y) {
+        if (brick_tMax.x < brick_tMax.z) {
+          t_current = brick_tMax.x;
+          brick_cell.x += brick_step.x;
+          brick_tMax.x += brick_tDelta.x;
+        }
+        else {
+          t_current = brick_tMax.z;
+          brick_cell.z += brick_step.z;
+          brick_tMax.z += brick_tDelta.z;
+        }
+      }
+      else {
+        if (brick_tMax.y < brick_tMax.z) {
+          t_current = brick_tMax.y;
+          brick_cell.y += brick_step.y;
+          brick_tMax.y += brick_tDelta.y;
+        }
+        else {
+          t_current = brick_tMax.z;
+          brick_cell.z += brick_step.z;
+          brick_tMax.z += brick_tDelta.z;
+        }
+      }
+
+      if (t_current > t_exit) {
         break;
       }
-    }
-
-    /* ---- Advance brick-level DDA ---- */
-    if (brick_tMax.x < brick_tMax.y) {
-      if (brick_tMax.x < brick_tMax.z) {
-        t_enter = brick_tMax.x;
-        brick_cell.x += brick_step.x;
-        brick_tMax.x += brick_tDelta.x;
-      }
-      else {
-        t_enter = brick_tMax.z;
-        brick_cell.z += brick_step.z;
-        brick_tMax.z += brick_tDelta.z;
-      }
-    }
-    else {
-      if (brick_tMax.y < brick_tMax.z) {
-        t_enter = brick_tMax.y;
-        brick_cell.y += brick_step.y;
-        brick_tMax.y += brick_tDelta.y;
-      }
-      else {
-        t_enter = brick_tMax.z;
-        brick_cell.z += brick_step.z;
-        brick_tMax.z += brick_tDelta.z;
-      }
-    }
-
-    if (t_enter > t_exit) {
-      break;
     }
   }
 
