@@ -89,9 +89,17 @@ float evalSDF(float3 pos, int num_candidates) {
 
 /** Evaluate block properties: distance at center and linearity error.
  * Uses MathOPS Engine 2's 7-point cross stencil for ultra-fast classification. */
-void evaluateBlock(float3 center, float half_size, int num_candidates, float scaled_threshold, out float d_c, out float error) {
+void evaluateBlock(float3 center, float half_size, int num_candidates, float scaled_threshold, float surf_t, out float d_c, out float error, out bool is_empty) {
   /* Phase 1: Center eval */
   d_c = evalSDF(center, num_candidates);
+
+  /* Fast rejection: if center is far enough, the entire block is empty (inside or outside).
+   * Multiply by 2.0 for conservative bound to ensure no thin features are missed. */
+  if (abs(d_c) > surf_t * 2.0f) {
+    is_empty = true;
+    error = 0.0f;
+    return;
+  }
 
   /* Sample at quarter-chunk spacing for second-order finite differences */
   float h = half_size * 0.5f;
@@ -103,6 +111,23 @@ void evaluateBlock(float3 center, float half_size, int num_candidates, float sca
   float dz_p = evalSDF(center + float3(0.0f, 0.0f, h), num_candidates);
   float dz_m = evalSDF(center - float3(0.0f, 0.0f, h), num_candidates);
 
+  /* Thin feature detection: if all 7 points are far from the surface, it is empty. */
+  int surf_count = 0;
+  if (abs(d_c)  < surf_t) surf_count++;
+  if (abs(dx_p) < surf_t) surf_count++;
+  if (abs(dx_m) < surf_t) surf_count++;
+  if (abs(dy_p) < surf_t) surf_count++;
+  if (abs(dy_m) < surf_t) surf_count++;
+  if (abs(dz_p) < surf_t) surf_count++;
+  if (abs(dz_m) < surf_t) surf_count++;
+
+  if (surf_count == 0) {
+    is_empty = true;
+    error = 0.0f;
+    return;
+  }
+  is_empty = false;
+
   /* Second-order finite differences (Laplacian components) */
   float d2x = dx_p + dx_m - 2.0f * d_c;
   float d2y = dy_p + dy_m - 2.0f * d_c;
@@ -113,9 +138,9 @@ void evaluateBlock(float3 center, float half_size, int num_candidates, float sca
 
   /* Phase 3: Gradient-based edge detection for ambiguous cases */
   if (error > scaled_threshold * 0.3f && error < scaled_threshold * 3.0f) {
-    float gx = (dx_p - dx_m) * 0.5f;
-    float gy = (dy_p - dy_m) * 0.5f;
-    float gz = (dz_p - dz_m) * 0.5f;
+    float gx = (dx_p - dx_m) / (2.0f * h);
+    float gy = (dy_p - dy_m) / (2.0f * h);
+    float gz = (dz_p - dz_m) / (2.0f * h);
     float gradMag = sqrt(gx * gx + gy * gy + gz * gz);
     float gradDeviation = abs(gradMag - 1.0f);
     error = max(error, error + gradDeviation * scaled_threshold * 2.0f);
@@ -176,18 +201,15 @@ void main() {
   float bound0 = lod0_half_size * 1.73205f + max_blend + brick_half_diag;
   if (tid == 0u) {
     float d_c, error;
-    float threshold0 = 0.05f * lod0_half_size;
-    evaluateBlock(lod0_center, lod0_half_size, num_cands, threshold0, d_c, error);
+    bool is_empty;
+    float threshold0 = 0.025f; // Constant dimensionless threshold
+    evaluateBlock(lod0_center, lod0_half_size, num_cands, threshold0, bound0, d_c, error, is_empty);
 
-    if (d_c > bound0) {
-      lod0_status.status = 0; // fully outside
-      lod0_status.slot = -1;
-    } else if (d_c < -bound0) {
-      lod0_status.status = 0; // fully inside
-      lod0_status.slot = -2;
+    if (is_empty) {
+      if (d_c > 0.0f) lod0_status.status = 0; // fully outside
+      else lod0_status.status = 0;            // fully inside (slot logic handled below)
+      lod0_status.slot = (d_c > 0.0f) ? -1 : -2;
     } else {
-      // Intersects. Check linearity.
-      // Error threshold: relative to half size.
       if (error < threshold0) {
         lod0_status.status = 2; // flat: allocate
         lod0_status.slot = int(atomicAdd(brick_counter.count, 1u));
@@ -216,15 +238,13 @@ void main() {
     float3 lod1_center = lod0_center + (float3(l1_offset) * 2.0f - 1.0f) * lod1_half_size;
 
     float d_c, error;
-    float threshold1 = 0.05f * lod1_half_size;
-    evaluateBlock(lod1_center, lod1_half_size, num_cands, threshold1, d_c, error);
+    bool is_empty;
+    float threshold1 = 0.025f; // Constant dimensionless threshold
+    evaluateBlock(lod1_center, lod1_half_size, num_cands, threshold1, bound1, d_c, error, is_empty);
 
-    if (d_c > bound1) {
+    if (is_empty) {
       lod1_status[tid].status = 0;
-      lod1_status[tid].slot = -1;
-    } else if (d_c < -bound1) {
-      lod1_status[tid].status = 0;
-      lod1_status[tid].slot = -2;
+      lod1_status[tid].slot = (d_c > 0.0f) ? -1 : -2;
     } else {
       if (error < threshold1) {
         lod1_status[tid].status = 2;
