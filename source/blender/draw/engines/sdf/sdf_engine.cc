@@ -125,14 +125,16 @@ static bool s_perf_active = false;
 
 /* ---- Static atlas state for cross-engine access (overlay selection) ---- */
 static gpu::Texture *s_compact_atlas = nullptr;
-static gpu::Texture *s_indirection = nullptr;
+static gpu::StorageBuf *s_hash_table = nullptr;
 static gpu::Texture *s_object_id_atlas = nullptr;
 static float s_voxel_size = 0.0f;
 static float3 s_atlas_origin = float3(0);
 static float3 s_atlas_extent = float3(0);
 static int3 s_grid_resolution = int3(0);
 static int s_bricks_per_axis = 0;
+static int3 s_brick_offset = int3(0);
 static int s_object_count = 0;
+static float s_bounds_margin = 0.0f;
 static gpu::StorageBuf *s_object_ssbo = nullptr;
 
 class Instance : public DrawEngine {
@@ -144,8 +146,11 @@ class Instance : public DrawEngine {
   float3 scene_min_ = float3(1e30f);
   float3 scene_max_ = float3(-1e30f);
 
-  /** Brick grid indirection texture (R32I, grid_res^3). */
-  gpu::Texture *indirection_tx_ = nullptr;
+  /** Spatial Hash Table SSBO (replaces indirection texture). */
+  gpu::StorageBuf *hash_table_ssbo_ = nullptr;
+  /** Active coarse chunks for sparse dispatch. */
+  gpu::StorageBuf *active_coarse_chunks_ = nullptr;
+  int active_coarse_chunk_count_ = 0;
   /** Compact atlas (RGBA16F, sized for active bricks only). */
   gpu::Texture *compact_atlas_tx_ = nullptr;
   /** Object ID atlas (R32I, same dimensions as compact atlas). */
@@ -160,6 +165,8 @@ class Instance : public DrawEngine {
   float3 atlas_origin_ = float3(0.0f);
   float3 atlas_extent_ = float3(1.0f);
   float voxel_size_ = 1.0f / 256.0f;
+  /** Brick coordinate offset: absolute brick coords = DDA-relative + brick_offset_. */
+  int3 brick_offset_ = int3(0);
 
   /** Grid resolution in bricks per axis (per-axis, world-aligned). */
   int3 grid_res_ = int3(32);
@@ -635,57 +642,116 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Compute atlas parameters. Resolution = voxels per Blender unit (fixed density).
-     * voxel_size is constant for a given resolution setting. The grid adapts to
-     * scene size with per-axis brick counts, snapped to world-aligned chunks.
-     * Active-brick-only dispatch ensures bake cost is proportional to active bricks
-     * (~5% of grid volume), not total grid_res^3. */
-    float3 scene_size = scene_max_ - scene_min_;
-    float margin = math::max(math::reduce_max(scene_size) * 0.1f, 0.5f);
-
-    /* Fixed voxel density: resolution = voxels per BU.
-     * Smooth auto-coarsen: if the padded scene extent would exceed
-     * SDF_MAX_GRID_RES bricks, grow voxel_size by the exact amount needed.
-     * Using max(base, extent-based) gives a perfectly linear ramp —
-     * no snapping at all.  The -2 absorbs worst-case floor/ceil snap
-     * overhead (one extra brick per side), guaranteeing the grid fits. */
-    float base_voxel = 1.0f / float(sdf_resolution_);
-    float3 padded_min = scene_min_ - float3(margin);
-    float3 padded_max = scene_max_ + float3(margin);
-    float max_extent = math::reduce_max(padded_max - padded_min);
-    float min_voxel = max_extent /
-                      (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
-    voxel_size_ = math::max(base_voxel, min_voxel);
+    /* Fixed voxel density: resolution = voxels per BU. */
+    voxel_size_ = 1.0f / float(sdf_resolution_);
     float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
 
-    /* Snap to world-aligned chunk boundaries. */
-    float3 grid_min = math::floor(padded_min / chunk_size) * chunk_size;
-    float3 grid_max = math::ceil(padded_max / chunk_size) * chunk_size;
+    /* Collect active coarse chunks based on object AABBs.
+     * We evaluate which 4x4x4 coarse chunks (each chunk = 4*SDF_BRICK_SIZE * voxel_size_)
+     * intersect the expanded AABBs of the objects. */
+    float coarse_chunk_size = chunk_size * 4.0f;
+    Set<uint64_t> active_coarse_set;
+    Vector<int4> active_coarse_array;
 
-    /* Per-axis grid resolution in bricks. */
-    int3 new_grid_res = int3(math::round((grid_max - grid_min) / chunk_size));
-    new_grid_res = math::clamp(new_grid_res, int3(1), int3(SDF_MAX_GRID_RES));
+    auto add_coarse_chunk = [&](int cx, int cy, int cz) {
+      uint64_t key = (uint64_t(uint32_t(cx)) & 0x1FFFFF) |
+                     ((uint64_t(uint32_t(cy)) & 0x1FFFFF) << 21) |
+                     ((uint64_t(uint32_t(cz)) & 0x1FFFFF) << 42);
+      if (!active_coarse_set.contains(key)) {
+        active_coarse_set.add(key);
+        active_coarse_array.append(int4(cx, cy, cz, 0));
+      }
+    };
 
-    atlas_origin_ = grid_min;
-    atlas_extent_ = grid_max - grid_min;
+    /* Compute max blend to expand AABBs correctly. */
+    float max_blend = 0.0f;
+    for (const SDFObjectGPU &obj : objects_) {
+      max_blend = math::max(max_blend, obj.blend);
+    }
+    max_blend_ = max_blend;
 
-    /* Free textures only if grid dimensions actually changed. */
-    if (new_grid_res != grid_res_) {
-      grid_res_ = new_grid_res;
-      if (indirection_tx_) {
-        GPU_texture_free(indirection_tx_);
-        indirection_tx_ = nullptr;
+    float bounds_margin = max_blend + (float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f) * surface_margin_;
+
+    for (const SDFObjectGPU &obj : objects_) {
+      float3 wmin = float3(obj.bbox_min) - float3(bounds_margin);
+      float3 wmax = float3(obj.bbox_max) + float3(bounds_margin);
+
+      int3 cmin = int3(math::floor(wmin / coarse_chunk_size));
+      int3 cmax = int3(math::floor(wmax / coarse_chunk_size));
+
+      for (int cz = cmin.z; cz <= cmax.z; cz++) {
+        for (int cy = cmin.y; cy <= cmax.y; cy++) {
+          for (int cx = cmin.x; cx <= cmax.x; cx++) {
+            add_coarse_chunk(cx, cy, cz);
+          }
+        }
       }
-      if (compact_atlas_tx_) {
-        GPU_texture_free(compact_atlas_tx_);
-        compact_atlas_tx_ = nullptr;
+    }
+
+    /* Also include grid objects bounds. */
+    for (const GridObject &grid : grid_objects_) {
+      float4x4 tex_to_world = math::invert(grid.world_to_texture);
+      float3 gmin = float3(1e30f);
+      float3 gmax = float3(-1e30f);
+      for (int c = 0; c < 8; c++) {
+        float3 tc = float3((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
+        float3 wc = math::transform_point(tex_to_world, tc);
+        gmin = math::min(gmin, wc);
+        gmax = math::max(gmax, wc);
       }
-      if (object_id_tx_) {
-        GPU_texture_free(object_id_tx_);
-        object_id_tx_ = nullptr;
+      gmin -= float3(bounds_margin);
+      gmax += float3(bounds_margin);
+      int3 cmin = int3(math::floor(gmin / coarse_chunk_size));
+      int3 cmax = int3(math::floor(gmax / coarse_chunk_size));
+      for (int cz = cmin.z; cz <= cmax.z; cz++) {
+        for (int cy = cmin.y; cy <= cmax.y; cy++) {
+          for (int cx = cmin.x; cx <= cmax.x; cx++) {
+            add_coarse_chunk(cx, cy, cz);
+          }
+        }
       }
-      atlas_capacity_ = 0;
-      prev_active_brick_count_ = 0;
+    }
+
+    active_coarse_chunk_count_ = int(active_coarse_array.size());
+
+    /* Upload active coarse chunks to SSBO. */
+    if (active_coarse_chunk_count_ > 0) {
+      if (active_coarse_chunks_) {
+        GPU_storagebuf_free(active_coarse_chunks_);
+      }
+      active_coarse_chunks_ = GPU_storagebuf_create_ex(
+          active_coarse_chunk_count_ * sizeof(int4),
+          active_coarse_array.data(),
+          GPU_USAGE_DYNAMIC,
+          "sdf_active_coarse_chunks");
+    }
+
+    /* Compute atlas AABB from coarse chunk bounds.
+     * The march shader uses atlas_origin_ / grid_res_ for ray-AABB intersection,
+     * and the hash table maps absolute brick coordinates to atlas slots. */
+    if (active_coarse_chunk_count_ > 0) {
+      int3 chunk_min = int3(active_coarse_array[0].x,
+                            active_coarse_array[0].y,
+                            active_coarse_array[0].z);
+      int3 chunk_max = chunk_min;
+      for (const int4 &chunk : active_coarse_array) {
+        int3 c = int3(chunk.x, chunk.y, chunk.z);
+        chunk_min = math::min(chunk_min, c);
+        chunk_max = math::max(chunk_max, c);
+      }
+      /* Fine brick range: each coarse chunk is 4 fine bricks per axis. */
+      int3 brick_min = chunk_min * 4;
+      int3 brick_max = (chunk_max + int3(1)) * 4;
+      grid_res_ = brick_max - brick_min;
+      brick_offset_ = brick_min;
+      atlas_origin_ = float3(brick_min) * float(SDF_BRICK_SIZE) * voxel_size_;
+      atlas_extent_ = float3(grid_res_) * float(SDF_BRICK_SIZE) * voxel_size_;
+    }
+    else {
+      grid_res_ = int3(0);
+      brick_offset_ = int3(0);
+      atlas_origin_ = float3(0.0f);
+      atlas_extent_ = float3(0.0f);
     }
 
     /* Compute scene hash for dirty tracking (analytic + grid combined). */
@@ -850,11 +916,8 @@ class Instance : public DrawEngine {
         }
         bricks_per_axis_ = new_bpa;
 
-        /* Create world-space indirection texture (needed for non-instanced fallback
-         * paths like grid objects). Ensure it exists but don't classify into it. */
-        ensure_indirection();
-        int32_t clear_val = -1;
-        GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
+        ensure_hash_table();
+        clear_hash_table();
 
         ensure_compact_atlas();
 
@@ -902,14 +965,13 @@ class Instance : public DrawEngine {
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_CLASSIFY);
         }
-        ensure_indirection();
+        ensure_hash_table();
         if (!objects_.is_empty()) {
-          int32_t clear_val = -1;
-          GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
+          clear_hash_table();
           dispatch_classify();
         }
         else {
-          clear_indirection();
+          clear_hash_table();
         }
         if (perf_enabled_) {
           perf_end_pass(PERF_PASS_CLASSIFY);
@@ -1011,14 +1073,17 @@ class Instance : public DrawEngine {
 
     /* Update static atlas state for cross-engine access (overlay selection). */
     s_compact_atlas = compact_atlas_tx_;
-    s_indirection = indirection_tx_;
+    s_hash_table = hash_table_ssbo_;
     s_object_id_atlas = object_id_tx_;
     s_voxel_size = voxel_size_;
     s_atlas_origin = atlas_origin_;
     s_atlas_extent = atlas_extent_;
     s_grid_resolution = grid_res_;
     s_bricks_per_axis = bricks_per_axis_;
+    s_brick_offset = brick_offset_;
     s_object_count = int(objects_.size());
+    s_bounds_margin = max_blend_ +
+                      (float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f) * surface_margin_;
     s_object_ssbo = object_ssbo_;
 
     if (perf_enabled_) {
@@ -1235,20 +1300,26 @@ class Instance : public DrawEngine {
     }
   }
 
-  void ensure_indirection()
+  void ensure_hash_table()
   {
-    if (indirection_tx_ != nullptr) {
+    if (hash_table_ssbo_ != nullptr) {
       return;
     }
-    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
-    indirection_tx_ = GPU_texture_create_3d("sdf_indirection",
-                                            grid_res_.x,
-                                            grid_res_.y,
-                                            grid_res_.z,
-                                            1,
-                                            gpu::TextureFormat::SINT_32,
-                                            usage,
-                                            nullptr);
+    const size_t buf_size = SDF_HASH_TABLE_SIZE * sizeof(HashEntry);
+    hash_table_ssbo_ = GPU_storagebuf_create_ex(
+        buf_size, nullptr, GPU_USAGE_DYNAMIC, "sdf_hash_table");
+  }
+
+  void clear_hash_table()
+  {
+    if (!hash_table_ssbo_) {
+      return;
+    }
+    static Vector<HashEntry> empty_table;
+    if (empty_table.is_empty()) {
+      empty_table.resize(SDF_HASH_TABLE_SIZE, {0xFFFFFFFFu, -1});
+    }
+    GPU_storagebuf_update(hash_table_ssbo_, empty_table.data());
   }
 
   /** Ensure compact atlas and object ID atlas exist with correct dimensions. */
@@ -1815,11 +1886,11 @@ class Instance : public DrawEngine {
       GPU_storagebuf_update(brick_counter_, &zero_counter);
     }
 
-    /* Ensure active bricks SSBO is large enough for worst case (all bricks active). */
-    int max_bricks = grid_res_.x * grid_res_.y * grid_res_.z;
-    if (max_bricks < 1) {
-      max_bricks = 1;
-    }
+    /* Ensure active bricks SSBO is large enough.
+     * Each coarse chunk (4x4x4 fine bricks) produces at most 64 active bricks.
+     * Using this tight bound instead of grid_res^3 avoids huge allocations
+     * and dispatch counts when objects are far apart. */
+    int max_bricks = math::max(active_coarse_chunk_count_ * 64, 1);
     if (active_bricks_ == nullptr || active_bricks_capacity_ < max_bricks) {
       if (active_bricks_) {
         GPU_storagebuf_free(active_bricks_);
@@ -1847,14 +1918,26 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
     }
 
-    /* Bind indirection texture as image. */
-    GPU_texture_image_bind(indirection_tx_, 0);
+    /* Bind active coarse chunks SSBO. */
+    if (active_coarse_chunks_) {
+      int coarse_slot = GPU_shader_get_ssbo_binding(classify_sh_, "active_coarse_chunks");
+      GPU_storagebuf_bind(active_coarse_chunks_, coarse_slot);
+    }
 
-    /* Push constants. */
+    /* Bind hash table SSBO as storage. */
+    if (hash_table_ssbo_) {
+      int hash_slot = GPU_shader_get_ssbo_binding(classify_sh_, "hash_table");
+      GPU_storagebuf_bind(hash_table_ssbo_, hash_slot);
+    }
+
+    /* Push constants.
+     * The classify shader works in absolute world-grid coordinates (brick coords
+     * can be negative), so atlas_origin must be 0 — it converts absolute brick
+     * coords to world positions directly. */
     GPU_shader_uniform_1i(classify_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(classify_sh_, "voxel_size", voxel_size_);
-    GPU_shader_uniform_3fv(classify_sh_, "atlas_origin", atlas_origin_);
-    GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", grid_res_);
+    GPU_shader_uniform_3fv(classify_sh_, "atlas_origin", float3(0.0f));
+    GPU_shader_uniform_1i(classify_sh_, "active_chunk_count", active_coarse_chunk_count_);
 
     /* Compute max blend across all objects. Smooth union pushes the
      * iso-surface outward by up to k/4 per blending pair. */
@@ -1863,25 +1946,24 @@ class Instance : public DrawEngine {
       max_blend_ = math::max(max_blend_, obj.blend);
     }
 
-    /* Brick half-diagonal: conservative surface test distance.
-     * The classify shader evaluates the blended smooth-union SDF, so the
-     * result already accounts for smooth-union surface push — no need to
-     * add max_blend here.  surface_margin_ (UI "Surface Margin" %) lets
-     * the user widen the active-brick shell if needed. */
+    /* Brick half-diagonal: conservative surface test distance. */
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
     GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
     GPU_shader_uniform_1f(classify_sh_, "max_blend", max_blend_);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
+    GPU_shader_uniform_3iv(classify_sh_, "brick_offset", brick_offset_);
 
-    /* Dispatch: one thread per brick, local group size is 4x4x4. */
-    GPU_compute_dispatch(classify_sh_,
-                         divide_ceil_u(grid_res_.x, 4),
-                         divide_ceil_u(grid_res_.y, 4),
-                         divide_ceil_u(grid_res_.z, 4));
+    /* Dispatch: one threadgroup per coarse chunk (which corresponds to 4x4x4 fine bricks). */
+    int dispatch_count = active_coarse_chunk_count_;
+    if (dispatch_count > 0) {
+      uint disp_x = uint(math::min(dispatch_count, 65535));
+      uint disp_y = uint(divide_ceil_u(dispatch_count, 65535));
+      GPU_shader_uniform_1i(classify_sh_, "dispatch_width", int(disp_x));
+      GPU_compute_dispatch(classify_sh_, disp_x, disp_y, 1);
+    }
 
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
-    GPU_texture_image_unbind(indirection_tx_);
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     GPU_shader_unbind();
 
     /* Deferred readback: the bake shader reads brick_counter.count from the
@@ -1935,7 +2017,7 @@ class Instance : public DrawEngine {
     /* Push constants. */
     GPU_shader_uniform_1i(bake_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(bake_sh_, "voxel_size", voxel_size_);
-    GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
+    GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", float3(0.0f));
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
@@ -2006,10 +2088,10 @@ class Instance : public DrawEngine {
       GPU_texture_bind(compact_atlas_tx_, atlas_slot);
     }
 
-    /* Bind indirection as sampler. */
-    int indir_slot = GPU_shader_get_sampler_binding(march_sh_, "indirection_tx");
-    if (indirection_tx_) {
-      GPU_texture_bind(indirection_tx_, indir_slot);
+    /* Bind hash table SSBO for brick-to-slot lookups. */
+    if (hash_table_ssbo_) {
+      int ht_slot = GPU_shader_get_ssbo_binding(march_sh_, "hash_table");
+      GPU_storagebuf_bind(hash_table_ssbo_, ht_slot);
     }
 
     /* Bind object ID atlas for debug visualization. */
@@ -2050,6 +2132,9 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "use_instanced", use_instanced_ ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "instance_count", int(instances_.size()));
     GPU_shader_uniform_1i(march_sh_, "bvh_node_count", int(bvh_nodes_.size()));
+    float bounds_margin = max_blend_ +
+                          (float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f) * surface_margin_;
+    GPU_shader_uniform_1f(march_sh_, "bounds_margin", bounds_margin);
 
     GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
     GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
@@ -2093,9 +2178,6 @@ class Instance : public DrawEngine {
 
     if (compact_atlas_tx_) {
       GPU_texture_unbind(compact_atlas_tx_);
-    }
-    if (indirection_tx_) {
-      GPU_texture_unbind(indirection_tx_);
     }
     if (object_id_tx_) {
       GPU_texture_unbind(object_id_tx_);
@@ -2230,126 +2312,126 @@ class Instance : public DrawEngine {
     return GPU_batch_create_ex(GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
   }
 
+  /** CPU-side hash function matching the GLSL hashBrickKey in sdf_lib.glsl. */
+  static uint32_t hash_brick_key(int3 p)
+  {
+    uint32_t h = uint32_t(p.x) * 73856093u ^ uint32_t(p.y) * 19349663u ^
+                 uint32_t(p.z) * 83492791u;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return h;
+  }
+
+  /** Look up a brick coordinate in a CPU-side copy of the hash table. */
+  static int32_t hash_lookup(const Vector<HashEntry> &ht, int3 p)
+  {
+    uint32_t key = hash_brick_key(p);
+    uint32_t start = key % SDF_HASH_TABLE_SIZE;
+    for (uint32_t i = 0; i < 32; i++) {
+      uint32_t idx = (start + i) % SDF_HASH_TABLE_SIZE;
+      if (ht[idx].key == key) {
+        return ht[idx].value;
+      }
+      if (ht[idx].key == 0xFFFFFFFFu) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+
+  /** Insert a (coord, value) pair into a CPU-side hash table copy. */
+  static void hash_insert(Vector<HashEntry> &ht, int3 p, int32_t value)
+  {
+    uint32_t key = hash_brick_key(p);
+    uint32_t start = key % SDF_HASH_TABLE_SIZE;
+    for (uint32_t i = 0; i < 32; i++) {
+      uint32_t idx = (start + i) % SDF_HASH_TABLE_SIZE;
+      if (ht[idx].key == 0xFFFFFFFFu || ht[idx].key == key) {
+        ht[idx].key = key;
+        ht[idx].value = value;
+        return;
+      }
+    }
+  }
+
   void rebuild_grid_batch_active()
   {
-    if (!indirection_tx_) {
+    if (!active_bricks_ || active_brick_count_ <= 0) {
       return;
     }
 
-    /* Read back indirection texture to find active bricks. */
-    int32_t *data = static_cast<int32_t *>(
-        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
-    if (!data) {
-      return;
-    }
-
-    int3 n = grid_res_;
-
-    /* Track processed slots to avoid drawing duplicate coarse boxes. */
-    int max_slot = 0;
-    int total = n.x * n.y * n.z;
-    for (int i = 0; i < total; i++) {
-      if (data[i] >= 0) {
-        int slot = data[i] >> 2;
-        max_slot = std::max(max_slot, slot);
-      }
-    }
-
-    Vector<char> slot_processed(max_slot + 1, 0);
-    int unique_bricks = 0;
-    
-    for (int i = 0; i < total; i++) {
-      if (data[i] >= 0) {
-        int slot = data[i] >> 2;
-        if (!slot_processed[slot]) {
-          unique_bricks++;
-          slot_processed[slot] = 1;
-        }
-      }
-    }
-
-    if (unique_bricks == 0) {
-      MEM_freeN(data);
-      return;
-    }
+    /* Read back active bricks directly instead of probing the full grid volume.
+     * This is O(active_bricks) instead of O(grid_volume), critical when objects
+     * are far apart and grid_res spans enormous empty space. */
+    Vector<ActiveBrick> bricks(active_brick_count_);
+    GPU_storagebuf_read(active_bricks_, bricks.data());
 
     /* 12 edges per cube, 2 vertices per edge = 24 vertices per active brick. */
-    Vector<float3> positions(unique_bricks * 24);
-    Vector<float4> colors(unique_bricks * 24);
-    int vi = 0;
+    Vector<float3> positions;
+    Vector<float4> colors;
+    positions.reserve(active_brick_count_ * 24);
+    colors.reserve(active_brick_count_ * 24);
 
-    slot_processed.fill(0);
+    for (int i = 0; i < active_brick_count_; i++) {
+      int3 brick_coord = int3(bricks[i].coord.x, bricks[i].coord.y, bricks[i].coord.z);
+      int packed_w = bricks[i].coord.w;
+      int lod = packed_w & 3;
 
-    for (int z = 0; z < n.z; z++) {
-      for (int y = 0; y < n.y; y++) {
-        for (int x = 0; x < n.x; x++) {
-          int idx = x + y * n.x + z * n.x * n.y;
-          if (data[idx] < 0) {
-            continue;
-          }
+      int scale_shift = 2 - lod;
+      int size_in_fine = 1 << scale_shift;
 
-          int slot = data[idx] >> 2;
-          int lod = data[idx] & 3;
+      float lod_brick_world = float(SDF_BRICK_SIZE * size_in_fine) * voxel_size_;
+      float3 lo = atlas_origin_ +
+                  float3(brick_coord) * float(SDF_BRICK_SIZE) * voxel_size_;
+      float3 hi = lo + float3(lod_brick_world);
 
-          if (slot_processed[slot]) {
-            continue;
-          }
-          slot_processed[slot] = 1;
-
-          int scale_shift = 2 - lod;
-          int size_in_fine = 1 << scale_shift;
-          int bx = (x >> scale_shift) << scale_shift;
-          int by = (y >> scale_shift) << scale_shift;
-          int bz = (z >> scale_shift) << scale_shift;
-
-          float lod_brick_world = float(SDF_BRICK_SIZE * size_in_fine) * voxel_size_;
-          float3 lo = atlas_origin_ + float3(float(bx), float(by), float(bz)) * float(SDF_BRICK_SIZE) * voxel_size_;
-          float3 hi = lo + float3(lod_brick_world);
-
-          float4 col;
-          if (lod == 0) {
-            col = float4(0.0f, 1.0f, 0.0f, 1.0f); // Green for coarse
-          } else if (lod == 1) {
-            col = float4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow for medium
-          } else {
-            col = float4(1.0f, 0.0f, 0.0f, 1.0f); // Red for fine
-          }
-
-          /* Bottom face edges. */
-          positions[vi] = float3(lo.x, lo.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, lo.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, lo.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, hi.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, hi.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, hi.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, hi.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, lo.y, lo.z); colors[vi++] = col;
-
-          /* Top face edges. */
-          positions[vi] = float3(lo.x, lo.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, lo.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, lo.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, hi.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, hi.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, hi.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, hi.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, lo.y, hi.z); colors[vi++] = col;
-
-          /* Vertical edges. */
-          positions[vi] = float3(lo.x, lo.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, lo.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, lo.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, lo.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, hi.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(hi.x, hi.y, hi.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, hi.y, lo.z); colors[vi++] = col;
-          positions[vi] = float3(lo.x, hi.y, hi.z); colors[vi++] = col;
-        }
+      float4 col;
+      if (lod == 0) {
+        col = float4(0.0f, 1.0f, 0.0f, 1.0f); /* Green for coarse */
       }
+      else if (lod == 1) {
+        col = float4(1.0f, 1.0f, 0.0f, 1.0f); /* Yellow for medium */
+      }
+      else {
+        col = float4(1.0f, 0.0f, 0.0f, 1.0f); /* Red for fine */
+      }
+
+      /* Bottom face edges. */
+      positions.append(float3(lo.x, lo.y, lo.z)); colors.append(col);
+      positions.append(float3(hi.x, lo.y, lo.z)); colors.append(col);
+      positions.append(float3(hi.x, lo.y, lo.z)); colors.append(col);
+      positions.append(float3(hi.x, hi.y, lo.z)); colors.append(col);
+      positions.append(float3(hi.x, hi.y, lo.z)); colors.append(col);
+      positions.append(float3(lo.x, hi.y, lo.z)); colors.append(col);
+      positions.append(float3(lo.x, hi.y, lo.z)); colors.append(col);
+      positions.append(float3(lo.x, lo.y, lo.z)); colors.append(col);
+
+      /* Top face edges. */
+      positions.append(float3(lo.x, lo.y, hi.z)); colors.append(col);
+      positions.append(float3(hi.x, lo.y, hi.z)); colors.append(col);
+      positions.append(float3(hi.x, lo.y, hi.z)); colors.append(col);
+      positions.append(float3(hi.x, hi.y, hi.z)); colors.append(col);
+      positions.append(float3(hi.x, hi.y, hi.z)); colors.append(col);
+      positions.append(float3(lo.x, hi.y, hi.z)); colors.append(col);
+      positions.append(float3(lo.x, hi.y, hi.z)); colors.append(col);
+      positions.append(float3(lo.x, lo.y, hi.z)); colors.append(col);
+
+      /* Vertical edges. */
+      positions.append(float3(lo.x, lo.y, lo.z)); colors.append(col);
+      positions.append(float3(lo.x, lo.y, hi.z)); colors.append(col);
+      positions.append(float3(hi.x, lo.y, lo.z)); colors.append(col);
+      positions.append(float3(hi.x, lo.y, hi.z)); colors.append(col);
+      positions.append(float3(hi.x, hi.y, lo.z)); colors.append(col);
+      positions.append(float3(hi.x, hi.y, hi.z)); colors.append(col);
+      positions.append(float3(lo.x, hi.y, lo.z)); colors.append(col);
+      positions.append(float3(lo.x, hi.y, hi.z)); colors.append(col);
     }
 
-    MEM_freeN(data);
-    grid_batch_ = create_colored_line_batch(positions.data(), colors.data(), vi);
+    grid_batch_ = create_colored_line_batch(
+        positions.data(), colors.data(), int(positions.size()));
   }
 
   /** Emit 12 wireframe edges (24 vertices) for an axis-aligned box. */
@@ -2594,34 +2676,39 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Use builtin 3D uniform color shader. */
-    gpu::Shader *shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_UNIFORM_COLOR);
-    GPU_shader_bind(shader);
-
     /* MVP = persmat (lines are in world space, no model transform). */
     View &view = View::default_get();
     float4x4 mvp = view.persmat();
-    GPU_shader_uniform_mat4(shader, "ModelViewProjectionMatrix", mvp.ptr());
 
     GPU_blend(GPU_BLEND_ALPHA);
     GPU_depth_mask(false); /* Grid lines don't write depth. */
 
-    GPU_batch_set_shader(grid_batch_, shader);
-
     /* --- Pass 1: Occluded lines (behind SDF surface) ---
      * Drawn first so front lines overdraw on top. Faint ghost
      * lines give spatial context without visual clutter. */
-    GPU_depth_test(GPU_DEPTH_GREATER);
-    GPU_line_width(1.0f);
-    GPU_shader_uniform_4f(shader, "color", 0.0f, 0.6f, 0.0f, 0.1f);
-    GPU_batch_draw(grid_batch_);
+    {
+      gpu::Shader *uc_shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_UNIFORM_COLOR);
+      GPU_shader_bind(uc_shader);
+      GPU_shader_uniform_mat4(uc_shader, "ModelViewProjectionMatrix", mvp.ptr());
+      GPU_batch_set_shader(grid_batch_, uc_shader);
+      GPU_depth_test(GPU_DEPTH_GREATER);
+      GPU_line_width(1.0f);
+      GPU_shader_uniform_4f(uc_shader, "color", 0.4f, 0.4f, 0.4f, 0.08f);
+      GPU_batch_draw(grid_batch_);
+    }
 
     /* --- Pass 2: Front lines (in front of SDF surface) ---
-     * Bright and slightly thicker for clear readability. */
-    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-    GPU_line_width(1.5f);
-    GPU_shader_uniform_4f(shader, "color", 0.0f, 1.0f, 0.0f, 0.8f);
-    GPU_batch_draw(grid_batch_);
+     * Uses flat color shader to show per-vertex LOD colors:
+     * Green = LOD0 (coarse), Yellow = LOD1 (medium), Red = LOD2 (fine). */
+    {
+      gpu::Shader *fc_shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_FLAT_COLOR);
+      GPU_shader_bind(fc_shader);
+      GPU_shader_uniform_mat4(fc_shader, "ModelViewProjectionMatrix", mvp.ptr());
+      GPU_batch_set_shader(grid_batch_, fc_shader);
+      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+      GPU_line_width(1.5f);
+      GPU_batch_draw(grid_batch_);
+    }
 
     /* Restore state. */
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
@@ -2800,25 +2887,19 @@ class Instance : public DrawEngine {
     grid_objects_.clear();
   }
 
-  void clear_indirection()
-  {
-    /* Initialize all bricks as outside (-1). */
-    int total = grid_res_.x * grid_res_.y * grid_res_.z;
-    Vector<int32_t> data(total, -1);
-    GPU_texture_update(indirection_tx_, GPU_DATA_INT, data.data());
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    active_brick_count_ = 0;
-  }
-
   void augment_indirection_for_grids()
   {
+    if (!hash_table_ssbo_) {
+      return;
+    }
+
     /* Mark all bricks overlapping each grid object's world AABB as active.
      * Uses simple sequential slot assignment. */
     float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
 
-    /* Read current indirection (already written by classify or clear). */
-    int32_t *data = static_cast<int32_t *>(
-        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+    /* Read current hash table (already written by GPU classify). */
+    Vector<HashEntry> ht(SDF_HASH_TABLE_SIZE);
+    GPU_storagebuf_read(hash_table_ssbo_, ht.data());
 
     Vector<ActiveBrick> new_bricks;
     int next_slot = active_brick_count_;
@@ -2835,20 +2916,20 @@ class Instance : public DrawEngine {
         gmax = math::max(gmax, wc);
       }
 
-      int3 bmin = int3(math::floor((gmin - atlas_origin_) / brick_world));
-      int3 bmax = int3(math::floor((gmax - atlas_origin_) / brick_world));
-      bmin = math::max(bmin, int3(0));
-      bmax = math::min(bmax, grid_res_ - int3(1));
+      /* Compute absolute brick range, then convert to relative for hash ops. */
+      int3 bmin = int3(math::floor(gmin / brick_world));
+      int3 bmax = int3(math::floor(gmax / brick_world));
 
       for (int bz = bmin.z; bz <= bmax.z; bz++) {
         for (int by = bmin.y; by <= bmax.y; by++) {
           for (int bx = bmin.x; bx <= bmax.x; bx++) {
-            int idx = bx + by * grid_res_.x + bz * grid_res_.x * grid_res_.y;
-            if (data[idx] >= 0) {
+            int3 brick_abs = int3(bx, by, bz);
+            int3 brick_rel = brick_abs - brick_offset_;
+            if (hash_lookup(ht, brick_rel) >= 0) {
               continue; /* Already active from analytic classify. */
             }
             int slot = next_slot++;
-            data[idx] = slot;
+            hash_insert(ht, brick_rel, slot);
 
             ActiveBrick ab = {};
             ab.coord = int4(bx, by, bz, slot);
@@ -2860,10 +2941,9 @@ class Instance : public DrawEngine {
 
     active_brick_count_ = next_slot;
 
-    /* Re-upload modified indirection. */
-    GPU_texture_update(indirection_tx_, GPU_DATA_INT, data);
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    MEM_freeN(data);
+    /* Re-upload modified hash table. */
+    GPU_storagebuf_update(hash_table_ssbo_, ht.data());
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
     /* Append grid bricks to the active_bricks SSBO. */
     if (!new_bricks.is_empty()) {
@@ -2928,7 +3008,7 @@ class Instance : public DrawEngine {
 
       /* Push constants. */
       GPU_shader_uniform_1f(grid_blend_sh_, "voxel_size", voxel_size_);
-      GPU_shader_uniform_3fv(grid_blend_sh_, "atlas_origin", atlas_origin_);
+      GPU_shader_uniform_3fv(grid_blend_sh_, "atlas_origin", float3(0.0f));
       GPU_shader_uniform_1i(grid_blend_sh_, "bricks_per_axis", bricks_per_axis_);
       GPU_shader_uniform_mat4(
           grid_blend_sh_, "grid_world_to_texture", grid.world_to_texture.ptr());
@@ -3103,7 +3183,7 @@ class Instance : public DrawEngine {
     /* Clear static pointers BEFORE freeing resources to prevent
      * dangling access from overlay/selection code. */
     s_compact_atlas = nullptr;
-    s_indirection = nullptr;
+    s_hash_table = nullptr;
     s_object_id_atlas = nullptr;
     s_object_ssbo = nullptr;
     s_perf_active = false;
@@ -3112,9 +3192,6 @@ class Instance : public DrawEngine {
     }
     if (march_fb_) {
       GPU_framebuffer_free(march_fb_);
-    }
-    if (indirection_tx_) {
-      GPU_texture_free(indirection_tx_);
     }
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
@@ -3177,9 +3254,9 @@ gpu::Texture *sdf_atlas_get()
   return s_compact_atlas;
 }
 
-gpu::Texture *sdf_indirection_get()
+gpu::StorageBuf *sdf_hash_table_get()
 {
-  return s_indirection;
+  return s_hash_table;
 }
 
 gpu::Texture *sdf_object_id_atlas_get()
@@ -3187,19 +3264,29 @@ gpu::Texture *sdf_object_id_atlas_get()
   return s_object_id_atlas;
 }
 
-void sdf_atlas_params_get(
-    float *voxel_size, float3 *origin, float3 *extent, int3 *grid_resolution, int *bricks_per_axis)
+void sdf_atlas_params_get(float *voxel_size,
+                          float3 *origin,
+                          float3 *extent,
+                          int3 *grid_resolution,
+                          int3 *brick_offset_out,
+                          int *bricks_per_axis)
 {
   *voxel_size = s_voxel_size;
   *origin = s_atlas_origin;
   *extent = s_atlas_extent;
   *grid_resolution = s_grid_resolution;
+  *brick_offset_out = s_brick_offset;
   *bricks_per_axis = s_bricks_per_axis;
 }
 
 int sdf_object_count_get()
 {
   return s_object_count;
+}
+
+float sdf_bounds_margin_get()
+{
+  return s_bounds_margin;
 }
 
 gpu::StorageBuf *sdf_objects_ssbo_get()

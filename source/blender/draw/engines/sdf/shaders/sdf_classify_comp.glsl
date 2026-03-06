@@ -17,6 +17,21 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
 #include "sdf_lib.glsl"
 
+/** Insert into hash table using relative coordinates (p - brick_offset). */
+void hashInsert(int3 p, int value) {
+  int3 rel = p - brick_offset;
+  uint key = hashBrickKey(rel);
+  uint start_idx = key % uint(SDF_HASH_TABLE_SIZE);
+  for (uint i = 0u; i < 32u; i++) {
+    uint idx = (start_idx + i) % uint(SDF_HASH_TABLE_SIZE);
+    uint old_key = atomicCompSwap(hash_table[idx].key, 0xFFFFFFFFu, key);
+    if (old_key == 0xFFFFFFFFu || old_key == key) {
+      hash_table[idx].value = value;
+      return;
+    }
+  }
+}
+
 #define BRICK_SIZE 8
 #define MAX_CANDIDATES 64
 
@@ -148,12 +163,15 @@ void evaluateBlock(float3 center, float half_size, int num_candidates, float sca
 }
 
 void main() {
-  int3 coarse_brick = int3(gl_WorkGroupID);
+  int chunk_idx = int(gl_WorkGroupID.y * uint(dispatch_width) + gl_WorkGroupID.x);
+  if (chunk_idx >= active_chunk_count) return;
+
+  int3 coarse_brick = active_coarse_chunks[chunk_idx].xyz;
   int3 local_id = int3(gl_LocalInvocationID);
   uint tid = gl_LocalInvocationIndex;
 
   int3 fine_brick = coarse_brick * 4 + local_id;
-  bool is_valid_fine = all(lessThan(fine_brick, grid_resolution.xyz));
+  bool is_valid_fine = true;
 
   float lod0_half_size = float(LOD0_SCALE * BRICK_SIZE) * 0.5f * voxel_size;
   float3 lod0_center = atlas_origin + (float3(coarse_brick * 4) * float(BRICK_SIZE) + float(LOD0_SCALE * BRICK_SIZE) * 0.5f) * voxel_size;
@@ -193,12 +211,12 @@ void main() {
 
   int num_cands = shared_num_candidates;
   if (num_cands == 0) {
-    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4(-1, 0, 0, 0));
+    if (is_valid_fine) hashInsert(fine_brick, -1);
     return;
   }
 
   /* 2. Evaluate LOD0 (Thread 0) */
-  float bound0 = lod0_half_size * 1.73205f + max_blend + brick_half_diag;
+  float bound0 = lod0_half_size * 1.73205f + brick_half_diag;
   if (tid == 0u) {
     float d_c, error;
     bool is_empty;
@@ -222,17 +240,17 @@ void main() {
   barrier();
 
   if (lod0_status.status == 0) {
-    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4(lod0_status.slot, 0, 0, 0));
+    if (is_valid_fine) hashInsert(fine_brick, lod0_status.slot);
     return;
   }
   if (lod0_status.status == 2) {
-    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4((lod0_status.slot << 2) | 0, 0, 0, 0));
+    if (is_valid_fine) hashInsert(fine_brick, (lod0_status.slot << 2) | 0);
     return;
   }
 
   /* 3. Evaluate LOD1 (Threads 0..7) */
   float lod1_half_size = lod0_half_size * 0.5f;
-  float bound1 = lod1_half_size * 1.73205f + max_blend + brick_half_diag;
+  float bound1 = lod1_half_size * 1.73205f + brick_half_diag;
   if (tid < 8u) {
     int3 l1_offset = int3(tid % 2, (tid / 2) % 2, tid / 4);
     float3 lod1_center = lod0_center + (float3(l1_offset) * 2.0f - 1.0f) * lod1_half_size;
@@ -261,11 +279,11 @@ void main() {
 
   int l1_idx = local_id.x / 2 + (local_id.y / 2) * 2 + (local_id.z / 2) * 4;
   if (lod1_status[l1_idx].status == 0) {
-    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4(lod1_status[l1_idx].slot, 0, 0, 0));
+    if (is_valid_fine) hashInsert(fine_brick, lod1_status[l1_idx].slot);
     return;
   }
   if (lod1_status[l1_idx].status == 2) {
-    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4((lod1_status[l1_idx].slot << 2) | 1, 0, 0, 0));
+    if (is_valid_fine) hashInsert(fine_brick, (lod1_status[l1_idx].slot << 2) | 1);
     return;
   }
 
@@ -277,12 +295,12 @@ void main() {
 
     if (abs(d_c) < brick_half_diag) {
       int slot = int(atomicAdd(brick_counter.count, 1u));
-      imageStore(indirection_tex, fine_brick, int4((slot << 2) | 2, 0, 0, 0));
+      hashInsert(fine_brick, (slot << 2) | 2);
       active_bricks[slot].coord = int4(fine_brick, (slot << 2) | 2);
     } else if (d_c < 0.0f) {
-      imageStore(indirection_tex, fine_brick, int4(-2, 0, 0, 0));
+      hashInsert(fine_brick, -2);
     } else {
-      imageStore(indirection_tex, fine_brick, int4(-1, 0, 0, 0));
+      hashInsert(fine_brick, -1);
     }
   }
 }

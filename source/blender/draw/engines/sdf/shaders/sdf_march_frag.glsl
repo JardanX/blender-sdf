@@ -23,6 +23,22 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
+int hashLookup(int3 p) {
+  uint key = hashBrickKey(p);
+  uint start_idx = key % uint(SDF_HASH_TABLE_SIZE);
+  for (uint i = 0u; i < 32u; i++) {
+    uint idx = (start_idx + i) % uint(SDF_HASH_TABLE_SIZE);
+    uint k = hash_table[idx].key;
+    if (k == key) {
+      return hash_table[idx].value;
+    }
+    if (k == 0xFFFFFFFFu) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 
@@ -204,6 +220,7 @@ void dda_march(float3 ray_origin,
   float t_current = t_enter;
 
   for (int bstep = 0; bstep < MAX_BRICK_STEPS; bstep++) {
+    /* Bounds check: brick_cell must be within [0, grid_res). */
     if (any(lessThan(brick_cell, int3(0))) || any(greaterThanEqual(brick_cell, grid_res))) {
       break;
     }
@@ -211,10 +228,12 @@ void dda_march(float3 ray_origin,
     float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
     t_brick_exit = min(t_brick_exit, t_exit);
 
-    /* Read indirection: from texture (world-space) or SSBO (instanced). */
+    /* Read indirection: from hash table (world-space) or SSBO (instanced).
+     * Hash table stores relative coordinates (0-based from brick_offset),
+     * and brick_cell is already relative, so look up directly. */
     int slot_packed;
     if (indir_offset < 0) {
-      slot_packed = texelFetch(indirection_tx, brick_cell, 0).r;
+      slot_packed = hashLookup(brick_cell);
     }
     else {
       int flat_idx = brick_cell.x + brick_cell.y * grid_res.x +
@@ -619,30 +638,121 @@ void main()
     hit_normal = normalize(mat3(transpose(inst.world_to_local)) * local_normal);
   }
   else {
-    /* ---- World-space mode: global two-level DDA ---- */
+    /* ---- World-space mode: BVH-guided DDA ---- */
     int3 grid_res = grid_resolution;
     int3 total_res = grid_res * BRICK_SIZE;
     float3 grid_world_min = atlas_origin;
     float3 grid_world_max = atlas_origin + float3(total_res) * voxel_size;
 
     float3 inv_dir = 1.0f / ray_dir;
-    float3 t0 = (grid_world_min - ray_origin) * inv_dir;
-    float3 t1 = (grid_world_max - ray_origin) * inv_dir;
-    float3 t_lo = min(t0, t1);
-    float3 t_hi = max(t0, t1);
-    float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
-    float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
-    if (t_enter > t_exit || t_exit < 0.0f) {
-      discard;
-      return;
+    if (bvh_node_count > 0) {
+      /* BVH traversal: DDA only within ray-intersected object AABBs.
+       * Skips empty space between distant objects entirely. */
+      float best_t = 1e30f;
+
+      int stack[BVH_MAX_STACK];
+      int sp = 0;
+      stack[sp++] = 0;
+
+      while (sp > 0) {
+        int node_idx = stack[--sp];
+        BVHNodeGPU node = bvh_nodes[node_idx];
+
+        float node_t_near, node_t_far;
+        if (!ray_aabb_intersect(ray_origin, inv_dir,
+                                node.min_and_left.xyz, node.max_and_right.xyz,
+                                node_t_near, node_t_far))
+        {
+          continue;
+        }
+
+        if (node_t_near > best_t) {
+          continue;
+        }
+
+        int left = bvh_decode_int(node.min_and_left.w);
+        int right = bvh_decode_int(node.max_and_right.w);
+
+        if (left == -1) {
+          /* Leaf: expand AABB by bounds_margin to cover all baked bricks,
+           * clip to grid bounds, then DDA only within this interval. */
+          float3 leaf_min = max(node.min_and_left.xyz - float3(bounds_margin), grid_world_min);
+          float3 leaf_max = min(node.max_and_right.xyz + float3(bounds_margin), grid_world_max);
+
+          float leaf_t_near, leaf_t_far;
+          if (ray_aabb_intersect(ray_origin, inv_dir, leaf_min, leaf_max,
+                                  leaf_t_near, leaf_t_far))
+          {
+            leaf_t_near = max(leaf_t_near, 0.0f);
+
+            float leaf_hit_t;
+            int3 leaf_hit_brick, leaf_hit_cell;
+            int leaf_hit_slot, leaf_hit_lod;
+
+            dda_march(ray_origin, ray_dir, leaf_t_near, leaf_t_far,
+                      grid_res, atlas_origin, voxel_size, bricks_per_axis, -1,
+                      leaf_hit_t, leaf_hit_brick, leaf_hit_cell, leaf_hit_slot, leaf_hit_lod);
+
+            if (leaf_hit_t >= 0.0f && leaf_hit_t < best_t) {
+              best_t = leaf_hit_t;
+              hit_t = leaf_hit_t;
+              hit_brick = leaf_hit_brick;
+              hit_local_cell = leaf_hit_cell;
+              hit_slot = leaf_hit_slot;
+              hit_lod = leaf_hit_lod;
+            }
+          }
+        }
+        else {
+          /* Interior node: push children in near-to-far order for early termination. */
+          float t_left_near, t_left_far, t_right_near, t_right_far;
+
+          bool hit_left = ray_aabb_intersect(ray_origin, inv_dir,
+              bvh_nodes[left].min_and_left.xyz, bvh_nodes[left].max_and_right.xyz,
+              t_left_near, t_left_far);
+          bool hit_right = ray_aabb_intersect(ray_origin, inv_dir,
+              bvh_nodes[right].min_and_left.xyz, bvh_nodes[right].max_and_right.xyz,
+              t_right_near, t_right_far);
+
+          if (hit_left && hit_right) {
+            if (t_left_near < t_right_near) {
+              if (sp < BVH_MAX_STACK) { stack[sp++] = right; }
+              if (sp < BVH_MAX_STACK) { stack[sp++] = left; }
+            }
+            else {
+              if (sp < BVH_MAX_STACK) { stack[sp++] = left; }
+              if (sp < BVH_MAX_STACK) { stack[sp++] = right; }
+            }
+          }
+          else if (hit_left) {
+            if (sp < BVH_MAX_STACK) { stack[sp++] = left; }
+          }
+          else if (hit_right) {
+            if (sp < BVH_MAX_STACK) { stack[sp++] = right; }
+          }
+        }
+      }
     }
-    t_enter = max(t_enter, 0.0f);
+    else {
+      /* Fallback: full grid DDA (no BVH available, e.g. grid-only scenes). */
+      float3 t0 = (grid_world_min - ray_origin) * inv_dir;
+      float3 t1 = (grid_world_max - ray_origin) * inv_dir;
+      float3 t_lo = min(t0, t1);
+      float3 t_hi = max(t0, t1);
+      float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+      float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
-    /* DDA through world-space atlas. */
-    dda_march(ray_origin, ray_dir, t_enter, t_exit,
-              grid_res, atlas_origin, voxel_size, bricks_per_axis, -1,
-              hit_t, hit_brick, hit_local_cell, hit_slot, hit_lod);
+      if (t_enter > t_exit || t_exit < 0.0f) {
+        discard;
+        return;
+      }
+      t_enter = max(t_enter, 0.0f);
+
+      dda_march(ray_origin, ray_dir, t_enter, t_exit,
+                grid_res, atlas_origin, voxel_size, bricks_per_axis, -1,
+                hit_t, hit_brick, hit_local_cell, hit_slot, hit_lod);
+    }
 
     if (hit_t < 0.0f) {
       discard;

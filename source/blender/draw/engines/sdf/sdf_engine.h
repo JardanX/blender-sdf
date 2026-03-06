@@ -37,13 +37,13 @@ const char *sdf_perf_info_get();
 /** Returns true if performance data is valid and should be displayed. */
 bool sdf_perf_active();
 
-/** Returns the compact SDF atlas texture, or nullptr if not baked. */
+/** Returns the compact atlas texture (rgba16f), or nullptr. */
 gpu::Texture *sdf_atlas_get();
 
-/** Returns the indirection texture, or nullptr. */
-gpu::Texture *sdf_indirection_get();
+/** Returns the hash table SSBO for brick-to-slot lookups, or nullptr. */
+gpu::StorageBuf *sdf_hash_table_get();
 
-/** Returns the object ID atlas texture, or nullptr. */
+/** Returns the object ID atlas texture (r32i), or nullptr. */
 gpu::Texture *sdf_object_id_atlas_get();
 
 /** Returns current atlas parameters. */
@@ -51,10 +51,14 @@ void sdf_atlas_params_get(float *voxel_size,
                           float3 *origin,
                           float3 *extent,
                           int3 *grid_resolution,
+                          int3 *brick_offset,
                           int *bricks_per_axis);
 
 /** Returns the number of SDF objects in the current bake. */
 int sdf_object_count_get();
+
+/** Returns the bounds margin used for AABB expansion during classify/bake. */
+float sdf_bounds_margin_get();
 
 /** Returns the objects SSBO (SDFObjectGPU[]), or nullptr. */
 gpu::StorageBuf *sdf_objects_ssbo_get();

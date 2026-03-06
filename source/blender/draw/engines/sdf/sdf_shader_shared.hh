@@ -40,6 +40,12 @@ struct BrickCounter {
   uint _pad2;
 };
 
+/** Spatial Hash Table Entry for SSBO. */
+struct HashEntry {
+  uint key;   /* 32-bit spatial hash of the int3 fine brick coordinate. */
+  int value;  /* compact atlas slot, -1 for empty, -2 for fully inside. */
+};
+
 /** Active brick coordinate entry (written by classify, read by bake/grid_blend). */
 struct ActiveBrick {
   int4 coord; /* xyz = brick coordinate, w = compact atlas slot index */
