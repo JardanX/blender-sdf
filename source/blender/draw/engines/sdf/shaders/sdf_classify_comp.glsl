@@ -3,198 +3,267 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /**
- * SDF classify compute shader.
- * One thread per brick. Evaluates SDF at brick center to determine if the
- * brick contains surface. Active bricks get a compact atlas slot via atomic
- * counter; void bricks are marked -1 (outside) or -2 (inside).
+ * SDF classify compute shader (Virtual Octree).
+ * Evaluates blocks of 4x4x4 fine bricks (LOD0).
+ * Subdivides to 2x2x2 (LOD1) and 1x1x1 (LOD2) based on SDF linearity.
+ * Outputs flat indirection texture with identical packed pointers for coarse blocks.
  */
 
 #include "infos/sdf_shader_infos.hh"
 
 COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
 #include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
 #define MAX_CANDIDATES 64
 
-/* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
+#define LOD0_SCALE 4
+#define LOD1_SCALE 2
+#define LOD2_SCALE 1
+
+/* SDF primitive types. */
 #define SDF_TYPE_BOX 0
 #define SDF_TYPE_SPHERE 1
 #define SDF_TYPE_CAPSULE 4
 #define SDF_TYPE_TORUS 5
 
-float sdSphere(float3 p, float r)
-{
-  return length(p) - r;
-}
-
-float sdCapsule(float3 p, float3 size)
-{
+float sdSphere(float3 p, float r) { return length(p) - r; }
+float sdCapsule(float3 p, float3 size) {
   float h = size.y;
   float r = size.x;
   p.y -= clamp(p.y, -h, h);
   return length(p) - r;
 }
-
-float sdTorus(float3 p, float2 t)
-{
+float sdTorus(float3 p, float2 t) {
   float2 q = float2(length(p.xz) - t.x, p.y);
   return length(q) - t.y;
 }
 
-/** Evaluate the actual SDF primitive for an object (not just box). */
-float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
-{
+float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj) {
   float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
-  float dist;
-
-  if (obj.sdf_type == SDF_TYPE_SPHERE) {
-    dist = sdSphere(local_pos, size.x - bevel);
+  if (obj.sdf_type == SDF_TYPE_SPHERE) return sdSphere(local_pos, size.x - bevel) - bevel;
+  if (obj.sdf_type == SDF_TYPE_CAPSULE) {
+    float3 cap_size = max(size - float3(bevel), float3(0.001f));
+    return sdCapsule(local_pos, cap_size) - bevel;
   }
-  else if (obj.sdf_type == SDF_TYPE_CAPSULE) {
-    float3 cap_size = size - float3(bevel);
-    cap_size = max(cap_size, float3(0.001f));
-    dist = sdCapsule(local_pos, cap_size);
+  if (obj.sdf_type == SDF_TYPE_TORUS) {
+    float major = max(size.x - bevel, 0.001f);
+    float minor = max(size.y - bevel, 0.001f);
+    return sdTorus(local_pos, float2(major, minor)) - bevel;
   }
-  else if (obj.sdf_type == SDF_TYPE_TORUS) {
-    float major = size.x - bevel;
-    float minor = size.y - bevel;
-    major = max(major, 0.001f);
-    minor = max(minor, 0.001f);
-    dist = sdTorus(local_pos, float2(major, minor));
-  }
-  else {
-    /* SDF_TYPE_BOX (default). */
-    float3 box_size = size - float3(bevel);
-    box_size = max(box_size, float3(0.001f));
-    dist = sdBox(local_pos, box_size);
-  }
-
-  return dist - bevel;
+  float3 box_size = max(size - float3(bevel), float3(0.001f));
+  return sdBox(local_pos, box_size) - bevel;
 }
 
-void main()
-{
-  int3 brick = int3(gl_GlobalInvocationID);
+shared int shared_candidates[MAX_CANDIDATES];
+shared int shared_num_candidates;
 
-  if (any(greaterThanEqual(brick, grid_resolution.xyz))) {
-    return;
-  }
+struct BlockStatus {
+  int status; // 0: empty/inside, 1: subdivide, 2: allocated leaf
+  int slot;
+};
+shared BlockStatus lod0_status;
+shared BlockStatus lod1_status[8];
 
-  /* World-space center of this brick. */
-  float3 brick_center = atlas_origin +
-                         (float3(brick) * float(BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) *
-                             voxel_size;
-
-  /* Per-brick AABB for object culling.
-   * Expand by brick_half_diag to match the surface test threshold,
-   * plus max_blend to capture objects contributing to smooth union. */
-  float expand = brick_half_diag + max_blend;
-  float3 brick_min = brick_center - float3(expand);
-  float3 brick_max = brick_center + float3(expand);
-
-  /* Collect candidate objects from BVH, then evaluate in index order.
-   * Deterministic evaluation order ensures consistent blending when
-   * objects have different blend values. */
-  int candidates[MAX_CANDIDATES];
-  int num_candidates = 0;
-
-  if (bvh_node_count > 0) {
-    int stack[BVH_MAX_STACK];
-    int sp = 0;
-    stack[sp++] = 0;
-
-    while (sp > 0) {
-      int node_idx = stack[--sp];
-      BVHNodeGPU node = bvh_nodes[node_idx];
-
-      if (!aabb_overlap(brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz)) {
-        continue;
-      }
-
-      int left = bvh_decode_int(node.min_and_left.w);
-      int right = bvh_decode_int(node.max_and_right.w);
-
-      if (left == -1) {
-        if (num_candidates < MAX_CANDIDATES) {
-          candidates[num_candidates++] = right;
-        }
-      }
-      else {
-        if (sp < BVH_MAX_STACK - 1) {
-          stack[sp++] = left;
-          stack[sp++] = right;
-        }
-      }
-    }
-
-    /* Sort candidates by object index (insertion sort, small N). */
-    for (int i = 1; i < num_candidates; i++) {
-      int key = candidates[i];
-      int j = i - 1;
-      while (j >= 0 && candidates[j] > key) {
-        candidates[j + 1] = candidates[j];
-        j--;
-      }
-      candidates[j + 1] = key;
-    }
-  }
-  else {
-    /* Fallback: linear scan collects all AABB-overlapping objects. */
-    for (int i = 0; i < object_count; i++) {
-      SDFObjectGPU obj = objects[i];
-
-      if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
-          any(lessThan(brick_max, obj.bbox_min.xyz))) {
-        continue;
-      }
-
-      if (num_candidates < MAX_CANDIDATES) {
-        candidates[num_candidates++] = i;
-      }
-    }
-    /* Already in index order, no sort needed. */
-  }
-
-  /* Evaluate candidates in deterministic index order. */
+/** Evaluate full SDF for a set of candidates. */
+float evalSDF(float3 pos, int num_candidates) {
   float acc_dist = 1e10f;
-
   for (int c = 0; c < num_candidates; c++) {
-    SDFObjectGPU obj = objects[candidates[c]];
-
-    float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
-
-    /* Evaluate actual SDF primitive (not just box proxy). Reduces
-     * false-positive active bricks for spheres, capsules, and tori. */
+    SDFObjectGPU obj = objects[shared_candidates[c]];
+    float3 local_pos = (obj.inverse_matrix * float4(pos - obj.position.xyz, 1.0f)).xyz;
     float dist = evalSDFPrimitive(local_pos, obj);
-
     float k = obj.blend;
     if (k > 0.0f && acc_dist < 1e9f) {
       float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
       acc_dist = mix(acc_dist, dist, h) - k * h * (1.0f - h);
-    }
-    else {
+    } else {
       acc_dist = min(acc_dist, dist);
     }
   }
+  return acc_dist;
+}
 
-  /* Conservative surface test: if the absolute distance at the brick center
-   * is less than the brick's half-diagonal, the surface might pass through. */
-  if (abs(acc_dist) < brick_half_diag) {
-    /* Active brick: allocate a compact atlas slot. */
-    uint slot = atomicAdd(brick_counter.count, 1u);
-    imageStore(indirection_tex, brick, int4(int(slot), 0, 0, 0));
-    /* Record brick coordinate for active-brick-only dispatch in bake/grid_blend. */
-    active_bricks[slot].coord = int4(brick, int(slot));
-  }
-  else if (acc_dist < 0.0f) {
-    /* Fully inside: mark as -2. */
-    imageStore(indirection_tex, brick, int4(-2, 0, 0, 0));
-  }
-  else {
-    /* Fully outside: mark as -1. */
-    imageStore(indirection_tex, brick, int4(-1, 0, 0, 0));
+/** Evaluate block properties: distance at center and linearity error.
+ * Uses MathOPS Engine 2's 7-point cross stencil for ultra-fast classification. */
+void evaluateBlock(float3 center, float half_size, int num_candidates, float scaled_threshold, out float d_c, out float error) {
+  /* Phase 1: Center eval */
+  d_c = evalSDF(center, num_candidates);
+
+  /* Sample at quarter-chunk spacing for second-order finite differences */
+  float h = half_size * 0.5f;
+
+  float dx_p = evalSDF(center + float3(h, 0.0f, 0.0f), num_candidates);
+  float dx_m = evalSDF(center - float3(h, 0.0f, 0.0f), num_candidates);
+  float dy_p = evalSDF(center + float3(0.0f, h, 0.0f), num_candidates);
+  float dy_m = evalSDF(center - float3(0.0f, h, 0.0f), num_candidates);
+  float dz_p = evalSDF(center + float3(0.0f, 0.0f, h), num_candidates);
+  float dz_m = evalSDF(center - float3(0.0f, 0.0f, h), num_candidates);
+
+  /* Second-order finite differences (Laplacian components) */
+  float d2x = dx_p + dx_m - 2.0f * d_c;
+  float d2y = dy_p + dy_m - 2.0f * d_c;
+  float d2z = dz_p + dz_m - 2.0f * d_c;
+
+  /* Dimensionless curvature error */
+  error = (abs(d2x) + abs(d2y) + abs(d2z)) / h;
+
+  /* Phase 3: Gradient-based edge detection for ambiguous cases */
+  if (error > scaled_threshold * 0.3f && error < scaled_threshold * 3.0f) {
+    float gx = (dx_p - dx_m) * 0.5f;
+    float gy = (dy_p - dy_m) * 0.5f;
+    float gz = (dz_p - dz_m) * 0.5f;
+    float gradMag = sqrt(gx * gx + gy * gy + gz * gz);
+    float gradDeviation = abs(gradMag - 1.0f);
+    error = max(error, error + gradDeviation * scaled_threshold * 2.0f);
   }
 }
+
+void main() {
+  int3 coarse_brick = int3(gl_WorkGroupID);
+  int3 local_id = int3(gl_LocalInvocationID);
+  uint tid = gl_LocalInvocationIndex;
+
+  int3 fine_brick = coarse_brick * 4 + local_id;
+  bool is_valid_fine = all(lessThan(fine_brick, grid_resolution.xyz));
+
+  float lod0_half_size = float(LOD0_SCALE * BRICK_SIZE) * 0.5f * voxel_size;
+  float3 lod0_center = atlas_origin + (float3(coarse_brick * 4) * float(BRICK_SIZE) + float(LOD0_SCALE * BRICK_SIZE) * 0.5f) * voxel_size;
+
+  /* 1. Collect candidates for the LOD0 block (Thread 0) */
+  if (tid == 0u) {
+    shared_num_candidates = 0;
+    float expand = lod0_half_size * 1.73205f + max_blend + (brick_half_diag * 4.0f);
+    float3 brick_min = lod0_center - float3(expand);
+    float3 brick_max = lod0_center + float3(expand);
+
+    if (bvh_node_count > 0) {
+      int stack[BVH_MAX_STACK];
+      int sp = 0;
+      stack[sp++] = 0;
+      while (sp > 0) {
+        int node_idx = stack[--sp];
+        BVHNodeGPU node = bvh_nodes[node_idx];
+        if (!aabb_overlap(brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz)) continue;
+        int left = bvh_decode_int(node.min_and_left.w);
+        int right = bvh_decode_int(node.max_and_right.w);
+        if (left == -1) {
+          if (shared_num_candidates < MAX_CANDIDATES) shared_candidates[shared_num_candidates++] = right;
+        } else {
+          if (sp < BVH_MAX_STACK - 1) { stack[sp++] = left; stack[sp++] = right; }
+        }
+      }
+    } else {
+      for (int i = 0; i < object_count; i++) {
+        SDFObjectGPU obj = objects[i];
+        if (any(greaterThan(brick_min, obj.bbox_max.xyz)) || any(lessThan(brick_max, obj.bbox_min.xyz))) continue;
+        if (shared_num_candidates < MAX_CANDIDATES) shared_candidates[shared_num_candidates++] = i;
+      }
+    }
+  }
+  barrier();
+
+  int num_cands = shared_num_candidates;
+  if (num_cands == 0) {
+    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4(-1, 0, 0, 0));
+    return;
+  }
+
+  /* 2. Evaluate LOD0 (Thread 0) */
+  float bound0 = lod0_half_size * 1.73205f + max_blend + brick_half_diag;
+  if (tid == 0u) {
+    float d_c, error;
+    float threshold0 = 0.05f * lod0_half_size;
+    evaluateBlock(lod0_center, lod0_half_size, num_cands, threshold0, d_c, error);
+
+    if (d_c > bound0) {
+      lod0_status.status = 0; // fully outside
+      lod0_status.slot = -1;
+    } else if (d_c < -bound0) {
+      lod0_status.status = 0; // fully inside
+      lod0_status.slot = -2;
+    } else {
+      // Intersects. Check linearity.
+      // Error threshold: relative to half size.
+      if (error < threshold0) {
+        lod0_status.status = 2; // flat: allocate
+        lod0_status.slot = int(atomicAdd(brick_counter.count, 1u));
+        active_bricks[lod0_status.slot].coord = int4(fine_brick, (lod0_status.slot << 2) | 0);
+      } else {
+        lod0_status.status = 1; // subdivide
+      }
+    }
+  }
+  barrier();
+
+  if (lod0_status.status == 0) {
+    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4(lod0_status.slot, 0, 0, 0));
+    return;
+  }
+  if (lod0_status.status == 2) {
+    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4((lod0_status.slot << 2) | 0, 0, 0, 0));
+    return;
+  }
+
+  /* 3. Evaluate LOD1 (Threads 0..7) */
+  float lod1_half_size = lod0_half_size * 0.5f;
+  float bound1 = lod1_half_size * 1.73205f + max_blend + brick_half_diag;
+  if (tid < 8u) {
+    int3 l1_offset = int3(tid % 2, (tid / 2) % 2, tid / 4);
+    float3 lod1_center = lod0_center + (float3(l1_offset) * 2.0f - 1.0f) * lod1_half_size;
+
+    float d_c, error;
+    float threshold1 = 0.05f * lod1_half_size;
+    evaluateBlock(lod1_center, lod1_half_size, num_cands, threshold1, d_c, error);
+
+    if (d_c > bound1) {
+      lod1_status[tid].status = 0;
+      lod1_status[tid].slot = -1;
+    } else if (d_c < -bound1) {
+      lod1_status[tid].status = 0;
+      lod1_status[tid].slot = -2;
+    } else {
+      if (error < threshold1) {
+        lod1_status[tid].status = 2;
+        int slot = int(atomicAdd(brick_counter.count, 1u));
+        lod1_status[tid].slot = slot;
+        int3 l1_fine_brick = coarse_brick * 4 + l1_offset * 2;
+        active_bricks[slot].coord = int4(l1_fine_brick, (slot << 2) | 1);
+      } else {
+        lod1_status[tid].status = 1;
+      }
+    }
+  }
+  barrier();
+
+  int l1_idx = local_id.x / 2 + (local_id.y / 2) * 2 + (local_id.z / 2) * 4;
+  if (lod1_status[l1_idx].status == 0) {
+    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4(lod1_status[l1_idx].slot, 0, 0, 0));
+    return;
+  }
+  if (lod1_status[l1_idx].status == 2) {
+    if (is_valid_fine) imageStore(indirection_tex, fine_brick, int4((lod1_status[l1_idx].slot << 2) | 1, 0, 0, 0));
+    return;
+  }
+
+  /* 4. Evaluate LOD2 (All 64 threads) */
+  if (is_valid_fine) {
+    float lod2_half_size = lod1_half_size * 0.5f;
+    float3 lod2_center = atlas_origin + (float3(fine_brick) * float(BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
+    float d_c = evalSDF(lod2_center, num_cands);
+
+    if (abs(d_c) < brick_half_diag) {
+      int slot = int(atomicAdd(brick_counter.count, 1u));
+      imageStore(indirection_tex, fine_brick, int4((slot << 2) | 2, 0, 0, 0));
+      active_bricks[slot].coord = int4(fine_brick, (slot << 2) | 2);
+    } else if (d_c < 0.0f) {
+      imageStore(indirection_tex, fine_brick, int4(-2, 0, 0, 0));
+    } else {
+      imageStore(indirection_tex, fine_brick, int4(-1, 0, 0, 0));
+    }
+  }
+}
+
