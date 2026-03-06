@@ -108,21 +108,26 @@ void main()
 
   int4 brick_data = active_bricks[brick_idx].coord;
   int3 brick = brick_data.xyz;
-  int slot = brick_data.w;
+  int packed_w = brick_data.w;
+  int slot = packed_w >> 2;
+  int lod = packed_w & 3;
+
+  int scale_shift = 2 - lod;
+  float lod_voxel_size = voxel_size * float(1 << scale_shift);
 
   /* Compute slot origin in compact atlas. */
   int bpa = bricks_per_axis;
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
+  float3 brick_base = atlas_origin + float3(brick * BRICK_SIZE) * voxel_size;
+
   /* Per-brick AABB for object culling (includes 2-voxel overlap border).
    * Expand by max_blend so objects contributing to smooth union are evaluated.
    * Objects outside max_blend of the storage region get h=0 in the smooth
    * union (no contribution), so this is safe for cross-brick consistency. */
-  float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
-                      float3(max_blend);
-  float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
-                      float3(max_blend);
+  float3 brick_min = brick_base - 2.0f * lod_voxel_size - float3(max_blend);
+  float3 brick_max = brick_base + (float(BRICK_SIZE) + 2.0f) * lod_voxel_size + float3(max_blend);
 
   /* Elect thread 0 to collect candidates for the entire workgroup.
    * All threads in the brick share the same AABB, so the candidate list
@@ -218,10 +223,8 @@ void main()
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
 
-    /* World-space position: brick_coord * 8 + (local - 2) + 0.5, times voxel_size.
-     * The -2 accounts for the 2-voxel overlap border. */
-    float3 world_pos = atlas_origin +
-                       (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) * voxel_size;
+    /* World-space position */
+    float3 world_pos = brick_base + (float3(local_voxel - int3(2)) + 0.5f) * lod_voxel_size;
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
@@ -261,3 +264,4 @@ void main()
     imageStore(object_id_atlas, atlas_coord, int4(acc_obj_id, 0, 0, 0));
   }
 }
+

@@ -2244,25 +2244,41 @@ class Instance : public DrawEngine {
     }
 
     int3 n = grid_res_;
-    float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
 
-    /* Count active bricks. */
+    /* Track processed slots to avoid drawing duplicate coarse boxes. */
+    int max_slot = 0;
     int total = n.x * n.y * n.z;
-    int active_count = 0;
     for (int i = 0; i < total; i++) {
       if (data[i] >= 0) {
-        active_count++;
+        int slot = data[i] >> 2;
+        max_slot = std::max(max_slot, slot);
       }
     }
 
-    if (active_count == 0) {
+    Vector<char> slot_processed(max_slot + 1, 0);
+    int unique_bricks = 0;
+    
+    for (int i = 0; i < total; i++) {
+      if (data[i] >= 0) {
+        int slot = data[i] >> 2;
+        if (!slot_processed[slot]) {
+          unique_bricks++;
+          slot_processed[slot] = 1;
+        }
+      }
+    }
+
+    if (unique_bricks == 0) {
       MEM_freeN(data);
       return;
     }
 
     /* 12 edges per cube, 2 vertices per edge = 24 vertices per active brick. */
-    Vector<float3> positions(active_count * 24);
+    Vector<float3> positions(unique_bricks * 24);
+    Vector<float4> colors(unique_bricks * 24);
     int vi = 0;
+
+    slot_processed.fill(0);
 
     for (int z = 0; z < n.z; z++) {
       for (int y = 0; y < n.y; y++) {
@@ -2272,44 +2288,68 @@ class Instance : public DrawEngine {
             continue;
           }
 
-          float3 lo = atlas_origin_ + float3(float(x), float(y), float(z)) * brick_world;
-          float3 hi = lo + float3(brick_world);
+          int slot = data[idx] >> 2;
+          int lod = data[idx] & 3;
+
+          if (slot_processed[slot]) {
+            continue;
+          }
+          slot_processed[slot] = 1;
+
+          int scale_shift = 2 - lod;
+          int size_in_fine = 1 << scale_shift;
+          int bx = (x >> scale_shift) << scale_shift;
+          int by = (y >> scale_shift) << scale_shift;
+          int bz = (z >> scale_shift) << scale_shift;
+
+          float lod_brick_world = float(SDF_BRICK_SIZE * size_in_fine) * voxel_size_;
+          float3 lo = atlas_origin_ + float3(float(bx), float(by), float(bz)) * float(SDF_BRICK_SIZE) * voxel_size_;
+          float3 hi = lo + float3(lod_brick_world);
+
+          float4 col;
+          if (lod == 0) {
+            col = float4(0.0f, 1.0f, 0.0f, 1.0f); // Green for coarse
+          } else if (lod == 1) {
+            col = float4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow for medium
+          } else {
+            col = float4(1.0f, 0.0f, 0.0f, 1.0f); // Red for fine
+          }
 
           /* Bottom face edges. */
-          positions[vi++] = float3(lo.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, hi.y, lo.z);
-          positions[vi++] = float3(hi.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, lo.y, lo.z);
+          positions[vi] = float3(lo.x, lo.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, lo.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, lo.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, hi.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, hi.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, hi.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, hi.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, lo.y, lo.z); colors[vi++] = col;
 
           /* Top face edges. */
-          positions[vi++] = float3(lo.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, hi.y, hi.z);
-          positions[vi++] = float3(hi.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, lo.y, hi.z);
+          positions[vi] = float3(lo.x, lo.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, lo.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, lo.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, hi.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, hi.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, hi.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, hi.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, lo.y, hi.z); colors[vi++] = col;
 
           /* Vertical edges. */
-          positions[vi++] = float3(lo.x, lo.y, lo.z);
-          positions[vi++] = float3(lo.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, hi.y, lo.z);
-          positions[vi++] = float3(hi.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, hi.y, hi.z);
+          positions[vi] = float3(lo.x, lo.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, lo.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, lo.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, lo.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, hi.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(hi.x, hi.y, hi.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, hi.y, lo.z); colors[vi++] = col;
+          positions[vi] = float3(lo.x, hi.y, hi.z); colors[vi++] = col;
         }
       }
     }
 
     MEM_freeN(data);
-    grid_batch_ = create_line_batch(positions.data(), vi);
+    grid_batch_ = create_colored_line_batch(positions.data(), colors.data(), vi);
   }
 
   /** Emit 12 wireframe edges (24 vertices) for an axis-aligned box. */
