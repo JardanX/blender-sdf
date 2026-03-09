@@ -23,6 +23,7 @@
     .blend = 0.0f, \
     .blend_type = 0, \
     .csg_operation = 0, \
+    .shell_distance = 0.0f, \
   }
 
 /** \} */

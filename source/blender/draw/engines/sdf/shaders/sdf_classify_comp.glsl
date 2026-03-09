@@ -158,7 +158,9 @@ void main()
     /* Already in index order, no sort needed. */
   }
 
-  /* Evaluate candidates in deterministic index order. */
+  /* Evaluate candidates in deterministic index order.
+   * Use combineCSG() so that subtraction/intersection surfaces are
+   * correctly detected (not just union). */
   float acc_dist = 1e10f;
 
   for (int c = 0; c < num_candidates; c++) {
@@ -170,13 +172,19 @@ void main()
      * false-positive active bricks for spheres, capsules, and tori. */
     float dist = evalSDFPrimitive(local_pos, obj);
 
-    float k = obj.blend;
-    if (k > 0.0f && acc_dist < 1e9f) {
-      float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-      acc_dist = mix(acc_dist, dist, h) - k * h * (1.0f - h);
+    if (acc_dist >= 1e9f) {
+      /* Subtraction/intersection from nothing = nothing. Only union and
+       * shell objects can introduce new geometry into an empty accumulator. */
+      if (obj.csg_operation == SDF_CSG_OP_SUBTRACT ||
+          obj.csg_operation == SDF_CSG_OP_INTERSECT)
+      {
+        continue;
+      }
+      /* Shell applies onion (hollow) to the object's own distance. */
+      acc_dist = (obj.csg_operation == SDF_CSG_OP_SHELL) ? opOnion(dist, obj.blend) : dist;
     }
     else {
-      acc_dist = min(acc_dist, dist);
+      acc_dist = combineCSG(acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend);
     }
   }
 

@@ -15,23 +15,22 @@
 #pragma once
 
 #ifndef FXAA_QUALITY__PRESET
-#  define FXAA_QUALITY__PRESET 29
+#  define FXAA_QUALITY__PRESET 25
 #endif
 
-#if (FXAA_QUALITY__PRESET == 29)
-#  define FXAA_QUALITY__PS 12
+#if (FXAA_QUALITY__PRESET == 25)
+/* 8 search steps — good balance of quality and performance.
+ * Preset 29 (12 steps) was overkill for SDF viewport where
+ * voxel-resolution aliasing dominates over sub-pixel edges. */
+#  define FXAA_QUALITY__PS 8
 #  define FXAA_QUALITY__P0 1.0
 #  define FXAA_QUALITY__P1 1.5
 #  define FXAA_QUALITY__P2 2.0
 #  define FXAA_QUALITY__P3 2.0
 #  define FXAA_QUALITY__P4 2.0
 #  define FXAA_QUALITY__P5 2.0
-#  define FXAA_QUALITY__P6 2.0
-#  define FXAA_QUALITY__P7 2.0
-#  define FXAA_QUALITY__P8 2.0
-#  define FXAA_QUALITY__P9 4.0
-#  define FXAA_QUALITY__P10 12.0
-#  define FXAA_QUALITY__P11 12.0
+#  define FXAA_QUALITY__P6 4.0
+#  define FXAA_QUALITY__P7 8.0
 #endif
 
 #define FxaaSat(x) clamp(x, 0.0, 1.0)
@@ -54,11 +53,12 @@ vec3 sdf_fxaa_srgb_to_linear(vec3 srgb)
   return mix(lower, higher, step(vec3(0.04045), srgb));
 }
 
-/* Perceptual luma via sRGB conversion (matches MathOPS addon). */
+/* Perceptual luma for edge detection.
+ * Simple dot-product is sufficient for edge detection and avoids
+ * 33+ pow() calls per pixel from the sRGB conversion path. */
 float FxaaLuma(vec3 rgb)
 {
-  vec3 srgb = sdf_fxaa_linear_to_srgb(clamp(rgb, 0.0, 1.0));
-  return srgb.g * (0.587 / 0.299) + srgb.r;
+  return dot(rgb, vec3(0.299, 0.587, 0.114));
 }
 
 float FxaaLuma(vec4 rgba)

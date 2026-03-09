@@ -4,7 +4,8 @@
 
 /**
  * Grid SDF blend compute shader (sparse brick version).
- * Blends one dense-float SDF grid into the existing compact atlas using smooth union.
+ * Blends one dense-float SDF grid into the existing compact atlas using the
+ * specified CSG operation and blend type.
  * Dispatched once per grid object, with a memory barrier between dispatches.
  * Each workgroup handles one brick, same layout as the bake shader.
  */
@@ -12,6 +13,8 @@
 #include "infos/sdf_shader_infos.hh"
 
 COMPUTE_SHADER_CREATE_INFO(sdf_grid_blend)
+
+#include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
@@ -36,9 +39,6 @@ void main()
 
   /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
-  if (any(greaterThanEqual(local_xy, int2(BRICK_STORAGE)))) {
-    return;
-  }
 
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
@@ -63,7 +63,7 @@ void main()
      * which provides a conservative distance estimate. Including them prevents
      * discontinuities between grid data and the atlas clear value (1e10) that
      * would cause the ray marcher to overshoot and miss the surface. */
-    float grid_dist = texture(sdf_grid, grid_uvw).r;
+    float grid_dist = textureLod(sdf_grid, grid_uvw, 0.0).r;
 
     /* Read current accumulated atlas value. */
     int3 atlas_coord = slot_origin + local_voxel;
@@ -71,17 +71,42 @@ void main()
     float acc_dist = current.r;
     float3 acc_color = current.gba;
 
-    /* Blend grid distance into atlas using smooth union. */
+    /* Blend grid distance into atlas using the specified CSG operation and blend type. */
     float k = grid_blend;
-    if (k > 0.0f && acc_dist < 1e9f) {
-      float h = clamp(0.5f + 0.5f * (acc_dist - grid_dist) / k, 0.0f, 1.0f);
-      acc_color = mix(acc_color, grid_color.rgb, h);
-      acc_dist = mix(acc_dist, grid_dist, h) - k * h * (1.0f - h);
+    if (acc_dist >= 1e9f) {
+      if (grid_csg_operation == SDF_CSG_OP_SUBTRACT ||
+          grid_csg_operation == SDF_CSG_OP_INTERSECT)
+      {
+        continue;
+      }
+      acc_color = grid_color.rgb;
+      acc_dist = (grid_csg_operation == SDF_CSG_OP_SHELL) ? opOnion(grid_dist, k) : grid_dist;
     }
     else {
-      if (grid_dist < acc_dist) {
-        acc_color = grid_color.rgb;
-        acc_dist = grid_dist;
+      float new_dist = combineCSG(acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k);
+
+      if (grid_csg_operation == SDF_CSG_OP_SUBTRACT) {
+        acc_dist = new_dist;
+      }
+      else if (k > 0.0f && grid_blend_type == SDF_BLEND_TYPE_SMOOTH) {
+        float h;
+        if (grid_csg_operation == SDF_CSG_OP_UNION) {
+          h = clamp(0.5f + 0.5f * (acc_dist - grid_dist) / k, 0.0f, 1.0f);
+        }
+        else {
+          h = clamp(0.5f - 0.5f * (acc_dist - grid_dist) / k, 0.0f, 1.0f);
+        }
+        acc_color = mix(acc_color, grid_color.rgb, h);
+        acc_dist = new_dist;
+      }
+      else {
+        if (grid_csg_operation == SDF_CSG_OP_UNION && grid_dist < acc_dist) {
+          acc_color = grid_color.rgb;
+        }
+        else if (grid_csg_operation == SDF_CSG_OP_INTERSECT && grid_dist > acc_dist) {
+          acc_color = grid_color.rgb;
+        }
+        acc_dist = new_dist;
       }
     }
 

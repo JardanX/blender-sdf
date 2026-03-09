@@ -15,6 +15,14 @@
 
 #include "BLI_math_base.h"
 
+const EnumPropertyItem rna_enum_sdf_type_items[] = {
+    {SDF_TYPE_BOX, "BOX", 0, "Cube", "Cube SDF primitive"},
+    {SDF_TYPE_SPHERE, "SPHERE", 0, "Sphere", "Sphere SDF primitive"},
+    {SDF_TYPE_CAPSULE, "CAPSULE", 0, "Capsule", "Capsule SDF primitive"},
+    {SDF_TYPE_TORUS, "TORUS", 0, "Torus", "Torus SDF primitive"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 #ifdef RNA_RUNTIME
 
 #  include "BKE_main.hh"
@@ -32,26 +40,19 @@ static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 
 #else
 
-static const EnumPropertyItem rna_enum_sdf_type_items[] = {
-    {SDF_TYPE_BOX, "BOX", 0, "Box", "Box primitive"},
-    {SDF_TYPE_SPHERE, "SPHERE", 0, "Sphere", "Sphere primitive"},
-    {SDF_TYPE_CAPSULE, "CAPSULE", 0, "Capsule", "Capsule primitive"},
-    {SDF_TYPE_TORUS, "TORUS", 0, "Torus", "Torus primitive"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 static const EnumPropertyItem rna_enum_sdf_blend_type_items[] = {
-    {SDF_BLEND_LINEAR, "LINEAR", 0, "Linear", "Hard union/difference"},
-    {SDF_BLEND_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth blend"},
-    {SDF_BLEND_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer blend"},
-    {SDF_BLEND_ROUND, "ROUND", 0, "Round", "Round blend"},
+    {SDF_BLEND_LINEAR, "LINEAR", ICON_SDF_BLEND_LINEAR, "Linear", "Hard union/difference"},
+    {SDF_BLEND_SMOOTH, "SMOOTH", ICON_SDF_BLEND_SMOOTH, "Smooth", "Smooth blend"},
+    {SDF_BLEND_CHAMFER, "CHAMFER", ICON_SDF_BLEND_CHAMFER, "Chamfer", "Chamfer blend"},
+    {SDF_BLEND_ROUND, "ROUND", ICON_SDF_BLEND_ROUND, "Round", "Spherical round blend"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_sdf_csg_items[] = {
-    {SDF_CSG_UNION, "UNION", 0, "Union", "Boolean union"},
-    {SDF_CSG_SUBTRACT, "SUBTRACT", 0, "Subtract", "Boolean subtraction"},
-    {SDF_CSG_INTERSECT, "INTERSECT", 0, "Intersect", "Boolean intersection"},
+    {SDF_CSG_UNION, "UNION", ICON_SDF_CSG_UNION, "Union", "Boolean union"},
+    {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
+    {SDF_CSG_INTERSECT, "INTERSECT", ICON_SDF_CSG_INTERSECT, "Intersect", "Boolean intersection"},
+    {SDF_CSG_SHELL, "SHELL", ICON_SDF_CSG_EXTRUDE, "Shell", "Shell/extrusion operation"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -113,6 +114,15 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "csg_operation", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_csg_items);
   RNA_def_property_ui_text(prop, "CSG Operation", "Boolean operation type");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Shell Distance */
+  prop = RNA_def_property(srna, "shell_distance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "shell_distance");
+  RNA_def_property_range(prop, -5.0f, 5.0f);
+  RNA_def_property_ui_range(prop, -5.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(
+      prop, "Shell Distance", "Offset distance for shell/extrusion operation");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Materials */
