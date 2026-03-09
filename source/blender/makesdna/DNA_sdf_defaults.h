@@ -20,10 +20,10 @@
     .size = {1.0f, 1.0f, 1.0f}, \
     .bevel = 0.0f, \
     .color = {0.8f, 0.8f, 0.8f, 1.0f}, \
-    .blend = 0.0f, \
-    .blend_type = 0, \
+    .blend = 0.1f, \
+    .blend_type = 1, /* SDF_BLEND_SMOOTH */ \
     .csg_operation = 0, \
-    .shell_distance = 0.0f, \
+    .shell_distance = 0.2f, \
   }
 
 /** \} */

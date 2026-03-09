@@ -2,8 +2,69 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-from bpy.types import Panel
+import bpy
+from bpy.types import Panel, Menu, Operator
 
+
+# -- Pie Menus ----------------------------------------------------------------
+
+class SDF_MT_csg_pie(Menu):
+    bl_idname = "SDF_MT_csg_pie"
+    bl_label = "CSG Operation"
+
+    def draw(self, context):
+        pie = self.layout.menu_pie()
+        sdf = context.object.data
+        pie.prop_enum(sdf, "csg_operation", value='UNION')
+        pie.prop_enum(sdf, "csg_operation", value='SUBTRACT')
+        pie.prop_enum(sdf, "csg_operation", value='INTERSECT')
+        pie.prop_enum(sdf, "csg_operation", value='SHELL')
+
+
+class SDF_MT_blend_pie(Menu):
+    bl_idname = "SDF_MT_blend_pie"
+    bl_label = "Blend Type"
+
+    def draw(self, context):
+        pie = self.layout.menu_pie()
+        sdf = context.object.data
+        pie.prop_enum(sdf, "blend_type", value='LINEAR')
+        pie.prop_enum(sdf, "blend_type", value='SMOOTH')
+        pie.prop_enum(sdf, "blend_type", value='CHAMFER')
+        pie.prop_enum(sdf, "blend_type", value='ROUND')
+
+
+class SDF_OT_csg_pie_call(Operator):
+    """Open the CSG operation pie menu (Tab)"""
+    bl_idname = "sdf.csg_pie_call"
+    bl_label = "SDF CSG Pie"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == 'SDF'
+
+    def execute(self, context):
+        bpy.ops.wm.call_menu_pie(name="SDF_MT_csg_pie")
+        return {'FINISHED'}
+
+
+class SDF_OT_blend_pie_call(Operator):
+    """Open the blend type pie menu (Shift+Tab)"""
+    bl_idname = "sdf.blend_pie_call"
+    bl_label = "SDF Blend Pie"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == 'SDF'
+
+    def execute(self, context):
+        bpy.ops.wm.call_menu_pie(name="SDF_MT_blend_pie")
+        return {'FINISHED'}
+
+
+# -- Properties Panels --------------------------------------------------------
 
 class SDFButtonsPanel:
     bl_space_type = 'PROPERTIES'
@@ -37,36 +98,69 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
         sdf = context.sdf
 
-        layout.prop(sdf, "sdf_type", text="Type")
+        # Shape type — full-width icon-only buttons
+        row = layout.row(align=True)
+        row.scale_y = 1.6
+        row.prop(sdf, "sdf_type", expand=True, icon_only=True)
+
+        layout.separator()
+
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         layout.prop(sdf, "size")
         layout.prop(sdf, "bevel")
         layout.prop(sdf, "color")
 
 
-class DATA_PT_sdf_blending(SDFButtonsPanel, Panel):
-    bl_label = "Blending"
+class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
+    bl_label = "Operation"
 
     def draw(self, context):
         layout = self.layout
-        layout.use_property_split = True
         layout.use_property_decorate = False
 
         sdf = context.sdf
 
-        layout.prop(sdf, "blend")
-        layout.prop(sdf, "blend_type")
-        layout.prop(sdf, "csg_operation")
+        # CSG operation — full-width icon-only buttons
+        row = layout.row(align=True)
+        row.scale_y = 1.6
+        row.prop(sdf, "csg_operation", expand=True, icon_only=True)
 
+        layout.separator()
+
+        # Blend type — full-width icon-only buttons
+        row = layout.row(align=True)
+        row.scale_y = 1.6
+        row.prop(sdf, "blend_type", expand=True, icon_only=True)
+
+        layout.separator()
+
+        # Blend amount — disabled for Linear (no blending needed)
+        col = layout.column(align=True)
+        col.label(text="Blend")
+        sub = col.row()
+        sub.enabled = (sdf.blend_type != 'LINEAR')
+        sub.prop(sdf, "blend", text="")
+
+        # Shell distance — only visible when CSG is Shell
+        if sdf.csg_operation == 'SHELL':
+            col = layout.column(align=True)
+            col.label(text="Shell Thickness")
+            col.prop(sdf, "shell_distance", text="")
+
+
+# -- Registration -------------------------------------------------------------
 
 classes = (
+    SDF_MT_csg_pie,
+    SDF_MT_blend_pie,
+    SDF_OT_csg_pie_call,
+    SDF_OT_blend_pie_call,
     DATA_PT_context_sdf,
     DATA_PT_sdf_shape,
-    DATA_PT_sdf_blending,
+    DATA_PT_sdf_operation,
 )
 
 

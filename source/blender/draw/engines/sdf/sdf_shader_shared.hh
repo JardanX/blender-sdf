@@ -30,7 +30,8 @@ struct SDFObjectGPU {
   int blend_type;
   /** CSG operation (eSDFCSGOperation: 0=union, 1=subtract, 2=intersect, 3=shell). */
   int csg_operation;
-  float _pad2;
+  /** Shell/extrusion thickness (world-space, from DNA shell_distance). */
+  float shell_distance;
   float _pad3;
   float _pad4;
   /** Object color RGBA. */

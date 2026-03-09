@@ -154,7 +154,7 @@ float opSmoothChamferIntersection(float d1, float d2, float k, float k2, float k
   return max(term1, term2);
 }
 
-/* ---- Round (spherical) blend operations ---- */
+/* ---- 2D mirror helper (for round blend operations) ---- */
 
 float2 sdf_mirror2D(float2 p, float2 N)
 {
@@ -162,7 +162,24 @@ float2 sdf_mirror2D(float2 p, float2 N)
   return p - 2.0f * N * proj;
 }
 
-float opRoundUnionRaw(float a, float b, float r)
+/* ---- Round (spherical) blend operations ---- */
+
+/* Core building block: inward-rounding difference (concave fillet).
+ * Uses 2D distance-field geometry in the (a, b) plane with mirror2D. */
+float opDifferenceIRound(float a, float b, float r)
+{
+  float2 q = float2(a, b);
+  q = sdf_mirror2D(q, normalize(float2(1.0f, 1.0f)));
+  q.y -= r;
+  q.y = min(0.0f, q.y);
+  float ad = sign(q.x) * length(q);
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corn = -(length(s) - r);
+  return max(ad, corn);
+}
+
+/* Inward-rounding union (concave fillet). Kept for future use. */
+float opUnionIRound(float a, float b, float r)
 {
   float2 q = float2(a, b);
   q = sdf_mirror2D(q, normalize(float2(-1.0f, 1.0f)));
@@ -174,39 +191,31 @@ float opRoundUnionRaw(float a, float b, float r)
   return min(ad, corn);
 }
 
-float opRoundSubtractionRaw(float a, float b, float r)
+float opIntersectIRound(float a, float b, float r)
 {
-  float2 q = float2(a, b);
-  q = sdf_mirror2D(q, normalize(float2(1.0f, 1.0f)));
-  q.y -= r;
-  q.y = min(0.0f, q.y);
-  float ad = sign(q.x) * length(q);
-  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
-  float corn = -1.0f * (length(s) - r);
-  return max(ad, corn);
+  return opDifferenceIRound(a, -b, r);
 }
 
-float opRoundIntersectionRaw(float a, float b, float r)
+/* Outward-expanding round operations (convex fillet at junctions).
+ * opRoundUnion uses opUnionIRound directly — produces an outward convex
+ * bulge at the union seam. Subtraction and intersection derived by duality. */
+
+float opRoundUnion(float d1, float d2, float r)
 {
-  return opRoundSubtractionRaw(a, -b, r);
+  return opUnionIRound(d1, d2, r);
 }
 
-float opRoundUnion(float d1, float d2, float k)
+float opRoundSubtraction(float d1, float d2, float r)
 {
-  /* Inverted variant: subtract then take min with original. */
-  float sub = opRoundSubtractionRaw(d1, d2, k);
-  return min(sub, d2);
+  return -opUnionIRound(d1, -d2, r);
 }
 
-float opRoundSubtraction(float d1, float d2, float k)
+float opRoundIntersection(float d1, float d2, float r)
 {
-  return opRoundSubtractionRaw(d2, d1, k);
+  return -opUnionIRound(-d1, -d2, r);
 }
 
-float opRoundIntersection(float d1, float d2, float k)
-{
-  return opRoundIntersectionRaw(d1, d2, k);
-}
+/* Smooth + round dual-radius blends. */
 
 float opSmoothRoundUnion(float a, float b, float r, float k2, float k3)
 {
@@ -237,6 +246,13 @@ float opSmoothRoundIntersection(float d1, float d2, float r, float k2, float k3)
   return max(term1, term2);
 }
 
+/* Smooth + round inverted (outward) union. */
+float opSmoothRoundUnionInverted(float a, float b, float r, float k2, float k3)
+{
+  float diff = opSmoothRoundSubtraction(b, a, r, k2, k3);
+  return min(diff, b);
+}
+
 /* ---- Shell (onion) helper ---- */
 
 float opOnion(float d, float thickness)
@@ -264,10 +280,11 @@ float opOnion(float d, float thickness)
  * \param d2: new object's distance.
  * \param op: CSG operation (0=union, 1=subtract, 2=intersect, 3=shell).
  * \param bt: blend type (0=linear, 1=smooth, 2=chamfer, 3=round).
- * \param k: blend radius.
+ * \param k: blend radius for smooth/chamfer/round transitions.
+ * \param shell_dist: shell expansion thickness (only used when op == SHELL).
  * \return combined distance.
  */
-float combineCSG(float d1, float d2, int op, int bt, float k)
+float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
 {
   if (op == SDF_CSG_OP_UNION) {
     if (k > 0.0f && bt > 0) {
@@ -311,8 +328,48 @@ float combineCSG(float d1, float d2, int op, int bt, float k)
     }
     return max(d1, d2);
   }
-  /* SDF_CSG_OP_SHELL: onion-skin fallback. */
-  return opOnion(d1, k);
+  /* SDF_CSG_OP_SHELL: expand the intersection region between base and shape.
+   * 1) Union the new shape into the base (using blend type).
+   * 2) Intersect with a limit surface (base offset inward by k).
+   * Result: only the overlap region is kept, expanded outward by k. */
+  {
+    /* Clamp blend for shell: 0 causes hard edges, too high overwhelms geometry. */
+    k = clamp(k, 0.01f, abs(shell_dist) * 2.0f);
+
+    float d_union;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        d_union = opSmoothUnion(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        d_union = opChamferUnion(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        d_union = opRoundUnion(d1, d2, k);
+      }
+      else {
+        d_union = min(d1, d2);
+      }
+    }
+    else {
+      d_union = min(d1, d2);
+    }
+
+    float lim = d1 - abs(shell_dist);
+
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        return opSmoothIntersection(d_union, lim, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        return opChamferIntersection(d_union, lim, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        return opRoundIntersection(d_union, lim, k);
+      }
+    }
+    return max(d_union, lim);
+  }
 }
 
 /** \} */

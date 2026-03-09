@@ -16,10 +16,10 @@
 #include "BLI_math_base.h"
 
 const EnumPropertyItem rna_enum_sdf_type_items[] = {
-    {SDF_TYPE_BOX, "BOX", 0, "Cube", "Cube SDF primitive"},
-    {SDF_TYPE_SPHERE, "SPHERE", 0, "Sphere", "Sphere SDF primitive"},
-    {SDF_TYPE_CAPSULE, "CAPSULE", 0, "Capsule", "Capsule SDF primitive"},
-    {SDF_TYPE_TORUS, "TORUS", 0, "Torus", "Torus SDF primitive"},
+    {SDF_TYPE_BOX, "BOX", ICON_MESH_CUBE, "Cube", "Cube SDF primitive"},
+    {SDF_TYPE_SPHERE, "SPHERE", ICON_MESH_UVSPHERE, "Sphere", "Sphere SDF primitive"},
+    {SDF_TYPE_CAPSULE, "CAPSULE", ICON_MESH_CAPSULE, "Capsule", "Capsule SDF primitive"},
+    {SDF_TYPE_TORUS, "TORUS", ICON_MESH_TORUS, "Torus", "Torus SDF primitive"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
