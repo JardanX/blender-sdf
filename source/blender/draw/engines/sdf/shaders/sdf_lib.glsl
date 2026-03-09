@@ -82,18 +82,237 @@ float sdBox(float3 p, float3 b)
   return length(max(q, float3(0.0f))) + min(max(q.x, max(q.y, q.z)), 0.0f);
 }
 
-/**
- * Smooth union (Inigo Quilez pattern).
- * Blends two SDF distances with smooth radius k.
- * \param d1: first distance.
- * \param d2: second distance.
- * \param k: blend radius (0 = hard union).
- * \return blended distance.
- */
+/* ---- Smooth blend operations ---- */
+
 float opSmoothUnion(float d1, float d2, float k)
 {
+  if (k <= 0.0001f) {
+    return min(d1, d2);
+  }
   float h = clamp(0.5f + 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
   return mix(d2, d1, h) - k * h * (1.0f - h);
+}
+
+float opSmoothSubtraction(float d1, float d2, float k)
+{
+  if (k <= 0.0001f) {
+    return max(-d1, d2);
+  }
+  float h = clamp(0.5f - 0.5f * (d2 + d1) / k, 0.0f, 1.0f);
+  return mix(d2, -d1, h) + k * h * (1.0f - h);
+}
+
+float opSmoothIntersection(float d1, float d2, float k)
+{
+  if (k <= 0.0001f) {
+    return max(d1, d2);
+  }
+  float h = clamp(0.5f - 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
+  return mix(d2, d1, h) + k * h * (1.0f - h);
+}
+
+/* ---- Chamfer blend operations ---- */
+
+float opChamferUnion(float a, float b, float r)
+{
+  return min(min(a, b), (a - r + b) * 0.70710678f);
+}
+
+float opChamferIntersection(float a, float b, float r)
+{
+  return max(max(a, b), (a + r + b) * 0.70710678f);
+}
+
+float opChamferSubtraction(float d1, float d2, float r)
+{
+  return opChamferIntersection(d2, -d1, r);
+}
+
+float opSmoothChamferUnion(float d1, float d2, float k, float k2, float k3)
+{
+  float chamfer_plane = (d1 + d2 - k) * 0.70710678f;
+  float term1 = opSmoothUnion(d1, chamfer_plane, k2);
+  float term2 = opSmoothUnion(d2, chamfer_plane, k3);
+  return min(term1, term2);
+}
+
+float opSmoothChamferSubtraction(float d1, float d2, float k, float k2, float k3)
+{
+  float A = -d1;
+  float B = d2;
+  float chamfer_plane = (A + B + k) * 0.70710678f;
+  float term1 = opSmoothIntersection(A, chamfer_plane, k2);
+  float term2 = opSmoothIntersection(B, chamfer_plane, k3);
+  return max(term1, term2);
+}
+
+float opSmoothChamferIntersection(float d1, float d2, float k, float k2, float k3)
+{
+  float chamfer_plane = (d1 + d2 + k) * 0.70710678f;
+  float term1 = opSmoothIntersection(d1, chamfer_plane, k2);
+  float term2 = opSmoothIntersection(d2, chamfer_plane, k3);
+  return max(term1, term2);
+}
+
+/* ---- Round (spherical) blend operations ---- */
+
+float2 sdf_mirror2D(float2 p, float2 N)
+{
+  float proj = min(dot(p, N), 0.0f);
+  return p - 2.0f * N * proj;
+}
+
+float opRoundUnionRaw(float a, float b, float r)
+{
+  float2 q = float2(a, b);
+  q = sdf_mirror2D(q, normalize(float2(-1.0f, 1.0f)));
+  q.y -= r;
+  q.y = min(0.0f, q.y);
+  float ad = sign(q.x) * length(q);
+  float2 s = float2(max(a, 0.0f), max(b, 0.0f));
+  float corn = length(s) - r;
+  return min(ad, corn);
+}
+
+float opRoundSubtractionRaw(float a, float b, float r)
+{
+  float2 q = float2(a, b);
+  q = sdf_mirror2D(q, normalize(float2(1.0f, 1.0f)));
+  q.y -= r;
+  q.y = min(0.0f, q.y);
+  float ad = sign(q.x) * length(q);
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corn = -1.0f * (length(s) - r);
+  return max(ad, corn);
+}
+
+float opRoundIntersectionRaw(float a, float b, float r)
+{
+  return opRoundSubtractionRaw(a, -b, r);
+}
+
+float opRoundUnion(float d1, float d2, float k)
+{
+  /* Inverted variant: subtract then take min with original. */
+  float sub = opRoundSubtractionRaw(d1, d2, k);
+  return min(sub, d2);
+}
+
+float opRoundSubtraction(float d1, float d2, float k)
+{
+  return opRoundSubtractionRaw(d2, d1, k);
+}
+
+float opRoundIntersection(float d1, float d2, float k)
+{
+  return opRoundIntersectionRaw(d1, d2, k);
+}
+
+float opSmoothRoundUnion(float a, float b, float r, float k2, float k3)
+{
+  float2 s = float2(max(a, 0.0f), max(b, 0.0f));
+  float corner = length(s) - r;
+  float term1 = opSmoothUnion(a, corner, k2);
+  float term2 = opSmoothUnion(b, corner, k3);
+  return min(term1, term2);
+}
+
+float opSmoothRoundSubtraction(float d1, float d2, float r, float k2, float k3)
+{
+  float a = d2;
+  float b = d1;
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corner = r - length(s);
+  float term1 = opSmoothIntersection(a, corner, k2);
+  float term2 = opSmoothIntersection(-b, corner, k3);
+  return max(term1, term2);
+}
+
+float opSmoothRoundIntersection(float d1, float d2, float r, float k2, float k3)
+{
+  float2 s = float2(min(d1, 0.0f), max(-d2, 0.0f));
+  float corner = r - length(s);
+  float term1 = opSmoothIntersection(d1, corner, k2);
+  float term2 = opSmoothIntersection(d2, corner, k3);
+  return max(term1, term2);
+}
+
+/* ---- Shell (onion) helper ---- */
+
+float opOnion(float d, float thickness)
+{
+  return abs(d) - thickness;
+}
+
+/* ---- CSG dispatch ---- */
+
+/** CSG operation IDs (must match eSDFCSGOperation in DNA_sdf_types.h). */
+#define SDF_CSG_OP_UNION 0
+#define SDF_CSG_OP_SUBTRACT 1
+#define SDF_CSG_OP_INTERSECT 2
+#define SDF_CSG_OP_SHELL 3
+
+/** Blend type IDs (must match eSDFBlendType in DNA_sdf_types.h). */
+#define SDF_BLEND_TYPE_LINEAR 0
+#define SDF_BLEND_TYPE_SMOOTH 1
+#define SDF_BLEND_TYPE_CHAMFER 2
+#define SDF_BLEND_TYPE_ROUND 3
+
+/**
+ * Combine two SDF distances using the specified CSG operation and blend type.
+ * \param d1: accumulated distance field.
+ * \param d2: new object's distance.
+ * \param op: CSG operation (0=union, 1=subtract, 2=intersect, 3=shell).
+ * \param bt: blend type (0=linear, 1=smooth, 2=chamfer, 3=round).
+ * \param k: blend radius.
+ * \return combined distance.
+ */
+float combineCSG(float d1, float d2, int op, int bt, float k)
+{
+  if (op == SDF_CSG_OP_UNION) {
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        return opSmoothUnion(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        return opChamferUnion(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        return opRoundUnion(d1, d2, k);
+      }
+    }
+    return min(d1, d2);
+  }
+  else if (op == SDF_CSG_OP_SUBTRACT) {
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        return opSmoothSubtraction(d2, d1, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        return opChamferSubtraction(d2, d1, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        return opRoundSubtraction(d2, d1, k);
+      }
+    }
+    return max(d1, -d2);
+  }
+  else if (op == SDF_CSG_OP_INTERSECT) {
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        return opSmoothIntersection(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        return opChamferIntersection(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        return opRoundIntersection(d1, d2, k);
+      }
+    }
+    return max(d1, d2);
+  }
+  /* SDF_CSG_OP_SHELL: onion-skin fallback. */
+  return opOnion(d1, k);
 }
 
 /** \} */
@@ -178,129 +397,6 @@ float evalCubicDeriv(float c[4], float t)
 /* -------------------------------------------------------------------- */
 /** \name Cubic Solvers
  * \{ */
-
-/** Safe cube root that handles negative values. */
-float sdf_cbrt(float x)
-{
-  return sign(x) * pow(abs(x), 1.0f / 3.0f);
-}
-
-/**
- * Analytic cubic solver using Vieta's trigonometric method.
- * Finds the smallest real root of c[0] + c[1]*t + c[2]*t^2 + c[3]*t^3 = 0
- * in the interval [0, tfar].
- *
- * Handles degenerate cases: c3~0 -> quadratic, c3~0 && c2~0 -> linear.
- * For the three-real-roots case (discriminant <= 0), uses the trigonometric
- * solution to avoid complex intermediate values.
- *
- * \return smallest root in [0, tfar], or -1.0 if no root found.
- */
-float solveCubicFirstRoot(float c[4], float tfar)
-{
-  float c0 = c[0], c1 = c[1], c2 = c[2], c3 = c[3];
-
-  /* Degenerate: c3 ~ 0 -> solve as quadratic or linear. */
-  if (abs(c3) < 1e-7f) {
-    if (abs(c2) < 1e-7f) {
-      /* Linear: c1*t + c0 = 0 */
-      if (abs(c1) < 1e-7f) {
-        return -1.0f;
-      }
-      float t = -c0 / c1;
-      return (t >= 0.0f && t <= tfar) ? t : -1.0f;
-    }
-    /* Quadratic: c2*t^2 + c1*t + c0 = 0 */
-    float disc = c1 * c1 - 4.0f * c2 * c0;
-    if (disc < 0.0f) {
-      return -1.0f;
-    }
-    disc = sqrt(disc);
-    float inv2a = 0.5f / c2;
-    float t1 = (-c1 - disc) * inv2a;
-    float t2 = (-c1 + disc) * inv2a;
-    float lo = min(t1, t2);
-    float hi = max(t1, t2);
-    if (lo >= 0.0f && lo <= tfar) {
-      return lo;
-    }
-    if (hi >= 0.0f && hi <= tfar) {
-      return hi;
-    }
-    return -1.0f;
-  }
-
-  /* Normalize: t^3 + a*t^2 + b*t + cc = 0 */
-  float inv_c3 = 1.0f / c3;
-  float a = c2 * inv_c3;
-  float b = c1 * inv_c3;
-  float cc = c0 * inv_c3;
-
-  /* Depress: substitute t = u - a/3
-   * Yields: u^3 + p*u + q = 0
-   * p = b - a^2/3
-   * q = (2*a^3 - 9*a*b + 27*cc) / 27 */
-  float a_3 = a / 3.0f;
-  float a2 = a * a;
-  float p = b - a2 / 3.0f;
-  float q = (2.0f * a2 * a - 9.0f * a * b + 27.0f * cc) / 27.0f;
-
-  float p_3 = p / 3.0f;
-  float q_2 = q / 2.0f;
-  float D = q_2 * q_2 + p_3 * p_3 * p_3;
-
-  float roots[3];
-  int n_roots;
-
-  if (D > 1e-10f) {
-    /* One real root (Cardano's formula). */
-    float sqrtD = sqrt(D);
-    roots[0] = sdf_cbrt(-q_2 + sqrtD) + sdf_cbrt(-q_2 - sqrtD) - a_3;
-    n_roots = 1;
-  }
-  else if (D < -1e-10f) {
-    /* Three real roots (Vieta's trigonometric solution).
-     * Since D < 0, p must be negative, so -p/3 > 0. */
-    float neg_p_3 = -p_3;
-    float m = 2.0f * sqrt(neg_p_3);
-    float r = neg_p_3 * sqrt(neg_p_3); /* (-p/3)^(3/2) */
-    float theta = acos(clamp(-q_2 / r, -1.0f, 1.0f));
-    roots[0] = m * cos(theta / 3.0f) - a_3;
-    roots[1] = m * cos((theta + 2.0f * SDF_PI) / 3.0f) - a_3;
-    roots[2] = m * cos((theta + 4.0f * SDF_PI) / 3.0f) - a_3;
-    n_roots = 3;
-  }
-  else {
-    /* D ~ 0: repeated root case. */
-    if (abs(q_2) < 1e-10f) {
-      /* Triple root at u = 0. */
-      roots[0] = -a_3;
-      n_roots = 1;
-    }
-    else {
-      float u = sdf_cbrt(-q_2);
-      roots[0] = 2.0f * u - a_3;  /* distinct root */
-      roots[1] = -u - a_3;        /* repeated root */
-      n_roots = 2;
-    }
-  }
-
-  /* Select smallest root in [0, tfar]. */
-  float best = -1.0f;
-  for (int i = 0; i < 3; i++) {
-    if (i >= n_roots) {
-      break;
-    }
-    float root = roots[i];
-    if (root >= -1e-5f && root <= tfar + 1e-5f) {
-      root = clamp(root, 0.0f, tfar);
-      if (best < 0.0f || root < best) {
-        best = root;
-      }
-    }
-  }
-  return best;
-}
 
 /**
  * Marmitt + Newton-Raphson cubic solver.

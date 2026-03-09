@@ -29,7 +29,7 @@ void main()
     return;
   }
 
-  int4 brick_data = active_bricks[brick_idx].coord;
+  int4 brick_data = active_bricks[brick_idx + brick_offset].coord;
   int3 brick = brick_data.xyz;
   int slot = brick_data.w;
 

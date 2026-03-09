@@ -25,14 +25,6 @@
 
 namespace blender::ed::object {
 
-static const EnumPropertyItem rna_enum_sdf_type_items[] = {
-    {SDF_TYPE_BOX, "BOX", 0, "Cube", "Box SDF primitive"},
-    {SDF_TYPE_SPHERE, "SPHERE", 0, "Sphere", "Sphere SDF primitive"},
-    {SDF_TYPE_CAPSULE, "CAPSULE", 0, "Capsule", "Capsule SDF primitive"},
-    {SDF_TYPE_TORUS, "TORUS", 0, "Torus", "Torus SDF primitive"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 /* SDF Add */
 
 static const char *sdf_type_name(int type)

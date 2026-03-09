@@ -1,6 +1,7 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
   <g fill="#fff" fill-rule="evenodd">
-    <!-- Extrude/shell: concentric square outline showing hollow shell -->
-    <path d="M 150,150 H 1450 V 1450 H 150 Z M 350,350 V 1250 H 1250 V 350 Z"/>
+    <path d="M 150,150 H 1450 V 1450 H 150 Z M 380,380 V 1220 H 1220 V 380 Z"/>
+    <!-- Inner shell wall -->
+    <path d="M 530,530 H 1070 V 1070 H 530 Z M 620,620 V 980 H 980 V 620 Z"/>
   </g>
 </svg>

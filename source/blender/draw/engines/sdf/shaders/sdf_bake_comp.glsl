@@ -45,7 +45,7 @@ float sdTorus(float3 p, float2 t)
 
 /* Compact per-object data cached in shared memory.
  * Only the fields needed for SDF evaluation — avoids re-reading the
- * full 160-byte SDFObjectGPU struct from SSBO for every voxel. */
+ * full SDFObjectGPU struct from SSBO for every voxel. */
 struct SharedObj {
   float4x4 inverse_matrix;
   float4 position;
@@ -54,6 +54,8 @@ struct SharedObj {
   float bevel;
   float blend;
   int sdf_type;
+  int blend_type;
+  int csg_operation;
   int obj_index;
 };
 
@@ -208,6 +210,8 @@ void main()
     shared_objs[c].bevel = obj.bevel;
     shared_objs[c].blend = obj.blend;
     shared_objs[c].sdf_type = obj.sdf_type;
+    shared_objs[c].blend_type = obj.blend_type;
+    shared_objs[c].csg_operation = obj.csg_operation;
     shared_objs[c].obj_index = i;
   }
   barrier();
@@ -243,15 +247,56 @@ void main()
       }
 
       float k = sobj.blend;
-      if (k > 0.0f && acc_dist < 1e9f) {
-        float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-        acc_color = mix(acc_color, sobj.color.rgb, h);
-        acc_dist = mix(acc_dist, dist, h) - k * h * (1.0f - h);
+      int bt = sobj.blend_type;
+      int op = sobj.csg_operation;
+
+      /* First object initializes the accumulator — but subtraction/intersection
+       * from nothing = nothing. Only union/shell create new geometry. */
+      if (acc_dist >= 1e9f) {
+        if (op == SDF_CSG_OP_SUBTRACT || op == SDF_CSG_OP_INTERSECT) {
+          continue;
+        }
+        acc_color = sobj.color.rgb;
+        /* Shell applies onion (hollow) to the object's own distance. */
+        acc_dist = (op == SDF_CSG_OP_SHELL) ? opOnion(dist, k) : dist;
       }
       else {
-        if (dist < acc_dist) {
-          acc_color = sobj.color.rgb;
-          acc_dist = dist;
+        /* Combine using per-object CSG operation and blend type. */
+        float new_dist = combineCSG(acc_dist, dist, op, bt, k);
+
+        /* Color blending depends on the CSG operation type. */
+        if (op == SDF_CSG_OP_SUBTRACT) {
+          /* Subtraction: the carving object doesn't contribute color.
+           * Keep the accumulator color. */
+          acc_dist = new_dist;
+        }
+        else if (k > 0.0f && bt == SDF_BLEND_TYPE_SMOOTH) {
+          /* Smooth blend: use h-factor for proportional color mixing. */
+          float h;
+          if (op == SDF_CSG_OP_UNION) {
+            h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
+          }
+          else {
+            /* Intersection: blend toward whichever surface is further. */
+            h = clamp(0.5f - 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
+          }
+          acc_color = mix(acc_color, sobj.color.rgb, h);
+          acc_dist = new_dist;
+        }
+        else {
+          /* Linear/Chamfer/Round: pick color from the surface that defines the result. */
+          if (op == SDF_CSG_OP_UNION) {
+            if (dist < acc_dist) {
+              acc_color = sobj.color.rgb;
+            }
+          }
+          else if (op == SDF_CSG_OP_INTERSECT) {
+            if (dist > acc_dist) {
+              acc_color = sobj.color.rgb;
+            }
+          }
+          /* Shell: keep accumulator color. */
+          acc_dist = new_dist;
         }
       }
     }

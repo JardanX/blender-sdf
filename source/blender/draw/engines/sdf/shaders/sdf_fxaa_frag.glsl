@@ -4,7 +4,7 @@
 
 /**
  * SDF FXAA post-processing fragment shader.
- * Uses MathOPS-style FXAA with sRGB-based luma (quality preset 29).
+ * Quality preset 25 (8 search steps) with perceptual luma.
  */
 
 #include "infos/sdf_shader_infos.hh"
@@ -18,6 +18,6 @@ void main()
       color_tx,     /* offscreen march result */
       rcpFrame,     /* 1.0 / viewport size */
       0.75,         /* subpix: default filtering amount */
-      0.063,        /* edgeThreshold: overkill quality */
+      0.125,        /* edgeThreshold: good default quality */
       0.0312);      /* edgeThresholdMin: visible limit */
 }

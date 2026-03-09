@@ -27,6 +27,7 @@ typedef struct SDFRuntimeHandle SDFRuntimeHandle;
 typedef enum eSDFType {
   SDF_TYPE_BOX = 0,
   SDF_TYPE_SPHERE = 1,
+  /* 2, 3 reserved (removed: Cylinder, Cone). */
   SDF_TYPE_CAPSULE = 4,
   SDF_TYPE_TORUS = 5,
 } eSDFType;
@@ -42,6 +43,7 @@ typedef enum eSDFCSGOperation {
   SDF_CSG_UNION = 0,
   SDF_CSG_SUBTRACT = 1,
   SDF_CSG_INTERSECT = 2,
+  SDF_CSG_SHELL = 3,
 } eSDFCSGOperation;
 
 typedef struct SDF {
@@ -73,7 +75,8 @@ typedef struct SDF {
   int blend_type;
   /** CSG operation (eSDFCSGOperation). */
   int csg_operation;
-  char _pad1[4];
+  /** Shell/extrusion offset distance (used when csg_operation == SDF_CSG_SHELL). */
+  float shell_distance;
 
   /** Material slots. */
   struct Material **mat;
@@ -85,7 +88,3 @@ typedef struct SDF {
   SDFRuntimeHandle *runtime;
 } SDF;
 
-/** #SDF.flag */
-enum {
-  SDF_DS_EXPAND = (1 << 0),
-};

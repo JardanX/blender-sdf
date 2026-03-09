@@ -943,6 +943,14 @@ if(WITH_BLENDER)
       vis_sel_11
       sdf_data
       sdf_primitive
+      sdf_blend_linear
+      sdf_blend_smooth
+      sdf_blend_chamfer
+      sdf_blend_round
+      sdf_csg_union
+      sdf_csg_subtract
+      sdf_csg_intersect
+      sdf_csg_extrude
       volume_data
       vpaint_hlt
       warning_large

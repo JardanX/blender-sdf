@@ -1676,3 +1676,127 @@ between Cycles and the draw engine.
 | `intern/cycles/blender/sdf.cpp` | Store `Shader*` in instances and `object_shaders` in all code paths (instanced bake, world-space bake, early return). Fixed instanced mode `object_shader_ids` from hardcoded 0 to actual resolved IDs |
 | `intern/cycles/scene/geometry.cpp` | Re-resolve shader IDs from `Shader*` at device upload time via `get_shader_id()` for both instanced and world-space paths |
 | `intern/cycles/blender/sync.cpp` | Added `(b_update.is_updated_shading() && is_sdf_object)` to geometry re-sync trigger |
+
+---
+
+## Code Audit Fixes (2026-03-09)
+
+Systematic audit of SDF integration across all Blender layers. Found and fixed missing registrations, dead code, strict aliasing UB, and enum duplication.
+
+### Critical Fixes
+
+| File | Fix |
+|------|-----|
+| `depsgraph/intern/depsgraph_tag.cc` | Added `case OB_SDF:` and `case ID_SF:` to `geometry_tag_to_component()`. Without these, `DEG_id_tag_update(..., ID_RECALC_GEOMETRY)` from `rna_SDF_update()` mapped to `NodeType::UNDEFINED`, potentially causing missed viewport redraws via the depsgraph path. |
+| `blenkernel/intern/object_update.cc` | Added `case OB_SDF:` in geometry eval dispatch (calls `BKE_sdf_data_update`) and batch cache dirty tag (no-op, SDF has no batch cache). Added `#include "BKE_sdf.hh"`. |
+
+### Warning Fixes
+
+| File | Fix |
+|------|-----|
+| `draw/engines/sdf/sdf_engine.cc` | Replaced 24 `*reinterpret_cast<const uint32_t *>(&float)` strict aliasing violations with `memcpy`-based `float_as_uint()` helper in hash computation. |
+| `makesrna/intern/rna_sdf.cc` + `editors/object/object_sdf.cc` | Consolidated duplicated `rna_enum_sdf_type_items` into single definition in `rna_sdf.cc`, declared via `RNA_enum_items.hh`. Unified label from "Box" (RNA) / "Cube" (editor) to "Cube" everywhere. |
+
+### Info Fixes
+
+| File | Fix |
+|------|-----|
+| `makesdna/DNA_sdf_types.h` | Removed dead `SDF_DS_EXPAND` flag enum (referenced `#SDF.flag` but struct has no `flag` field). Added comment for enum value gap (2, 3 reserved from removed Cylinder/Cone types). |
+| `blenkernel/intern/sdf.cc` | Removed unused `#include <optional>`. |
+| `makesrna/RNA_enum_items.hh` | Added `DEF_ENUM(rna_enum_sdf_type_items)` for shared enum access. |
+
+---
+
+## Performance Optimizations (2026-03-09)
+
+Performance audit of SDF draw engine. Targeted GPU stalls, shader ALU waste, unnecessary allocations, and per-frame overhead.
+
+### Shader Optimizations
+
+| File | Change | Impact |
+|------|--------|--------|
+| `shaders/sdf_fxaa_lib.glsl` | Replaced `pow(x, 1/2.4)` sRGB luma with `dot(rgb, vec3(0.299, 0.587, 0.114))` — eliminates 33+ `pow()` calls per pixel. Reduced preset from 29 (12 search steps) to 25 (8 steps) with threshold 0.063→0.125. | ~2-5% frame time |
+| `shaders/sdf_lib.glsl` | Removed dead code: `sdf_cbrt()` and `solveCubicFirstRoot()` (Marmitt+NR solver is used instead). Reduces shader binary size and compile time. | Shader compile |
+| `shaders/sdf_grid_blend_comp.glsl` | Removed dead bounds check (workgroup size matches `BRICK_STORAGE`). Added explicit `textureLod(..., 0.0)` for defined behavior in compute shaders. | Minor |
+
+### Engine Optimizations
+
+| File | Change | Impact |
+|------|--------|--------|
+| `sdf_engine.cc` — `clear_indirection()` | Replaced CPU-side `Vector<int32_t>` (up to 8MB at 128^3) with `GPU_texture_clear()` — zero CPU allocation. | ~0.1-0.5ms |
+| `sdf_engine.cc` — `dispatch_shape_bake_all()` | Eliminated per-shape SSBO alloc/free cycle by uploading all active bricks once and using `brick_offset` push constant. Consolidated N per-shape memory barriers into single barrier after all shapes. | ~0.5-3ms with many shapes |
+| `sdf_engine.cc` — `upload_shapes_instances()` | Added SSBO reuse: track count, only recreate when size changes, otherwise `GPU_storagebuf_update()`. Applied same pattern to shape/instance/shape_indirection SSBOs. | ~0.05-0.2ms per dirty frame |
+| `sdf_engine.cc` — `dispatch_classify()` | Moved `max_blend_` computation from draw-time O(N) scan to incremental update during `object_sync()`. | Minor |
+
+### Overlay Optimizations
+
+| File | Change | Impact |
+|------|--------|--------|
+| `overlay_sdf.hh` — `end_sync()` | SSBO reuse for select_id_map (track count, update in-place). Cached 11 shader binding/uniform slots after shader creation (eliminates per-draw string hashing). | ~10-25us per selection draw |
+| `overlay_sdf.hh` — `draw()` | Use cached slots + `GPU_shader_uniform_*_ex()` with integer locations instead of string lookups. Cache texture pointers to avoid double cross-TU fetch for unbind. | ~10-25us per selection draw |
+
+### Shader Info Changes
+
+| File | Change |
+|------|--------|
+| `shaders/infos/sdf_shader_infos.hh` | Added `brick_offset` push constant to `sdf_shape_bake` for per-shape SSBO offset. |
+| `shaders/sdf_shape_bake_comp.glsl` | Use `active_bricks[brick_idx + brick_offset]` to index into shared SSBO. |
+
+---
+
+## Full CSG Boolean & Blend Operations (Phase 12 — All MathOPS blend/CSG in native engine)
+
+Implemented all SDF boolean and blending operations from the MathOPS addon in the native
+Blender draw engine. Previously only smooth union was hard-coded; now the engine supports
+all 4 blend types × 4 CSG operations with per-object dispatch.
+
+### Operations Supported
+
+| CSG Operation | Blend: Linear | Blend: Smooth | Blend: Chamfer | Blend: Round |
+|---------------|---------------|---------------|----------------|--------------|
+| Union         | `min(d1,d2)` | `opSmoothUnion` | `opChamferUnion` | `opRoundUnion` |
+| Subtract      | `max(d1,-d2)` | `opSmoothSubtraction` | `opChamferSubtraction` | `opRoundSubtraction` |
+| Intersect     | `max(d1,d2)` | `opSmoothIntersection` | `opChamferIntersection` | `opRoundIntersection` |
+| Shell         | `opOnion` | (planned) | (planned) | (planned) |
+
+### DNA Changes
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_sdf_types.h` | Added `SDF_CSG_SHELL = 3` to `eSDFCSGOperation`. Replaced `_pad1[4]` with `float shell_distance` |
+| `makesdna/DNA_sdf_defaults.h` | Added `.shell_distance = 0.0f` default |
+
+### RNA Changes
+
+| File | Change |
+|------|--------|
+| `makesrna/intern/rna_sdf.cc` | Added Shell to CSG enum items. Added SVG icons to all blend type and CSG enum items. Added `shell_distance` float property (range -5.0 to 5.0) |
+
+### Icon Registration (8 new icons)
+
+| File | Change |
+|------|--------|
+| `editors/include/UI_icons.hh` | 8 new DEF_ICON entries: `SDF_BLEND_LINEAR`, `SDF_BLEND_SMOOTH`, `SDF_BLEND_CHAMFER`, `SDF_BLEND_ROUND`, `SDF_CSG_UNION`, `SDF_CSG_SUBTRACT`, `SDF_CSG_INTERSECT`, `SDF_CSG_EXTRUDE` |
+| `editors/datafiles/CMakeLists.txt` | 8 SVG filenames added to `SVG_FILENAMES_NOEXT` |
+
+### GPU Struct Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `blend_type` (int) and `csg_operation` (int) to `SDFObjectGPU` (160→176 bytes) and `SDFInstanceGPU` (160→176 bytes) |
+
+### GLSL Shader Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Ported all blend functions from MathOPS `sdf_ops.glsl`: smooth (union/sub/intersect), chamfer (union/sub/intersect + smooth variants), round/spherical (union/sub/intersect + smooth variants), onion shell. Added `combineCSG()` dispatch function |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | **Bug fix:** Replaced hard-coded union (min/smooth union) with `combineCSG()` dispatch so that subtraction/intersection surfaces are correctly detected during brick classification. Previously, subtraction bricks were misclassified as "fully inside" causing holes in the rendered surface |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added `blend_type` and `csg_operation` to `SharedObj`. Replaced hard-coded smooth union with per-object `combineCSG()` dispatch. Color blending adapts per operation (subtraction keeps accumulator color; smooth uses h-factor; linear/chamfer/round use closest surface) |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Added `#include "sdf_lib.glsl"`. Replaced hard-coded smooth union with `combineCSG()` dispatch. Added `grid_blend_type` and `grid_csg_operation` push constants |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `grid_blend_type` and `grid_csg_operation` push constants to `sdf_grid_blend` shader info |
+
+### Engine Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Pass `blend_type`/`csg_operation` from SDF DNA to GPU objects and instances. Added to `GridObject` and `InstanceInfo` structs. Updated scene hash to include blend_type/csg_operation. Updated instance SSBO upload. Grid blend dispatch passes new push constants. Grid objects read blend_type/csg_operation from SDF data when available |

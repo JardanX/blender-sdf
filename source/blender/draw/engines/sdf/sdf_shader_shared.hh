@@ -26,11 +26,17 @@ struct SDFObjectGPU {
   float blend;
   /** SDF primitive type (eSDFType: 0=box, 1=sphere, 4=capsule, 5=torus). */
   int sdf_type;
+  /** Blend function type (eSDFBlendType: 0=linear, 1=smooth, 2=chamfer, 3=round). */
+  int blend_type;
+  /** CSG operation (eSDFCSGOperation: 0=union, 1=subtract, 2=intersect, 3=shell). */
+  int csg_operation;
   float _pad2;
+  float _pad3;
+  float _pad4;
   /** Object color RGBA. */
   float4 color;
 };
-/* Total: 64 + 16 + 16 + 16 + 16 + 16 + 16 = 160 bytes, 16-byte aligned. */
+/* Total: 64 + 16 + 16 + 16 + 16 + 16 + 16 + 16 = 176 bytes, 16-byte aligned. */
 
 /** Brick counter SSBO (used by classify pass). */
 struct BrickCounter {
@@ -92,9 +98,15 @@ struct SDFInstanceGPU {
   int shape_id;
   /** Original object index in objects[] (for selection/debug). */
   int object_id;
+  /** Blend function type (eSDFBlendType). */
+  int blend_type;
+  /** CSG operation (eSDFCSGOperation). */
+  int csg_operation;
   float _pad0;
+  float _pad1;
+  float _pad2;
 };
-/* 64 + 64 + 16 + 16 = 160 bytes, 16-byte aligned. */
+/* 64 + 64 + 16 + 16 + 16 = 176 bytes, 16-byte aligned. */
 
 /** Push constants for the classify compute shader. */
 struct SDFClassifyParams {

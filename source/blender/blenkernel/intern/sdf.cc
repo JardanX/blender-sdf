@@ -6,8 +6,6 @@
  * \ingroup bke
  */
 
-#include <optional>
-
 #include "MEM_guardedalloc.h"
 
 #include "DNA_defaults.h"

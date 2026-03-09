@@ -1,8 +1,8 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
   <g fill="#fff" fill-rule="evenodd">
-    <!-- Subtract: A minus overlap region -->
-    <path d="M 150,150 H 950 V 650 H 650 V 950 H 150 Z"/>
-    <!-- B shown as outline (the cutter) -->
-    <path d="M 650,650 H 1450 V 1450 H 650 Z M 750,750 V 1350 H 1350 V 750 Z"/>
+    <!-- Result: A minus overlap -->
+    <path d="M 100,100 H 900 V 700 H 700 V 900 H 100 Z"/>
+    <!-- Cutter: B as outline -->
+    <path d="M 700,700 H 1500 V 1500 H 700 Z M 820,820 V 1380 H 1380 V 820 Z"/>
   </g>
 </svg>

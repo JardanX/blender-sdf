@@ -32,6 +32,7 @@
 #include "BKE_pointcache.h"
 #include "BKE_pointcloud.hh"
 #include "BKE_scene.hh"
+#include "BKE_sdf.hh"
 #include "BKE_volume.hh"
 
 #include "MEM_guardedalloc.h"
@@ -175,6 +176,9 @@ void BKE_object_handle_data_update(Depsgraph *depsgraph, Scene *scene, Object *o
     case OB_GREASE_PENCIL:
       BKE_object_eval_grease_pencil(depsgraph, scene, ob);
       break;
+    case OB_SDF:
+      BKE_sdf_data_update(depsgraph, scene, ob);
+      break;
   }
 
   /* particles */
@@ -272,6 +276,9 @@ void BKE_object_batch_cache_dirty_tag(Object *ob)
     case OB_GREASE_PENCIL:
       BKE_grease_pencil_batch_cache_dirty_tag((GreasePencil *)ob->data,
                                               BKE_GREASEPENCIL_BATCH_DIRTY_ALL);
+      break;
+    case OB_SDF:
+      /* SDF objects have no batch cache (rendered by custom draw engine). */
       break;
     default:
       break;

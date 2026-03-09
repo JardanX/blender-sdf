@@ -1,6 +1,5 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
   <g fill="#fff">
-    <!-- Union: two overlapping squares merged into one filled shape -->
-    <path d="M 150,150 H 950 V 650 H 1450 V 1450 H 650 V 950 H 150 Z"/>
+    <path d="M 100,100 H 900 V 700 H 1500 V 1500 H 700 V 900 H 100 Z"/>
   </g>
 </svg>

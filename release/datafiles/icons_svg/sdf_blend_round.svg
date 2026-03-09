@@ -1,6 +1,5 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
   <g fill="#fff">
-    <!-- Round: quarter-circle fillet at corner -->
-    <path d="M 350,200 H 500 V 650 A 450,450 0 0 0 950,1100 H 1400 V 1250 H 950 A 600,600 0 0 1 350,650 Z"/>
+    <path d="M 300,150 H 520 V 520 A 560,560 0 0 0 1080,1080 H 1450 V 1300 H 1080 A 780,780 0 0 1 300,520 Z"/>
   </g>
 </svg>
