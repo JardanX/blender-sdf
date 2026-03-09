@@ -1,7 +1,7 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
-  <g fill="#fff" fill-rule="evenodd">
-    <path d="M 150,150 H 1450 V 1450 H 150 Z M 380,380 V 1220 H 1220 V 380 Z"/>
-    <!-- Inner shell wall -->
-    <path d="M 530,530 H 1070 V 1070 H 530 Z M 620,620 V 980 H 980 V 620 Z"/>
+  <g fill="none" stroke="#fff" stroke-width="90" stroke-linejoin="miter">
+    <path d="M 200,200 H 950 V 950 H 200 Z"/>
+    <path d="M 650,650 H 1400 V 1400 H 650 Z"/>
+    <rect x="530" y="530" width="540" height="540"/>
   </g>
 </svg>

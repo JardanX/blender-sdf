@@ -1783,20 +1783,96 @@ all 4 blend types × 4 CSG operations with per-object dispatch.
 
 | File | Change |
 |------|--------|
-| `draw/engines/sdf/sdf_shader_shared.hh` | Added `blend_type` (int) and `csg_operation` (int) to `SDFObjectGPU` (160→176 bytes) and `SDFInstanceGPU` (160→176 bytes) |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `blend_type`, `csg_operation`, and `shell_distance` to `SDFObjectGPU` (replaces padding). Added `blend_type`, `csg_operation` to `SDFInstanceGPU` |
 
 ### GLSL Shader Changes
 
 | File | Change |
 |------|--------|
-| `draw/engines/sdf/shaders/sdf_lib.glsl` | Ported all blend functions from MathOPS `sdf_ops.glsl`: smooth (union/sub/intersect), chamfer (union/sub/intersect + smooth variants), round/spherical (union/sub/intersect + smooth variants), onion shell. Added `combineCSG()` dispatch function |
-| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | **Bug fix:** Replaced hard-coded union (min/smooth union) with `combineCSG()` dispatch so that subtraction/intersection surfaces are correctly detected during brick classification. Previously, subtraction bricks were misclassified as "fully inside" causing holes in the rendered surface |
-| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added `blend_type` and `csg_operation` to `SharedObj`. Replaced hard-coded smooth union with per-object `combineCSG()` dispatch. Color blending adapts per operation (subtraction keeps accumulator color; smooth uses h-factor; linear/chamfer/round use closest surface) |
-| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Added `#include "sdf_lib.glsl"`. Replaced hard-coded smooth union with `combineCSG()` dispatch. Added `grid_blend_type` and `grid_csg_operation` push constants |
-| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `grid_blend_type` and `grid_csg_operation` push constants to `sdf_grid_blend` shader info |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Ported all blend functions from MathOPS `sdf_ops.glsl`: smooth (union/sub/intersect), chamfer (union/sub/intersect + smooth variants), round/spherical (union/sub/intersect + smooth variants), onion shell. Added `combineCSG()` dispatch function with `shell_dist` parameter. **Bug fix:** Shell now applies `opOnion(d2, shell_dist)` to the new object then unions with scene (was incorrectly applying to accumulator) |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | **Bug fix:** Replaced hard-coded union with `combineCSG()` dispatch. Subtraction/intersection skip empty accumulators. Shell uses `obj.shell_distance` for onion thickness |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added `blend_type`, `csg_operation`, and `shell_distance` to `SharedObj`. Per-object CSG dispatch. Subtraction/intersection skip empty accumulators. Shell uses `shell_distance` for onion |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | CSG dispatch with `grid_shell_distance` push constant. Subtraction/intersection skip empty atlas voxels |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `grid_blend_type`, `grid_csg_operation`, and `grid_shell_distance` push constants to `sdf_grid_blend` |
 
 ### Engine Changes
 
 | File | Change |
 |------|--------|
-| `draw/engines/sdf/sdf_engine.cc` | Pass `blend_type`/`csg_operation` from SDF DNA to GPU objects and instances. Added to `GridObject` and `InstanceInfo` structs. Updated scene hash to include blend_type/csg_operation. Updated instance SSBO upload. Grid blend dispatch passes new push constants. Grid objects read blend_type/csg_operation from SDF data when available |
+| `draw/engines/sdf/sdf_engine.cc` | Pass `blend_type`/`csg_operation`/`shell_distance` from SDF DNA to GPU objects, instances, and grid objects. Intersection objects get infinite AABB to be always evaluated. Shell objects get AABB expanded by `shell_distance`. Scene hash includes `shell_distance`. Grid blend dispatch passes `grid_shell_distance` push constant |
+
+---
+
+## Session: CSG Two-Pass Evaluation + Shell Fix + UI Redesign (2026-03-09)
+
+### Critical Bug Fixes
+
+**Two-pass evaluation in classify and bake shaders:**
+Object ordering caused subtraction/intersection objects to be processed before any union object existed, resulting in those objects rendering as solid blobs or disappearing entirely.
+
+**Fix:** Both `sdf_classify_comp.glsl` and `sdf_bake_comp.glsl` now use two-pass evaluation:
+- Pass 1: Accumulate only union objects to build the base SDF
+- Pass 2: Apply subtraction/intersection/shell modifiers to the built base
+
+**Shell algorithm rewrite:**
+Shell was using `opOnion(d2, shell_dist)` which applies a hollow shell to the new object. The correct MathOPS algorithm is: union the shape with base, then intersect with a limit surface (`base - thickness`), producing an expanded intersection region.
+
+### Shader Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Two-pass evaluation: pass 1 unions only, pass 2 modifiers. 6-param `combineCSG` call |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Two-pass evaluation matching classify. `SharedObj` struct gets `shell_distance` field |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | `combineCSG` rewritten to 6 params (`d1, d2, op, bt, k, shell_dist`). Shell case implements MathOPS algorithm: union + intersect with limit surface `(d1 - abs(shell_dist))` |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Shell init uses `grid_dist` (needs base). Empty accumulator skips subtract/intersect |
+
+### UI Redesign
+
+| File | Change |
+|------|--------|
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Panel renamed "Blending" → "Operation". Icon-only grids for CSG operation and blend type (`prop_enum` with `text=""`). Title labels "Boolean" and "Blend Type". Blend amount always shown; shell_distance shown only when CSG operation is SHELL |
+
+### SVG Icon Redesign (all 8 icons)
+
+All icons redesigned with bordered/outlined style using `fill-rule="evenodd"` (outer path minus inner path = outlined shape with transparent background).
+
+| File | Style |
+|------|-------|
+| `sdf_csg_union.svg` | Two overlapping outlined squares, overlap region open |
+| `sdf_csg_subtract.svg` | A outline (with overlap cut out) + B cutter outline |
+| `sdf_csg_intersect.svg` | A and B outlined, overlap region filled solid |
+| `sdf_csg_extrude.svg` | A and B outlined, expanded overlap region outlined |
+| `sdf_blend_linear.svg` | L-profile outline with sharp 90-degree corner |
+| `sdf_blend_smooth.svg` | L-profile outline with curved (Bezier) transition |
+| `sdf_blend_chamfer.svg` | L-profile outline with 45-degree diagonal cut |
+| `sdf_blend_round.svg` | L-profile outline with circular arc corner |
+
+---
+
+## UI Improvements, Blend Fixes, and Shell Voxel Fix
+
+### UI: Full-width icon buttons, pie menus, defaults
+
+| File | Change |
+|------|--------|
+| `source/blender/editors/interface/interface_layout.cc` | Exempt `ButType::Row` (expanded enum buttons) from `fixed_size_set(true)`, allowing icon-only expanded enums to fill available width |
+| `source/blender/makesrna/intern/rna_sdf.cc` | Added icons to shape type enum items (ICON_MESH_CUBE, ICON_MESH_UVSPHERE, ICON_MESH_CAPSULE, ICON_MESH_TORUS) |
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Full-width icon-only enum rows with `scale_y=1.6`, pie menu operators (Tab=CSG, Shift+Tab=Blend), blend slider disabled for Linear, shell thickness only shown for Shell |
+| `scripts/presets/keyconfig/keymap_data/blender_default.py` | Added SDF pie menu keymaps (Tab and Shift+Tab) in `km_object_non_modal()` before mode-switch entries |
+| `source/blender/makesdna/DNA_sdf_defaults.h` | Changed defaults: `blend=0.1f`, `blend_type=1` (Smooth), `shell_distance=0.2f` |
+| `release/datafiles/icons_svg/sdf_*.svg` (8 files) | Redesigned with thin stroke-based rendering (`stroke-width="90"`) for pixel-sharp display at 20×20px |
+
+### Blend math: round operations and shell blend clamp
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/sdf/shaders/sdf_lib.glsl` | Replaced round blend ops with MathOPS `opUnionIRound` (outward convex fillet using mirror2D). Added `opDifferenceIRound`, `opIntersectIRound`, `opSmoothRoundUnionInverted`. Shell blend clamped: `k = clamp(k, 0.01, abs(shell_dist)*2)`. Full shell CSG implementation (union + limit surface intersection). `combineCSG` now takes `shell_dist` parameter |
+
+### Shell voxel classification fix
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | Track `max_shell_distance_` across all shell objects (like `max_blend_`). Pass as uniform to classify and bake shaders |
+| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `PUSH_CONSTANT(float, max_shell_distance)` to classify and bake shader infos |
+| `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Brick AABB expansion includes `max_shell_distance`. Surface test threshold: `brick_half_diag + max_shell_distance` ensures bricks near shell boundaries are activated |
+| `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Brick AABB expansion includes `max_shell_distance` for candidate object collection |

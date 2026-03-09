@@ -1,5 +1,4 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
-  <g fill="#fff">
-    <path d="M 300,150 H 520 V 580 C 520,980 620,1080 1020,1080 H 1450 V 1300 H 1020 C 420,1300 300,1100 300,580 Z"/>
-  </g>
+  <path d="M 400,250 V 350 C 400,850 750,1050 1350,1050"
+        fill="none" stroke="#fff" stroke-width="90" stroke-linecap="round"/>
 </svg>

@@ -5539,8 +5539,10 @@ void LayoutInternal::layout_add_but(uiLayout *layout, uiBut *but)
   int w, h;
   ui_item_size((uiItem *)bitem, &w, &h);
   /* XXX uiBut hasn't scaled yet
-   * we can flag the button as not expandable, depending on its size */
-  if (w <= 2 * UI_UNIT_X && but->str.empty()) {
+   * we can flag the button as not expandable, depending on its size.
+   * Exception: expanded enum buttons (ButType::Row) should stretch to fill available space
+   * when used with icon_only/empty text, so they aren't marked fixed. */
+  if (w <= 2 * UI_UNIT_X && but->str.empty() && but->type != ButType::Row) {
     bitem->fixed_size_set(true);
   }
 

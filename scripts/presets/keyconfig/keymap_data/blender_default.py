@@ -4534,6 +4534,12 @@ def km_object_non_modal(params):
         {"items": items},
     )
 
+    # SDF pie menus (poll restricts to SDF objects, falls through otherwise)
+    items.extend([
+        ("sdf.csg_pie_call", {"type": 'TAB', "value": 'PRESS'}, None),
+        ("sdf.blend_pie_call", {"type": 'TAB', "value": 'PRESS', "shift": True}, None),
+    ])
+
     if params.legacy:
         items.extend([
             ("object.mode_set", {"type": 'TAB', "value": 'PRESS'},

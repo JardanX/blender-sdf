@@ -181,6 +181,8 @@ class Instance : public DrawEngine {
   float surface_margin_ = 1.0f;
   /** Max blend radius across all objects (computed in classify, used in bake). */
   float max_blend_ = 0.0f;
+  /** Max shell distance across all shell objects (for brick expansion). */
+  float max_shell_distance_ = 0.0f;
 
   /** Dirty tracking: hash of object data for the current frame. */
   uint64_t scene_hash_ = 0;
@@ -209,6 +211,7 @@ class Instance : public DrawEngine {
     float blend;                     /* Blend amount from modifier */
     int blend_type;                  /* Blend function type (eSDFBlendType) */
     int csg_operation;               /* CSG operation (eSDFCSGOperation) */
+    float shell_distance;            /* Shell/extrusion thickness */
   };
   Vector<GridObject> grid_objects_;
 
@@ -393,6 +396,7 @@ class Instance : public DrawEngine {
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
     max_blend_ = 0.0f;
+    max_shell_distance_ = 0.0f;
   }
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
@@ -481,6 +485,7 @@ class Instance : public DrawEngine {
     gpu_obj.sdf_type = sdf_data->sdf_type;
     gpu_obj.blend_type = sdf_data->blend_type;
     gpu_obj.csg_operation = sdf_data->csg_operation;
+    gpu_obj.shell_distance = sdf_data->shell_distance;
 
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
@@ -488,7 +493,11 @@ class Instance : public DrawEngine {
     /* Compute world AABB from scaled size + bevel + blend.
      * Smooth union with factor k can push the iso-surface outward by up to k
      * from either object's surface, so we expand by the full blend value. */
-    float3 local_extent = float3(gpu_obj.sdf_size) + float3(bevel + sdf_data->blend);
+    float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
+                              fabsf(sdf_data->shell_distance) :
+                              0.0f;
+    float3 local_extent = float3(gpu_obj.sdf_size) +
+                          float3(bevel + sdf_data->blend + shell_expand);
 
     /* Transform local AABB corners to world to get tight world AABB. */
     float3 world_min = float3(1e30f);
@@ -524,6 +533,9 @@ class Instance : public DrawEngine {
     scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
     max_blend_ = math::max(max_blend_, gpu_obj.blend);
+    if (sdf_data->csg_operation == SDF_CSG_SHELL) {
+      max_shell_distance_ = math::max(max_shell_distance_, fabsf(sdf_data->shell_distance));
+    }
 
     const int object_index = objects_.size();
     objects_.append(gpu_obj);
@@ -724,6 +736,7 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.blend);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.blend_type);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.csg_operation);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.shell_distance);
       hash = hash * 6364136223846793005ULL +
              float_as_uint(obj.inverse_matrix[0][0]);
       hash = hash * 6364136223846793005ULL +
@@ -1911,6 +1924,7 @@ class Instance : public DrawEngine {
     brick_half_diag *= surface_margin_;
     GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
     GPU_shader_uniform_1f(classify_sh_, "max_blend", max_blend_);
+    GPU_shader_uniform_1f(classify_sh_, "max_shell_distance", max_shell_distance_);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
 
     /* Dispatch: one thread per brick, local group size is 4x4x4. */
@@ -1977,6 +1991,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
+    GPU_shader_uniform_1f(bake_sh_, "max_shell_distance", max_shell_distance_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
@@ -2786,14 +2801,16 @@ class Instance : public DrawEngine {
     grid_obj.world_to_texture = world_to_tex;
     grid_obj.color = color;
     grid_obj.blend = blend_val;
-    grid_obj.blend_type = 0; /* Default to linear for grid objects. */
-    grid_obj.csg_operation = 0; /* Default to union for grid objects. */
+    grid_obj.blend_type = 0;      /* Default to linear for grid objects. */
+    grid_obj.csg_operation = 0;   /* Default to union for grid objects. */
+    grid_obj.shell_distance = 0.0f;
 
     /* If the object has SDF data, use its blend_type and csg_operation. */
     if (ob->type == OB_SDF && ob->data) {
       const SDF *sdf_data = static_cast<const SDF *>(ob->data);
       grid_obj.blend_type = sdf_data->blend_type;
       grid_obj.csg_operation = sdf_data->csg_operation;
+      grid_obj.shell_distance = sdf_data->shell_distance;
     }
 
     grid_objects_.append(grid_obj);
@@ -2946,6 +2963,7 @@ class Instance : public DrawEngine {
       GPU_shader_uniform_1f(grid_blend_sh_, "grid_blend", grid.blend);
       GPU_shader_uniform_1i(grid_blend_sh_, "grid_blend_type", grid.blend_type);
       GPU_shader_uniform_1i(grid_blend_sh_, "grid_csg_operation", grid.csg_operation);
+      GPU_shader_uniform_1f(grid_blend_sh_, "grid_shell_distance", grid.shell_distance);
       GPU_shader_uniform_1i(grid_blend_sh_, "active_brick_count", active_brick_count_);
 
       /* Active-brick-only dispatch: one workgroup per active brick.

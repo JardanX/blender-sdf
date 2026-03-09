@@ -80,10 +80,11 @@ void main()
         continue;
       }
       acc_color = grid_color.rgb;
-      acc_dist = (grid_csg_operation == SDF_CSG_OP_SHELL) ? opOnion(grid_dist, k) : grid_dist;
+      acc_dist = grid_dist;
     }
     else {
-      float new_dist = combineCSG(acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k);
+      float new_dist = combineCSG(
+          acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance);
 
       if (grid_csg_operation == SDF_CSG_OP_SUBTRACT) {
         acc_dist = new_dist;
