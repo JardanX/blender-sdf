@@ -232,6 +232,11 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *object_ssbo_ = nullptr;
   int object_ssbo_count_ = 0;
 
+  /** Modifier data for GPU upload. */
+  Vector<SDFModifierGPU> modifiers_;
+  gpu::StorageBuf *modifier_ssbo_ = nullptr;
+  int modifier_ssbo_count_ = 0;
+
   /** BVH for object AABB culling on GPU. */
   Vector<BVHNodeGPU> bvh_nodes_;
   gpu::StorageBuf *bvh_ssbo_ = nullptr;
@@ -389,6 +394,7 @@ class Instance : public DrawEngine {
     }
 
     objects_.clear();
+    modifiers_.clear();
     pending_grid_objects_.clear();
     shapes_.clear();
     shape_fingerprint_map_.clear();
@@ -490,14 +496,68 @@ class Instance : public DrawEngine {
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
 
-    /* Compute world AABB from scaled size + bevel + blend.
-     * Smooth union with factor k can push the iso-surface outward by up to k
-     * from either object's surface, so we expand by the full blend value. */
+    /* Pack modifiers for this object. */
+    gpu_obj.modifier_start = int(modifiers_.size());
+    gpu_obj.modifier_count = 0;
+    LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+      if (!mod->show_viewport) {
+        continue;
+      }
+      SDFModifierGPU gpu_mod = {};
+      gpu_mod.header = int4(mod->type, mod->flag, 0, 0);
+      gpu_mod.params = float4(mod->params[0], mod->params[1], mod->params[2], mod->params[3]);
+      modifiers_.append(gpu_mod);
+      gpu_obj.modifier_count++;
+    }
+
+    /* Compute shape-specific local extent, then add blend/shell padding.
+     * Each primitive has different actual extents from its size parameters. */
     float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
                               fabsf(sdf_data->shell_distance) :
                               0.0f;
-    float3 local_extent = float3(gpu_obj.sdf_size) +
-                          float3(bevel + sdf_data->blend + shell_expand);
+    float pad = sdf_data->blend + shell_expand;
+    float3 local_extent;
+    float3 sz = float3(gpu_obj.sdf_size);
+    switch (sdf_data->sdf_type) {
+      case SDF_TYPE_CAPSULE: {
+        /* Capsule: radius sz.x in XY, half-height sz.y along Z, caps add radius. */
+        float r = sz.x;
+        float h = math::max(sz.y - bevel, 0.0f);
+        local_extent = float3(r + pad, r + pad, h + r + pad);
+        break;
+      }
+      case SDF_TYPE_TORUS: {
+        /* Torus: major radius sz.x in XY, minor sz.y is tube radius along Z. */
+        float outer = sz.x + sz.y;
+        local_extent = float3(outer + pad, outer + pad, sz.y + pad);
+        break;
+      }
+      default:
+        /* Box / Sphere: symmetric extent = size + bevel + pad. */
+        local_extent = sz + float3(bevel + pad);
+        break;
+    }
+
+    /* Expand AABB for domain modifiers. */
+    LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+      if (!mod->show_viewport) {
+        continue;
+      }
+      switch (mod->type) {
+        case SDF_MOD_ELONGATE:
+          local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
+          break;
+        case SDF_MOD_HOLLOW:
+        case SDF_MOD_ONION:
+          local_extent += float3(mod->params[0]);
+          break;
+        case SDF_MOD_ROUND:
+          local_extent += float3(mod->params[0]);
+          break;
+        default:
+          break;
+      }
+    }
 
     /* Transform local AABB corners to world to get tight world AABB. */
     float3 world_min = float3(1e30f);
@@ -736,7 +796,12 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.bevel);
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.blend);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.blend_type);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.sdf_type);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.csg_operation);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.x);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.z);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.w);
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.shell_distance);
       hash = hash * 6364136223846793005ULL +
              float_as_uint(obj.inverse_matrix[0][0]);
@@ -744,6 +809,15 @@ class Instance : public DrawEngine {
              float_as_uint(obj.inverse_matrix[1][1]);
       hash = hash * 6364136223846793005ULL +
              float_as_uint(obj.inverse_matrix[2][2]);
+    }
+    /* Include modifier data in hash. */
+    for (const SDFModifierGPU &mod : modifiers_) {
+      hash = hash * 6364136223846793005ULL + uint64_t(mod.header.x);
+      hash = hash * 6364136223846793005ULL + uint64_t(mod.header.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.x);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.z);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.w);
     }
     /* Include surface margin so changes trigger rebake. */
     hash = hash * 6364136223846793005ULL + float_as_uint(surface_margin_);
@@ -1351,6 +1425,33 @@ class Instance : public DrawEngine {
     else {
       GPU_storagebuf_update(object_ssbo_, objects_.data());
     }
+
+    /* Upload modifier SSBO. Ensure at least 1 element for binding. */
+    const int mod_count = math::max(int(modifiers_.size()), 1);
+    const size_t mod_buf_size = mod_count * sizeof(SDFModifierGPU);
+
+    if (modifier_ssbo_ != nullptr && modifier_ssbo_count_ != mod_count) {
+      GPU_storagebuf_free(modifier_ssbo_);
+      modifier_ssbo_ = nullptr;
+    }
+
+    if (modifier_ssbo_ == nullptr) {
+      if (modifiers_.is_empty()) {
+        SDFModifierGPU dummy = {};
+        modifier_ssbo_ = GPU_storagebuf_create_ex(
+            mod_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_modifiers_ssbo");
+      }
+      else {
+        modifier_ssbo_ = GPU_storagebuf_create_ex(
+            mod_buf_size, modifiers_.data(), GPU_USAGE_DYNAMIC, "sdf_modifiers_ssbo");
+      }
+      modifier_ssbo_count_ = mod_count;
+    }
+    else {
+      if (!modifiers_.is_empty()) {
+        GPU_storagebuf_update(modifier_ssbo_, modifiers_.data());
+      }
+    }
   }
 
   /** Upload shape/instance tables to GPU SSBOs. */
@@ -1815,6 +1916,12 @@ class Instance : public DrawEngine {
     int ab_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "active_bricks");
     GPU_storagebuf_bind(shape_ab_ssbo, ab_slot);
 
+    /* Bind modifier SSBO (declared in shader info, may not be accessed). */
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
+
     /* Bind compact atlas as image. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
 
@@ -1907,6 +2014,12 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
     }
 
+    /* Bind modifier SSBO. */
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(classify_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
+
     /* Bind indirection texture as image. */
     GPU_texture_image_bind(indirection_tx_, 0);
 
@@ -1978,6 +2091,12 @@ class Instance : public DrawEngine {
     /* Bind brick counter SSBO (bake shader reads count from here). */
     int counter_slot = GPU_shader_get_ssbo_binding(bake_sh_, "brick_counter");
     GPU_storagebuf_bind(brick_counter_, counter_slot);
+
+    /* Bind modifier SSBO. */
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(bake_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
 
     /* Bind atlas images. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
@@ -2088,6 +2207,10 @@ class Instance : public DrawEngine {
     if (shape_indir_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "shape_indir");
       GPU_storagebuf_bind(shape_indir_ssbo_, slot);
+    }
+    if (modifier_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, slot);
     }
 
     /* Push constants. */
@@ -2946,6 +3069,12 @@ class Instance : public DrawEngine {
       int ab_slot = GPU_shader_get_ssbo_binding(grid_blend_sh_, "active_bricks");
       GPU_storagebuf_bind(active_bricks_, ab_slot);
 
+      /* Bind modifier SSBO (declared in shader info, may not be accessed). */
+      if (modifier_ssbo_) {
+        int mod_slot = GPU_shader_get_ssbo_binding(grid_blend_sh_, "sdf_modifiers");
+        GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+      }
+
       /* Bind compact atlas as read-write image. */
       GPU_texture_image_bind(compact_atlas_tx_, 0);
 
@@ -3163,6 +3292,9 @@ class Instance : public DrawEngine {
     }
     if (object_ssbo_) {
       GPU_storagebuf_free(object_ssbo_);
+    }
+    if (modifier_ssbo_) {
+      GPU_storagebuf_free(modifier_ssbo_);
     }
     if (bvh_ssbo_) {
       GPU_storagebuf_free(bvh_ssbo_);

@@ -59,6 +59,24 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
   if (ob && ob->data) {
     SDF *sdf_data = static_cast<SDF *>(ob->data);
     sdf_data->sdf_type = type;
+
+    /* Set shape-appropriate default sizes.
+     * Capsule: radius 0.5, half-height 1.0 (stands up along Y).
+     * Torus:   major 0.8, minor 0.25 (flat ring in XZ plane). */
+    switch (type) {
+      case SDF_TYPE_CAPSULE:
+        sdf_data->size[0] = 0.5f;
+        sdf_data->size[1] = 1.0f;
+        sdf_data->size[2] = 0.5f;
+        break;
+      case SDF_TYPE_TORUS:
+        sdf_data->size[0] = 0.8f;
+        sdf_data->size[1] = 0.25f;
+        sdf_data->size[2] = 0.8f;
+        break;
+      default:
+        break;
+    }
   }
   return ob;
 }

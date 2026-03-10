@@ -15,6 +15,7 @@
 #include "DNA_object_force_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_text_types.h"
 
@@ -2470,8 +2471,19 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
         return ICON_OUTLINER_OB_POINTCLOUD;
       case OB_VOLUME:
         return ICON_OUTLINER_OB_VOLUME;
-      case OB_SDF:
-        return ICON_SDF_PRIMITIVE;
+      case OB_SDF: {
+        const SDF *sdf_data = static_cast<const SDF *>(ob->data);
+        switch (sdf_data->sdf_type) {
+          case SDF_TYPE_SPHERE:
+            return ICON_SDF_SPHERE;
+          case SDF_TYPE_CAPSULE:
+            return ICON_SDF_CAPSULE;
+          case SDF_TYPE_TORUS:
+            return ICON_SDF_TORUS;
+          default:
+            return ICON_SDF_PRIMITIVE;
+        }
+      }
       case OB_EMPTY:
         if (ob->instance_collection && (ob->transflag & OB_DUPLICOLLECTION)) {
           return ICON_OUTLINER_OB_GROUP_INSTANCE;

@@ -1,0 +1,8 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="none" stroke="#fff" stroke-width="90" stroke-linejoin="miter">
+    <!-- Other object (full, carves into avoid) -->
+    <rect x="200" y="200" width="750" height="750" fill="#fff"/>
+    <!-- Avoid object with chunk carved out -->
+    <path d="M 1400,650 V 1400 H 650 V 950 H 950 V 650 Z"/>
+  </g>
+</svg>

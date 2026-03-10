@@ -33,13 +33,13 @@ float sdCapsule(float3 p, float3 size)
 {
   float h = size.y;
   float r = size.x;
-  p.y -= clamp(p.y, -h, h);
+  p.z -= clamp(p.z, -h, h);
   return length(p) - r;
 }
 
 float sdTorus(float3 p, float2 t)
 {
-  float2 q = float2(length(p.xz) - t.x, p.y);
+  float2 q = float2(length(p.xy) - t.x, p.z);
   return length(q) - t.y;
 }
 
@@ -58,11 +58,18 @@ struct SharedObj {
   int csg_operation;
   float shell_distance;
   int obj_index;
+  int modifier_start;
+  int modifier_count;
 };
 
 /** Evaluate the actual SDF primitive (reads from shared memory cache). */
 float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
 {
+  /* Apply domain modifiers (warp sampling space). */
+  if (obj.modifier_count > 0) {
+    local_pos = applyDomainModifiers(local_pos, obj.modifier_start, obj.modifier_count);
+  }
+
   float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
   float dist;
@@ -89,7 +96,14 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
     dist = sdBox(local_pos, box_size);
   }
 
-  return dist - bevel;
+  dist -= bevel;
+
+  /* Apply distance modifiers. */
+  if (obj.modifier_count > 0) {
+    dist = applyDistanceModifiers(dist, obj.modifier_start, obj.modifier_count);
+  }
+
+  return dist;
 }
 
 /* Shared candidate list and object cache: BVH traversal done once per
@@ -215,6 +229,8 @@ void main()
     shared_objs[c].csg_operation = obj.csg_operation;
     shared_objs[c].shell_distance = obj.shell_distance;
     shared_objs[c].obj_index = i;
+    shared_objs[c].modifier_start = obj.modifier_start;
+    shared_objs[c].modifier_count = obj.modifier_count;
   }
   barrier();
 
@@ -259,7 +275,6 @@ void main()
       int op = sobj.csg_operation;
 
       if (acc_dist >= 1e9f) {
-        /* Shell/extrusion needs a base to extrude from — skip if no base yet. */
         if (op == SDF_CSG_OP_SHELL) {
           continue;
         }
@@ -269,7 +284,10 @@ void main()
       else {
         float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
 
-        if (k > 0.0f && bt == SDF_BLEND_TYPE_SMOOTH) {
+        /* Union color: blend factor = how much the new object contributes.
+         * Works for all blend types — smooth formula is a good approximation
+         * of the blend zone for chamfer/round too. */
+        if (k > 0.0f && bt > 0) {
           float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
           acc_color = mix(acc_color, sobj.color.rgb, h);
         }
@@ -282,14 +300,11 @@ void main()
       }
     }
 
-    /* Pass 2: apply subtraction/intersection modifiers to the base. */
+    /* Pass 2: apply modifiers (subtract/intersect/push/avoid) to the base. */
     for (int c = 0; c < num_candidates; c++) {
       SharedObj sobj = shared_objs[c];
       if (sobj.csg_operation == SDF_CSG_OP_UNION || sobj.csg_operation == SDF_CSG_OP_SHELL) {
         continue;
-      }
-      if (acc_dist >= 1e9f) {
-        continue; /* No base geometry to modify. */
       }
 
       float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
@@ -304,20 +319,61 @@ void main()
       int bt = sobj.blend_type;
       int op = sobj.csg_operation;
 
+      if (acc_dist >= 1e9f) {
+        if (op == SDF_CSG_OP_PUSH || op == SDF_CSG_OP_AVOID) {
+          acc_color = sobj.color.rgb;
+          acc_dist = dist;
+        }
+        continue;
+      }
+
       float new_dist = combineCSG(acc_dist, dist, op, bt, k, 0.0f);
 
-      /* Color blending depends on the CSG operation type. */
+      /* Color blending for all 6 operations × 4 blend types.
+       * For blended operations (k > 0, bt > 0), use smooth-style interpolation
+       * as an approximation that works for smooth/chamfer/round blend zones. */
       if (op == SDF_CSG_OP_SUBTRACT) {
+        /* Subtraction: base color stays, subtractor doesn't add visible surface. */
         acc_dist = new_dist;
       }
-      else if (k > 0.0f && bt == SDF_BLEND_TYPE_SMOOTH) {
-        float h = clamp(0.5f - 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-        acc_color = mix(acc_color, sobj.color.rgb, h);
+      else if (op == SDF_CSG_OP_INTERSECT) {
+        /* Intersect: new object's color shows where it limits the base. */
+        if (k > 0.0f && bt > 0) {
+          float h = clamp(0.5f + 0.5f * (dist - acc_dist) / k, 0.0f, 1.0f);
+          acc_color = mix(acc_color, sobj.color.rgb, h);
+        }
+        else {
+          if (dist > acc_dist) {
+            acc_color = sobj.color.rgb;
+          }
+        }
         acc_dist = new_dist;
       }
-      else {
-        if (op == SDF_CSG_OP_INTERSECT && dist > acc_dist) {
-          acc_color = sobj.color.rgb;
+      else if (op == SDF_CSG_OP_PUSH) {
+        /* Push: subtract + union self. Push color shows where push object is closest. */
+        float subtracted = max(acc_dist, -dist);
+        if (k > 0.0f && bt > 0) {
+          float h = clamp(0.5f + 0.5f * (subtracted - dist) / max(k, 0.001f), 0.0f, 1.0f);
+          acc_color = mix(acc_color, sobj.color.rgb, h);
+        }
+        else {
+          if (dist < subtracted) {
+            acc_color = sobj.color.rgb;
+          }
+        }
+        acc_dist = new_dist;
+      }
+      else if (op == SDF_CSG_OP_AVOID) {
+        /* Avoid: carved avoid color shows where avoid is visible (outside base). */
+        float carved = max(dist, -acc_dist);
+        if (k > 0.0f && bt > 0) {
+          float h = clamp(0.5f + 0.5f * (acc_dist - carved) / max(k, 0.001f), 0.0f, 1.0f);
+          acc_color = mix(acc_color, sobj.color.rgb, h);
+        }
+        else {
+          if (carved < acc_dist) {
+            acc_color = sobj.color.rgb;
+          }
         }
         acc_dist = new_dist;
       }

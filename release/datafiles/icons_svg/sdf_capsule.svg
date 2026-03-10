@@ -1,0 +1,9 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff" fill-rule="evenodd">
+    <!-- Outer capsule ring (quarter-circle arcs, r=280, uniform 100px ring) -->
+    <path d="M 800,100 A 280,280 0 0,1 1080,380 V 1220 A 280,280 0 0,1 800,1500 A 280,280 0 0,1 520,1220 V 380 A 280,280 0 0,1 800,100 Z
+             M 800,200 A 180,180 0 0,1 980,380 V 1220 A 180,180 0 0,1 800,1400 A 180,180 0 0,1 620,1220 V 380 A 180,180 0 0,1 800,200 Z"/>
+    <!-- Inner filled capsule -->
+    <path d="M 800,470 A 110,110 0 0,1 910,580 V 1020 A 110,110 0 0,1 800,1130 A 110,110 0 0,1 690,1020 V 580 A 110,110 0 0,1 800,470 Z"/>
+  </g>
+</svg>

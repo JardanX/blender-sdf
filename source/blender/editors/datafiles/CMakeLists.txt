@@ -951,6 +951,11 @@ if(WITH_BLENDER)
       sdf_csg_subtract
       sdf_csg_intersect
       sdf_csg_extrude
+      sdf_csg_push
+      sdf_csg_avoid
+      sdf_sphere
+      sdf_capsule
+      sdf_torus
       volume_data
       vpaint_hlt
       warning_large
