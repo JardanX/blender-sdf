@@ -4773,7 +4773,6 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sdf_surface_margin", PROP_INT, PROP_PERCENTAGE);
   RNA_def_property_int_sdna(prop, nullptr, "sdf_surface_margin");
   RNA_def_property_range(prop, 50, 300);
-  RNA_def_property_int_default(prop, 100);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop,
                            "Surface Margin",

@@ -6,6 +6,8 @@
  * \ingroup edobj
  */
 
+#include "MEM_guardedalloc.h"
+
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 
@@ -14,6 +16,7 @@
 #include "RNA_enum_types.hh"
 
 #include "BKE_context.hh"
+#include "BKE_sdf.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"

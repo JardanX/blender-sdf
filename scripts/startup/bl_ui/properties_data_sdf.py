@@ -266,6 +266,7 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             layout.prop(sdf, "ngon_edge_mode", text="Edges")
 
 
+
 # -- Modifier Operators -------------------------------------------------------
 
 class SDF_OT_modifier_add(Operator):

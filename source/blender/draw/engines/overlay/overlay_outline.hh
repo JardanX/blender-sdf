@@ -8,19 +8,35 @@
 
 #pragma once
 
+#include "BLI_assert.h"
+
 #include "overlay_base.hh"
 /* MATHOPS: Removed — Grease Pencil overlay */
 // #include "overlay_grease_pencil.hh"
 
 #include "draw_common.hh"
+#include "draw_view.hh"
 
+#include "DNA_object_types.h"
 #include "DNA_userdef_types.h"
+
+#include "GPU_batch.hh"
+#include "GPU_shader.hh"
+#include "GPU_state.hh"
+#include "GPU_storage_buffer.hh"
+#include "GPU_texture.hh"
+#include "GPU_uniform_buffer.hh"
+
+#include "engines/sdf/sdf_engine.h"
 
 namespace blender::draw::overlay {
 
 /**
  * Display selected object outline.
  * The option can be found under (Viewport Overlays > Objects > Outline Selected).
+ *
+ * SDF objects are handled via a fullscreen ray-march pass that writes packed
+ * outline IDs into the same framebuffer as the regular geometry prepass.
  */
 class Outline : Overlay {
  private:
@@ -45,13 +61,48 @@ class Outline : Overlay {
 
   PassMain outline_prepass_flat_ps_ = {"PrepassFlat"};
 
+  /* ---- SDF outline state ---- */
+
+  /**
+   * Maps SDF object index (bake order) -> packed 16-bit outline ID.
+   * 0 means not selected (no outline).
+   * Format: (color_id << 14) | (unique_id & 0x3FFF)
+   *   color_id: 0=transform, 1=selected, 3=active
+   */
+  Vector<uint32_t> sdf_outline_ids_;
+  int sdf_selected_count_ = 0;
+
+  gpu::Shader *sdf_outline_sh_ = nullptr;
+  gpu::Batch *sdf_fullscreen_batch_ = nullptr;
+  gpu::StorageBuf *sdf_outline_ssbo_ = nullptr;
+  int sdf_outline_ssbo_count_ = 0;
+
+  /* Cached binding locations for the SDF outline shader. */
+  int sdf_map_slot_ = -1;
+  int sdf_objects_slot_ = -1;
+  int sdf_modifiers_slot_ = -1;
+  int sdf_voxel_size_loc_ = -1;
+  int sdf_object_count_loc_ = -1;
+
  public:
+  ~Outline()
+  {
+    if (sdf_outline_ssbo_) {
+      GPU_storagebuf_free(sdf_outline_ssbo_);
+    }
+    if (sdf_fullscreen_batch_) {
+      GPU_batch_discard(sdf_fullscreen_batch_);
+    }
+  }
+
   void begin_sync(Resources &res, const State &state) final
   {
     enabled_ = !res.is_selection();
     enabled_ &= state.v3d && (state.v3d_flag & V3D_SELECT_OUTLINE);
 
     flat_objects_.clear();
+    sdf_outline_ids_.clear();
+    sdf_selected_count_ = 0;
 
     if (!enabled_) {
       return;
@@ -194,6 +245,49 @@ class Outline : Overlay {
     }
   }
 
+  /**
+   * Track an SDF object for outline rendering.
+   * Must be called for ALL SDF objects in bake order (matching the SDF engine's iteration).
+   * Selected objects get a packed outline ID; non-selected objects map to 0 (no outline).
+   */
+  void sdf_object_sync(const ObjectRef &ob_ref, const State &state)
+  {
+    if (!enabled_) {
+      return;
+    }
+    if (ob_ref.object->type != OB_SDF) {
+      return;
+    }
+
+    const bool is_selected = (ob_ref.object->base_flag & BASE_SELECTED) != 0;
+    if (!is_selected) {
+      sdf_outline_ids_.append(0);
+      return;
+    }
+
+    const bool is_active = (ob_ref.object == state.object_active);
+    const bool is_transform = (G.moving & G_TRANSFORM_OBJ) != 0;
+
+    uint color_id;
+    if (is_transform) {
+      color_id = 0u; /* theme.colors.transform */
+    }
+    else if (is_active) {
+      color_id = 3u; /* theme.colors.active_object */
+    }
+    else {
+      color_id = 1u; /* theme.colors.object_select */
+    }
+
+    sdf_selected_count_++;
+
+    /* Use IDs offset by 0x2000 to avoid collision with mesh resource IDs.
+     * The bottom 14 bits hold the unique object ID, top 2 bits hold the color. */
+    uint unique_id = uint(sdf_selected_count_) + 0x2000u;
+    uint packed = (color_id << 14u) | (unique_id & 0x3FFFu);
+    sdf_outline_ids_.append(packed);
+  }
+
   /* Flat objects outline workaround need to generate passes for each redraw. */
   void flat_objects_pass_sync(Manager &manager, View &view, Resources &res, const State &state)
   {
@@ -255,6 +349,9 @@ class Outline : Overlay {
     manager.submit_only(outline_prepass_ps_, view);
     manager.submit_only(outline_prepass_flat_ps_, view);
 
+    /* SDF outline: analytical per-object sphere-march into the same framebuffer. */
+    draw_sdf_outline_(res, view);
+
     GPU_framebuffer_bind(framebuffer);
     manager.submit(outline_resolve_ps_, view);
 
@@ -262,6 +359,99 @@ class Outline : Overlay {
     object_id_tx_.release();
 
     GPU_debug_group_end();
+  }
+
+ private:
+  /**
+   * Draw SDF outline pass (analytical per-object sphere-march).
+   * For each pixel, tests all selected SDF objects' AABBs against the camera
+   * ray. For objects whose AABB is hit, evaluates the actual SDF analytically
+   * (sphere-marching) to find the precise surface. Writes stable packed
+   * outline IDs into the prepass framebuffer for edge detection.
+   */
+  void draw_sdf_outline_(Resources & /*res*/, View &view)
+  {
+    if (sdf_selected_count_ == 0) {
+      return;
+    }
+    gpu::StorageBuf *objects_ssbo = sdf::sdf_objects_ssbo_get();
+    if (objects_ssbo == nullptr) {
+      return;
+    }
+
+    /* Lazy-create the outline shader. */
+    if (!sdf_outline_sh_) {
+      sdf_outline_sh_ = GPU_shader_create_from_info_name("sdf_outline_march");
+      if (sdf_outline_sh_) {
+        sdf_map_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "outline_id_map_buf");
+        sdf_objects_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "sdf_objects");
+        sdf_modifiers_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "sdf_modifiers");
+        sdf_voxel_size_loc_ = GPU_shader_get_uniform(sdf_outline_sh_, "voxel_size");
+        sdf_object_count_loc_ = GPU_shader_get_uniform(sdf_outline_sh_, "object_count");
+      }
+    }
+    if (!sdf_outline_sh_) {
+      return;
+    }
+
+    /* Use safe count: minimum of overlay-tracked and engine-tracked objects. */
+    const int count = min(int(sdf_outline_ids_.size()), sdf::sdf_object_count_get());
+    if (count == 0) {
+      return;
+    }
+    if (sdf_outline_ssbo_ != nullptr && sdf_outline_ssbo_count_ != count) {
+      GPU_storagebuf_free(sdf_outline_ssbo_);
+      sdf_outline_ssbo_ = nullptr;
+    }
+    if (sdf_outline_ssbo_ == nullptr) {
+      sdf_outline_ssbo_ = GPU_storagebuf_create_ex(count * sizeof(uint32_t),
+                                                    sdf_outline_ids_.data(),
+                                                    GPU_USAGE_DYNAMIC,
+                                                    "sdf_outline_id_map");
+      sdf_outline_ssbo_count_ = count;
+    }
+    else {
+      GPU_storagebuf_update(sdf_outline_ssbo_, sdf_outline_ids_.data());
+    }
+
+    /* Bind the prepass framebuffer (object_id_tx_ + tmp_depth_tx_). */
+    GPU_framebuffer_bind(prepass_fb_);
+
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
+
+    GPU_shader_bind(sdf_outline_sh_);
+
+    /* Bind SSBOs: outline ID map, SDF objects, and modifiers. */
+    GPU_storagebuf_bind(sdf_outline_ssbo_, sdf_map_slot_);
+    GPU_storagebuf_bind(objects_ssbo, sdf_objects_slot_);
+    gpu::StorageBuf *mod_ssbo = sdf::sdf_modifiers_ssbo_get();
+    if (mod_ssbo) {
+      GPU_storagebuf_bind(mod_ssbo, sdf_modifiers_slot_);
+    }
+
+    /* Push uniforms. */
+    float vs;
+    float3 origin, extent;
+    int3 grid_res;
+    int bpa;
+    sdf::sdf_atlas_params_get(&vs, &origin, &extent, &grid_res, &bpa);
+    GPU_shader_uniform_float_ex(sdf_outline_sh_, sdf_voxel_size_loc_, 1, 1, &vs);
+    GPU_shader_uniform_int_ex(sdf_outline_sh_, sdf_object_count_loc_, 1, 1, &count);
+
+    /* Bind the view UBO for camera matrices. */
+    view.matrices_ubo_get().push_update();
+    GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
+
+    /* Draw fullscreen triangle. */
+    if (!sdf_fullscreen_batch_) {
+      sdf_fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
+    }
+    GPU_batch_set_shader(sdf_fullscreen_batch_, sdf_outline_sh_);
+    GPU_batch_draw(sdf_fullscreen_batch_);
+
+    GPU_shader_unbind();
   }
 };
 

@@ -3,21 +3,20 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /**
- * SDF selection fragment shader — analytical per-object sphere-march.
+ * SDF outline fragment shader — per-object analytical sphere-march.
  *
- * Instead of marching the baked voxel atlas (which has quantization and
- * staleness issues), this shader evaluates each SDF object analytically.
- * For every pixel, it tests all objects' AABBs against the camera ray,
- * then sphere-marches each candidate to find the exact surface. The
- * closest hit across all objects is written to the selection buffer.
+ * Matches MathOPS approach: each selected object is sphere-marched
+ * independently against the camera ray. The closest hit across all
+ * selected objects wins. Non-selected objects are skipped entirely.
  *
- * This approach matches the outline shader (sdf_outline_march_frag.glsl)
- * but outputs select::ID instead of outline IDs.
+ * Each selected object gets a unique packed outline ID so edge detection
+ * finds boundaries between any pair of objects, producing outlines at
+ * intersections between selected objects as well as at silhouette edges.
  */
 
 #include "infos/sdf_shader_infos.hh"
 
-FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
+FRAGMENT_SHADER_CREATE_INFO(sdf_outline_march)
 
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
@@ -31,9 +30,9 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
 #define SDF_TYPE_TORUS 5
 #define SDF_TYPE_NGON 6
 
-#define MAX_MARCH_STEPS 48
+#define MAX_MARCH_STEPS 96
 
-/* ---- Local SDF primitives (same as outline shader) ---- */
+/* ---- Local SDF primitives (not in sdf_lib.glsl) ---- */
 
 float sdSphere(float3 p, float r)
 {
@@ -79,7 +78,8 @@ float sdCone(float3 p, float r, float h)
 
 /* ---- Evaluate a single SDF primitive with modifiers ---- */
 
-float evalSelectPrimitive(float3 local_pos, SDFObjectGPU obj)
+/** Matches evalSDFPrimitive() in sdf_classify_comp.glsl. */
+float evalOutlinePrimitive(float3 local_pos, SDFObjectGPU obj)
 {
   /* Apply domain modifiers (warp sampling space). */
   if (obj.modifier_count > 0) {
@@ -170,34 +170,11 @@ float evalSelectPrimitive(float3 local_pos, SDFObjectGPU obj)
   return dist;
 }
 
-/* ---- Write a single hit to the selection buffer ---- */
-
-void writeSelectHit(uint sel_id, float ndc_depth)
-{
-  if (sel_id == uint(-1)) {
-    return;
-  }
-  if (select_info_buf.mode == SELECT_ALL) {
-    atomicOr(out_select_buf[sel_id / 32u], 1u << (sel_id % 32u));
-  }
-  else if (select_info_buf.mode == SELECT_PICK_ALL) {
-    atomicMin(out_select_buf[sel_id], floatBitsToUint(ndc_depth));
-  }
-  else if (select_info_buf.mode == SELECT_PICK_NEAREST) {
-    int2 coord = abs(int2(gl_FragCoord.xy) - select_info_buf.cursor);
-    uint dist = uint(max(coord.x, coord.y));
-    uint depth = uint(ndc_depth * float(0x00FFFFFFu));
-    if (dist < 0xFFu) {
-      atomicMin(out_select_buf[sel_id], (depth << 8u) | dist);
-    }
-  }
-}
-
 void main()
 {
   float2 uv = screen_uv;
 
-  /* ---- 1. Reconstruct camera ray ---- */
+  /* Reconstruct camera ray. */
   ViewMatrices vm = drw_view();
   float4x4 view_inv = vm.viewinv;
   float4x4 win_inv = vm.wininv;
@@ -214,21 +191,21 @@ void main()
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
   float3 inv_dir = 1.0f / ray_dir;
 
-  /* ---- 2. Per-object analytical sphere-march ----
-   * March ALL objects and write a hit for EACH one that intersects.
-   * This is essential for Blender's selection cycling (SELECT_PICK_ALL mode):
-   * the C++ side collects all hit objects sorted by depth, then cycles through
-   * them when clicking on the same spot repeatedly. atomicMin in each mode
-   * ensures correct results regardless of iteration order. */
+  /* Per-object independent sphere-march (matches MathOPS approach).
+   * Only selected objects are marched. Closest hit wins. */
   float best_depth = 1.0f;
-  bool any_hit = false;
+  uint best_outline_id = 0u;
 
   for (int i = 0; i < object_count; i++) {
-    SDFObjectGPU obj = sdf_objects[i];
+    /* Skip non-selected objects entirely. */
+    uint oid = outline_id_map_buf[i];
+    if (oid == 0u) {
+      continue;
+    }
 
     /* Ray-AABB intersection test. */
-    float3 bmin = obj.bbox_min.xyz;
-    float3 bmax = obj.bbox_max.xyz;
+    float3 bmin = sdf_objects[i].bbox_min.xyz;
+    float3 bmax = sdf_objects[i].bbox_max.xyz;
     float3 t0 = (bmin - ray_origin) * inv_dir;
     float3 t1 = (bmax - ray_origin) * inv_dir;
     float3 t_lo = min(t0, t1);
@@ -241,13 +218,15 @@ void main()
     }
     t_enter = max(t_enter, 0.0f);
 
-    /* Adaptive threshold: sub-voxel precision, capped at 0.2% of object extent. */
+    SDFObjectGPU obj = sdf_objects[i];
+
+    /* Threshold: sub-voxel precision, capped at 0.2% of object extent. */
     float3 obj_extent = bmax - bmin;
     float thr = 0.002f * max(obj_extent.x, max(obj_extent.y, obj_extent.z));
     thr = clamp(thr, 1e-5f, voxel_size * 0.25f);
     float min_step = thr * 0.5f;
 
-    /* Sphere-march this object's analytical SDF. */
+    /* Sphere-march this object's individual SDF. */
     float t = t_enter;
     bool hit = false;
     float3 hit_pos;
@@ -255,7 +234,7 @@ void main()
     for (int s = 0; s < MAX_MARCH_STEPS; s++) {
       float3 wp = ray_origin + ray_dir * t;
       float3 lp = (obj.inverse_matrix * float4(wp - obj.position.xyz, 1.0f)).xyz;
-      float d = evalSelectPrimitive(lp, obj);
+      float d = evalOutlinePrimitive(lp, obj);
 
       if (d < thr) {
         hit = true;
@@ -270,27 +249,19 @@ void main()
     }
 
     if (hit) {
-      /* Write this object's hit to the selection buffer immediately.
-       * For SELECT_PICK_ALL: each object gets its own entry (enables cycling).
-       * For SELECT_PICK_NEAREST: atomicMin picks the closest automatically.
-       * For SELECT_ALL: bitmap OR records all objects. */
       float depth = drw_point_world_to_screen(hit_pos).z;
-      uint sel_id = select_id_map_buf[i];
-      writeSelectHit(sel_id, depth);
-
       if (depth < best_depth) {
         best_depth = depth;
+        best_outline_id = oid;
       }
-      any_hit = true;
     }
   }
 
-  /* ---- 3. No hit: discard fragment ---- */
-  if (!any_hit) {
+  if (best_outline_id == 0u) {
     discard;
     return;
   }
 
-  /* ---- 4. Set depth to nearest hit for correct mesh/SDF interop ---- */
-  gl_FragDepth = best_depth;
+  out_object_id = best_outline_id;
+  gl_FragDepth = best_depth - 1e-5f;
 }

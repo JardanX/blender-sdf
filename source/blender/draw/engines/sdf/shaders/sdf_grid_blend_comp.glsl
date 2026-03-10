@@ -44,10 +44,11 @@ void main()
     int3 local_voxel = int3(local_xy, lz);
 
     /* World-space position: same calculation as the bake shader.
-     * brick_coord * 8 + (local - 2) + 0.5, times voxel_size.
-     * The -2 accounts for the 2-voxel overlap border. */
+     * brick_coord * 8 + (local - 2), times voxel_size.
+     * The -2 accounts for the 2-voxel overlap border.
+     * Values at voxel CORNERS to match the DDA trilinear interpolation. */
     float3 world_pos = atlas_origin +
-                       (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) * voxel_size;
+                       float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
     /* Transform world position to grid texture UVW [0,1]^3. */
     float3 grid_uvw = (grid_world_to_texture * float4(world_pos, 1.0f)).xyz;

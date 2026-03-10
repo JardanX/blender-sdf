@@ -192,9 +192,6 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_select_march)
 DO_STATIC_COMPILATION()
-SAMPLER(0, sampler3D, compact_atlas)
-SAMPLER(1, isampler3D, indirection_tx)
-SAMPLER(2, isampler3D, object_id_tx)
 STORAGE_BUF(0, read, uint, select_id_map_buf[])
 STORAGE_BUF(1, read, SDFObjectGPU, sdf_objects[])
 STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
@@ -202,10 +199,6 @@ STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
 UNIFORM_BUF(4, SelectInfoData, select_info_buf)
 STORAGE_BUF(6, read_write, uint, out_select_buf[])
 PUSH_CONSTANT(float, voxel_size)
-PUSH_CONSTANT(float3, atlas_origin)
-PUSH_CONSTANT(float3, atlas_extent)
-PUSH_CONSTANT(int3, grid_resolution)
-PUSH_CONSTANT(int, bricks_per_axis)
 PUSH_CONSTANT(int, object_count)
 DEPTH_WRITE(DepthWrite::ANY)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
@@ -213,6 +206,28 @@ TYPEDEF_SOURCE("select_shader_shared.hh")
 ADDITIONAL_INFO(gpu_fullscreen)
 ADDITIONAL_INFO(draw_view)
 FRAGMENT_SOURCE("sdf_select_march_frag.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Outline March Fragment Shader
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_outline_march)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, uint, outline_id_map_buf[])
+STORAGE_BUF(1, read, SDFObjectGPU, sdf_objects[])
+STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
+PUSH_CONSTANT(float, voxel_size)
+PUSH_CONSTANT(int, object_count)
+/* Using uint because 16bit uint can contain more ids than int. */
+FRAGMENT_OUT(0, uint, out_object_id)
+DEPTH_WRITE(DepthWrite::ANY)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(gpu_fullscreen)
+ADDITIONAL_INFO(draw_view)
+FRAGMENT_SOURCE("sdf_outline_march_frag.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */

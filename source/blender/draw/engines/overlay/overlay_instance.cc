@@ -636,6 +636,12 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
     if (object_is_selected(ob_ref) && !in_edit_paint_mode) {
       outline.object_sync(manager, ob_ref, resources, state);
     }
+
+    /* Track ALL SDF objects for outline mapping (selected ones get an outline ID,
+     * non-selected ones map to 0). Must iterate all to match SDF engine bake order. */
+    if (ob_ref.object->type == OB_SDF) {
+      outline.sdf_object_sync(ob_ref, state);
+    }
   }
 }
 

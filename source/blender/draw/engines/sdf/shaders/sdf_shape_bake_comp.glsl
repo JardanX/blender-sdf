@@ -99,10 +99,11 @@ void main()
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
 
-    /* Local-space position: brick * 8 + (local - 2) + 0.5, times voxel_size.
-     * The -2 accounts for the 2-voxel overlap border. */
+    /* Local-space position: brick * 8 + (local - 2), times voxel_size.
+     * The -2 accounts for the 2-voxel overlap border.
+     * Values at voxel CORNERS to match the DDA trilinear interpolation. */
     float3 local_pos = local_origin +
-                       (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) *
+                       float3(brick * BRICK_SIZE + local_voxel - int3(2)) *
                            local_voxel_size;
 
     /* Evaluate SDF primitive based on shape type. */

@@ -59,4 +59,7 @@ int sdf_object_count_get();
 /** Returns the objects SSBO (SDFObjectGPU[]), or nullptr. */
 gpu::StorageBuf *sdf_objects_ssbo_get();
 
+/** Returns the modifiers SSBO (SDFModifierGPU[]), or nullptr. */
+gpu::StorageBuf *sdf_modifiers_ssbo_get();
+
 }  // namespace blender::draw::sdf

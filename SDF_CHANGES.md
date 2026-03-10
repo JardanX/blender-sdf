@@ -1876,3 +1876,101 @@ All icons redesigned with bordered/outlined style using `fill-rule="evenodd"` (o
 | `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `PUSH_CONSTANT(float, max_shell_distance)` to classify and bake shader infos |
 | `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Brick AABB expansion includes `max_shell_distance`. Surface test threshold: `brick_half_diag + max_shell_distance` ensures bricks near shell boundaries are activated |
 | `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Brick AABB expansion includes `max_shell_distance` for candidate object collection |
+
+---
+
+### Text SDF primitive (`SDF_TYPE_TEXT = 7`)
+
+Adds a Text SDF primitive that rasterizes font glyphs to a 2D SDF atlas via BLF, then extrudes along Z on the GPU (text lies in XY plane, facing up). Follows the existing `grid_blend` pattern for blending external texture data into the brick atlas.
+
+**New Files:**
+
+| File | Purpose |
+|------|---------|
+| `source/blender/blenkernel/intern/sdf_text.cc` | CPU-side 2D SDF atlas generation: BLF text rasterization + 8SSEDT distance transform |
+| `source/blender/draw/engines/sdf/shaders/sdf_text_blend_comp.glsl` | GPU compute shader: samples 2D text SDF atlas at XY, extrudes Z, blends into brick atlas via CSG |
+
+**Modified Files:**
+
+| File | Change |
+|------|--------|
+| `source/blender/makesdna/DNA_sdf_types.h` | Added `SDF_TYPE_TEXT = 7`, `eSDFTextAlign` enum, text fields to `SDF` struct (`text`, `text_font_path`, `text_depth`, `text_size`, `text_spacing`, `text_line_spacing`, `text_align`, `text_sdf_resolution`) |
+| `source/blender/makesdna/DNA_sdf_defaults.h` | Added defaults for all text fields |
+| `source/blender/blenkernel/BKE_sdf.hh` | Added `BKE_sdf_text_generate_atlas()` and `BKE_sdf_text_update_bounds()` declarations |
+| `source/blender/blenkernel/intern/sdf.cc` | Text string lifecycle: deep copy, free, blend_write/read |
+| `source/blender/blenkernel/CMakeLists.txt` | Added `intern/sdf_text.cc` to sources |
+| `source/blender/makesrna/intern/rna_sdf.cc` | Added TEXT enum item, RNA properties for all text fields, type update handler; auto-calls `BKE_sdf_text_update_bounds()` in `rna_SDF_update` and `rna_SDF_type_update` |
+| `source/blender/editors/object/object_sdf.cc` | Added TEXT to add operator name table; calls `BKE_sdf_text_update_bounds()` for correct initial size |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | `TextBlendObject` struct, `process_text_object()`, `dispatch_text_blends()`, text hash/cache in `end_sync()` |
+| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_text_blend` shader create info |
+| `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Added `SDF_TYPE_TEXT` — evaluates as box with `max(dist, 0.0)` to force all interior bricks to be allocated (text has internal glyph detail) |
+| `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added `SDF_TYPE_TEXT` — skipped in both CSG passes (text_blend fills actual values) |
+| `source/blender/draw/engines/sdf/shaders/sdf_shape_bake_comp.glsl` | Added `SDF_TYPE_TEXT` — returns 1e10 (skip) |
+| `source/blender/draw/engines/sdf/shaders/sdf_outline_march_frag.glsl` | Added `SDF_TYPE_TEXT` define for consistency |
+| `source/blender/draw/CMakeLists.txt` | Added `sdf_text_blend_comp.glsl` to shader list |
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Added TEXT to property panel poll, `draw_text()` method with searchable system font dropdown, `SDF_OT_select_font` operator |
+
+**Key design decisions:**
+
+1. **Auto-sizing**: `BKE_sdf_text_update_bounds()` auto-computes `sdf->size` from BLF text metrics whenever text properties change. This keeps the AABB accurate without manual user intervention.
+2. **Interior brick allocation**: Classify shader uses `max(sdBox(...), 0.0)` for text — forces ALL interior bricks to be allocated. Regular SDF primitives only need surface bricks, but text has internal glyph detail the box SDF can't predict.
+3. **Bake skip**: Text objects are skipped in both CSG passes of the bake shader. Without this, text's 1e10 return value would erase geometry via `max(acc, 1e10)` in intersect operations.
+4. **Font selection**: Searchable dropdown (`invoke_search_popup`) enumerates system fonts from OS font directories (Windows/macOS/Linux). Cached for 60 seconds to avoid repeated filesystem scans.
+
+### Text SDF fixes (orientation, real-time updates, quality, performance, Add menu)
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/sdf/shaders/sdf_text_blend_comp.glsl` | Text lies in XY plane facing up (like a Blender plane), Z is extrusion. UV samples `local_pos.xy`, depth along Z |
+| `source/blender/blenkernel/intern/sdf_text.cc` | Bounds: `size[0]=half_w, size[1]=half_h, size[2]=depth`. Added sub-pixel edge refinement using BLF's anti-aliased alpha — replaces staircase binary threshold with smooth alpha-derived distances near glyph edges, blended with 8SSEDT via smoothstep for far-field accuracy |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | Fixed real-time updates: text_hash now included in scene_hash so text parameter changes trigger `needs_bake_`. Added missing hash params. **Performance fix**: added `augment_indirection_for_text()` — CPU-side smart brick allocation that samples the 2D text SDF at each brick center, only activating bricks near actual glyph surfaces. TextBlendObject now stores CPU copy of 2D SDF data for this augmentation. Atlas always cleared before bake to initialize text bricks. |
+| `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Text objects now skipped in both CSG passes — brick allocation moved to CPU-side augmentation for ~10x fewer active bricks |
+| `scripts/startup/bl_ui/space_view3d.py` | Added "SDF Text" entry to `VIEW3D_MT_sdf_add` menu under separator |
+
+**Performance notes:**
+- Previously: classify used `max(sdBox, 0.0)` for text, allocating ALL interior bricks (100% of AABB). A single text object could create hundreds of active bricks.
+- Now: CPU-side `augment_indirection_for_text()` uses bilinear-sampled 2D SDF at each brick center. Only bricks within `brick_half_diagonal` of actual glyph surfaces are activated (~5-15% of AABB). March time scales with visible text detail, not bounding box volume.
+
+### Text SDF brick counter sync fix
+
+**Bug**: Text objects were invisible (0 active bricks) because `dispatch_bake()` reads back the GPU `brick_counter` SSBO — which only reflects the classify shader's atomic count (excludes text bricks added by CPU-side augmentation) — and overwrites `active_brick_count_` with it. This caused `dispatch_text_blends()` to early-exit since `active_brick_count_ <= 0`.
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | After `augment_indirection_for_text()`, update GPU `brick_counter_` SSBO with the total count (classify + text bricks). Creates the SSBO if it doesn't exist yet (text-only scene without analytic objects). |
+
+### Text SDF quality improvement — internal 2× supersampling
+
+**Problem**: The 8SSEDT distance transform creates staircase artifacts at pixel boundaries because it operates on a binary threshold of the rasterized text. At the output resolution, these integer-pixel-precision distances create visible stepping on curved glyph surfaces when baked into the voxel atlas.
+
+**Fix**: Rasterize and distance-transform at 2× the output resolution internally, then bilinear-downsample the SDF to the target atlas size. The 2× hi-res computation halves the staircase step size; bilinear downsampling averages out the remaining artifacts. The output atlas stays the same size — zero impact on GPU texture memory, text_blend performance, or march speed.
+
+| File | Change |
+|------|--------|
+| `source/blender/blenkernel/intern/sdf_text.cc` | Removed 2× CPU supersampling (GPU bicubic + RGSS handles quality now). Direct rasterize → 8SSEDT → SDF at native resolution. 4× faster, 4× less memory. |
+| `source/blender/makesdna/DNA_sdf_defaults.h` | Default `text_sdf_resolution` bumped from 256 to 512 (now safe — rendering performance is independent of atlas resolution after the classify fix) |
+| `source/blender/makesrna/intern/rna_sdf.cc` | Max resolution raised from 1024 to 2048 |
+
+### Rotated Text Normal Artifacts + Jagged Text Edges
+
+**Problem**: Text SDF surfaces show a crosshatch/leather pattern when rotated and jagged staircase edges when blended with other primitives. Root cause: the 8SSEDT binary threshold creates pixel-level discontinuities in the 2D SDF that the DDA trilinear solver can't smooth over.
+
+**Fix**: Two-layer approach:
+1. **CPU Gaussian blur** (sigma=2px) applied to the 2D SDF after 8SSEDT — removes pixel-level staircases at the source, producing smooth distance gradients that the voxel DDA solver handles correctly.
+2. **GPU bicubic (Catmull-Rom) sampling** — C1-continuous interpolation between the pre-filtered texels.
+3. Removed GPU-side 4× RGSS (redundant now that CPU blur handles quality).
+
+| File | Change |
+|------|--------|
+| `source/blender/blenkernel/intern/sdf_text.cc` | Added `gaussian_blur_separable()` — separable 2-pass Gaussian blur applied to 2D SDF before GPU upload |
+| `source/blender/draw/engines/sdf/shaders/sdf_text_blend_comp.glsl` | Simplified to single bicubic sample (CPU blur handles anti-aliasing); kept `sampleTextSDF_bicubic()` for C1 smooth GPU interpolation |
+
+### Real-Time Text Editing
+
+**Problem**: Text SDF only updated when the text input field was confirmed (Enter/click away), not during typing.
+
+**Fix**: Added `PROP_TEXTEDIT_UPDATE` flag to the `text` RNA string property. This makes Blender fire the `rna_SDF_update` callback on every keystroke, regenerating the 2D SDF atlas in real time as the user types.
+
+| File | Change |
+|------|--------|
+| `source/blender/makesrna/intern/rna_sdf.cc` | Added `RNA_def_property_flag(prop, PROP_TEXTEDIT_UPDATE)` to the `text` property |
