@@ -21,6 +21,8 @@ COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 /* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
 #define SDF_TYPE_BOX 0
 #define SDF_TYPE_SPHERE 1
+#define SDF_TYPE_CYLINDER 2
+#define SDF_TYPE_CONE 3
 #define SDF_TYPE_CAPSULE 4
 #define SDF_TYPE_TORUS 5
 
@@ -43,6 +45,33 @@ float sdTorus(float3 p, float2 t)
   return length(q) - t.y;
 }
 
+float sdCylinder(float3 p, float3 size)
+{
+  /* Elliptical cylinder: size.xy = XY radii, size.z = half-height.
+   * Gradient-corrected radial distance for proper SDF. */
+  float2 e = max(size.xy, float2(0.001f));
+  float2 pn = p.xy / e;
+  float rn = length(pn);
+  float2 g = pn / (e * max(rn, 1e-6f));
+  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
+  float vertical = abs(p.z) - size.z;
+  float2 d = float2(radial, vertical);
+  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
+}
+
+float sdCone(float3 p, float r, float h)
+{
+  /* Capped cone: base radius r at z=-h, apex at z=+h.
+   * Based on Inigo Quilez's sdCappedCone. */
+  float2 q = float2(length(p.xy), p.z);
+  float2 k1 = float2(0.0f, h);
+  float2 k2 = float2(-r, 2.0f * h);
+  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
+  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
 /** Evaluate the actual SDF primitive for an object, with modifiers. */
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -58,6 +87,16 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
   if (obj.sdf_type == SDF_TYPE_SPHERE) {
     dist = sdSphere(local_pos, size.x - bevel);
   }
+  else if (obj.sdf_type == SDF_TYPE_CYLINDER) {
+    float3 cyl_size = size - float3(bevel);
+    cyl_size = max(cyl_size, float3(0.001f));
+    dist = sdCylinder(local_pos, cyl_size);
+  }
+  else if (obj.sdf_type == SDF_TYPE_CONE) {
+    float cone_r = max(size.x - bevel, 0.001f);
+    float cone_h = max(size.y - bevel, 0.001f);
+    dist = sdCone(local_pos, cone_r, cone_h);
+  }
   else if (obj.sdf_type == SDF_TYPE_CAPSULE) {
     float3 cap_size = size - float3(bevel);
     cap_size = max(cap_size, float3(0.001f));
@@ -72,9 +111,32 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
   }
   else {
     /* SDF_TYPE_BOX (default). */
-    float3 box_size = size - float3(bevel);
-    box_size = max(box_size, float3(0.001f));
-    dist = sdBox(local_pos, box_size);
+    float4 corners = obj.box_corners;
+    float edgeTop = obj.box_edges.x;
+    float edgeBot = obj.box_edges.y;
+    float tapTop = obj.box_edges.z;
+    float tapBot = obj.box_edges.w;
+    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w +
+                        edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
+    if (hasAdvanced) {
+      float3 box_size = size - float3(bevel);
+      box_size = max(box_size, float3(0.001f));
+      dist = sdAdvancedBox(local_pos,
+                           box_size,
+                           corners,
+                           edgeTop,
+                           edgeBot,
+                           tapTop,
+                           tapBot,
+                           obj.box_modes.x,
+                           obj.box_modes.y,
+                           box_size.z);
+    }
+    else {
+      float3 box_size = size - float3(bevel);
+      box_size = max(box_size, float3(0.001f));
+      dist = sdBox(local_pos, box_size);
+    }
   }
 
   dist -= bevel;

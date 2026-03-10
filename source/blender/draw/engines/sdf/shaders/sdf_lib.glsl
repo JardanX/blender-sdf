@@ -82,6 +82,135 @@ float sdBox(float3 p, float3 b)
   return length(max(q, float3(0.0f))) + min(max(q.x, max(q.y, q.z)), 0.0f);
 }
 
+/**
+ * 2D rounded box with per-corner radii.
+ * \param r: corner radii (x=+x+y, y=+x-y, z=-x+y, w=-x-y).
+ */
+float sdRoundBox2D(float2 p, float2 b, float4 r)
+{
+  r.xy = (p.x > 0.0f) ? r.xy : r.zw;
+  r.x = (p.y > 0.0f) ? r.x : r.y;
+  float2 q = abs(p) - b + r.x;
+  return min(max(q.x, q.y), 0.0f) + length(max(q, float2(0.0f))) - r.x;
+}
+
+/**
+ * 2D chamfered box with per-corner radii.
+ */
+float sdChamferBox2D(float2 p, float2 b, float4 r)
+{
+  r.xy = (p.x > 0.0f) ? r.xy : r.zw;
+  r.x = (p.y > 0.0f) ? r.x : r.y;
+  float2 q = abs(p) - b;
+  float rr = r.x;
+  if (rr < 0.001f) {
+    return length(max(q, float2(0.0f))) + min(max(q.x, q.y), 0.0f);
+  }
+  float d_cham = (q.x + q.y + rr) * 0.70710678f;
+  float d_box = max(q.x, q.y);
+  float d = max(d_box, d_cham);
+  if (d <= 0.0f) {
+    return d;
+  }
+  if (d_box <= 0.0f) {
+    return d_cham;
+  }
+  if (q.y <= -rr || q.x <= -rr) {
+    return length(max(q, float2(0.0f)));
+  }
+  float t = (-q.x + q.y + rr) / (2.0f * rr);
+  if (t <= 0.0f) {
+    return length(q - float2(0.0f, -rr));
+  }
+  if (t >= 1.0f) {
+    return length(q - float2(-rr, 0.0f));
+  }
+  return d_cham;
+}
+
+/**
+ * Advanced box SDF with per-corner bevels, top/bottom edge chamfer, and taper.
+ * \param corners: per-corner bevel radii (normalized 0–1).
+ * \param edgeTop: top face edge chamfer (normalized 0–1).
+ * \param edgeBot: bottom face edge chamfer (normalized 0–1).
+ * \param tapTop: top taper amount (>0 shrinks top).
+ * \param tapBot: bottom taper amount (>0 shrinks bottom).
+ * \param cornerMode: 0=smooth, 1=chamfer.
+ * \param edgeMode: 0=smooth, 1=chamfer.
+ * \param taperZ: Z half-size for taper normalization.
+ */
+float sdAdvancedBox(float3 p,
+                    float3 size,
+                    float4 corners,
+                    float edgeTop,
+                    float edgeBot,
+                    float tapTop,
+                    float tapBot,
+                    int cornerMode,
+                    int edgeMode,
+                    float taperZ)
+{
+  float zn = clamp(p.z / max(taperZ, 0.001f), -1.0f, 1.0f);
+  float t = (zn + 1.0f) * 0.5f;
+  float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
+  float2 sz = size.xy * tapFactor;
+
+  float maxR = min(sz.x, sz.y);
+  float4 r = corners * maxR;
+
+  float d2d;
+  if (cornerMode == 0) {
+    d2d = sdRoundBox2D(p.xy, sz, r);
+  }
+  else {
+    d2d = sdChamferBox2D(p.xy, sz, r);
+  }
+
+  float tc = clamp(t, 0.0f, 1.0f);
+  float tapFace = max(1.0f - tapTop * tc - tapBot * (1.0f - tc), 0.001f);
+  float maxR_face = min(size.x * tapFace, size.y * tapFace);
+
+  float dz = abs(p.z) - size.z;
+  float edgeR = (p.z > 0.0f) ? edgeTop * min(maxR_face, size.z)
+                              : edgeBot * min(maxR_face, size.z);
+
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d2d + edgeR, dz + edgeR);
+      return min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR;
+    }
+    else {
+      float base = max(d2d, dz);
+      float cham = (d2d + dz + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) {
+        return dd;
+      }
+      if (d2d <= 0.0f && dz <= 0.0f) {
+        return cham;
+      }
+      if (dz <= -edgeR) {
+        return d2d;
+      }
+      if (d2d <= -edgeR) {
+        return dz;
+      }
+      float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) {
+        return length(float2(d2d, dz + edgeR));
+      }
+      if (tc2 >= 1.0f) {
+        return length(float2(d2d + edgeR, dz));
+      }
+      return cham;
+    }
+  }
+  else {
+    float2 dd = float2(d2d, dz);
+    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+  }
+}
+
 /* ---- Smooth blend operations ---- */
 
 float opSmoothUnion(float d1, float d2, float k)
@@ -270,6 +399,7 @@ float opOnion(float d, float thickness)
 #define SDF_MOD_HOLLOW 4
 #define SDF_MOD_ROUND 5
 #define SDF_MOD_ONION 6
+#define SDF_MOD_BEVEL 7
 
 /** Mirror axis flags. */
 #define SDF_MOD_MIRROR_X 1
@@ -340,6 +470,8 @@ float applyDistanceModifiers(float dist, int mod_start, int mod_count)
     else if (mtype == SDF_MOD_ONION) {
       dist = abs(dist) - smod.params.x;
     }
+    /* SDF_MOD_BEVEL is handled in the primitive evaluation stage
+     * (shrink primitive by bevel, then dist -= bevel). No action here. */
   }
   return dist;
 }

@@ -34,6 +34,10 @@ static const char *sdf_type_name(int type)
       return "SDF Cube";
     case SDF_TYPE_SPHERE:
       return "SDF Sphere";
+    case SDF_TYPE_CYLINDER:
+      return "SDF Cylinder";
+    case SDF_TYPE_CONE:
+      return "SDF Cone";
     case SDF_TYPE_CAPSULE:
       return "SDF Capsule";
     case SDF_TYPE_TORUS:
@@ -68,6 +72,11 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         sdf_data->size[0] = 0.5f;
         sdf_data->size[1] = 1.0f;
         sdf_data->size[2] = 0.5f;
+        break;
+      case SDF_TYPE_CONE:
+        sdf_data->size[0] = 1.0f;
+        sdf_data->size[1] = 1.0f;
+        sdf_data->size[2] = 1.0f;
         break;
       case SDF_TYPE_TORUS:
         sdf_data->size[0] = 0.8f;

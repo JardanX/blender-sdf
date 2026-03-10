@@ -2520,6 +2520,8 @@ class VIEW3D_MT_sdf_add(Menu):
         layout.operator_context = 'EXEC_REGION_WIN'
         layout.operator("object.sdf_add", text="SDF Cube", icon='SDF_PRIMITIVE').type = 'BOX'
         layout.operator("object.sdf_add", text="SDF Sphere", icon='SDF_SPHERE').type = 'SPHERE'
+        layout.operator("object.sdf_add", text="SDF Cylinder", icon='SDF_CYLINDER').type = 'CYLINDER'
+        layout.operator("object.sdf_add", text="SDF Cone", icon='SDF_CONE').type = 'CONE'
         layout.operator("object.sdf_add", text="SDF Capsule", icon='SDF_CAPSULE').type = 'CAPSULE'
         layout.operator("object.sdf_add", text="SDF Torus", icon='SDF_TORUS').type = 'TORUS'
         layout.separator()

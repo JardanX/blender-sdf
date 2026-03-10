@@ -21,6 +21,8 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 /* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
 #define SDF_TYPE_BOX 0
 #define SDF_TYPE_SPHERE 1
+#define SDF_TYPE_CYLINDER 2
+#define SDF_TYPE_CONE 3
 #define SDF_TYPE_CAPSULE 4
 #define SDF_TYPE_TORUS 5
 
@@ -43,6 +45,33 @@ float sdTorus(float3 p, float2 t)
   return length(q) - t.y;
 }
 
+float sdCylinder(float3 p, float3 size)
+{
+  /* Elliptical cylinder: size.xy = XY radii, size.z = half-height.
+   * Gradient-corrected radial distance for proper SDF. */
+  float2 e = max(size.xy, float2(0.001f));
+  float2 pn = p.xy / e;
+  float rn = length(pn);
+  float2 g = pn / (e * max(rn, 1e-6f));
+  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
+  float vertical = abs(p.z) - size.z;
+  float2 d = float2(radial, vertical);
+  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
+}
+
+float sdCone(float3 p, float r, float h)
+{
+  /* Capped cone: base radius r at z=-h, apex at z=+h.
+   * Based on Inigo Quilez's sdCappedCone. */
+  float2 q = float2(length(p.xy), p.z);
+  float2 k1 = float2(0.0f, h);
+  float2 k2 = float2(-r, 2.0f * h);
+  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
+  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
 /* Compact per-object data cached in shared memory.
  * Only the fields needed for SDF evaluation — avoids re-reading the
  * full SDFObjectGPU struct from SSBO for every voxel. */
@@ -60,6 +89,9 @@ struct SharedObj {
   int obj_index;
   int modifier_start;
   int modifier_count;
+  float4 box_corners;
+  float4 box_edges;
+  int4 box_modes;
 };
 
 /** Evaluate the actual SDF primitive (reads from shared memory cache). */
@@ -77,6 +109,16 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
   if (obj.sdf_type == SDF_TYPE_SPHERE) {
     dist = sdSphere(local_pos, size.x - bevel);
   }
+  else if (obj.sdf_type == SDF_TYPE_CYLINDER) {
+    float3 cyl_size = size - float3(bevel);
+    cyl_size = max(cyl_size, float3(0.001f));
+    dist = sdCylinder(local_pos, cyl_size);
+  }
+  else if (obj.sdf_type == SDF_TYPE_CONE) {
+    float cone_r = max(size.x - bevel, 0.001f);
+    float cone_h = max(size.y - bevel, 0.001f);
+    dist = sdCone(local_pos, cone_r, cone_h);
+  }
   else if (obj.sdf_type == SDF_TYPE_CAPSULE) {
     float3 cap_size = size - float3(bevel);
     cap_size = max(cap_size, float3(0.001f));
@@ -91,9 +133,32 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
   }
   else {
     /* SDF_TYPE_BOX (default). */
-    float3 box_size = size - float3(bevel);
-    box_size = max(box_size, float3(0.001f));
-    dist = sdBox(local_pos, box_size);
+    float4 corners = obj.box_corners;
+    float edgeTop = obj.box_edges.x;
+    float edgeBot = obj.box_edges.y;
+    float tapTop = obj.box_edges.z;
+    float tapBot = obj.box_edges.w;
+    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w +
+                        edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
+    if (hasAdvanced) {
+      float3 box_size = size - float3(bevel);
+      box_size = max(box_size, float3(0.001f));
+      dist = sdAdvancedBox(local_pos,
+                           box_size,
+                           corners,
+                           edgeTop,
+                           edgeBot,
+                           tapTop,
+                           tapBot,
+                           obj.box_modes.x,
+                           obj.box_modes.y,
+                           box_size.z);
+    }
+    else {
+      float3 box_size = size - float3(bevel);
+      box_size = max(box_size, float3(0.001f));
+      dist = sdBox(local_pos, box_size);
+    }
   }
 
   dist -= bevel;
@@ -231,6 +296,9 @@ void main()
     shared_objs[c].obj_index = i;
     shared_objs[c].modifier_start = obj.modifier_start;
     shared_objs[c].modifier_count = obj.modifier_count;
+    shared_objs[c].box_corners = obj.box_corners;
+    shared_objs[c].box_edges = obj.box_edges;
+    shared_objs[c].box_modes = obj.box_modes;
   }
   barrier();
 
@@ -330,14 +398,19 @@ void main()
       float new_dist = combineCSG(acc_dist, dist, op, bt, k, 0.0f);
 
       /* Color blending for all 6 operations × 4 blend types.
-       * For blended operations (k > 0, bt > 0), use smooth-style interpolation
-       * as an approximation that works for smooth/chamfer/round blend zones. */
+       * Smooth-style blend factor (h) approximates all blend types well. */
       if (op == SDF_CSG_OP_SUBTRACT) {
-        /* Subtraction: base color stays, subtractor doesn't add visible surface. */
+        /* Subtraction: subtractor's color where it has carved (inside the cutter),
+         * base color where the original surface remains. Sharp seam at the
+         * subtractor's d=0 boundary — no gradual falloff into base. Works for
+         * all blend types (linear, smooth, chamfer, round). */
+        if (dist <= 0.0f) {
+          acc_color = sobj.color.rgb;
+        }
         acc_dist = new_dist;
       }
       else if (op == SDF_CSG_OP_INTERSECT) {
-        /* Intersect: new object's color shows where it limits the base. */
+        /* Intersect: intersector's color shows where it limits the base. */
         if (k > 0.0f && bt > 0) {
           float h = clamp(0.5f + 0.5f * (dist - acc_dist) / k, 0.0f, 1.0f);
           acc_color = mix(acc_color, sobj.color.rgb, h);
@@ -350,30 +423,39 @@ void main()
         acc_dist = new_dist;
       }
       else if (op == SDF_CSG_OP_PUSH) {
-        /* Push: subtract + union self. Push color shows where push object is closest. */
-        float subtracted = max(acc_dist, -dist);
-        if (k > 0.0f && bt > 0) {
-          float h = clamp(0.5f + 0.5f * (subtracted - dist) / max(k, 0.001f), 0.0f, 1.0f);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
-        }
-        else {
-          if (dist < subtracted) {
-            acc_color = sobj.color.rgb;
-          }
+        /* Push = subtract base by d2, then union d2 back.
+         * Color by surface ownership: push object where it's closer than the
+         * dented base, base color otherwise. Sharp boundary — no fading. */
+        float sub_base = combineCSG(acc_dist, dist, SDF_CSG_OP_SUBTRACT, bt, k, 0.0f);
+        if (dist <= sub_base) {
+          acc_color = sobj.color.rgb;
         }
         acc_dist = new_dist;
       }
       else if (op == SDF_CSG_OP_AVOID) {
-        /* Avoid: carved avoid color shows where avoid is visible (outside base). */
-        float carved = max(dist, -acc_dist);
+        /* Avoid = subtract base from avoid, then union with base.
+         * Color by surface ownership: avoid color where it's visible (outside
+         * base), base color otherwise. Sharp boundary — no fading. */
+        float carved;
         if (k > 0.0f && bt > 0) {
-          float h = clamp(0.5f + 0.5f * (acc_dist - carved) / max(k, 0.001f), 0.0f, 1.0f);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
+          if (bt == SDF_BLEND_TYPE_SMOOTH) {
+            carved = opSmoothSubtraction(acc_dist, dist, k);
+          }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            carved = opChamferSubtraction(acc_dist, dist, k);
+          }
+          else if (bt == SDF_BLEND_TYPE_ROUND) {
+            carved = opRoundSubtraction(acc_dist, dist, k);
+          }
+          else {
+            carved = max(dist, -acc_dist);
+          }
         }
         else {
-          if (carved < acc_dist) {
-            acc_color = sobj.color.rgb;
-          }
+          carved = max(dist, -acc_dist);
+        }
+        if (carved < acc_dist) {
+          acc_color = sobj.color.rgb;
         }
         acc_dist = new_dist;
       }

@@ -484,7 +484,14 @@ class Instance : public DrawEngine {
                               sdf_data->size[2] * scale.z,
                               0.0f);
 
-    float bevel = sdf_data->bevel * math::reduce_min(scale);
+    /* Compute bevel from modifier stack (sum of all enabled bevel modifiers). */
+    float bevel = 0.0f;
+    LISTBASE_FOREACH (const SDFModifier *, bmod, &sdf_data->modifiers) {
+      if (bmod->show_viewport && bmod->type == SDF_MOD_BEVEL) {
+        bevel += bmod->params[0];
+      }
+    }
+    bevel *= math::reduce_min(scale);
     gpu_obj.bevel = bevel;
 
     gpu_obj.blend = sdf_data->blend;
@@ -495,6 +502,18 @@ class Instance : public DrawEngine {
 
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
+
+    /* Box-specific shape data. */
+    gpu_obj.box_corners = float4(sdf_data->box_corners[0],
+                                 sdf_data->box_corners[1],
+                                 sdf_data->box_corners[2],
+                                 sdf_data->box_corners[3]);
+    float taper = sdf_data->box_taper;
+    gpu_obj.box_edges = float4(sdf_data->box_edge_top,
+                               sdf_data->box_edge_bottom,
+                               math::max(taper, 0.0f),
+                               math::max(-taper, 0.0f));
+    gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
 
     /* Pack modifiers for this object. */
     gpu_obj.modifier_start = int(modifiers_.size());
@@ -524,6 +543,18 @@ class Instance : public DrawEngine {
         float r = sz.x;
         float h = math::max(sz.y - bevel, 0.0f);
         local_extent = float3(r + pad, r + pad, h + r + pad);
+        break;
+      }
+      case SDF_TYPE_CYLINDER: {
+        /* Elliptical cylinder: XY radii + bevel + pad, Z half-height + bevel + pad. */
+        local_extent = sz + float3(bevel + pad);
+        break;
+      }
+      case SDF_TYPE_CONE: {
+        /* Cone: base radius sz.x in XY, half-height sz.y along Z. */
+        float r = sz.x;
+        float h = sz.y;
+        local_extent = float3(r + bevel + pad, r + bevel + pad, h + bevel + pad);
         break;
       }
       case SDF_TYPE_TORUS: {
@@ -803,6 +834,16 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.z);
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.w);
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.shell_distance);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.x);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.z);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.w);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.x);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.z);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.w);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.x);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.y);
       hash = hash * 6364136223846793005ULL +
              float_as_uint(obj.inverse_matrix[0][0]);
       hash = hash * 6364136223846793005ULL +
@@ -1825,8 +1866,8 @@ class Instance : public DrawEngine {
       shape_indir_data_.resize(indir_start + grid_volume, -1);
 
       /* Classify: evaluate single SDF at each brick center. */
-      float3 box_size = shape.size_normalized - float3(shape.bevel_normalized);
-      box_size = math::max(box_size, float3(0.001f));
+      float3 sz = math::max(shape.size_normalized - float3(shape.bevel_normalized), float3(0.001f));
+      float bev = shape.bevel_normalized;
 
       float brick_half_diag = float(SDF_BRICK_SIZE) * local_vs * 0.866025f;
       brick_half_diag *= surface_margin_;
@@ -1841,11 +1882,61 @@ class Instance : public DrawEngine {
                                    float(SDF_BRICK_SIZE) * 0.5f) *
                                       local_vs;
 
-            /* sdBox evaluation. */
-            float3 q = math::abs(brick_center) - box_size;
-            float dist = math::length(math::max(q, float3(0.0f))) +
-                         math::min(math::max(q.x, math::max(q.y, q.z)), 0.0f) -
-                         shape.bevel_normalized;
+            /* Evaluate SDF based on shape type. */
+            float dist;
+            float3 p = brick_center;
+            switch (shape.sdf_type) {
+              case SDF_TYPE_SPHERE:
+                dist = math::length(p) - sz.x;
+                break;
+              case SDF_TYPE_CYLINDER: {
+                float2 pn = float2(p.x / sz.x, p.y / sz.y);
+                float rn = math::length(pn);
+                float2 g = float2(pn.x / sz.x, pn.y / sz.y) / math::max(rn, 1e-6f);
+                float radial = (rn - 1.0f) / math::max(math::length(g), 1e-6f);
+                float vertical = math::abs(p.z) - sz.z;
+                dist = math::length(math::max(float2(radial, vertical), float2(0.0f))) +
+                       math::min(math::max(radial, vertical), 0.0f);
+                break;
+              }
+              case SDF_TYPE_CONE: {
+                float cr = math::max(shape.size_normalized.x - bev, 0.001f);
+                float ch = math::max(shape.size_normalized.y - bev, 0.001f);
+                float2 q = float2(math::length(float2(p.x, p.y)), p.z);
+                float2 k1 = float2(0.0f, ch);
+                float2 k2 = float2(-cr, 2.0f * ch);
+                float2 ca = float2(q.x - math::min(q.x, (q.y < 0.0f) ? cr : 0.0f),
+                                   math::abs(q.y) - ch);
+                float t_clamped = math::clamp(math::dot(k1 - q, k2) / math::dot(k2, k2),
+                                              0.0f,
+                                              1.0f);
+                float2 cb = q - k1 + k2 * t_clamped;
+                float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+                dist = s * std::sqrt(math::min(math::dot(ca, ca), math::dot(cb, cb)));
+                break;
+              }
+              case SDF_TYPE_CAPSULE: {
+                float3 pc = p;
+                pc.z -= math::clamp(pc.z, -sz.y, sz.y);
+                dist = math::length(pc) - sz.x;
+                break;
+              }
+              case SDF_TYPE_TORUS: {
+                float major = math::max(shape.size_normalized.x - bev, 0.001f);
+                float minor = math::max(shape.size_normalized.y - bev, 0.001f);
+                float2 qt = float2(math::length(float2(p.x, p.y)) - major, p.z);
+                dist = math::length(qt) - minor;
+                break;
+              }
+              default: {
+                /* sdBox */
+                float3 q = math::abs(p) - sz;
+                dist = math::length(math::max(q, float3(0.0f))) +
+                       math::min(math::max(q.x, math::max(q.y, q.z)), 0.0f);
+                break;
+              }
+            }
+            dist -= bev;
 
             if (math::abs(dist) < brick_half_diag) {
               /* Active brick: assign global slot. */
@@ -1939,6 +2030,7 @@ class Instance : public DrawEngine {
         /* Push shape-specific constants. */
         GPU_shader_uniform_3fv(shape_bake_sh_, "shape_size", shape.size_normalized);
         GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
+        GPU_shader_uniform_1i(shape_bake_sh_, "shape_type", shape.sdf_type);
         GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
         GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
         GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);
