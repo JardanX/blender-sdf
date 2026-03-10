@@ -157,6 +157,8 @@ static const char *sdf_modifier_type_name(int type)
       return "Round";
     case SDF_MOD_ONION:
       return "Onion";
+    case SDF_MOD_BEVEL:
+      return "Bevel";
     default:
       return "Modifier";
   }
@@ -192,6 +194,9 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
       mod->params[0] = 0.05f;
       break;
     case SDF_MOD_ONION:
+      mod->params[0] = 0.1f;
+      break;
+    case SDF_MOD_BEVEL:
       mod->params[0] = 0.1f;
       break;
     default:

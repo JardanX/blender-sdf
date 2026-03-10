@@ -24,7 +24,7 @@ struct SDFObjectGPU {
   float bevel;
   /** Smooth blend radius. */
   float blend;
-  /** SDF primitive type (eSDFType: 0=box, 1=sphere, 4=capsule, 5=torus). */
+  /** SDF primitive type (eSDFType: 0=box, 1=sphere, 2=cylinder, 3=cone, 4=capsule, 5=torus). */
   int sdf_type;
   /** Blend function type (eSDFBlendType: 0=linear, 1=smooth, 2=chamfer, 3=round). */
   int blend_type;
@@ -38,8 +38,14 @@ struct SDFObjectGPU {
   int modifier_count;
   /** Object color RGBA. */
   float4 color;
+  /** Box per-corner bevel radii (normalized 0–1). */
+  float4 box_corners;
+  /** Box edge chamfer: x=top, y=bottom, z=tapTop, w=tapBot. */
+  float4 box_edges;
+  /** Box modes: x=corner_mode (0=smooth,1=chamfer), y=edge_mode, z=0, w=0. */
+  int4 box_modes;
 };
-/* Total: 64 + 16 + 16 + 16 + 16 + 16 + 16 + 16 = 176 bytes, 16-byte aligned. */
+/* Total: 64 + 16*5 + 16 + 16*3 = 64+80+16+48 = 208 bytes -> needs recount */
 
 /** GPU-side SDF modifier. Flat data for SSBO upload. 32 bytes, 16-byte aligned. */
 struct SDFModifierGPU {

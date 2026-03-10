@@ -16,10 +16,16 @@ class SDF_MT_csg_pie(Menu):
     def draw(self, context):
         pie = self.layout.menu_pie()
         sdf = context.object.data
-        pie.prop_enum(sdf, "csg_operation", value='UNION')
-        pie.prop_enum(sdf, "csg_operation", value='SUBTRACT')
-        pie.prop_enum(sdf, "csg_operation", value='INTERSECT')
-        pie.prop_enum(sdf, "csg_operation", value='SHELL')
+        pie.prop_enum(sdf, "csg_operation", value='UNION')       # W
+        pie.prop_enum(sdf, "csg_operation", value='SUBTRACT')    # E
+        pie.separator()                                           # S (skip)
+        pie.separator()                                           # N (skip)
+        pie.prop_enum(sdf, "csg_operation", value='INTERSECT')   # NW
+        pie.prop_enum(sdf, "csg_operation", value='SHELL')       # NE
+        pie.prop_enum(sdf, "csg_operation", value='PUSH')        # SW
+        pie.prop_enum(sdf, "csg_operation", value='AVOID')       # SE
+        # Layout: 3 left (NW=Intersect, W=Union, SW=Push)
+        #         3 right (NE=Shell, E=Subtract, SE=Avoid)
 
 
 class SDF_MT_blend_pie(Menu):
@@ -110,7 +116,6 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
 
         layout.use_property_split = True
         layout.use_property_decorate = False
-        layout.prop(sdf, "bevel")
         layout.prop(sdf, "color")
 
 
@@ -161,6 +166,56 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
         sub.prop(sdf, "blend", text="")
 
 
+# -- Shape Property Panel (box-specific) --------------------------------------
+
+class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
+    bl_label = "Property"
+
+    @classmethod
+    def poll(cls, context):
+        sdf = context.sdf
+        return sdf and sdf.sdf_type == 'BOX'
+
+    def draw(self, context):
+        layout = self.layout
+        sdf = context.sdf
+
+        # Corner Bevels
+        layout.label(text="Corner Bevels")
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(sdf, "box_corners", index=0, text="1")
+        row.prop(sdf, "box_corners", index=1, text="2")
+        row = col.row(align=True)
+        row.prop(sdf, "box_corners", index=2, text="3")
+        row.prop(sdf, "box_corners", index=3, text="4")
+
+        layout.separator()
+
+        # Edge Chamfer
+        layout.label(text="Edge Chamfer")
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(sdf, "box_edge_top", text="Top")
+        row.prop(sdf, "box_edge_bottom", text="Bottom")
+
+        layout.separator()
+
+        # Taper
+        layout.prop(sdf, "box_taper")
+
+        # Mode dropdowns — only show when any shape property is active
+        corners = sdf.box_corners
+        has_shape = (corners[0] + corners[1] + corners[2] + corners[3]
+                     + sdf.box_edge_top + sdf.box_edge_bottom
+                     + abs(sdf.box_taper)) > 0.001
+        if has_shape:
+            layout.separator()
+            row = layout.row(align=True)
+            row.prop(sdf, "box_corner_mode", text="Corners")
+            row.prop(sdf, "box_edge_mode", text="Edges")
+
+
 # -- Modifier Operators -------------------------------------------------------
 
 class SDF_OT_modifier_add(Operator):
@@ -179,15 +234,18 @@ class SDF_OT_modifier_add(Operator):
             ('HOLLOW', "Hollow", "Make hollow with wall thickness", 'MOD_SOLIDIFY', 4),
             ('ROUND', "Round", "Additional rounding", 'MOD_SMOOTH', 5),
             ('ONION', "Onion", "Concentric shells", 'MOD_SOLIDIFY', 6),
+            ('BEVEL', "Bevel", "Bevel/round edges", 'MOD_BEVEL', 7),
         ],
     )
 
     @classmethod
     def poll(cls, context):
-        return context.sdf is not None
+        return getattr(context, 'sdf', None) is not None
 
     def execute(self, context):
-        sdf = context.sdf
+        sdf = getattr(context, 'sdf', None)
+        if sdf is None:
+            return {'CANCELLED'}
         sdf.modifiers.new(type=self.type)
         return {'FINISHED'}
 
@@ -202,10 +260,12 @@ class SDF_OT_modifier_remove(Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.sdf is not None
+        return getattr(context, 'sdf', None) is not None
 
     def execute(self, context):
-        sdf = context.sdf
+        sdf = getattr(context, 'sdf', None)
+        if sdf is None:
+            return {'CANCELLED'}
         if self.index < len(sdf.modifiers):
             sdf.modifiers.remove(sdf.modifiers[self.index])
         return {'FINISHED'}
@@ -222,10 +282,12 @@ class SDF_OT_modifier_move(Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.sdf is not None
+        return getattr(context, 'sdf', None) is not None
 
     def execute(self, context):
-        sdf = context.sdf
+        sdf = getattr(context, 'sdf', None)
+        if sdf is None:
+            return {'CANCELLED'}
         new_index = self.index + self.direction
         if 0 <= new_index < len(sdf.modifiers):
             sdf.modifiers.move(self.index, new_index)
@@ -292,6 +354,8 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 col.prop(mod, "radius")
             elif mod.type == 'ONION':
                 col.prop(mod, "thickness")
+            elif mod.type == 'BEVEL':
+                col.prop(mod, "radius")
 
 
 class SDF_MT_modifier_add(Menu):
@@ -308,6 +372,8 @@ class SDF_MT_modifier_add(Menu):
         layout.operator("sdf.modifier_add", text="Hollow", icon='MOD_SOLIDIFY').type = 'HOLLOW'
         layout.operator("sdf.modifier_add", text="Round", icon='MOD_SMOOTH').type = 'ROUND'
         layout.operator("sdf.modifier_add", text="Onion", icon='MOD_SOLIDIFY').type = 'ONION'
+        layout.separator()
+        layout.operator("sdf.modifier_add", text="Bevel", icon='MOD_BEVEL').type = 'BEVEL'
 
 
 # -- Registration -------------------------------------------------------------
@@ -324,6 +390,7 @@ classes = (
     DATA_PT_context_sdf,
     DATA_PT_sdf_shape,
     DATA_PT_sdf_operation,
+    DATA_PT_sdf_property,
     DATA_PT_sdf_modifiers,
 )
 

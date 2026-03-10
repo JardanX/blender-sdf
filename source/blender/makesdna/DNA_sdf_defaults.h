@@ -24,6 +24,12 @@
     .blend_type = 1, /* SDF_BLEND_SMOOTH */ \
     .csg_operation = 0, \
     .shell_distance = 0.2f, \
+    .box_corners = {0.0f, 0.0f, 0.0f, 0.0f}, \
+    .box_edge_top = 0.0f, \
+    .box_edge_bottom = 0.0f, \
+    .box_taper = 0.0f, \
+    .box_corner_mode = 0, \
+    .box_edge_mode = 0, \
   }
 
 /** \} */

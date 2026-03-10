@@ -954,6 +954,8 @@ if(WITH_BLENDER)
       sdf_csg_push
       sdf_csg_avoid
       sdf_sphere
+      sdf_cylinder
+      sdf_cone
       sdf_capsule
       sdf_torus
       volume_data

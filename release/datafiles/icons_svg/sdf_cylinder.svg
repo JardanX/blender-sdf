@@ -1,0 +1,9 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff" fill-rule="evenodd">
+    <!-- Outer rectangle ring (small corner radius = cylinder, not cube) -->
+    <path d="M 200,100 H 1400 A 100,100 0 0 1 1500,200 V 1400 A 100,100 0 0 1 1400,1500 H 200 A 100,100 0 0 1 100,1400 V 200 A 100,100 0 0 1 200,100 Z
+             M 260,200 H 1340 A 60,60 0 0 1 1400,260 V 1340 A 60,60 0 0 1 1340,1400 H 260 A 60,60 0 0 1 200,1340 V 260 A 60,60 0 0 1 260,200 Z"/>
+    <!-- Inner filled rectangle -->
+    <path d="M 570,560 H 1030 A 20,20 0 0 1 1050,580 V 1020 A 20,20 0 0 1 1030,1040 H 570 A 20,20 0 0 1 550,1020 V 580 A 20,20 0 0 1 570,560 Z"/>
+  </g>
+</svg>

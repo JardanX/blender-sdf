@@ -21,6 +21,56 @@ COMPUTE_SHADER_CREATE_INFO(sdf_shape_bake)
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 
+/* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
+#define SDF_TYPE_BOX 0
+#define SDF_TYPE_SPHERE 1
+#define SDF_TYPE_CYLINDER 2
+#define SDF_TYPE_CONE 3
+#define SDF_TYPE_CAPSULE 4
+#define SDF_TYPE_TORUS 5
+
+float sdSphere(float3 p, float r)
+{
+  return length(p) - r;
+}
+
+float sdCapsule(float3 p, float3 size)
+{
+  float h = size.y;
+  float r = size.x;
+  p.z -= clamp(p.z, -h, h);
+  return length(p) - r;
+}
+
+float sdTorus(float3 p, float2 t)
+{
+  float2 q = float2(length(p.xy) - t.x, p.z);
+  return length(q) - t.y;
+}
+
+float sdCylinder(float3 p, float3 size)
+{
+  float2 e = max(size.xy, float2(0.001f));
+  float2 pn = p.xy / e;
+  float rn = length(pn);
+  float2 g = pn / (e * max(rn, 1e-6f));
+  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
+  float vertical = abs(p.z) - size.z;
+  float2 d = float2(radial, vertical);
+  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
+}
+
+float sdCone(float3 p, float r, float h)
+{
+  float2 q = float2(length(p.xy), p.z);
+  float2 k1 = float2(0.0f, h);
+  float2 k2 = float2(-r, 2.0f * h);
+  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
+  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
 void main()
 {
   /* Active-brick-only dispatch: one workgroup per active brick. */
@@ -41,9 +91,9 @@ void main()
   /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
 
-  /* Pre-compute SDF box half-extents (size - bevel, clamped). */
-  float3 box_size = shape_size - shape_bevel;
-  box_size = max(box_size, float3(0.001f));
+  /* Pre-compute size with bevel compensation. */
+  float bevel = shape_bevel;
+  float3 sz = max(shape_size - bevel, float3(0.001f));
 
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
@@ -54,8 +104,32 @@ void main()
                        (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) *
                            local_voxel_size;
 
-    /* Evaluate single SDF (box with bevel). */
-    float dist = sdBox(local_pos, box_size) - shape_bevel;
+    /* Evaluate SDF primitive based on shape type. */
+    float dist;
+    if (shape_type == SDF_TYPE_SPHERE) {
+      dist = sdSphere(local_pos, sz.x);
+    }
+    else if (shape_type == SDF_TYPE_CYLINDER) {
+      dist = sdCylinder(local_pos, sz);
+    }
+    else if (shape_type == SDF_TYPE_CONE) {
+      dist = sdCone(local_pos, max(shape_size.x - bevel, 0.001f),
+                                max(shape_size.y - bevel, 0.001f));
+    }
+    else if (shape_type == SDF_TYPE_CAPSULE) {
+      dist = sdCapsule(local_pos, sz);
+    }
+    else if (shape_type == SDF_TYPE_TORUS) {
+      float major = max(shape_size.x - bevel, 0.001f);
+      float minor = max(shape_size.y - bevel, 0.001f);
+      dist = sdTorus(local_pos, float2(major, minor));
+    }
+    else {
+      /* SDF_TYPE_BOX (default). */
+      dist = sdBox(local_pos, sz);
+    }
+
+    dist -= bevel;
 
     /* Store distance only. Color channel is zero — color comes from
      * per-instance data at march time, not from the shape atlas. */

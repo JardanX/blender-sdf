@@ -18,6 +18,8 @@
 const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_BOX, "BOX", ICON_SDF_PRIMITIVE, "Cube", "Cube SDF primitive"},
     {SDF_TYPE_SPHERE, "SPHERE", ICON_SDF_SPHERE, "Sphere", "Sphere SDF primitive"},
+    {SDF_TYPE_CYLINDER, "CYLINDER", ICON_SDF_CYLINDER, "Cylinder", "Cylinder SDF primitive"},
+    {SDF_TYPE_CONE, "CONE", ICON_SDF_CONE, "Cone", "Cone SDF primitive"},
     {SDF_TYPE_CAPSULE, "CAPSULE", ICON_SDF_CAPSULE, "Capsule", "Capsule SDF primitive"},
     {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
     {0, nullptr, 0, nullptr, nullptr},
@@ -66,6 +68,11 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
       sdf->size[0] = 0.8f;
       sdf->size[1] = 0.25f;
       sdf->size[2] = 0.8f;
+      break;
+    case SDF_TYPE_CONE:
+      sdf->size[0] = 1.0f;
+      sdf->size[1] = 1.0f;
+      sdf->size[2] = 1.0f;
       break;
     default:
       sdf->size[0] = 1.0f;
@@ -155,6 +162,12 @@ static const EnumPropertyItem rna_enum_sdf_csg_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_box_mode_items[] = {
+    {SDF_BOX_MODE_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth rounding"},
+    {SDF_BOX_MODE_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer (45-degree cut)"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {SDF_MOD_MIRROR, "MIRROR", ICON_MOD_MIRROR, "Mirror", "Mirror across axes"},
     {SDF_MOD_TWIST, "TWIST", ICON_MOD_SIMPLEDEFORM, "Twist", "Twist around Z axis"},
@@ -163,6 +176,7 @@ static const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {SDF_MOD_HOLLOW, "HOLLOW", ICON_MOD_SOLIDIFY, "Hollow", "Make hollow with wall thickness"},
     {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Round", "Additional rounding"},
     {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
+    {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -306,14 +320,6 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Size", "Size in each axis");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
-  /* Bevel */
-  prop = RNA_def_property(srna, "bevel", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "bevel");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
-  RNA_def_property_ui_text(prop, "Bevel", "Bevel radius");
-  RNA_def_property_update(prop, 0, "rna_SDF_update");
-
   /* Color */
   prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "color");
@@ -349,6 +355,51 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
   RNA_def_property_ui_text(
       prop, "Shell Distance", "Offset distance for shell/extrusion operation");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Box Corner Bevels */
+  prop = RNA_def_property(srna, "box_corners", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "box_corners");
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Corner Bevels", "Per-corner bevel radii (normalized)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Box Edge Top */
+  prop = RNA_def_property(srna, "box_edge_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "box_edge_top");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Edge Top", "Top edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Box Edge Bottom */
+  prop = RNA_def_property(srna, "box_edge_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "box_edge_bottom");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Edge Bottom", "Bottom edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Box Taper */
+  prop = RNA_def_property(srna, "box_taper", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "box_taper");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Taper", "Taper factor (positive tapers top, negative tapers bottom)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Box Corner Mode */
+  prop = RNA_def_property(srna, "box_corner_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_box_mode_items);
+  RNA_def_property_ui_text(prop, "Corners", "Corner blend mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Box Edge Mode */
+  prop = RNA_def_property(srna, "box_edge_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_box_mode_items);
+  RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Materials */

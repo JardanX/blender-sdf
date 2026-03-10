@@ -2476,6 +2476,10 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
         switch (sdf_data->sdf_type) {
           case SDF_TYPE_SPHERE:
             return ICON_SDF_SPHERE;
+          case SDF_TYPE_CYLINDER:
+            return ICON_SDF_CYLINDER;
+          case SDF_TYPE_CONE:
+            return ICON_SDF_CONE;
           case SDF_TYPE_CAPSULE:
             return ICON_SDF_CAPSULE;
           case SDF_TYPE_TORUS:

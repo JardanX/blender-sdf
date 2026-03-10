@@ -27,10 +27,17 @@ typedef struct SDFRuntimeHandle SDFRuntimeHandle;
 typedef enum eSDFType {
   SDF_TYPE_BOX = 0,
   SDF_TYPE_SPHERE = 1,
-  /* 2, 3 reserved (removed: Cylinder, Cone). */
+  SDF_TYPE_CYLINDER = 2,
+  SDF_TYPE_CONE = 3,
   SDF_TYPE_CAPSULE = 4,
   SDF_TYPE_TORUS = 5,
 } eSDFType;
+
+/** Box corner/edge blend mode. */
+typedef enum eSDFBoxMode {
+  SDF_BOX_MODE_SMOOTH = 0,
+  SDF_BOX_MODE_CHAMFER = 1,
+} eSDFBoxMode;
 
 typedef enum eSDFBlendType {
   SDF_BLEND_LINEAR = 0,
@@ -57,6 +64,7 @@ typedef enum eSDFModifierType {
   SDF_MOD_HOLLOW = 4,
   SDF_MOD_ROUND = 5,
   SDF_MOD_ONION = 6,
+  SDF_MOD_BEVEL = 7,
 } eSDFModifierType;
 
 /** Mirror axis flags. */
@@ -125,6 +133,20 @@ typedef struct SDF {
   int csg_operation;
   /** Shell/extrusion offset distance (used when csg_operation == SDF_CSG_SHELL). */
   float shell_distance;
+
+  /** Box-specific shape properties. */
+  /** Per-corner bevel radii (normalized 0–1, scaled by min(size.xy)). */
+  float box_corners[4];
+  /** Top/bottom edge chamfer (normalized 0–1). */
+  float box_edge_top;
+  float box_edge_bottom;
+  /** Taper factor (-1 to 1). */
+  float box_taper;
+  /** Corner blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
+  int box_corner_mode;
+  /** Edge blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
+  int box_edge_mode;
+  char _pad4[4];
 
   /** Ordered modifier stack. */
   ListBase modifiers; /* SDFModifier */
