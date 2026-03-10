@@ -1,0 +1,9 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff" fill-rule="evenodd">
+    <!-- Outer hexagon ring -->
+    <path d="M 1500,800 L 1150,1406 L 450,1406 L 100,800 L 450,194 L 1150,194 Z
+             M 1400,800 L 1100,1320 L 500,1320 L 200,800 L 500,280 L 1100,280 Z"/>
+    <!-- Inner filled hexagon -->
+    <path d="M 1060,800 L 930,1025 L 670,1025 L 540,800 L 670,575 L 930,575 Z"/>
+  </g>
+</svg>

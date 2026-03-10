@@ -2484,6 +2484,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
             return ICON_SDF_CAPSULE;
           case SDF_TYPE_TORUS:
             return ICON_SDF_TORUS;
+          case SDF_TYPE_NGON:
+            return ICON_SDF_NGON;
           default:
             return ICON_SDF_PRIMITIVE;
         }

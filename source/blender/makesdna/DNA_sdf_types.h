@@ -31,6 +31,7 @@ typedef enum eSDFType {
   SDF_TYPE_CONE = 3,
   SDF_TYPE_CAPSULE = 4,
   SDF_TYPE_TORUS = 5,
+  SDF_TYPE_NGON = 6,
 } eSDFType;
 
 /** Box corner/edge blend mode. */
@@ -146,6 +147,19 @@ typedef struct SDF {
   int box_corner_mode;
   /** Edge blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
   int box_edge_mode;
+
+  /** N-Gon-specific shape properties. */
+  /** Number of polygon sides (3–32). */
+  int ngon_sides;
+  /** Uniform corner bevel (normalized 0–1, Minkowski round). */
+  float ngon_corner;
+  /** Top/bottom edge chamfer (normalized 0–1). */
+  float ngon_edge_top;
+  float ngon_edge_bottom;
+  /** Taper factor (-1 to 1). */
+  float ngon_taper;
+  /** Edge blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
+  int ngon_edge_mode;
   char _pad4[4];
 
   /** Ordered modifier stack. */

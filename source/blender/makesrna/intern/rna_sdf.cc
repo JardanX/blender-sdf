@@ -22,6 +22,7 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_CONE, "CONE", ICON_SDF_CONE, "Cone", "Cone SDF primitive"},
     {SDF_TYPE_CAPSULE, "CAPSULE", ICON_SDF_CAPSULE, "Capsule", "Capsule SDF primitive"},
     {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
+    {SDF_TYPE_NGON, "NGON", ICON_SDF_NGON, "N-Gon", "Regular polygon prism SDF primitive"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -70,6 +71,11 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
       sdf->size[2] = 0.8f;
       break;
     case SDF_TYPE_CONE:
+      sdf->size[0] = 1.0f;
+      sdf->size[1] = 1.0f;
+      sdf->size[2] = 1.0f;
+      break;
+    case SDF_TYPE_NGON:
       sdf->size[0] = 1.0f;
       sdf->size[1] = 1.0f;
       sdf->size[2] = 1.0f;
@@ -398,6 +404,53 @@ static void rna_def_sdf(BlenderRNA *brna)
 
   /* Box Edge Mode */
   prop = RNA_def_property(srna, "box_edge_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_box_mode_items);
+  RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* N-Gon Sides */
+  prop = RNA_def_property(srna, "ngon_sides", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "ngon_sides");
+  RNA_def_property_range(prop, 3, 32);
+  RNA_def_property_ui_range(prop, 3, 32, 1, 0);
+  RNA_def_property_ui_text(prop, "Sides", "Number of polygon sides");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* N-Gon Corner Bevel */
+  prop = RNA_def_property(srna, "ngon_corner", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "ngon_corner");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Corner Bevel", "Uniform corner bevel radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* N-Gon Edge Top */
+  prop = RNA_def_property(srna, "ngon_edge_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "ngon_edge_top");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Edge Top", "Top edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* N-Gon Edge Bottom */
+  prop = RNA_def_property(srna, "ngon_edge_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "ngon_edge_bottom");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Edge Bottom", "Bottom edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* N-Gon Taper */
+  prop = RNA_def_property(srna, "ngon_taper", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "ngon_taper");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(
+      prop, "Taper", "Taper factor (positive tapers top, negative tapers bottom)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* N-Gon Edge Mode */
+  prop = RNA_def_property(srna, "ngon_edge_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_box_mode_items);
   RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
   RNA_def_property_update(prop, 0, "rna_SDF_update");

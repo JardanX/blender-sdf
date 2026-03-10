@@ -25,6 +25,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 #define SDF_TYPE_CONE 3
 #define SDF_TYPE_CAPSULE 4
 #define SDF_TYPE_TORUS 5
+#define SDF_TYPE_NGON 6
 
 float sdSphere(float3 p, float r)
 {
@@ -130,6 +131,28 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
     major = max(major, 0.001f);
     minor = max(minor, 0.001f);
     dist = sdTorus(local_pos, float2(major, minor));
+  }
+  else if (obj.sdf_type == SDF_TYPE_NGON) {
+    float R = max(size.x - bevel, 0.001f);
+    float halfH = max(size.z - bevel, 0.001f);
+    int sides = obj.box_modes.z;
+    float corner = obj.box_corners.x;
+    float edgeTop = obj.box_edges.x;
+    float edgeBot = obj.box_edges.y;
+    float tapTop = obj.box_edges.z;
+    float tapBot = obj.box_edges.w;
+    int edgeMode = obj.box_modes.y;
+    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
+    if (hasAdvanced) {
+      dist = sdAdvancedNgon(
+          local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH);
+    }
+    else {
+      float d2d = sdRegularPolygon2D(local_pos.xy, R, sides);
+      float dz = abs(local_pos.z) - halfH;
+      float2 dd = float2(d2d, dz);
+      dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    }
   }
   else {
     /* SDF_TYPE_BOX (default). */
@@ -400,12 +423,18 @@ void main()
       /* Color blending for all 6 operations × 4 blend types.
        * Smooth-style blend factor (h) approximates all blend types well. */
       if (op == SDF_CSG_OP_SUBTRACT) {
-        /* Subtraction: subtractor's color where it has carved (inside the cutter),
-         * base color where the original surface remains. Sharp seam at the
-         * subtractor's d=0 boundary — no gradual falloff into base. Works for
-         * all blend types (linear, smooth, chamfer, round). */
-        if (dist <= 0.0f) {
-          acc_color = sobj.color.rgb;
+        /* Color by surface ownership with smooth transition at the seam.
+         * acc_dist + dist < 0 → cutter dominates, > 0 → base dominates.
+         * For blended ops, transition smoothly across the blend zone (width k).
+         * For linear, sharp switch at the seam. */
+        if (k > 0.0f && bt > 0) {
+          float h = clamp(0.5f - 0.5f * (acc_dist + dist) / k, 0.0f, 1.0f);
+          acc_color = mix(acc_color, sobj.color.rgb, h);
+        }
+        else {
+          if (acc_dist + dist < 0.0f) {
+            acc_color = sobj.color.rgb;
+          }
         }
         acc_dist = new_dist;
       }
