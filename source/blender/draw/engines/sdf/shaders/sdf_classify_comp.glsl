@@ -33,19 +33,24 @@ float sdCapsule(float3 p, float3 size)
 {
   float h = size.y;
   float r = size.x;
-  p.y -= clamp(p.y, -h, h);
+  p.z -= clamp(p.z, -h, h);
   return length(p) - r;
 }
 
 float sdTorus(float3 p, float2 t)
 {
-  float2 q = float2(length(p.xz) - t.x, p.y);
+  float2 q = float2(length(p.xy) - t.x, p.z);
   return length(q) - t.y;
 }
 
-/** Evaluate the actual SDF primitive for an object (not just box). */
+/** Evaluate the actual SDF primitive for an object, with modifiers. */
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
+  /* Apply domain modifiers (warp sampling space). */
+  if (obj.modifier_count > 0) {
+    local_pos = applyDomainModifiers(local_pos, obj.modifier_start, obj.modifier_count);
+  }
+
   float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
   float dist;
@@ -72,7 +77,14 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
     dist = sdBox(local_pos, box_size);
   }
 
-  return dist - bevel;
+  dist -= bevel;
+
+  /* Apply distance modifiers. */
+  if (obj.modifier_count > 0) {
+    dist = applyDistanceModifiers(dist, obj.modifier_start, obj.modifier_count);
+  }
+
+  return dist;
 }
 
 void main()
@@ -188,18 +200,24 @@ void main()
     }
   }
 
-  /* Pass 2: apply subtraction/intersection modifiers to the base. */
+  /* Pass 2: apply modifiers (subtract/intersect/push/avoid) to the base. */
   for (int c = 0; c < num_candidates; c++) {
     SDFObjectGPU obj = objects[candidates[c]];
     if (obj.csg_operation == SDF_CSG_OP_UNION || obj.csg_operation == SDF_CSG_OP_SHELL) {
       continue;
     }
-    if (acc_dist >= 1e9f) {
-      continue; /* No base geometry to modify. */
-    }
 
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
     float dist = evalSDFPrimitive(local_pos, obj);
+
+    if (acc_dist >= 1e9f) {
+      /* Push/avoid create visible geometry even without a base. */
+      if (obj.csg_operation == SDF_CSG_OP_PUSH || obj.csg_operation == SDF_CSG_OP_AVOID) {
+        acc_dist = dist;
+      }
+      continue;
+    }
+
     acc_dist = combineCSG(
         acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, 0.0f);
   }

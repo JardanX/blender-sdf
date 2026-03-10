@@ -260,6 +260,90 @@ float opOnion(float d, float thickness)
   return abs(d) - thickness;
 }
 
+/* ---- SDF modifier evaluation ---- */
+
+/** Modifier type IDs (must match eSDFModifierType in DNA_sdf_types.h). */
+#define SDF_MOD_MIRROR 0
+#define SDF_MOD_TWIST 1
+#define SDF_MOD_BEND 2
+#define SDF_MOD_ELONGATE 3
+#define SDF_MOD_HOLLOW 4
+#define SDF_MOD_ROUND 5
+#define SDF_MOD_ONION 6
+
+/** Mirror axis flags. */
+#define SDF_MOD_MIRROR_X 1
+#define SDF_MOD_MIRROR_Y 2
+#define SDF_MOD_MIRROR_Z 4
+
+/**
+ * Apply domain modifiers to local position (before SDF primitive evaluation).
+ * Domain modifiers warp the sampling space.
+ * Applied in reverse order so visual stack order is top-to-bottom.
+ */
+float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
+{
+  for (int i = mod_start + mod_count - 1; i >= mod_start; i--) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+    int mflags = smod.header.y;
+
+    if (mtype == SDF_MOD_MIRROR) {
+      if ((mflags & SDF_MOD_MIRROR_X) != 0) {
+        p.x = abs(p.x);
+      }
+      if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
+        p.y = abs(p.y);
+      }
+      if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
+        p.z = abs(p.z);
+      }
+    }
+    else if (mtype == SDF_MOD_TWIST) {
+      float k = smod.params.x;
+      float angle = k * p.z;
+      float c = cos(angle);
+      float s = sin(angle);
+      p = float3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+    }
+    else if (mtype == SDF_MOD_BEND) {
+      float k = smod.params.x;
+      float angle = k * p.x;
+      float c = cos(angle);
+      float s = sin(angle);
+      p = float3(s * p.y + c * p.x, c * p.y - s * p.x, p.z);
+    }
+    else if (mtype == SDF_MOD_ELONGATE) {
+      float3 h = smod.params.xyz;
+      p = p - clamp(p, -h, h);
+    }
+  }
+  return p;
+}
+
+/**
+ * Apply distance modifiers to SDF distance (after primitive evaluation).
+ * Applied in forward stack order.
+ */
+float applyDistanceModifiers(float dist, int mod_start, int mod_count)
+{
+  for (int i = mod_start; i < mod_start + mod_count; i++) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+
+    if (mtype == SDF_MOD_HOLLOW) {
+      dist = abs(dist) - smod.params.x;
+    }
+    else if (mtype == SDF_MOD_ROUND) {
+      dist -= smod.params.x;
+    }
+    else if (mtype == SDF_MOD_ONION) {
+      dist = abs(dist) - smod.params.x;
+    }
+  }
+  return dist;
+}
+
 /* ---- CSG dispatch ---- */
 
 /** CSG operation IDs (must match eSDFCSGOperation in DNA_sdf_types.h). */
@@ -267,6 +351,8 @@ float opOnion(float d, float thickness)
 #define SDF_CSG_OP_SUBTRACT 1
 #define SDF_CSG_OP_INTERSECT 2
 #define SDF_CSG_OP_SHELL 3
+#define SDF_CSG_OP_PUSH 4
+#define SDF_CSG_OP_AVOID 5
 
 /** Blend type IDs (must match eSDFBlendType in DNA_sdf_types.h). */
 #define SDF_BLEND_TYPE_LINEAR 0
@@ -328,6 +414,53 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
     }
     return max(d1, d2);
   }
+  else if (op == SDF_CSG_OP_PUSH) {
+    /* Push: subtract d2 from base (with blend), then hard-union d2 back.
+     * Effect: the push object dents the base but remains visible as solid. */
+    float subtracted;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        subtracted = opSmoothSubtraction(d2, d1, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        subtracted = opChamferSubtraction(d2, d1, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        subtracted = opRoundSubtraction(d2, d1, k);
+      }
+      else {
+        subtracted = max(d1, -d2);
+      }
+    }
+    else {
+      subtracted = max(d1, -d2);
+    }
+    return min(subtracted, d2);
+  }
+  else if (op == SDF_CSG_OP_AVOID) {
+    /* Avoid: subtract base (d1) from the avoid object (d2), then hard-union
+     * the carved result with the base. Effect: the avoid object is visible
+     * only where it does not overlap the base — other objects carve into it. */
+    float carved;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        carved = opSmoothSubtraction(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        carved = opChamferSubtraction(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_ROUND) {
+        carved = opRoundSubtraction(d1, d2, k);
+      }
+      else {
+        carved = max(d2, -d1);
+      }
+    }
+    else {
+      carved = max(d2, -d1);
+    }
+    return min(d1, carved);
+  }
   /* SDF_CSG_OP_SHELL (extrusion): two-stage blend matching MathOPS algorithm.
    * Finds the intersection between two SDF fields and extrudes/insets a thin
    * wall of thickness |shell_dist| with correct blending at both stages.
@@ -340,11 +473,9 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
    * Negative shell_dist (inset): subtract shape from base, union with limit. */
   {
     float h = abs(shell_dist);
-    /* Limit-stage blend: must not exceed wall thickness to avoid artifacts. */
     float lk = min(k, h);
 
     if (shell_dist < 0.0f) {
-      /* Inset: subtract shape from base, then cap with limit plane. */
       float d_sub;
       if (k > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) {
@@ -379,7 +510,6 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
       return min(d_sub, lim);
     }
     else {
-      /* Extrusion: union shape into base, clip with limit plane. */
       float d_union;
       if (k > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) {

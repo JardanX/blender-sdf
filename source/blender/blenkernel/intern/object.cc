@@ -3523,8 +3523,27 @@ std::optional<blender::Bounds<blender::float3>> BKE_object_boundbox_get(const Ob
       return static_cast<const GreasePencil *>(ob->data)->bounds_min_max_eval();
     case OB_SDF: {
       const SDF *sdf = static_cast<const SDF *>(ob->data);
-      const blender::float3 half_size = blender::float3(sdf->size[0], sdf->size[1], sdf->size[2]) +
-                                        blender::float3(sdf->bevel);
+      blender::float3 half_size;
+      switch (sdf->sdf_type) {
+        case SDF_TYPE_CAPSULE: {
+          /* Capsule: radius size.x in XY, half-height size.y along Z, caps add radius. */
+          float r = sdf->size[0];
+          float h = std::max(sdf->size[1] - sdf->bevel, 0.0f) + r;
+          half_size = {r, r, h};
+          break;
+        }
+        case SDF_TYPE_TORUS: {
+          /* Torus: major radius size.x in XY, minor radius size.y along Z. */
+          float outer = sdf->size[0] + sdf->size[1];
+          half_size = {outer, outer, sdf->size[1]};
+          break;
+        }
+        default:
+          /* Box / Sphere: extent matches size + bevel. */
+          half_size = blender::float3(sdf->size[0], sdf->size[1], sdf->size[2]) +
+                      blender::float3(sdf->bevel);
+          break;
+      }
       return blender::Bounds<blender::float3>{-half_size, half_size};
     }
   }

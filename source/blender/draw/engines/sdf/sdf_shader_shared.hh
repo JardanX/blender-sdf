@@ -32,12 +32,22 @@ struct SDFObjectGPU {
   int csg_operation;
   /** Shell/extrusion thickness (world-space, from DNA shell_distance). */
   float shell_distance;
-  float _pad3;
-  float _pad4;
+  /** Index of first modifier in the modifier SSBO. */
+  int modifier_start;
+  /** Number of modifiers for this object. */
+  int modifier_count;
   /** Object color RGBA. */
   float4 color;
 };
 /* Total: 64 + 16 + 16 + 16 + 16 + 16 + 16 + 16 = 176 bytes, 16-byte aligned. */
+
+/** GPU-side SDF modifier. Flat data for SSBO upload. 32 bytes, 16-byte aligned. */
+struct SDFModifierGPU {
+  /** x=type, y=flags, z=0, w=0 */
+  int4 header;
+  /** Modifier-specific parameters. */
+  float4 params;
+};
 
 /** Brick counter SSBO (used by classify pass). */
 struct BrickCounter {

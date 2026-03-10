@@ -16,16 +16,20 @@
 #include "BLI_math_base.h"
 
 const EnumPropertyItem rna_enum_sdf_type_items[] = {
-    {SDF_TYPE_BOX, "BOX", ICON_MESH_CUBE, "Cube", "Cube SDF primitive"},
-    {SDF_TYPE_SPHERE, "SPHERE", ICON_MESH_UVSPHERE, "Sphere", "Sphere SDF primitive"},
-    {SDF_TYPE_CAPSULE, "CAPSULE", ICON_MESH_CAPSULE, "Capsule", "Capsule SDF primitive"},
-    {SDF_TYPE_TORUS, "TORUS", ICON_MESH_TORUS, "Torus", "Torus SDF primitive"},
+    {SDF_TYPE_BOX, "BOX", ICON_SDF_PRIMITIVE, "Cube", "Cube SDF primitive"},
+    {SDF_TYPE_SPHERE, "SPHERE", ICON_SDF_SPHERE, "Sphere", "Sphere SDF primitive"},
+    {SDF_TYPE_CAPSULE, "CAPSULE", ICON_SDF_CAPSULE, "Capsule", "Capsule SDF primitive"},
+    {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 #ifdef RNA_RUNTIME
 
+#  include "BLI_listbase.h"
+
 #  include "BKE_main.hh"
+#  include "BKE_report.hh"
+#  include "BKE_sdf.hh"
 
 #  include "DEG_depsgraph.hh"
 
@@ -47,6 +51,82 @@ static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
+/** Reset size to shape-appropriate defaults when sdf_type changes. */
+static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  SDF *sdf = (SDF *)ptr->owner_id;
+
+  switch (sdf->sdf_type) {
+    case SDF_TYPE_CAPSULE:
+      sdf->size[0] = 0.5f;
+      sdf->size[1] = 1.0f;
+      sdf->size[2] = 0.5f;
+      break;
+    case SDF_TYPE_TORUS:
+      sdf->size[0] = 0.8f;
+      sdf->size[1] = 0.25f;
+      sdf->size[2] = 0.8f;
+      break;
+    default:
+      sdf->size[0] = 1.0f;
+      sdf->size[1] = 1.0f;
+      sdf->size[2] = 1.0f;
+      break;
+  }
+
+  rna_SDF_update(bmain, scene, ptr);
+}
+
+static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
+static SDFModifier *rna_SDF_modifier_new(SDF *sdf, int type)
+{
+  SDFModifier *mod = BKE_sdf_modifier_add(sdf, type);
+
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+
+  return mod;
+}
+
+static void rna_SDF_modifier_remove(SDF *sdf, ReportList *reports, PointerRNA *mod_ptr)
+{
+  SDFModifier *mod = (SDFModifier *)mod_ptr->data;
+
+  if (BLI_findindex(&sdf->modifiers, mod) == -1) {
+    BKE_reportf(reports, RPT_ERROR, "Modifier '%s' not in SDF", mod->name);
+    return;
+  }
+
+  BKE_sdf_modifier_remove(sdf, mod);
+  mod_ptr->data = nullptr;
+
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
+static void rna_SDF_modifier_move(SDF *sdf, ReportList *reports, int from, int to)
+{
+  SDFModifier *mod = (SDFModifier *)BLI_findlink(&sdf->modifiers, from);
+  if (!mod) {
+    BKE_reportf(reports, RPT_ERROR, "Invalid modifier index %d", from);
+    return;
+  }
+
+  int direction = (to > from) ? 1 : -1;
+  int steps = abs(to - from);
+  for (int i = 0; i < steps; i++) {
+    BKE_sdf_modifier_move(sdf, mod, direction);
+  }
+
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
 #else
 
 static const EnumPropertyItem rna_enum_sdf_blend_type_items[] = {
@@ -62,8 +142,145 @@ static const EnumPropertyItem rna_enum_sdf_csg_items[] = {
     {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
     {SDF_CSG_INTERSECT, "INTERSECT", ICON_SDF_CSG_INTERSECT, "Intersect", "Boolean intersection"},
     {SDF_CSG_SHELL, "SHELL", ICON_SDF_CSG_EXTRUDE, "Shell", "Shell/extrusion operation"},
+    {SDF_CSG_PUSH,
+     "PUSH",
+     ICON_SDF_CSG_PUSH,
+     "Push",
+     "Subtract from base but keep the pushing object visible"},
+    {SDF_CSG_AVOID,
+     "AVOID",
+     ICON_SDF_CSG_AVOID,
+     "Avoid",
+     "Object is carved by all other objects in the scene"},
     {0, nullptr, 0, nullptr, nullptr},
 };
+
+static const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
+    {SDF_MOD_MIRROR, "MIRROR", ICON_MOD_MIRROR, "Mirror", "Mirror across axes"},
+    {SDF_MOD_TWIST, "TWIST", ICON_MOD_SIMPLEDEFORM, "Twist", "Twist around Z axis"},
+    {SDF_MOD_BEND, "BEND", ICON_MOD_SIMPLEDEFORM, "Bend", "Bend around an axis"},
+    {SDF_MOD_ELONGATE, "ELONGATE", ICON_MOD_LENGTH, "Elongate", "Stretch along axes"},
+    {SDF_MOD_HOLLOW, "HOLLOW", ICON_MOD_SOLIDIFY, "Hollow", "Make hollow with wall thickness"},
+    {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Round", "Additional rounding"},
+    {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_sdf_modifier(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFModifier", nullptr);
+  RNA_def_struct_ui_text(srna, "SDF Modifier", "Modifier in the SDF modifier stack");
+  RNA_def_struct_sdna(srna, "SDFModifier");
+
+  /* Type */
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_modifier_type_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Type", "Modifier type");
+
+  /* Name */
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_ui_text(prop, "Name", "Modifier name");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+  RNA_def_struct_name_property(srna, prop);
+
+  /* Enabled */
+  prop = RNA_def_property(srna, "show_viewport", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_viewport", 1);
+  RNA_def_property_ui_text(prop, "Viewport", "Enable modifier in viewport");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Mirror axes (for Mirror type) */
+  prop = RNA_def_property(srna, "use_mirror_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_X);
+  RNA_def_property_ui_text(prop, "X", "Mirror across X axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  prop = RNA_def_property(srna, "use_mirror_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_Y);
+  RNA_def_property_ui_text(prop, "Y", "Mirror across Y axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  prop = RNA_def_property(srna, "use_mirror_z", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_Z);
+  RNA_def_property_ui_text(prop, "Z", "Mirror across Z axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Strength (Twist, Bend) */
+  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
+  RNA_def_property_range(prop, -100.0f, 100.0f);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Strength", "Deformation strength");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Thickness (Hollow, Onion) */
+  prop = RNA_def_property(srna, "thickness", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 2.0f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Thickness", "Wall thickness");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Radius (Round) */
+  prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 2.0f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Radius", "Round radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Elongation (Elongate) */
+  prop = RNA_def_property(srna, "elongation", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "params");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Elongation", "Stretch amount per axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+}
+
+static void rna_def_sdf_modifiers(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "SDFModifiers");
+  srna = RNA_def_struct(brna, "SDFModifiers", nullptr);
+  RNA_def_struct_sdna(srna, "SDF");
+  RNA_def_struct_ui_text(srna, "SDF Modifiers", "Collection of SDF modifiers");
+
+  /* Add */
+  func = RNA_def_function(srna, "new", "rna_SDF_modifier_new");
+  RNA_def_function_ui_description(func, "Add a new SDF modifier");
+  parm = RNA_def_enum(
+      func, "type", rna_enum_sdf_modifier_type_items, SDF_MOD_MIRROR, "Type", "Modifier type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "modifier", "SDFModifier", "", "New modifier");
+  RNA_def_function_return(func, parm);
+
+  /* Remove */
+  func = RNA_def_function(srna, "remove", "rna_SDF_modifier_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove an SDF modifier");
+  parm = RNA_def_pointer(func, "modifier", "SDFModifier", "", "Modifier to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  /* Move */
+  func = RNA_def_function(srna, "move", "rna_SDF_modifier_move");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Move a modifier in the stack");
+  parm = RNA_def_int(func, "from_index", -1, 0, INT_MAX, "From Index", "", 0, 10000);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "to_index", -1, 0, INT_MAX, "To Index", "", 0, 10000);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
 
 static void rna_def_sdf(BlenderRNA *brna)
 {
@@ -78,7 +295,7 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sdf_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_type_items);
   RNA_def_property_ui_text(prop, "Type", "SDF primitive type");
-  RNA_def_property_update(prop, 0, "rna_SDF_update");
+  RNA_def_property_update(prop, 0, "rna_SDF_type_update");
 
   /* Size */
   prop = RNA_def_property(srna, "size", PROP_FLOAT, PROP_XYZ);
@@ -150,12 +367,20 @@ static void rna_def_sdf(BlenderRNA *brna)
                                     nullptr,
                                     "rna_IDMaterials_assign_int");
 
+  /* Modifiers */
+  prop = RNA_def_property(srna, "modifiers", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "modifiers", nullptr);
+  RNA_def_property_struct_type(prop, "SDFModifier");
+  RNA_def_property_ui_text(prop, "Modifiers", "SDF modifier stack");
+  rna_def_sdf_modifiers(brna, prop);
+
   /* Animation data */
   rna_def_animdata_common(srna);
 }
 
 void RNA_def_sdf(BlenderRNA *brna)
 {
+  rna_def_sdf_modifier(brna);
   rna_def_sdf(brna);
 }
 

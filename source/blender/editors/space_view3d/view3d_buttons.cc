@@ -2102,7 +2102,8 @@ static void view3d_panel_transform(const bContext *C, Panel *panel)
     v3d_transform_butsR(col, &obptr);
 
     /* Dimensions and editmode are mostly the same check. */
-    if (OB_TYPE_SUPPORT_EDITMODE(ob->type) || ELEM(ob->type, OB_VOLUME, OB_CURVES, OB_POINTCLOUD))
+    if (OB_TYPE_SUPPORT_EDITMODE(ob->type) ||
+        ELEM(ob->type, OB_VOLUME, OB_CURVES, OB_POINTCLOUD, OB_SDF))
     {
       View3D *v3d = CTX_wm_view3d(C);
       v3d_object_dimension_buts(nullptr, col, v3d, ob);

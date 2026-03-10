@@ -44,7 +44,55 @@ typedef enum eSDFCSGOperation {
   SDF_CSG_SUBTRACT = 1,
   SDF_CSG_INTERSECT = 2,
   SDF_CSG_SHELL = 3,
+  SDF_CSG_PUSH = 4,
+  SDF_CSG_AVOID = 5,
 } eSDFCSGOperation;
+
+/** SDF modifier types. */
+typedef enum eSDFModifierType {
+  SDF_MOD_MIRROR = 0,
+  SDF_MOD_TWIST = 1,
+  SDF_MOD_BEND = 2,
+  SDF_MOD_ELONGATE = 3,
+  SDF_MOD_HOLLOW = 4,
+  SDF_MOD_ROUND = 5,
+  SDF_MOD_ONION = 6,
+} eSDFModifierType;
+
+/** Mirror axis flags. */
+enum {
+  SDF_MOD_MIRROR_X = (1 << 0),
+  SDF_MOD_MIRROR_Y = (1 << 1),
+  SDF_MOD_MIRROR_Z = (1 << 2),
+};
+
+/** Single SDF modifier in the stack. */
+typedef struct SDFModifier {
+  struct SDFModifier *next, *prev;
+
+  /** Modifier type (eSDFModifierType). */
+  int type;
+  /** Modifier-specific flags (e.g., mirror axes). */
+  int flag;
+
+  /** Generic parameters — meaning depends on type:
+   *  Mirror:   (unused, axes in .flag)
+   *  Twist:    params[0] = strength (radians/unit)
+   *  Bend:     params[0] = strength, params[1] = axis (0=X,1=Y,2=Z)
+   *  Elongate: params[0..2] = elongation per axis
+   *  Hollow:   params[0] = wall thickness
+   *  Round:    params[0] = radius
+   *  Onion:    params[0] = layer thickness
+   */
+  float params[4];
+
+  /** Display name. */
+  char name[64];
+
+  /** Whether this modifier is enabled. */
+  short show_viewport;
+  char _pad[6];
+} SDFModifier;
 
 typedef struct SDF {
 #ifdef __cplusplus
@@ -77,6 +125,12 @@ typedef struct SDF {
   int csg_operation;
   /** Shell/extrusion offset distance (used when csg_operation == SDF_CSG_SHELL). */
   float shell_distance;
+
+  /** Ordered modifier stack. */
+  ListBase modifiers; /* SDFModifier */
+  /** Number of modifiers. */
+  int totmodifier;
+  char _pad3[4];
 
   /** Material slots. */
   struct Material **mat;

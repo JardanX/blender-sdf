@@ -2519,6 +2519,9 @@ class VIEW3D_MT_sdf_add(Menu):
         layout = self.layout
         layout.operator_context = 'EXEC_REGION_WIN'
         layout.operator("object.sdf_add", text="SDF Cube", icon='SDF_PRIMITIVE').type = 'BOX'
+        layout.operator("object.sdf_add", text="SDF Sphere", icon='SDF_SPHERE').type = 'SPHERE'
+        layout.operator("object.sdf_add", text="SDF Capsule", icon='SDF_CAPSULE').type = 'CAPSULE'
+        layout.operator("object.sdf_add", text="SDF Torus", icon='SDF_TORUS').type = 'TORUS'
         layout.separator()
         layout.operator("object.mesh_to_sdf_grid", text="Mesh to SDF Grid", icon='MESH_GRID')
 
