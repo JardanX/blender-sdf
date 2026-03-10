@@ -2524,6 +2524,7 @@ class VIEW3D_MT_sdf_add(Menu):
         layout.operator("object.sdf_add", text="SDF Cone", icon='SDF_CONE').type = 'CONE'
         layout.operator("object.sdf_add", text="SDF Capsule", icon='SDF_CAPSULE').type = 'CAPSULE'
         layout.operator("object.sdf_add", text="SDF Torus", icon='SDF_TORUS').type = 'TORUS'
+        layout.operator("object.sdf_add", text="SDF N-Gon", icon='SDF_NGON').type = 'NGON'
         layout.separator()
         layout.operator("object.mesh_to_sdf_grid", text="Mesh to SDF Grid", icon='MESH_GRID')
 

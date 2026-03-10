@@ -211,6 +211,106 @@ float sdAdvancedBox(float3 p,
   }
 }
 
+/**
+ * 2D regular polygon SDF (centered at origin).
+ * \param p: 2D sample point.
+ * \param R: circumradius.
+ * \param n: number of sides (3+).
+ */
+float sdRegularPolygon2D(float2 p, float R, int n)
+{
+  float an = SDF_PI / float(n);
+  float r = R * cos(an);
+  float he = R * sin(an);
+  p = float2(-p.y, p.x);
+  float bn = an * floor((atan(p.y, p.x) + an) / an / 2.0f) * 2.0f;
+  float2 cs = float2(cos(bn), sin(bn));
+  p = float2(cs.x * p.x + cs.y * p.y, -cs.y * p.x + cs.x * p.y);
+  return length(p - float2(r, clamp(p.y, -he, he))) * sign(p.x - r);
+}
+
+/**
+ * Advanced N-Gon prism SDF with corner bevel, edge chamfer, and taper.
+ * \param p: 3D sample point in local space.
+ * \param R: circumradius of the polygon.
+ * \param halfH: half-height along Z.
+ * \param sides: number of polygon sides.
+ * \param corner: corner bevel amount (0–1, fraction of apothem).
+ * \param edgeTop: top face edge chamfer (0–1).
+ * \param edgeBot: bottom face edge chamfer (0–1).
+ * \param tapTop: top taper amount.
+ * \param tapBot: bottom taper amount.
+ * \param edgeMode: 0=smooth, 1=chamfer.
+ * \param taperH: Z half-size for taper normalization.
+ */
+float sdAdvancedNgon(float3 p,
+                     float R,
+                     float halfH,
+                     int sides,
+                     float corner,
+                     float edgeTop,
+                     float edgeBot,
+                     float tapTop,
+                     float tapBot,
+                     int edgeMode,
+                     float taperH)
+{
+  float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
+  float t = (zn + 1.0f) * 0.5f;
+  float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
+  float scaledR = R * tapFactor;
+
+  float an = SDF_PI / float(sides);
+  float apothem = scaledR * cos(an);
+  float bevelR = corner * apothem;
+  float innerR = scaledR - bevelR / max(cos(an), 0.001f);
+  float d2d = sdRegularPolygon2D(p.xy, innerR, sides) - bevelR;
+
+  float tc = clamp(t, 0.0f, 1.0f);
+  float tapFace = max(1.0f - tapTop * tc - tapBot * (1.0f - tc), 0.001f);
+  float apothem_face = R * tapFace * cos(an);
+
+  float dz = abs(p.z) - halfH;
+  float edgeR = (p.z > 0.0f) ? edgeTop * min(apothem_face, halfH)
+                              : edgeBot * min(apothem_face, halfH);
+
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d2d + edgeR, dz + edgeR);
+      return min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR;
+    }
+    else {
+      float base = max(d2d, dz);
+      float cham = (d2d + dz + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) {
+        return dd;
+      }
+      if (d2d <= 0.0f && dz <= 0.0f) {
+        return cham;
+      }
+      if (dz <= -edgeR) {
+        return d2d;
+      }
+      if (d2d <= -edgeR) {
+        return dz;
+      }
+      float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) {
+        return length(float2(d2d, dz + edgeR));
+      }
+      if (tc2 >= 1.0f) {
+        return length(float2(d2d + edgeR, dz));
+      }
+      return cham;
+    }
+  }
+  else {
+    float2 dd = float2(d2d, dz);
+    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+  }
+}
+
 /* ---- Smooth blend operations ---- */
 
 float opSmoothUnion(float d1, float d2, float k)

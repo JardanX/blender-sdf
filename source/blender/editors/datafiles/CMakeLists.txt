@@ -958,6 +958,7 @@ if(WITH_BLENDER)
       sdf_cone
       sdf_capsule
       sdf_torus
+      sdf_ngon
       volume_data
       vpaint_hlt
       warning_large

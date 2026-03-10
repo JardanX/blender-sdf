@@ -79,7 +79,8 @@ using namespace draw;
  */
 static uint64_t sdf_shape_fingerprint(int sdf_type,
                                        const float3 &effective_size,
-                                       float effective_bevel)
+                                       float effective_bevel,
+                                       int ngon_sides = 0)
 {
   /* Normalize by max component to make scale-independent. */
   float max_dim = math::reduce_max(math::abs(effective_size));
@@ -103,6 +104,9 @@ static uint64_t sdf_shape_fingerprint(int sdf_type,
   mix(uint64_t(sy));
   mix(uint64_t(sz));
   mix(uint64_t(sb));
+  if (sdf_type == SDF_TYPE_NGON) {
+    mix(uint64_t(ngon_sides));
+  }
   return h;
 }
 
@@ -247,6 +251,7 @@ class Instance : public DrawEngine {
   struct ShapeInfo {
     uint64_t fingerprint;
     int sdf_type;
+    int ngon_sides = 6;     /* Number of polygon sides (for SDF_TYPE_NGON). */
     float3 size_normalized; /* Aspect ratio (max = 1.0). */
     float bevel_normalized; /* bevel / max_size. */
     float world_scale;      /* Max effective size for first instance (representative). */
@@ -503,17 +508,28 @@ class Instance : public DrawEngine {
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
 
-    /* Box-specific shape data. */
-    gpu_obj.box_corners = float4(sdf_data->box_corners[0],
-                                 sdf_data->box_corners[1],
-                                 sdf_data->box_corners[2],
-                                 sdf_data->box_corners[3]);
-    float taper = sdf_data->box_taper;
-    gpu_obj.box_edges = float4(sdf_data->box_edge_top,
-                               sdf_data->box_edge_bottom,
-                               math::max(taper, 0.0f),
-                               math::max(-taper, 0.0f));
-    gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
+    /* Shape-specific data (box and ngon share GPU struct fields). */
+    if (sdf_data->sdf_type == SDF_TYPE_NGON) {
+      float ngon_taper = sdf_data->ngon_taper;
+      gpu_obj.box_corners = float4(sdf_data->ngon_corner, 0.0f, 0.0f, 0.0f);
+      gpu_obj.box_edges = float4(sdf_data->ngon_edge_top,
+                                 sdf_data->ngon_edge_bottom,
+                                 math::max(ngon_taper, 0.0f),
+                                 math::max(-ngon_taper, 0.0f));
+      gpu_obj.box_modes = int4(0, sdf_data->ngon_edge_mode, sdf_data->ngon_sides, 0);
+    }
+    else {
+      gpu_obj.box_corners = float4(sdf_data->box_corners[0],
+                                   sdf_data->box_corners[1],
+                                   sdf_data->box_corners[2],
+                                   sdf_data->box_corners[3]);
+      float taper = sdf_data->box_taper;
+      gpu_obj.box_edges = float4(sdf_data->box_edge_top,
+                                 sdf_data->box_edge_bottom,
+                                 math::max(taper, 0.0f),
+                                 math::max(-taper, 0.0f));
+      gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
+    }
 
     /* Pack modifiers for this object. */
     gpu_obj.modifier_start = int(modifiers_.size());
@@ -561,6 +577,12 @@ class Instance : public DrawEngine {
         /* Torus: major radius sz.x in XY, minor sz.y is tube radius along Z. */
         float outer = sz.x + sz.y;
         local_extent = float3(outer + pad, outer + pad, sz.y + pad);
+        break;
+      }
+      case SDF_TYPE_NGON: {
+        /* N-Gon: circumradius sz.x in XY, half-height sz.z along Z. */
+        float r = sz.x;
+        local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
         break;
       }
       default:
@@ -634,7 +656,9 @@ class Instance : public DrawEngine {
     /* Build shape fingerprint and instance entry. */
     float3 effective_size = float3(gpu_obj.sdf_size);
     float effective_bevel = gpu_obj.bevel;
-    uint64_t fp = sdf_shape_fingerprint(sdf_data->sdf_type, effective_size, effective_bevel);
+    int ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 0;
+    uint64_t fp = sdf_shape_fingerprint(
+        sdf_data->sdf_type, effective_size, effective_bevel, ngon_sides);
 
     int shape_id;
     const int *existing = shape_fingerprint_map_.lookup_ptr(fp);
@@ -651,6 +675,7 @@ class Instance : public DrawEngine {
       ShapeInfo shape;
       shape.fingerprint = fp;
       shape.sdf_type = sdf_data->sdf_type;
+      shape.ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 6;
       shape.size_normalized = effective_size / max_dim;
       shape.bevel_normalized = effective_bevel / max_dim;
       shape.world_scale = max_dim;
@@ -844,6 +869,7 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.w);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.x);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.y);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.z);
       hash = hash * 6364136223846793005ULL +
              float_as_uint(obj.inverse_matrix[0][0]);
       hash = hash * 6364136223846793005ULL +
@@ -1928,6 +1954,28 @@ class Instance : public DrawEngine {
                 dist = math::length(qt) - minor;
                 break;
               }
+              case SDF_TYPE_NGON: {
+                /* Simple regular polygon prism (no corner/edge/taper in instanced path). */
+                float R = math::max(sz.x - bev, 0.001f);
+                int sides = 6; /* Default; instanced path doesn't carry sides info. */
+                float an = M_PI / float(sides);
+                float r_apothem = R * std::cos(an);
+                float he = R * std::sin(an);
+                /* Rotate 90 degrees: swap x,y. */
+                float2 pp = float2(-p.y, p.x);
+                float bn = an * std::floor((std::atan2(pp.y, pp.x) + an) / an / 2.0f) * 2.0f;
+                float cs_x = std::cos(bn), cs_y = std::sin(bn);
+                float2 pp2 = float2(cs_x * pp.x + cs_y * pp.y,
+                                    -cs_y * pp.x + cs_x * pp.y);
+                float d2d = math::length(
+                                float2(pp2.x - r_apothem,
+                                       pp2.y - math::clamp(pp2.y, -he, he))) *
+                            ((pp2.x > r_apothem) ? 1.0f : -1.0f);
+                float dz = math::abs(p.z) - math::max(sz.z - bev, 0.001f);
+                dist = math::length(math::max(float2(d2d, dz), float2(0.0f))) +
+                       math::min(math::max(d2d, dz), 0.0f);
+                break;
+              }
               default: {
                 /* sdBox */
                 float3 q = math::abs(p) - sz;
@@ -2031,6 +2079,7 @@ class Instance : public DrawEngine {
         GPU_shader_uniform_3fv(shape_bake_sh_, "shape_size", shape.size_normalized);
         GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
         GPU_shader_uniform_1i(shape_bake_sh_, "shape_type", shape.sdf_type);
+        GPU_shader_uniform_1i(shape_bake_sh_, "shape_sides", shape.ngon_sides);
         GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
         GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
         GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);

@@ -174,12 +174,19 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         sdf = context.sdf
-        return sdf and sdf.sdf_type == 'BOX'
+        return sdf and sdf.sdf_type in ('BOX', 'NGON')
 
     def draw(self, context):
         layout = self.layout
         sdf = context.sdf
 
+        if sdf.sdf_type == 'NGON':
+            self.draw_ngon(layout, sdf)
+        else:
+            self.draw_box(layout, sdf)
+
+    @staticmethod
+    def draw_box(layout, sdf):
         # Corner Bevels
         layout.label(text="Corner Bevels")
         col = layout.column(align=True)
@@ -214,6 +221,37 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             row = layout.row(align=True)
             row.prop(sdf, "box_corner_mode", text="Corners")
             row.prop(sdf, "box_edge_mode", text="Edges")
+
+    @staticmethod
+    def draw_ngon(layout, sdf):
+        # Sides
+        layout.prop(sdf, "ngon_sides")
+
+        layout.separator()
+
+        # Corner Bevel
+        layout.prop(sdf, "ngon_corner")
+
+        layout.separator()
+
+        # Edge Chamfer
+        layout.label(text="Edge Chamfer")
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(sdf, "ngon_edge_top", text="Top")
+        row.prop(sdf, "ngon_edge_bottom", text="Bottom")
+
+        layout.separator()
+
+        # Taper
+        layout.prop(sdf, "ngon_taper")
+
+        # Edge mode — only show when any shape property is active
+        has_shape = (sdf.ngon_corner + sdf.ngon_edge_top
+                     + sdf.ngon_edge_bottom + abs(sdf.ngon_taper)) > 0.001
+        if has_shape:
+            layout.separator()
+            layout.prop(sdf, "ngon_edge_mode", text="Edges")
 
 
 # -- Modifier Operators -------------------------------------------------------

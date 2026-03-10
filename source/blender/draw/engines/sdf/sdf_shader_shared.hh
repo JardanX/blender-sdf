@@ -24,7 +24,7 @@ struct SDFObjectGPU {
   float bevel;
   /** Smooth blend radius. */
   float blend;
-  /** SDF primitive type (eSDFType: 0=box, 1=sphere, 2=cylinder, 3=cone, 4=capsule, 5=torus). */
+  /** SDF primitive type (eSDFType: 0=box, 1=sphere, 2=cyl, 3=cone, 4=capsule, 5=torus, 6=ngon). */
   int sdf_type;
   /** Blend function type (eSDFBlendType: 0=linear, 1=smooth, 2=chamfer, 3=round). */
   int blend_type;
@@ -42,7 +42,7 @@ struct SDFObjectGPU {
   float4 box_corners;
   /** Box edge chamfer: x=top, y=bottom, z=tapTop, w=tapBot. */
   float4 box_edges;
-  /** Box modes: x=corner_mode (0=smooth,1=chamfer), y=edge_mode, z=0, w=0. */
+  /** Box/Ngon modes: x=corner_mode, y=edge_mode, z=ngon_sides (0 if box), w=0. */
   int4 box_modes;
 };
 /* Total: 64 + 16*5 + 16 + 16*3 = 64+80+16+48 = 208 bytes -> needs recount */
