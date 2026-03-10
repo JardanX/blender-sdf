@@ -181,7 +181,7 @@ class Instance : public DrawEngine {
   float surface_margin_ = 1.0f;
   /** Max blend radius across all objects (computed in classify, used in bake). */
   float max_blend_ = 0.0f;
-  /** Max shell distance across all shell objects (for brick expansion). */
+  /** Max shell distance across all shell objects (for candidate AABB expansion). */
   float max_shell_distance_ = 0.0f;
 
   /** Dirty tracking: hash of object data for the current frame. */
@@ -612,6 +612,7 @@ class Instance : public DrawEngine {
       needs_bake_ = false;
       return;
     }
+
 
     /* Compute a lightweight hash from pending grid objects BEFORE doing the
      * expensive dense-float extraction. This lets us skip grid processing
@@ -1916,10 +1917,9 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", grid_res_);
 
     /* Brick half-diagonal: conservative surface test distance.
-     * The classify shader evaluates the blended smooth-union SDF, so the
-     * result already accounts for smooth-union surface push — no need to
-     * add max_blend here.  surface_margin_ (UI "Surface Margin" %) lets
-     * the user widen the active-brick shell if needed. */
+     * The shell operation in combineCSG produces correct thin-wall distances
+     * via two-stage blend, so no extra global expansion is needed.
+     * surface_margin_ (UI "Surface Margin" %) further widens the shell. */
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
     GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);

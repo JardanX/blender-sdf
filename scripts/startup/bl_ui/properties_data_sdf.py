@@ -137,18 +137,18 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
 
         layout.separator()
 
+        # Shell distance — only visible when CSG is Shell
+        if sdf.csg_operation == 'SHELL':
+            col = layout.column(align=True)
+            col.label(text="Shell Thickness")
+            col.prop(sdf, "shell_distance", text="")
+
         # Blend amount — disabled for Linear (no blending needed)
         col = layout.column(align=True)
         col.label(text="Blend")
         sub = col.row()
         sub.enabled = (sdf.blend_type != 'LINEAR')
         sub.prop(sdf, "blend", text="")
-
-        # Shell distance — only visible when CSG is Shell
-        if sdf.csg_operation == 'SHELL':
-            col = layout.column(align=True)
-            col.label(text="Shell Thickness")
-            col.prop(sdf, "shell_distance", text="")
 
 
 # -- Registration -------------------------------------------------------------

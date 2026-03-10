@@ -34,6 +34,15 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
 
 static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
+  SDF *sdf = (SDF *)ptr->owner_id;
+
+  /* Clamp blend to shell_distance when in shell mode to prevent artifacts. */
+  if (sdf->csg_operation == SDF_CSG_SHELL && sdf->shell_distance > 0.0f) {
+    if (sdf->blend > sdf->shell_distance) {
+      sdf->blend = sdf->shell_distance;
+    }
+  }
+
   DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
@@ -119,8 +128,8 @@ static void rna_def_sdf(BlenderRNA *brna)
   /* Shell Distance */
   prop = RNA_def_property(srna, "shell_distance", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "shell_distance");
-  RNA_def_property_range(prop, -5.0f, 5.0f);
-  RNA_def_property_ui_range(prop, -5.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
   RNA_def_property_ui_text(
       prop, "Shell Distance", "Offset distance for shell/extrusion operation");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
