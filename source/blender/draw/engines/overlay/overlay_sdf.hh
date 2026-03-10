@@ -30,8 +30,8 @@ namespace blender::draw::overlay {
 
 /**
  * SDF overlay for GPU picking.
- * Draws a fullscreen march through the SDF engine's baked atlas and object ID atlas.
- * On hit, reads the object ID and outputs the corresponding select::ID.
+ * Draws a fullscreen analytical sphere-march against each SDF object.
+ * On hit, outputs the corresponding select::ID to the selection buffer.
  * Only active during selection draws.
  */
 class Sdfs : Overlay {
@@ -53,16 +53,10 @@ class Sdfs : Overlay {
   int map_ssbo_count_ = 0;
 
   /** Cached shader binding slots (resolved once after shader creation). */
-  int atlas_slot_ = -1;
-  int indir_slot_ = -1;
-  int objid_slot_ = -1;
   int map_slot_ = -1;
   int obj_slot_ = -1;
+  int mod_slot_ = -1;
   int voxel_size_loc_ = -1;
-  int atlas_origin_loc_ = -1;
-  int atlas_extent_loc_ = -1;
-  int grid_resolution_loc_ = -1;
-  int bricks_per_axis_loc_ = -1;
   int object_count_loc_ = -1;
 
  public:
@@ -114,8 +108,8 @@ class Sdfs : Overlay {
       return;
     }
 
-    /* Check if SDF atlas is available. */
-    if (sdf::sdf_atlas_get() == nullptr) {
+    /* Verify we have SDF objects available from the engine. */
+    if (sdf::sdf_objects_ssbo_get() == nullptr) {
       return;
     }
 
@@ -126,16 +120,10 @@ class Sdfs : Overlay {
       select_march_sh_ = GPU_shader_create_from_info_name("sdf_select_march");
       if (select_march_sh_) {
         /* Cache binding slots once (they never change for a given shader). */
-        atlas_slot_ = GPU_shader_get_sampler_binding(select_march_sh_, "compact_atlas");
-        indir_slot_ = GPU_shader_get_sampler_binding(select_march_sh_, "indirection_tx");
-        objid_slot_ = GPU_shader_get_sampler_binding(select_march_sh_, "object_id_tx");
         map_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "select_id_map_buf");
         obj_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "sdf_objects");
+        mod_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "sdf_modifiers");
         voxel_size_loc_ = GPU_shader_get_uniform(select_march_sh_, "voxel_size");
-        atlas_origin_loc_ = GPU_shader_get_uniform(select_march_sh_, "atlas_origin");
-        atlas_extent_loc_ = GPU_shader_get_uniform(select_march_sh_, "atlas_extent");
-        grid_resolution_loc_ = GPU_shader_get_uniform(select_march_sh_, "grid_resolution");
-        bricks_per_axis_loc_ = GPU_shader_get_uniform(select_march_sh_, "bricks_per_axis");
         object_count_loc_ = GPU_shader_get_uniform(select_march_sh_, "object_count");
       }
     }
@@ -171,7 +159,8 @@ class Sdfs : Overlay {
     if (!enabled_ || select_id_map_.is_empty() || !select_march_sh_) {
       return;
     }
-    if (sdf::sdf_atlas_get() == nullptr || !map_ssbo_) {
+    gpu::StorageBuf *obj_ssbo = sdf::sdf_objects_ssbo_get();
+    if (obj_ssbo == nullptr || !map_ssbo_) {
       return;
     }
 
@@ -183,21 +172,13 @@ class Sdfs : Overlay {
 
     GPU_shader_bind(select_march_sh_);
 
-    /* Bind SDF atlas textures (cache pointers to avoid double fetch for unbind). */
-    gpu::Texture *atlas_tx = sdf::sdf_atlas_get();
-    gpu::Texture *indir_tx = sdf::sdf_indirection_get();
-    gpu::Texture *objid_tx = sdf::sdf_object_id_atlas_get();
-    GPU_texture_bind(atlas_tx, atlas_slot_);
-    GPU_texture_bind(indir_tx, indir_slot_);
-    GPU_texture_bind(objid_tx, objid_slot_);
-
-    /* Bind select ID map SSBO. */
+    /* Bind SSBOs: select ID map, SDF objects, and modifiers. */
     GPU_storagebuf_bind(map_ssbo_, map_slot_);
+    GPU_storagebuf_bind(obj_ssbo, obj_slot_);
 
-    /* Bind SDF objects SSBO (for ray-AABB cycling). */
-    gpu::StorageBuf *obj_ssbo = sdf::sdf_objects_ssbo_get();
-    if (obj_ssbo) {
-      GPU_storagebuf_bind(obj_ssbo, obj_slot_);
+    gpu::StorageBuf *mod_ssbo = sdf::sdf_modifiers_ssbo_get();
+    if (mod_ssbo) {
+      GPU_storagebuf_bind(mod_ssbo, mod_slot_);
     }
 
     /* Bind selection system UBO and output SSBO. */
@@ -208,17 +189,18 @@ class Sdfs : Overlay {
       GPU_storagebuf_bind(select_output_buf_, SELECT_ID_OUT);
     }
 
-    /* Push atlas params using cached uniform locations. */
+    /* Push uniforms. */
     float voxel_size;
     float3 origin, extent;
     int3 grid_res;
     int bpa;
     sdf::sdf_atlas_params_get(&voxel_size, &origin, &extent, &grid_res, &bpa);
+    /* Fallback: if atlas hasn't been baked yet, use a reasonable default.
+     * voxel_size is only used for threshold clamping in the analytical shader. */
+    if (voxel_size <= 0.0f) {
+      voxel_size = 0.01f;
+    }
     GPU_shader_uniform_float_ex(select_march_sh_, voxel_size_loc_, 1, 1, &voxel_size);
-    GPU_shader_uniform_float_ex(select_march_sh_, atlas_origin_loc_, 3, 1, origin);
-    GPU_shader_uniform_float_ex(select_march_sh_, atlas_extent_loc_, 3, 1, extent);
-    GPU_shader_uniform_int_ex(select_march_sh_, grid_resolution_loc_, 3, 1, grid_res);
-    GPU_shader_uniform_int_ex(select_march_sh_, bricks_per_axis_loc_, 1, 1, &bpa);
     int obj_count = sdf::sdf_object_count_get();
     GPU_shader_uniform_int_ex(select_march_sh_, object_count_loc_, 1, 1, &obj_count);
 
@@ -234,9 +216,6 @@ class Sdfs : Overlay {
     GPU_batch_draw(fullscreen_batch_);
 
     /* Cleanup. */
-    GPU_texture_unbind(atlas_tx);
-    GPU_texture_unbind(indir_tx);
-    GPU_texture_unbind(objid_tx);
     GPU_shader_unbind();
   }
 };

@@ -28,7 +28,10 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
 
 #ifdef RNA_RUNTIME
 
+#  include "MEM_guardedalloc.h"
+
 #  include "BLI_listbase.h"
+#  include "BLI_string.h"
 
 #  include "BKE_main.hh"
 #  include "BKE_report.hh"

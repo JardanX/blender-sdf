@@ -338,10 +338,11 @@ void main()
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
 
-    /* World-space position: brick_coord * 8 + (local - 2) + 0.5, times voxel_size.
-     * The -2 accounts for the 2-voxel overlap border. */
+    /* World-space position: brick_coord * 8 + (local - 2), times voxel_size.
+     * The -2 accounts for the 2-voxel overlap border.
+     * Values are stored at voxel CORNERS to match the DDA trilinear interpolation. */
     float3 world_pos = atlas_origin +
-                       (float3(brick * BRICK_SIZE + local_voxel - int3(2)) + 0.5f) * voxel_size;
+                       float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
@@ -359,7 +360,6 @@ void main()
       if (sobj.csg_operation != SDF_CSG_OP_UNION && sobj.csg_operation != SDF_CSG_OP_SHELL) {
         continue;
       }
-
       float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
       float dist = evalSDFPrimitiveSh(local_pos, sobj);
 

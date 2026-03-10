@@ -16,6 +16,7 @@
 #include "BKE_geometry_set.hh"
 #include "BKE_idprop.hh"
 #include "BKE_object.hh"
+#include "BKE_sdf.hh"
 #include "BKE_object_types.hh"
 #include "BKE_studiolight.h"
 #include "BKE_volume.hh"
@@ -144,6 +145,7 @@ static int3 s_grid_resolution = int3(0);
 static int s_bricks_per_axis = 0;
 static int s_object_count = 0;
 static gpu::StorageBuf *s_object_ssbo = nullptr;
+static gpu::StorageBuf *s_modifier_ssbo = nullptr;
 
 class Instance : public DrawEngine {
  private:
@@ -860,7 +862,7 @@ class Instance : public DrawEngine {
       prev_active_brick_count_ = 0;
     }
 
-    /* Compute scene hash for dirty tracking (analytic + grid combined). */
+    /* Compute scene hash for dirty tracking (analytic + grid + text combined). */
     uint64_t hash = uint64_t(objects_.size()) + grid_hash;
     for (const SDFObjectGPU &obj : objects_) {
       hash = hash * 6364136223846793005ULL + float_as_uint(obj.position.x);
@@ -1002,7 +1004,6 @@ class Instance : public DrawEngine {
     if (!grid_objects_.is_empty() && grid_blend_sh_ == nullptr) {
       return;
     }
-
     DRW_submission_start();
 
     if (!objects_.is_empty() && needs_upload_) {
@@ -1118,7 +1119,6 @@ class Instance : public DrawEngine {
         if (!grid_objects_.is_empty()) {
           augment_indirection_for_grids();
         }
-
         /* Pre-size atlas using previous frame's count with headroom.
          * The bake shader reads the actual count from brick_counter SSBO,
          * so the atlas just needs to be large enough. Grow-only policy:
@@ -1140,6 +1140,9 @@ class Instance : public DrawEngine {
 
         ensure_compact_atlas();
 
+        /* Always clear atlas to 1e10 (background) before bake. */
+        clear_compact_atlas();
+
         /* Phase 2: Bake SDFs into atlas. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
@@ -1157,12 +1160,10 @@ class Instance : public DrawEngine {
             }
             bricks_per_axis_ = new_bpa;
             ensure_compact_atlas();
+            clear_compact_atlas();
             dispatch_bake();
           }
           prev_active_brick_count_ = active_brick_count_;
-        }
-        else {
-          clear_compact_atlas();
         }
         if (perf_enabled_) {
           perf_end_pass(PERF_PASS_BAKE);
@@ -1220,6 +1221,7 @@ class Instance : public DrawEngine {
     s_bricks_per_axis = bricks_per_axis_;
     s_object_count = int(objects_.size());
     s_object_ssbo = object_ssbo_;
+    s_modifier_ssbo = modifier_ssbo_;
 
     if (perf_enabled_) {
       perf_end_frame(needs_bake_);
@@ -2236,9 +2238,9 @@ class Instance : public DrawEngine {
      * SSBO directly, avoiding the GPU→CPU pipeline stall in the common case.
      * active_brick_count_ is updated after bake in dispatch_bake().
      *
-     * Exception: when grid objects need augmenting, we must know the count now
-     * because augment_indirection_for_grids() assigns sequential slots starting
-     * from active_brick_count_. In that case, do the synchronous readback. */
+     * Exception: when grid objects need augmenting, we must know the count
+     * now because augment functions assign sequential slots starting from
+     * active_brick_count_. In that case, do the synchronous readback. */
     if (!grid_objects_.is_empty()) {
       BrickCounter readback = {};
       GPU_storagebuf_read(brick_counter_, &readback);
@@ -3447,6 +3449,7 @@ class Instance : public DrawEngine {
     s_indirection = nullptr;
     s_object_id_atlas = nullptr;
     s_object_ssbo = nullptr;
+    s_modifier_ssbo = nullptr;
     s_perf_active = false;
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);
@@ -3549,6 +3552,11 @@ int sdf_object_count_get()
 gpu::StorageBuf *sdf_objects_ssbo_get()
 {
   return s_object_ssbo;
+}
+
+gpu::StorageBuf *sdf_modifiers_ssbo_get()
+{
+  return s_modifier_ssbo;
 }
 
 DrawEngine *Engine::create_instance()

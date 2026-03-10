@@ -275,7 +275,6 @@ void main()
     if (obj.csg_operation != SDF_CSG_OP_UNION && obj.csg_operation != SDF_CSG_OP_SHELL) {
       continue;
     }
-
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
     float dist = evalSDFPrimitive(local_pos, obj);
 
