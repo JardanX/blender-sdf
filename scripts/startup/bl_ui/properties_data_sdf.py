@@ -174,7 +174,7 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         sdf = context.sdf
-        return sdf and sdf.sdf_type in ('BOX', 'NGON')
+        return sdf and sdf.sdf_type in ('BOX', 'NGON', 'TORUS')
 
     def draw(self, context):
         layout = self.layout
@@ -182,6 +182,8 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
 
         if sdf.sdf_type == 'NGON':
             self.draw_ngon(layout, sdf)
+        elif sdf.sdf_type == 'TORUS':
+            self.draw_torus(layout, sdf)
         else:
             self.draw_box(layout, sdf)
 
@@ -223,9 +225,18 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             row.prop(sdf, "box_edge_mode", text="Edges")
 
     @staticmethod
+    def draw_torus(layout, sdf):
+        layout.prop(sdf, "torus_angle")
+
+    @staticmethod
     def draw_ngon(layout, sdf):
         # Sides
         layout.prop(sdf, "ngon_sides")
+
+        layout.separator()
+
+        # Star
+        layout.prop(sdf, "ngon_star")
 
         layout.separator()
 
@@ -248,7 +259,8 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
 
         # Edge mode — only show when any shape property is active
         has_shape = (sdf.ngon_corner + sdf.ngon_edge_top
-                     + sdf.ngon_edge_bottom + abs(sdf.ngon_taper)) > 0.001
+                     + sdf.ngon_edge_bottom + abs(sdf.ngon_taper)
+                     + sdf.ngon_star) > 0.001
         if has_shape:
             layout.separator()
             layout.prop(sdf, "ngon_edge_mode", text="Edges")

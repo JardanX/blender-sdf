@@ -80,7 +80,9 @@ using namespace draw;
 static uint64_t sdf_shape_fingerprint(int sdf_type,
                                        const float3 &effective_size,
                                        float effective_bevel,
-                                       int ngon_sides = 0)
+                                       int ngon_sides = 0,
+                                       float torus_angle = 360.0f,
+                                       float ngon_star = 0.0f)
 {
   /* Normalize by max component to make scale-independent. */
   float max_dim = math::reduce_max(math::abs(effective_size));
@@ -106,6 +108,10 @@ static uint64_t sdf_shape_fingerprint(int sdf_type,
   mix(uint64_t(sb));
   if (sdf_type == SDF_TYPE_NGON) {
     mix(uint64_t(ngon_sides));
+    mix(uint64_t(int(roundf(ngon_star * Q))));
+  }
+  if (sdf_type == SDF_TYPE_TORUS) {
+    mix(uint64_t(int(roundf(torus_angle * Q))));
   }
   return h;
 }
@@ -252,6 +258,8 @@ class Instance : public DrawEngine {
     uint64_t fingerprint;
     int sdf_type;
     int ngon_sides = 6;     /* Number of polygon sides (for SDF_TYPE_NGON). */
+    float ngon_star = 0.0f;  /* Star factor (for SDF_TYPE_NGON). */
+    float torus_angle = 360.0f; /* Angle aperture in degrees (for SDF_TYPE_TORUS). */
     float3 size_normalized; /* Aspect ratio (max = 1.0). */
     float bevel_normalized; /* bevel / max_size. */
     float world_scale;      /* Max effective size for first instance (representative). */
@@ -508,15 +516,23 @@ class Instance : public DrawEngine {
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
 
-    /* Shape-specific data (box and ngon share GPU struct fields). */
+    /* Shape-specific data (box, ngon, torus share GPU struct fields). */
     if (sdf_data->sdf_type == SDF_TYPE_NGON) {
       float ngon_taper = sdf_data->ngon_taper;
-      gpu_obj.box_corners = float4(sdf_data->ngon_corner, 0.0f, 0.0f, 0.0f);
+      gpu_obj.box_corners = float4(sdf_data->ngon_corner, sdf_data->ngon_star, 0.0f, 0.0f);
       gpu_obj.box_edges = float4(sdf_data->ngon_edge_top,
                                  sdf_data->ngon_edge_bottom,
                                  math::max(ngon_taper, 0.0f),
                                  math::max(-ngon_taper, 0.0f));
       gpu_obj.box_modes = int4(0, sdf_data->ngon_edge_mode, sdf_data->ngon_sides, 0);
+    }
+    else if (sdf_data->sdf_type == SDF_TYPE_TORUS) {
+      /* Precompute sin/cos of half-angle for capped torus. */
+      float angle_deg = sdf_data->torus_angle;
+      float half_rad = angle_deg * 0.5f * float(M_PI) / 180.0f;
+      gpu_obj.box_corners = float4(sinf(half_rad), cosf(half_rad), 0.0f, 0.0f);
+      gpu_obj.box_edges = float4(0.0f);
+      gpu_obj.box_modes = int4(0, 0, 0, (angle_deg < 359.9f) ? 1 : 0);
     }
     else {
       gpu_obj.box_corners = float4(sdf_data->box_corners[0],
@@ -657,8 +673,10 @@ class Instance : public DrawEngine {
     float3 effective_size = float3(gpu_obj.sdf_size);
     float effective_bevel = gpu_obj.bevel;
     int ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 0;
+    float ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
+    float torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : 360.0f;
     uint64_t fp = sdf_shape_fingerprint(
-        sdf_data->sdf_type, effective_size, effective_bevel, ngon_sides);
+        sdf_data->sdf_type, effective_size, effective_bevel, ngon_sides, torus_angle, ngon_star);
 
     int shape_id;
     const int *existing = shape_fingerprint_map_.lookup_ptr(fp);
@@ -676,6 +694,8 @@ class Instance : public DrawEngine {
       shape.fingerprint = fp;
       shape.sdf_type = sdf_data->sdf_type;
       shape.ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 6;
+      shape.ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
+      shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : 360.0f;
       shape.size_normalized = effective_size / max_dim;
       shape.bevel_normalized = effective_bevel / max_dim;
       shape.world_scale = max_dim;
@@ -1950,14 +1970,29 @@ class Instance : public DrawEngine {
               case SDF_TYPE_TORUS: {
                 float major = math::max(shape.size_normalized.x - bev, 0.001f);
                 float minor = math::max(shape.size_normalized.y - bev, 0.001f);
-                float2 qt = float2(math::length(float2(p.x, p.y)) - major, p.z);
-                dist = math::length(qt) - minor;
+                if (shape.torus_angle < 359.9f) {
+                  /* Capped torus. */
+                  float half_rad = shape.torus_angle * 0.5f * float(M_PI) / 180.0f;
+                  float sc_x = sinf(half_rad);
+                  float sc_y = cosf(half_rad);
+                  float px = math::abs(p.x);
+                  float k = (sc_y * px > sc_x * p.y)
+                                ? (px * sc_y + p.y * sc_x)
+                                : math::length(float2(px, p.y));
+                  dist = std::sqrt(math::dot(float3(p.x, p.y, p.z), float3(p.x, p.y, p.z)) +
+                                   major * major - 2.0f * major * k) -
+                         minor;
+                }
+                else {
+                  float2 qt = float2(math::length(float2(p.x, p.y)) - major, p.z);
+                  dist = math::length(qt) - minor;
+                }
                 break;
               }
               case SDF_TYPE_NGON: {
                 /* Simple regular polygon prism (no corner/edge/taper in instanced path). */
                 float R = math::max(sz.x - bev, 0.001f);
-                int sides = 6; /* Default; instanced path doesn't carry sides info. */
+                int sides = shape.ngon_sides;
                 float an = M_PI / float(sides);
                 float r_apothem = R * std::cos(an);
                 float he = R * std::sin(an);
@@ -2080,6 +2115,12 @@ class Instance : public DrawEngine {
         GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
         GPU_shader_uniform_1i(shape_bake_sh_, "shape_type", shape.sdf_type);
         GPU_shader_uniform_1i(shape_bake_sh_, "shape_sides", shape.ngon_sides);
+        GPU_shader_uniform_1f(shape_bake_sh_, "shape_star", shape.ngon_star);
+        {
+          float half_rad = shape.torus_angle * 0.5f * float(M_PI) / 180.0f;
+          float sc[2] = {sinf(half_rad), cosf(half_rad)};
+          GPU_shader_uniform_2fv(shape_bake_sh_, "shape_torus_sc", sc);
+        }
         GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
         GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
         GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);

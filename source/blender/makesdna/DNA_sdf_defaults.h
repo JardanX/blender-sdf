@@ -36,6 +36,8 @@
     .ngon_edge_bottom = 0.0f, \
     .ngon_taper = 0.0f, \
     .ngon_edge_mode = 0, \
+    .ngon_star = 0.0f, \
+    .torus_angle = 360.0f, \
   }
 
 /** \} */
