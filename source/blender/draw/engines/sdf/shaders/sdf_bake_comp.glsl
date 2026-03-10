@@ -119,14 +119,13 @@ void main()
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
   /* Per-brick AABB for object culling (includes 2-voxel overlap border).
-   * Expand by max_blend so objects contributing to smooth union are evaluated,
-   * plus max_shell_distance so shell objects whose limit surfaces pass through
-   * this brick are included as candidates. */
-  float bake_expand = max_blend + max_shell_distance;
+   * Expand by max_blend for smooth union and max_shell_distance so bricks in
+   * the shell zone can find base union objects as candidates. */
+  float candidate_expand = max_blend + max_shell_distance;
   float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
-                      float3(bake_expand);
+                      float3(candidate_expand);
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
-                      float3(bake_expand);
+                      float3(candidate_expand);
 
   /* Elect thread 0 to collect candidates for the entire workgroup.
    * All threads in the brick share the same AABB, so the candidate list
@@ -235,14 +234,15 @@ void main()
     int acc_obj_id = -1;
     float closest_raw_dist = 1e10f;
 
-    /* Two-pass evaluation: build base from union objects first, then apply
-     * modifiers (subtract/intersect/shell). Ensures modifiers always have
-     * a base to operate on regardless of object creation order. */
+    /* Two-pass evaluation: build base from union/shell objects first, then
+     * apply modifiers (subtract/intersect). Shell (extrusion) is union-like —
+     * it adds geometry then clips with a limit plane, so it runs in pass 1
+     * and naturally gets the accumulated base without needing expanded AABBs. */
 
-    /* Pass 1: accumulate union objects to build the base. */
+    /* Pass 1: accumulate union and shell objects to build the base. */
     for (int c = 0; c < num_candidates; c++) {
       SharedObj sobj = shared_objs[c];
-      if (sobj.csg_operation != SDF_CSG_OP_UNION) {
+      if (sobj.csg_operation != SDF_CSG_OP_UNION && sobj.csg_operation != SDF_CSG_OP_SHELL) {
         continue;
       }
 
@@ -256,13 +256,18 @@ void main()
 
       float k = sobj.blend;
       int bt = sobj.blend_type;
+      int op = sobj.csg_operation;
 
       if (acc_dist >= 1e9f) {
+        /* Shell/extrusion needs a base to extrude from — skip if no base yet. */
+        if (op == SDF_CSG_OP_SHELL) {
+          continue;
+        }
         acc_color = sobj.color.rgb;
         acc_dist = dist;
       }
       else {
-        float new_dist = combineCSG(acc_dist, dist, SDF_CSG_OP_UNION, bt, k, 0.0f);
+        float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
 
         if (k > 0.0f && bt == SDF_BLEND_TYPE_SMOOTH) {
           float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
@@ -277,10 +282,10 @@ void main()
       }
     }
 
-    /* Pass 2: apply subtraction/intersection/shell modifiers to the base. */
+    /* Pass 2: apply subtraction/intersection modifiers to the base. */
     for (int c = 0; c < num_candidates; c++) {
       SharedObj sobj = shared_objs[c];
-      if (sobj.csg_operation == SDF_CSG_OP_UNION) {
+      if (sobj.csg_operation == SDF_CSG_OP_UNION || sobj.csg_operation == SDF_CSG_OP_SHELL) {
         continue;
       }
       if (acc_dist >= 1e9f) {
@@ -299,7 +304,7 @@ void main()
       int bt = sobj.blend_type;
       int op = sobj.csg_operation;
 
-      float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
+      float new_dist = combineCSG(acc_dist, dist, op, bt, k, 0.0f);
 
       /* Color blending depends on the CSG operation type. */
       if (op == SDF_CSG_OP_SUBTRACT) {

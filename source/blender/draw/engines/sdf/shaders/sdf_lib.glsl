@@ -328,47 +328,91 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
     }
     return max(d1, d2);
   }
-  /* SDF_CSG_OP_SHELL: expand the intersection region between base and shape.
-   * 1) Union the new shape into the base (using blend type).
-   * 2) Intersect with a limit surface (base offset inward by k).
-   * Result: only the overlap region is kept, expanded outward by k. */
+  /* SDF_CSG_OP_SHELL (extrusion): two-stage blend matching MathOPS algorithm.
+   * Finds the intersection between two SDF fields and extrudes/insets a thin
+   * wall of thickness |shell_dist| with correct blending at both stages.
+   *
+   * Stage 1 (shape blend) uses the full k for smooth transitions.
+   * Stage 2 (limit blend) clamps k to shell thickness so the blend region
+   * doesn't extend beyond the wall, which causes surface distortion.
+   *
+   * Positive shell_dist (extrusion): union shape into base, intersect with limit.
+   * Negative shell_dist (inset): subtract shape from base, union with limit. */
   {
-    /* Clamp blend for shell: 0 causes hard edges, too high overwhelms geometry. */
-    k = clamp(k, 0.01f, abs(shell_dist) * 2.0f);
+    float h = abs(shell_dist);
+    /* Limit-stage blend: must not exceed wall thickness to avoid artifacts. */
+    float lk = min(k, h);
 
-    float d_union;
-    if (k > 0.0f && bt > 0) {
-      if (bt == SDF_BLEND_TYPE_SMOOTH) {
-        d_union = opSmoothUnion(d1, d2, k);
+    if (shell_dist < 0.0f) {
+      /* Inset: subtract shape from base, then cap with limit plane. */
+      float d_sub;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          d_sub = opSmoothSubtraction(d2, d1, k);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          d_sub = opChamferSubtraction(d2, d1, k);
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          d_sub = opRoundSubtraction(d2, d1, k);
+        }
+        else {
+          d_sub = max(d1, -d2);
+        }
       }
-      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        d_union = opChamferUnion(d1, d2, k);
+      else {
+        d_sub = max(d1, -d2);
       }
-      else if (bt == SDF_BLEND_TYPE_ROUND) {
-        d_union = opRoundUnion(d1, d2, k);
+
+      float lim = d1 + h;
+      if (lk > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          return opSmoothUnion(d_sub, lim, lk);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          return opChamferUnion(d_sub, lim, lk);
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          return opRoundUnion(d_sub, lim, lk);
+        }
+      }
+      return min(d_sub, lim);
+    }
+    else {
+      /* Extrusion: union shape into base, clip with limit plane. */
+      float d_union;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          d_union = opSmoothUnion(d1, d2, k);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          d_union = opChamferUnion(d1, d2, k);
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          d_union = opRoundUnion(d1, d2, k);
+        }
+        else {
+          d_union = min(d1, d2);
+        }
       }
       else {
         d_union = min(d1, d2);
       }
-    }
-    else {
-      d_union = min(d1, d2);
-    }
 
-    float lim = d1 - abs(shell_dist);
-
-    if (k > 0.0f && bt > 0) {
-      if (bt == SDF_BLEND_TYPE_SMOOTH) {
-        return opSmoothIntersection(d_union, lim, k);
+      float lim = d1 - h;
+      if (lk > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          return opSmoothIntersection(d_union, lim, lk);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          return opChamferIntersection(d_union, lim, lk);
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          return opRoundIntersection(d_union, lim, lk);
+        }
       }
-      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        return opChamferIntersection(d_union, lim, k);
-      }
-      else if (bt == SDF_BLEND_TYPE_ROUND) {
-        return opRoundIntersection(d_union, lim, k);
-      }
+      return max(d_union, lim);
     }
-    return max(d_union, lim);
   }
 }
 

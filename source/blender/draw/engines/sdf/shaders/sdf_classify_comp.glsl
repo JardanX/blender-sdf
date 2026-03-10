@@ -90,9 +90,8 @@ void main()
 
   /* Per-brick AABB for object culling.
    * Expand by brick_half_diag to match the surface test threshold,
-   * plus max_blend to capture objects contributing to smooth union,
-   * plus max_shell_distance because shell operations create surfaces
-   * up to shell_distance away from the base geometry boundary. */
+   * plus max_blend for smooth union and max_shell_distance so bricks in the
+   * shell zone can find base union objects as candidates. */
   float expand = brick_half_diag + max_blend + max_shell_distance;
   float3 brick_min = brick_center - float3(expand);
   float3 brick_max = brick_center + float3(expand);
@@ -160,15 +159,16 @@ void main()
     /* Already in index order, no sort needed. */
   }
 
-  /* Two-pass evaluation: build the base from union objects first, then apply
-   * modifiers (subtract/intersect/shell). This ensures modifiers always have
-   * a base to operate on regardless of object creation order. */
+  /* Two-pass evaluation: build the base from union/shell objects first, then
+   * apply modifiers (subtract/intersect). Shell (extrusion) is union-like —
+   * it adds geometry then clips with a limit plane, so it runs in pass 1
+   * and naturally gets the accumulated base without needing expanded AABBs. */
   float acc_dist = 1e10f;
 
-  /* Pass 1: accumulate union objects to build the base. */
+  /* Pass 1: accumulate union and shell objects to build the base. */
   for (int c = 0; c < num_candidates; c++) {
     SDFObjectGPU obj = objects[candidates[c]];
-    if (obj.csg_operation != SDF_CSG_OP_UNION) {
+    if (obj.csg_operation != SDF_CSG_OP_UNION && obj.csg_operation != SDF_CSG_OP_SHELL) {
       continue;
     }
 
@@ -176,18 +176,22 @@ void main()
     float dist = evalSDFPrimitive(local_pos, obj);
 
     if (acc_dist >= 1e9f) {
+      /* Shell/extrusion needs a base to extrude from — skip if no base yet. */
+      if (obj.csg_operation == SDF_CSG_OP_SHELL) {
+        continue;
+      }
       acc_dist = dist;
     }
     else {
       acc_dist = combineCSG(
-          acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, 0.0f);
+          acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
     }
   }
 
-  /* Pass 2: apply subtraction/intersection/shell modifiers to the base. */
+  /* Pass 2: apply subtraction/intersection modifiers to the base. */
   for (int c = 0; c < num_candidates; c++) {
     SDFObjectGPU obj = objects[candidates[c]];
-    if (obj.csg_operation == SDF_CSG_OP_UNION) {
+    if (obj.csg_operation == SDF_CSG_OP_UNION || obj.csg_operation == SDF_CSG_OP_SHELL) {
       continue;
     }
     if (acc_dist >= 1e9f) {
@@ -197,15 +201,13 @@ void main()
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
     float dist = evalSDFPrimitive(local_pos, obj);
     acc_dist = combineCSG(
-        acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, 0.0f);
   }
 
-  /* Conservative surface test: if the absolute distance at the brick center
-   * is less than the threshold, the surface might pass through.
-   * Shell operations create limit surfaces at shell_distance from the base,
-   * which can compress the distance field — expand by max_shell_distance
-   * to ensure bricks near shell boundaries are activated. */
-  float surface_threshold = brick_half_diag + max_shell_distance;
+  /* Surface test: brick_half_diag is sufficient — the shell operation in
+   * combineCSG produces correct thin-wall distances via two-stage blend,
+   * so no global expansion needed. */
+  float surface_threshold = brick_half_diag;
   if (abs(acc_dist) < surface_threshold) {
     /* Active brick: allocate a compact atlas slot. */
     uint slot = atomicAdd(brick_counter.count, 1u);
