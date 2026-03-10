@@ -230,6 +230,59 @@ float sdRegularPolygon2D(float2 p, float R, int n)
 }
 
 /**
+ * Capped torus SDF (Inigo Quilez).
+ * \param p: 3D sample point.
+ * \param sc: float2(sin(half_angle), cos(half_angle)).
+ * \param ra: major radius.
+ * \param rb: minor (tube) radius.
+ */
+float sdCappedTorus(float3 p, float2 sc, float ra, float rb)
+{
+  p.x = abs(p.x);
+  float k = (sc.y * p.x > sc.x * p.y) ? dot(p.xy, sc) : length(p.xy);
+  return sqrt(dot(p, p) + ra * ra - 2.0f * ra * k) - rb;
+}
+
+/**
+ * Star polygon 2D SDF with n outer tips and n inner valleys.
+ * Uses sector-folding: folds into a half-sector [0, PI/n], then computes
+ * distance to the edge from outer tip (R, 0) to inner valley at angle PI/n.
+ * \param R: outer tip radius (circumradius).
+ * \param n: number of star points.
+ * \param star: 0 = regular polygon, 1 = valleys reach center.
+ */
+float sdStarPolygon2D(float2 p, float R, int n, float star)
+{
+  if (star < 0.001f) {
+    return sdRegularPolygon2D(p, R, n);
+  }
+
+  float an = SDF_PI / float(n);
+  /* Inner valley radius: star=0 → apothem (matches polygon), star=1 → near center. */
+  float r = R * cos(an) * max(1.0f - star, 0.01f);
+
+  /* Fold into fundamental half-sector centered on nearest outer tip.
+   * Outer tips at angles k*2*an; inner valleys at (k+0.5)*2*an = (2k+1)*an. */
+  float angle = atan(p.y, p.x);
+  float bn = floor((angle + an) / (2.0f * an)) * 2.0f * an;
+  float2 cs = float2(cos(bn), sin(bn));
+  float2 q = float2(cs.x * p.x + cs.y * p.y, -cs.y * p.x + cs.x * p.y);
+  /* Mirror to [0, an] half-sector (rotated angle is in [-an, an]). */
+  q.y = abs(q.y);
+
+  /* Edge from outer tip A=(R, 0) to inner valley B=(r*cos(an), r*sin(an)). */
+  float2 A = float2(R, 0.0f);
+  float2 B = float2(r * cos(an), r * sin(an));
+  float2 AB = B - A;
+  float t = clamp(dot(q - A, AB) / dot(AB, AB), 0.0f, 1.0f);
+  float dist = length(q - (A + AB * t));
+
+  /* Sign: cross product determines inside (toward center) vs outside. */
+  float cross_val = AB.x * (q.y - A.y) - AB.y * (q.x - A.x);
+  return (cross_val > 0.0f) ? -dist : dist;
+}
+
+/**
  * Advanced N-Gon prism SDF with corner bevel, edge chamfer, and taper.
  * \param p: 3D sample point in local space.
  * \param R: circumradius of the polygon.
@@ -253,7 +306,8 @@ float sdAdvancedNgon(float3 p,
                      float tapTop,
                      float tapBot,
                      int edgeMode,
-                     float taperH)
+                     float taperH,
+                     float star)
 {
   float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
   float t = (zn + 1.0f) * 0.5f;
@@ -264,7 +318,13 @@ float sdAdvancedNgon(float3 p,
   float apothem = scaledR * cos(an);
   float bevelR = corner * apothem;
   float innerR = scaledR - bevelR / max(cos(an), 0.001f);
-  float d2d = sdRegularPolygon2D(p.xy, innerR, sides) - bevelR;
+  float d2d;
+  if (star > 0.001f) {
+    d2d = sdStarPolygon2D(p.xy, innerR, sides, star) - bevelR;
+  }
+  else {
+    d2d = sdRegularPolygon2D(p.xy, innerR, sides) - bevelR;
+  }
 
   float tc = clamp(t, 0.0f, 1.0f);
   float tapFace = max(1.0f - tapTop * tc - tapBot * (1.0f - tc), 0.001f);

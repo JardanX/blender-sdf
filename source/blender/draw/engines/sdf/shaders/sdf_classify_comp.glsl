@@ -108,22 +108,29 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
     float minor = size.y - bevel;
     major = max(major, 0.001f);
     minor = max(minor, 0.001f);
-    dist = sdTorus(local_pos, float2(major, minor));
+    if (obj.box_modes.w != 0) {
+      /* Capped torus: box_corners.xy = (sin, cos) of half-angle. */
+      dist = sdCappedTorus(local_pos, obj.box_corners.xy, major, minor);
+    }
+    else {
+      dist = sdTorus(local_pos, float2(major, minor));
+    }
   }
   else if (obj.sdf_type == SDF_TYPE_NGON) {
     float R = max(size.x - bevel, 0.001f);
     float halfH = max(size.z - bevel, 0.001f);
     int sides = obj.box_modes.z;
     float corner = obj.box_corners.x;
+    float star = obj.box_corners.y;
     float edgeTop = obj.box_edges.x;
     float edgeBot = obj.box_edges.y;
     float tapTop = obj.box_edges.z;
     float tapBot = obj.box_edges.w;
     int edgeMode = obj.box_modes.y;
-    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
+    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f;
     if (hasAdvanced) {
       dist = sdAdvancedNgon(
-          local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH);
+          local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH, star);
     }
     else {
       float d2d = sdRegularPolygon2D(local_pos.xy, R, sides);

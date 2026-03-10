@@ -160,6 +160,11 @@ typedef struct SDF {
   float ngon_taper;
   /** Edge blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
   int ngon_edge_mode;
+  /** N-Gon star factor (0 = regular polygon, 1 = maximum star). */
+  float ngon_star;
+
+  /** Torus angle aperture (degrees, 0–360; 360 = full torus). */
+  float torus_angle;
   char _pad4[4];
 
   /** Ordered modifier stack. */

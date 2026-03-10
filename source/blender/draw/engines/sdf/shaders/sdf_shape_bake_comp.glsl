@@ -123,13 +123,24 @@ void main()
     else if (shape_type == SDF_TYPE_TORUS) {
       float major = max(shape_size.x - bevel, 0.001f);
       float minor = max(shape_size.y - bevel, 0.001f);
-      dist = sdTorus(local_pos, float2(major, minor));
+      if (shape_torus_sc.y > -0.999f && shape_torus_sc.x > 0.001f) {
+        /* Capped torus: shape_torus_sc = (sin, cos) of half-angle. */
+        dist = sdCappedTorus(local_pos, shape_torus_sc, major, minor);
+      }
+      else {
+        dist = sdTorus(local_pos, float2(major, minor));
+      }
     }
     else if (shape_type == SDF_TYPE_NGON) {
-      /* Basic polygon prism (no advanced properties in instanced path). */
       float R = sz.x;
       float halfH = sz.z;
-      float d2d = sdRegularPolygon2D(local_pos.xy, R, shape_sides);
+      float d2d;
+      if (shape_star > 0.001f) {
+        d2d = sdStarPolygon2D(local_pos.xy, R, shape_sides, shape_star);
+      }
+      else {
+        d2d = sdRegularPolygon2D(local_pos.xy, R, shape_sides);
+      }
       float dz = abs(local_pos.z) - halfH;
       float2 dd = float2(d2d, dz);
       dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);

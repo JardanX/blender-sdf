@@ -455,6 +455,24 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
+  /* N-Gon Star */
+  prop = RNA_def_property(srna, "ngon_star", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "ngon_star");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(
+      prop, "Star", "Star factor (0 = regular polygon, 1 = maximum star)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Torus Angle */
+  prop = RNA_def_property(srna, "torus_angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "torus_angle");
+  RNA_def_property_range(prop, 0.0f, 360.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 360.0f, 5.0f, 1);
+  RNA_def_property_ui_text(
+      prop, "Angle", "Aperture angle (360 = full torus, less = capped arc)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
   /* Materials */
   prop = RNA_def_property(srna, "materials", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "mat", "totcol");
