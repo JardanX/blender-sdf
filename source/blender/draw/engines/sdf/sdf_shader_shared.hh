@@ -36,6 +36,14 @@ struct SDFObjectGPU {
   int modifier_start;
   /** Number of modifiers for this object. */
   int modifier_count;
+  /** Index into groups[] SSBO (-1 = ungrouped). */
+  int group_id;
+  /** 1 if first object in its group (CSG operation ignored). */
+  int group_first;
+  /** Order within SDF group (0-based, mirrors SDFGroupMember.order). -1 if ungrouped. */
+  int group_order;
+  /** Original depsgraph index before sorting (used for selection/outline map lookup). */
+  int original_index;
   /** Object color RGBA. */
   float4 color;
   /** Box per-corner bevel radii (normalized 0–1). */
@@ -45,14 +53,34 @@ struct SDFObjectGPU {
   /** Box/Ngon modes: x=corner_mode, y=edge_mode, z=ngon_sides (0 if box), w=0. */
   int4 box_modes;
 };
-/* Total: 64 + 16*5 + 16 + 16*3 = 64+80+16+48 = 208 bytes -> needs recount */
+/* Total: 64 + 16*4 + 48 + 16*4 = 64+64+48+64 = 240 bytes, 16-byte aligned. */
 
-/** GPU-side SDF modifier. Flat data for SSBO upload. 32 bytes, 16-byte aligned. */
+/** GPU-side SDF evaluation group. 32 bytes, 16-byte aligned. */
+struct SDFGroupGPU {
+  /** Group-level CSG operation (eSDFCSGOperation). */
+  int csg_operation;
+  /** Group-level blend type (eSDFBlendType). */
+  int blend_type;
+  /** Group-level blend amount. */
+  float blend;
+  /** Group-level shell distance. */
+  float shell_distance;
+  /** Index of first member in sorted objects[] array. */
+  int first_object;
+  /** Number of members in this group. */
+  int object_count;
+  float _pad0;
+  float _pad1;
+};
+
+/** GPU-side SDF modifier. Flat data for SSBO upload. 48 bytes, 16-byte aligned. */
 struct SDFModifierGPU {
   /** x=type, y=flags, z=0, w=0 */
   int4 header;
-  /** Modifier-specific parameters. */
+  /** Modifier-specific parameters 0..3. */
   float4 params;
+  /** Modifier-specific parameters 4..7. */
+  float4 params2;
 };
 
 /** Brick counter SSBO (used by classify pass). */
@@ -132,7 +160,7 @@ struct SDFClassifyParams {
   float voxel_size;
   int object_count;
   float brick_half_diag;
-  float _pad0;
+  int group_count;
 };
 
 /** Push constants for the bake compute shader. */
@@ -142,7 +170,7 @@ struct SDFBakeParams {
   float voxel_size;
   int object_count;
   int bricks_per_axis;
-  float _pad0;
+  int group_count;
 };
 
 /** Push constants for the ray-march fragment shader. */
@@ -153,5 +181,5 @@ struct SDFMarchParams {
   float voxel_size;
   int object_count;
   int bricks_per_axis;
-  int debug_grid;
+  int group_count;
 };

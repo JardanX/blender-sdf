@@ -18,61 +18,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 #define BRICK_STORAGE 12
 #define MAX_CANDIDATES 64
 
-/* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
-#define SDF_TYPE_BOX 0
-#define SDF_TYPE_SPHERE 1
-#define SDF_TYPE_CYLINDER 2
-#define SDF_TYPE_CONE 3
-#define SDF_TYPE_CAPSULE 4
-#define SDF_TYPE_TORUS 5
-#define SDF_TYPE_NGON 6
-
-float sdSphere(float3 p, float r)
-{
-  return length(p) - r;
-}
-
-float sdCapsule(float3 p, float3 size)
-{
-  float h = size.y;
-  float r = size.x;
-  p.z -= clamp(p.z, -h, h);
-  return length(p) - r;
-}
-
-float sdTorus(float3 p, float2 t)
-{
-  float2 q = float2(length(p.xy) - t.x, p.z);
-  return length(q) - t.y;
-}
-
-float sdCylinder(float3 p, float3 size)
-{
-  /* Elliptical cylinder: size.xy = XY radii, size.z = half-height.
-   * Gradient-corrected radial distance for proper SDF. */
-  float2 e = max(size.xy, float2(0.001f));
-  float2 pn = p.xy / e;
-  float rn = length(pn);
-  float2 g = pn / (e * max(rn, 1e-6f));
-  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
-  float vertical = abs(p.z) - size.z;
-  float2 d = float2(radial, vertical);
-  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
-}
-
-float sdCone(float3 p, float r, float h)
-{
-  /* Capped cone: base radius r at z=-h, apex at z=+h.
-   * Based on Inigo Quilez's sdCappedCone. */
-  float2 q = float2(length(p.xy), p.z);
-  float2 k1 = float2(0.0f, h);
-  float2 k2 = float2(-r, 2.0f * h);
-  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
-  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
-  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
-  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
-}
-
 /* Compact per-object data cached in shared memory.
  * Only the fields needed for SDF evaluation — avoids re-reading the
  * full SDFObjectGPU struct from SSBO for every voxel. */
@@ -90,6 +35,9 @@ struct SharedObj {
   int obj_index;
   int modifier_start;
   int modifier_count;
+  int group_id;
+  int group_first;
+  int group_order;
   float4 box_corners;
   float4 box_edges;
   int4 box_modes;
@@ -98,107 +46,17 @@ struct SharedObj {
 /** Evaluate the actual SDF primitive (reads from shared memory cache). */
 float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
 {
-  /* Apply domain modifiers (warp sampling space). */
-  if (obj.modifier_count > 0) {
-    local_pos = applyDomainModifiers(local_pos, obj.modifier_start, obj.modifier_count);
-  }
+  SDFPrimitiveData prim_data;
+  prim_data.sdf_type = obj.sdf_type;
+  prim_data.size = obj.sdf_size.xyz;
+  prim_data.bevel = obj.bevel;
+  prim_data.box_corners = obj.box_corners;
+  prim_data.box_edges = obj.box_edges;
+  prim_data.box_modes = obj.box_modes;
+  prim_data.modifier_start = obj.modifier_start;
+  prim_data.modifier_count = obj.modifier_count;
 
-  float3 size = obj.sdf_size.xyz;
-  float bevel = obj.bevel;
-  float dist;
-
-  if (obj.sdf_type == SDF_TYPE_SPHERE) {
-    dist = sdSphere(local_pos, size.x - bevel);
-  }
-  else if (obj.sdf_type == SDF_TYPE_CYLINDER) {
-    float3 cyl_size = size - float3(bevel);
-    cyl_size = max(cyl_size, float3(0.001f));
-    dist = sdCylinder(local_pos, cyl_size);
-  }
-  else if (obj.sdf_type == SDF_TYPE_CONE) {
-    float cone_r = max(size.x - bevel, 0.001f);
-    float cone_h = max(size.y - bevel, 0.001f);
-    dist = sdCone(local_pos, cone_r, cone_h);
-  }
-  else if (obj.sdf_type == SDF_TYPE_CAPSULE) {
-    float3 cap_size = size - float3(bevel);
-    cap_size = max(cap_size, float3(0.001f));
-    dist = sdCapsule(local_pos, cap_size);
-  }
-  else if (obj.sdf_type == SDF_TYPE_TORUS) {
-    float major = size.x - bevel;
-    float minor = size.y - bevel;
-    major = max(major, 0.001f);
-    minor = max(minor, 0.001f);
-    if (obj.box_modes.w != 0) {
-      /* Capped torus: box_corners.xy = (sin, cos) of half-angle. */
-      dist = sdCappedTorus(local_pos, obj.box_corners.xy, major, minor);
-    }
-    else {
-      dist = sdTorus(local_pos, float2(major, minor));
-    }
-  }
-  else if (obj.sdf_type == SDF_TYPE_NGON) {
-    float R = max(size.x - bevel, 0.001f);
-    float halfH = max(size.z - bevel, 0.001f);
-    int sides = obj.box_modes.z;
-    float corner = obj.box_corners.x;
-    float star = obj.box_corners.y;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    int edgeMode = obj.box_modes.y;
-    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f;
-    if (hasAdvanced) {
-      dist = sdAdvancedNgon(
-          local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH, star);
-    }
-    else {
-      float d2d = sdRegularPolygon2D(local_pos.xy, R, sides);
-      float dz = abs(local_pos.z) - halfH;
-      float2 dd = float2(d2d, dz);
-      dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
-    }
-  }
-  else {
-    /* SDF_TYPE_BOX (default). */
-    float4 corners = obj.box_corners;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w +
-                        edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
-    if (hasAdvanced) {
-      float3 box_size = size - float3(bevel);
-      box_size = max(box_size, float3(0.001f));
-      dist = sdAdvancedBox(local_pos,
-                           box_size,
-                           corners,
-                           edgeTop,
-                           edgeBot,
-                           tapTop,
-                           tapBot,
-                           obj.box_modes.x,
-                           obj.box_modes.y,
-                           box_size.z);
-    }
-    else {
-      float3 box_size = size - float3(bevel);
-      box_size = max(box_size, float3(0.001f));
-      dist = sdBox(local_pos, box_size);
-    }
-  }
-
-  dist -= bevel;
-
-  /* Apply distance modifiers. */
-  if (obj.modifier_count > 0) {
-    dist = applyDistanceModifiers(dist, obj.modifier_start, obj.modifier_count);
-  }
-
-  return dist;
+  return evalObjectSDF(prim_data, local_pos);
 }
 
 /* Shared candidate list and object cache: BVH traversal done once per
@@ -326,6 +184,9 @@ void main()
     shared_objs[c].obj_index = i;
     shared_objs[c].modifier_start = obj.modifier_start;
     shared_objs[c].modifier_count = obj.modifier_count;
+    shared_objs[c].group_id = obj.group_id;
+    shared_objs[c].group_first = obj.group_first;
+    shared_objs[c].group_order = obj.group_order;
     shared_objs[c].box_corners = obj.box_corners;
     shared_objs[c].box_edges = obj.box_edges;
     shared_objs[c].box_modes = obj.box_modes;
@@ -349,59 +210,186 @@ void main()
     int acc_obj_id = -1;
     float closest_raw_dist = 1e10f;
 
-    /* Two-pass evaluation: build base from union/shell objects first, then
-     * apply modifiers (subtract/intersect). Shell (extrusion) is union-like —
-     * it adds geometry then clips with a limit plane, so it runs in pass 1
-     * and naturally gets the accumulated base without needing expanded AABBs. */
+    /* Group-aware sequential evaluation.
+     * Objects are sorted by group, then by order within group.
+     * Each group evaluates its members sequentially (first object = base,
+     * subsequent objects apply their per-object CSG). Groups then combine
+     * with each other via group-level CSG operations.
+     *
+     * Ungrouped objects (group_id == -1) fall back to the legacy two-pass
+     * approach for backward compatibility during migration. */
 
-    /* Pass 1: accumulate union and shell objects to build the base. */
-    for (int c = 0; c < num_candidates; c++) {
-      SharedObj sobj = shared_objs[c];
-      if (sobj.csg_operation != SDF_CSG_OP_UNION && sobj.csg_operation != SDF_CSG_OP_SHELL) {
-        continue;
-      }
-      float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
-      float dist = evalSDFPrimitiveSh(local_pos, sobj);
+    /* Evaluate grouped objects: iterate groups, accumulate within each,
+     * then combine group results with the scene. */
+    for (int g = 0; g < group_count; g++) {
+      SDFGroupGPU grp = groups[g];
+      float grp_dist = 1e10f;
+      float3 grp_color = float3(0.0f);
 
-      if (dist < closest_raw_dist) {
-        closest_raw_dist = dist;
-        acc_obj_id = sobj.obj_index;
-      }
-
-      float k = sobj.blend;
-      int bt = sobj.blend_type;
-      int op = sobj.csg_operation;
-
-      if (acc_dist >= 1e9f) {
-        if (op == SDF_CSG_OP_SHELL) {
+      /* Find candidates belonging to this group and evaluate sequentially. */
+      for (int c = 0; c < num_candidates; c++) {
+        SharedObj sobj = shared_objs[c];
+        if (sobj.group_id != g) {
           continue;
         }
-        acc_color = sobj.color.rgb;
-        acc_dist = dist;
-      }
-      else {
-        float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
 
-        /* Union color: blend factor = how much the new object contributes.
-         * Works for all blend types — smooth formula is a good approximation
-         * of the blend zone for chamfer/round too. */
-        if (k > 0.0f && bt > 0) {
-          float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
+        float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
+        float dist = evalSDFPrimitiveSh(local_pos, sobj);
+
+        if (dist < closest_raw_dist) {
+          closest_raw_dist = dist;
+          acc_obj_id = sobj.obj_index;
+        }
+
+        if (grp_dist >= 1e9f) {
+          /* First object in group is always the base shape — CSG op ignored. */
+          grp_dist = dist;
+          grp_color = sobj.color.rgb;
         }
         else {
-          if (dist < acc_dist) {
-            acc_color = sobj.color.rgb;
+          /* Apply this object's CSG to running group accumulator. */
+          float k = sobj.blend;
+          int bt = sobj.blend_type;
+          int op = sobj.csg_operation;
+
+          float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
+
+          /* Color blending based on CSG operation type. */
+          if (op == SDF_CSG_OP_UNION || op == SDF_CSG_OP_SHELL) {
+            if (k > 0.0f && bt > 0) {
+              float h = clamp(0.5f + 0.5f * (grp_dist - dist) / k, 0.0f, 1.0f);
+              grp_color = mix(grp_color, sobj.color.rgb, h);
+            }
+            else {
+              if (dist < grp_dist) {
+                grp_color = sobj.color.rgb;
+              }
+            }
+          }
+          else if (op == SDF_CSG_OP_SUBTRACT) {
+            if (k > 0.0f && bt > 0) {
+              float h = clamp(0.5f - 0.5f * (grp_dist + dist) / k, 0.0f, 1.0f);
+              grp_color = mix(grp_color, sobj.color.rgb, h);
+            }
+            else {
+              if (grp_dist + dist < 0.0f) {
+                grp_color = sobj.color.rgb;
+              }
+            }
+          }
+          else if (op == SDF_CSG_OP_INTERSECT) {
+            if (k > 0.0f && bt > 0) {
+              float h = clamp(0.5f + 0.5f * (dist - grp_dist) / k, 0.0f, 1.0f);
+              grp_color = mix(grp_color, sobj.color.rgb, h);
+            }
+            else {
+              if (dist > grp_dist) {
+                grp_color = sobj.color.rgb;
+              }
+            }
+          }
+          else if (op == SDF_CSG_OP_PUSH) {
+            float sub_base = combineCSG(grp_dist, dist, SDF_CSG_OP_SUBTRACT, bt, k, 0.0f);
+            if (dist <= sub_base) {
+              grp_color = sobj.color.rgb;
+            }
+          }
+          else if (op == SDF_CSG_OP_AVOID) {
+            float carved;
+            if (k > 0.0f && bt > 0) {
+              if (bt == SDF_BLEND_TYPE_SMOOTH) {
+                carved = opSmoothSubtraction(grp_dist, dist, k);
+              }
+              else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+                carved = opChamferSubtraction(grp_dist, dist, k);
+              }
+              else if (bt == SDF_BLEND_TYPE_ROUND) {
+                carved = opRoundSubtraction(grp_dist, dist, k);
+              }
+              else {
+                carved = max(dist, -grp_dist);
+              }
+            }
+            else {
+              carved = max(dist, -grp_dist);
+            }
+            if (carved < grp_dist) {
+              grp_color = sobj.color.rgb;
+            }
+          }
+
+          grp_dist = new_dist;
+        }
+      }
+
+      if (grp_dist >= 1e10f) {
+        continue; /* No members hit this brick. */
+      }
+
+      /* Combine group result with scene using group-level CSG. */
+      if (acc_dist >= 1e9f) {
+        acc_dist = grp_dist;
+        acc_color = grp_color;
+      }
+      else {
+        float new_dist = combineCSG(
+            acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+
+        /* Inter-group color blending. */
+        float gk = grp.blend;
+        int gbt = grp.blend_type;
+        int gop = grp.csg_operation;
+
+        if (gop == SDF_CSG_OP_UNION || gop == SDF_CSG_OP_SHELL) {
+          if (gk > 0.0f && gbt > 0) {
+            float h = clamp(0.5f + 0.5f * (acc_dist - grp_dist) / gk, 0.0f, 1.0f);
+            acc_color = mix(acc_color, grp_color, h);
+          }
+          else {
+            if (grp_dist < acc_dist) {
+              acc_color = grp_color;
+            }
           }
         }
+        else if (gop == SDF_CSG_OP_SUBTRACT) {
+          if (gk > 0.0f && gbt > 0) {
+            float h = clamp(0.5f - 0.5f * (acc_dist + grp_dist) / gk, 0.0f, 1.0f);
+            acc_color = mix(acc_color, grp_color, h);
+          }
+          else {
+            if (acc_dist + grp_dist < 0.0f) {
+              acc_color = grp_color;
+            }
+          }
+        }
+        else if (gop == SDF_CSG_OP_INTERSECT) {
+          if (gk > 0.0f && gbt > 0) {
+            float h = clamp(0.5f + 0.5f * (grp_dist - acc_dist) / gk, 0.0f, 1.0f);
+            acc_color = mix(acc_color, grp_color, h);
+          }
+          else {
+            if (grp_dist > acc_dist) {
+              acc_color = grp_color;
+            }
+          }
+        }
+        else {
+          /* Push/Avoid at group level: use group result color if closer. */
+          if (grp_dist < acc_dist) {
+            acc_color = grp_color;
+          }
+        }
+
         acc_dist = new_dist;
       }
     }
 
-    /* Pass 2: apply modifiers (subtract/intersect/push/avoid) to the base. */
+    /* Evaluate ungrouped objects (group_id == -1) sequentially.
+     * First ungrouped object is the base shape (CSG op ignored),
+     * subsequent objects apply their CSG in order (top-to-bottom). */
     for (int c = 0; c < num_candidates; c++) {
       SharedObj sobj = shared_objs[c];
-      if (sobj.csg_operation == SDF_CSG_OP_UNION || sobj.csg_operation == SDF_CSG_OP_SHELL) {
+      if (sobj.group_id != -1) {
         continue;
       }
 
@@ -413,86 +401,82 @@ void main()
         acc_obj_id = sobj.obj_index;
       }
 
-      float k = sobj.blend;
-      int bt = sobj.blend_type;
-      int op = sobj.csg_operation;
-
       if (acc_dist >= 1e9f) {
-        if (op == SDF_CSG_OP_PUSH || op == SDF_CSG_OP_AVOID) {
-          acc_color = sobj.color.rgb;
-          acc_dist = dist;
-        }
-        continue;
+        /* First ungrouped object is the base shape — CSG op ignored. */
+        acc_color = sobj.color.rgb;
+        acc_dist = dist;
       }
+      else {
+        float k = sobj.blend;
+        int bt = sobj.blend_type;
+        int op = sobj.csg_operation;
 
-      float new_dist = combineCSG(acc_dist, dist, op, bt, k, 0.0f);
+        float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
 
-      /* Color blending for all 6 operations × 4 blend types.
-       * Smooth-style blend factor (h) approximates all blend types well. */
-      if (op == SDF_CSG_OP_SUBTRACT) {
-        /* Color by surface ownership with smooth transition at the seam.
-         * acc_dist + dist < 0 → cutter dominates, > 0 → base dominates.
-         * For blended ops, transition smoothly across the blend zone (width k).
-         * For linear, sharp switch at the seam. */
-        if (k > 0.0f && bt > 0) {
-          float h = clamp(0.5f - 0.5f * (acc_dist + dist) / k, 0.0f, 1.0f);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
+        /* Color blending based on CSG operation type. */
+        if (op == SDF_CSG_OP_UNION || op == SDF_CSG_OP_SHELL) {
+          if (k > 0.0f && bt > 0) {
+            float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
+            acc_color = mix(acc_color, sobj.color.rgb, h);
+          }
+          else {
+            if (dist < acc_dist) {
+              acc_color = sobj.color.rgb;
+            }
+          }
         }
-        else {
-          if (acc_dist + dist < 0.0f) {
+        else if (op == SDF_CSG_OP_SUBTRACT) {
+          if (k > 0.0f && bt > 0) {
+            float h = clamp(0.5f - 0.5f * (acc_dist + dist) / k, 0.0f, 1.0f);
+            acc_color = mix(acc_color, sobj.color.rgb, h);
+          }
+          else {
+            if (acc_dist + dist < 0.0f) {
+              acc_color = sobj.color.rgb;
+            }
+          }
+        }
+        else if (op == SDF_CSG_OP_INTERSECT) {
+          if (k > 0.0f && bt > 0) {
+            float h = clamp(0.5f + 0.5f * (dist - acc_dist) / k, 0.0f, 1.0f);
+            acc_color = mix(acc_color, sobj.color.rgb, h);
+          }
+          else {
+            if (dist > acc_dist) {
+              acc_color = sobj.color.rgb;
+            }
+          }
+        }
+        else if (op == SDF_CSG_OP_PUSH) {
+          float sub_base = combineCSG(acc_dist, dist, SDF_CSG_OP_SUBTRACT, bt, k, 0.0f);
+          if (dist <= sub_base) {
             acc_color = sobj.color.rgb;
           }
         }
-        acc_dist = new_dist;
-      }
-      else if (op == SDF_CSG_OP_INTERSECT) {
-        /* Intersect: intersector's color shows where it limits the base. */
-        if (k > 0.0f && bt > 0) {
-          float h = clamp(0.5f + 0.5f * (dist - acc_dist) / k, 0.0f, 1.0f);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
-        }
-        else {
-          if (dist > acc_dist) {
-            acc_color = sobj.color.rgb;
-          }
-        }
-        acc_dist = new_dist;
-      }
-      else if (op == SDF_CSG_OP_PUSH) {
-        /* Push = subtract base by d2, then union d2 back.
-         * Color by surface ownership: push object where it's closer than the
-         * dented base, base color otherwise. Sharp boundary — no fading. */
-        float sub_base = combineCSG(acc_dist, dist, SDF_CSG_OP_SUBTRACT, bt, k, 0.0f);
-        if (dist <= sub_base) {
-          acc_color = sobj.color.rgb;
-        }
-        acc_dist = new_dist;
-      }
-      else if (op == SDF_CSG_OP_AVOID) {
-        /* Avoid = subtract base from avoid, then union with base.
-         * Color by surface ownership: avoid color where it's visible (outside
-         * base), base color otherwise. Sharp boundary — no fading. */
-        float carved;
-        if (k > 0.0f && bt > 0) {
-          if (bt == SDF_BLEND_TYPE_SMOOTH) {
-            carved = opSmoothSubtraction(acc_dist, dist, k);
-          }
-          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-            carved = opChamferSubtraction(acc_dist, dist, k);
-          }
-          else if (bt == SDF_BLEND_TYPE_ROUND) {
-            carved = opRoundSubtraction(acc_dist, dist, k);
+        else if (op == SDF_CSG_OP_AVOID) {
+          float carved;
+          if (k > 0.0f && bt > 0) {
+            if (bt == SDF_BLEND_TYPE_SMOOTH) {
+              carved = opSmoothSubtraction(acc_dist, dist, k);
+            }
+            else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+              carved = opChamferSubtraction(acc_dist, dist, k);
+            }
+            else if (bt == SDF_BLEND_TYPE_ROUND) {
+              carved = opRoundSubtraction(acc_dist, dist, k);
+            }
+            else {
+              carved = max(dist, -acc_dist);
+            }
           }
           else {
             carved = max(dist, -acc_dist);
           }
+          if (carved < acc_dist) {
+            acc_color = sobj.color.rgb;
+          }
         }
-        else {
-          carved = max(dist, -acc_dist);
-        }
-        if (carved < acc_dist) {
-          acc_color = sobj.color.rgb;
-        }
+
         acc_dist = new_dist;
       }
     }

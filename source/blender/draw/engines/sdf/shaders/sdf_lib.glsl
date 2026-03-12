@@ -88,10 +88,12 @@ float sdBox(float3 p, float3 b)
  */
 float sdRoundBox2D(float2 p, float2 b, float4 r)
 {
-  r.xy = (p.x > 0.0f) ? r.xy : r.zw;
-  r.x = (p.y > 0.0f) ? r.x : r.y;
-  float2 q = abs(p) - b + r.x;
-  return min(max(q.x, q.y), 0.0f) + length(max(q, float2(0.0f))) - r.x;
+  float rx = (p.x > 0.0f) ? r.x : r.z;
+  float ry = (p.x > 0.0f) ? r.y : r.w;
+  float rc = (p.y > 0.0f) ? rx : ry;
+
+  float2 q = abs(p) - b + rc;
+  return min(max(q.x, q.y), 0.0f) + length(max(q, float2(0.0f))) - rc;
 }
 
 /**
@@ -99,10 +101,12 @@ float sdRoundBox2D(float2 p, float2 b, float4 r)
  */
 float sdChamferBox2D(float2 p, float2 b, float4 r)
 {
-  r.xy = (p.x > 0.0f) ? r.xy : r.zw;
-  r.x = (p.y > 0.0f) ? r.x : r.y;
+  float rx = (p.x > 0.0f) ? r.x : r.z;
+  float ry = (p.x > 0.0f) ? r.y : r.w;
+  float rc = (p.y > 0.0f) ? rx : ry;
+
   float2 q = abs(p) - b;
-  float rr = r.x;
+  float rr = rc;
   if (rr < 0.001f) {
     return length(max(q, float2(0.0f))) + min(max(q.x, q.y), 0.0f);
   }
@@ -417,32 +421,6 @@ float opChamferSubtraction(float d1, float d2, float r)
   return opChamferIntersection(d2, -d1, r);
 }
 
-float opSmoothChamferUnion(float d1, float d2, float k, float k2, float k3)
-{
-  float chamfer_plane = (d1 + d2 - k) * 0.70710678f;
-  float term1 = opSmoothUnion(d1, chamfer_plane, k2);
-  float term2 = opSmoothUnion(d2, chamfer_plane, k3);
-  return min(term1, term2);
-}
-
-float opSmoothChamferSubtraction(float d1, float d2, float k, float k2, float k3)
-{
-  float A = -d1;
-  float B = d2;
-  float chamfer_plane = (A + B + k) * 0.70710678f;
-  float term1 = opSmoothIntersection(A, chamfer_plane, k2);
-  float term2 = opSmoothIntersection(B, chamfer_plane, k3);
-  return max(term1, term2);
-}
-
-float opSmoothChamferIntersection(float d1, float d2, float k, float k2, float k3)
-{
-  float chamfer_plane = (d1 + d2 + k) * 0.70710678f;
-  float term1 = opSmoothIntersection(d1, chamfer_plane, k2);
-  float term2 = opSmoothIntersection(d2, chamfer_plane, k3);
-  return max(term1, term2);
-}
-
 /* ---- 2D mirror helper (for round blend operations) ---- */
 
 float2 sdf_mirror2D(float2 p, float2 N)
@@ -453,21 +431,7 @@ float2 sdf_mirror2D(float2 p, float2 N)
 
 /* ---- Round (spherical) blend operations ---- */
 
-/* Core building block: inward-rounding difference (concave fillet).
- * Uses 2D distance-field geometry in the (a, b) plane with mirror2D. */
-float opDifferenceIRound(float a, float b, float r)
-{
-  float2 q = float2(a, b);
-  q = sdf_mirror2D(q, normalize(float2(1.0f, 1.0f)));
-  q.y -= r;
-  q.y = min(0.0f, q.y);
-  float ad = sign(q.x) * length(q);
-  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
-  float corn = -(length(s) - r);
-  return max(ad, corn);
-}
-
-/* Inward-rounding union (concave fillet). Kept for future use. */
+/* Inward-rounding union (concave fillet). */
 float opUnionIRound(float a, float b, float r)
 {
   float2 q = float2(a, b);
@@ -478,11 +442,6 @@ float opUnionIRound(float a, float b, float r)
   float2 s = float2(max(a, 0.0f), max(b, 0.0f));
   float corn = length(s) - r;
   return min(ad, corn);
-}
-
-float opIntersectIRound(float a, float b, float r)
-{
-  return opDifferenceIRound(a, -b, r);
 }
 
 /* Outward-expanding round operations (convex fillet at junctions).
@@ -504,51 +463,6 @@ float opRoundIntersection(float d1, float d2, float r)
   return -opUnionIRound(-d1, -d2, r);
 }
 
-/* Smooth + round dual-radius blends. */
-
-float opSmoothRoundUnion(float a, float b, float r, float k2, float k3)
-{
-  float2 s = float2(max(a, 0.0f), max(b, 0.0f));
-  float corner = length(s) - r;
-  float term1 = opSmoothUnion(a, corner, k2);
-  float term2 = opSmoothUnion(b, corner, k3);
-  return min(term1, term2);
-}
-
-float opSmoothRoundSubtraction(float d1, float d2, float r, float k2, float k3)
-{
-  float a = d2;
-  float b = d1;
-  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
-  float corner = r - length(s);
-  float term1 = opSmoothIntersection(a, corner, k2);
-  float term2 = opSmoothIntersection(-b, corner, k3);
-  return max(term1, term2);
-}
-
-float opSmoothRoundIntersection(float d1, float d2, float r, float k2, float k3)
-{
-  float2 s = float2(min(d1, 0.0f), max(-d2, 0.0f));
-  float corner = r - length(s);
-  float term1 = opSmoothIntersection(d1, corner, k2);
-  float term2 = opSmoothIntersection(d2, corner, k3);
-  return max(term1, term2);
-}
-
-/* Smooth + round inverted (outward) union. */
-float opSmoothRoundUnionInverted(float a, float b, float r, float k2, float k3)
-{
-  float diff = opSmoothRoundSubtraction(b, a, r, k2, k3);
-  return min(diff, b);
-}
-
-/* ---- Shell (onion) helper ---- */
-
-float opOnion(float d, float thickness)
-{
-  return abs(d) - thickness;
-}
-
 /* ---- SDF modifier evaluation ---- */
 
 /** Modifier type IDs (must match eSDFModifierType in DNA_sdf_types.h). */
@@ -560,11 +474,42 @@ float opOnion(float d, float thickness)
 #define SDF_MOD_ROUND 5
 #define SDF_MOD_ONION 6
 #define SDF_MOD_BEVEL 7
+#define SDF_MOD_ARRAY 8
 
 /** Mirror axis flags. */
 #define SDF_MOD_MIRROR_X 1
 #define SDF_MOD_MIRROR_Y 2
 #define SDF_MOD_MIRROR_Z 4
+
+/** Array types. */
+#define SDF_MOD_ARRAY_LINEAR 0
+#define SDF_MOD_ARRAY_RADIAL 1
+
+/**
+ * Smooth absolute value for soft mirroring.
+ */
+float sabs(float x, float k)
+{
+  if (k <= 0.0001f) {
+    return abs(x);
+  }
+  float h = clamp(0.5f + 0.5f * x / k, 0.0f, 1.0f);
+  return x * (2.0f * h - 1.0f) + k * h * (1.0f - h);
+}
+
+/**
+ * Smooth domain repetition staircase for soft arrays.
+ */
+float sround(float x, float k)
+{
+  if (k <= 0.0001f) {
+    return round(x);
+  }
+  float i = floor(x + 0.5f - k * 0.5f);
+  float f = fract(x + 0.5f - k * 0.5f);
+  float step_val = smoothstep(0.0f, k, f);
+  return i + step_val;
+}
 
 /**
  * Apply domain modifiers to local position (before SDF primitive evaluation).
@@ -579,14 +524,16 @@ float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
     int mflags = smod.header.y;
 
     if (mtype == SDF_MOD_MIRROR) {
+      float offset = smod.params.x;
+      float blend = smod.params.y;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-        p.x = abs(p.x);
+        p.x = sabs(p.x, blend) - offset;
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-        p.y = abs(p.y);
+        p.y = sabs(p.y, blend) - offset;
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-        p.z = abs(p.z);
+        p.z = sabs(p.z, blend) - offset;
       }
     }
     else if (mtype == SDF_MOD_TWIST) {
@@ -607,34 +554,111 @@ float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
       float3 h = smod.params.xyz;
       p = p - clamp(p, -h, h);
     }
+    else if (mtype == SDF_MOD_ARRAY) {
+      float count = smod.params.x;
+      float blend = smod.params2.x; /* blend is at params[4] = params2.x */
+      if (mflags == SDF_MOD_ARRAY_LINEAR) {
+        float3 offset = smod.params.yzw;
+        float spacing = length(offset);
+        if (spacing > 0.0001f && count > 0.5f) {
+          float3 dir = offset / spacing;
+          float t = dot(p, dir);
+          float id = sround(t / spacing, clamp(blend, 0.0f, 1.0f));
+          id = clamp(id, 0.0f, max(0.0f, count - 1.0f));
+          p = p - dir * id * spacing;
+        }
+      }
+      else if (mflags == SDF_MOD_ARRAY_RADIAL) {
+        float radius = smod.params.y;
+        if (count > 0.5f) {
+          float a = (2.0f * SDF_PI) / count;
+          float current_a = atan(p.y, p.x);
+          float id = sround(current_a / a, clamp(blend, 0.0f, 1.0f));
+          float final_a = current_a - id * a;
+          float r = length(p.xy);
+          p.x = r * cos(final_a) - radius;
+          p.y = r * sin(final_a);
+        }
+      }
+    }
   }
   return p;
 }
 
 /**
- * Apply distance modifiers to SDF distance (after primitive evaluation).
- * Applied in forward stack order.
+ * Cylinder SDF.
+ * \param size: xy = radii, z = half-height.
  */
-float applyDistanceModifiers(float dist, int mod_start, int mod_count)
+float sdCylinder(float3 p, float3 size)
 {
-  for (int i = mod_start; i < mod_start + mod_count; i++) {
-    SDFModifierGPU smod = sdf_modifiers[i];
-    int mtype = smod.header.x;
-
-    if (mtype == SDF_MOD_HOLLOW) {
-      dist = abs(dist) - smod.params.x;
-    }
-    else if (mtype == SDF_MOD_ROUND) {
-      dist -= smod.params.x;
-    }
-    else if (mtype == SDF_MOD_ONION) {
-      dist = abs(dist) - smod.params.x;
-    }
-    /* SDF_MOD_BEVEL is handled in the primitive evaluation stage
-     * (shrink primitive by bevel, then dist -= bevel). No action here. */
-  }
-  return dist;
+  float2 e = max(size.xy, float2(0.001f));
+  float2 pn = p.xy / e;
+  float rn = length(pn);
+  float2 g = pn / (e * max(rn, 1e-6f));
+  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
+  float vertical = abs(p.z) - size.z;
+  float2 d = float2(radial, vertical);
+  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
 }
+
+/**
+ * Cone SDF.
+ */
+float sdCone(float3 p, float r, float h)
+{
+  /* Capped cone: base radius r at z=-h, apex at z=+h.
+   * Based on Inigo Quilez's sdCappedCone.
+   * Must match CPU evaluation in shape_classify_cpu(). */
+  float2 q = float2(length(p.xy), p.z);
+  float2 k1 = float2(0.0f, h);
+  float2 k2 = float2(-r, 2.0f * h);
+  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
+  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
+/**
+ * Capsule SDF.
+ */
+float sdCapsule(float3 p, float3 size)
+{
+  float h = size.y;
+  float r = size.x;
+  p.z -= clamp(p.z, -h, h);
+  return length(p) - r;
+}
+
+/**
+ * Torus SDF.
+ */
+float sdTorus(float3 p, float2 t)
+{
+  float2 q = float2(length(p.xy) - t.x, p.z);
+  return length(q) - t.y;
+}
+
+/**
+ * Sphere SDF.
+ */
+float sdSphere(float3 p, float r)
+{
+  return length(p) - r;
+}
+
+/**
+ * Common primitive data struct for cross-shader evaluation.
+ */
+struct SDFPrimitiveData {
+  int sdf_type;
+  float3 size;
+  float bevel;
+  float4 box_corners;
+  float4 box_edges;
+  int4 box_modes;
+  int modifier_start;
+  int modifier_count;
+};
 
 /* ---- CSG dispatch ---- */
 
@@ -717,11 +741,8 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
         subtracted = opChamferSubtraction(d2, d1, k);
       }
-      else if (bt == SDF_BLEND_TYPE_ROUND) {
-        subtracted = opRoundSubtraction(d2, d1, k);
-      }
       else {
-        subtracted = max(d1, -d2);
+        subtracted = opRoundSubtraction(d2, d1, k);
       }
     }
     else {
@@ -730,9 +751,8 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
     return min(subtracted, d2);
   }
   else if (op == SDF_CSG_OP_AVOID) {
-    /* Avoid: subtract base (d1) from the avoid object (d2), then hard-union
-     * the carved result with the base. Effect: the avoid object is visible
-     * only where it does not overlap the base — other objects carve into it. */
+    /* Avoid: subtract base from avoid object, then hard union with base.
+     * Effect: the avoid object is carved by the base geometry. */
     float carved;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
@@ -741,11 +761,8 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
         carved = opChamferSubtraction(d1, d2, k);
       }
-      else if (bt == SDF_BLEND_TYPE_ROUND) {
-        carved = opRoundSubtraction(d1, d2, k);
-      }
       else {
-        carved = max(d2, -d1);
+        carved = opRoundSubtraction(d1, d2, k);
       }
     }
     else {
@@ -753,6 +770,7 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
     }
     return min(d1, carved);
   }
+  else if (op == SDF_CSG_OP_SHELL) {
   /* SDF_CSG_OP_SHELL (extrusion): two-stage blend matching MathOPS algorithm.
    * Finds the intersection between two SDF fields and extrudes/insets a thin
    * wall of thickness |shell_dist| with correct blending at both stages.
@@ -763,7 +781,6 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
    *
    * Positive shell_dist (extrusion): union shape into base, intersect with limit.
    * Negative shell_dist (inset): subtract shape from base, union with limit. */
-  {
     float h = abs(shell_dist);
     float lk = min(k, h);
 
@@ -836,6 +853,226 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
       return max(d_union, lim);
     }
   }
+  return d1; /* Fallback for unknown ops. */
+}
+
+/**
+ * Evaluate the base primitive shape only.
+ */
+float evalPrimitiveOnly(SDFPrimitiveData obj, float3 local_pos)
+{
+  float3 size = obj.size;
+  float bevel = obj.bevel;
+  float dist;
+
+  if (obj.sdf_type == 1) { /* SPHERE */
+    dist = sdSphere(local_pos, size.x - bevel);
+  }
+  else if (obj.sdf_type == 2) { /* CYLINDER */
+    float3 cyl_size = size - float3(bevel);
+    cyl_size = max(cyl_size, float3(0.001f));
+    dist = sdCylinder(local_pos, cyl_size);
+  }
+  else if (obj.sdf_type == 3) { /* CONE */
+    float cone_r = max(size.x - bevel, 0.001f);
+    float cone_h = max(size.y - bevel, 0.001f);
+    dist = sdCone(local_pos, cone_r, cone_h);
+  }
+  else if (obj.sdf_type == 4) { /* CAPSULE */
+    float3 cap_size = size - float3(bevel);
+    cap_size = max(cap_size, float3(0.001f));
+    dist = sdCapsule(local_pos, cap_size);
+  }
+  else if (obj.sdf_type == 5) { /* TORUS */
+    float major = size.x - bevel;
+    float minor = size.y - bevel;
+    major = max(major, 0.001f);
+    minor = max(minor, 0.001f);
+    if (obj.box_modes.w != 0) {
+      dist = sdCappedTorus(local_pos, obj.box_corners.xy, major, minor);
+    }
+    else {
+      dist = sdTorus(local_pos, float2(major, minor));
+    }
+  }
+  else if (obj.sdf_type == 6) { /* NGON */
+    float R = max(size.x - bevel, 0.001f);
+    float halfH = max(size.z - bevel, 0.001f);
+    int sides = obj.box_modes.z;
+    float corner = obj.box_corners.x;
+    float star = obj.box_corners.y;
+    float edgeTop = obj.box_edges.x;
+    float edgeBot = obj.box_edges.y;
+    float tapTop = obj.box_edges.z;
+    float tapBot = obj.box_edges.w;
+    int edgeMode = obj.box_modes.y;
+    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f;
+    if (hasAdvanced) {
+      dist = sdAdvancedNgon(local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH, star);
+    }
+    else {
+      float d2d = sdRegularPolygon2D(local_pos.xy, R, sides);
+      float dz = abs(local_pos.z) - halfH;
+      float2 dd = float2(d2d, dz);
+      dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    }
+  }
+  else { /* BOX (default) */
+    float4 corners = obj.box_corners;
+    float edgeTop = obj.box_edges.x;
+    float edgeBot = obj.box_edges.y;
+    float tapTop = obj.box_edges.z;
+    float tapBot = obj.box_edges.w;
+    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
+    if (hasAdvanced) {
+      float3 box_size = size - float3(bevel);
+      box_size = max(box_size, float3(0.001f));
+      dist = sdAdvancedBox(local_pos, box_size, corners, edgeTop, edgeBot, tapTop, tapBot, obj.box_modes.x, obj.box_modes.y, box_size.z);
+    }
+    else {
+      float3 box_size = size - float3(bevel);
+      box_size = max(box_size, float3(0.001f));
+      dist = sdBox(local_pos, box_size);
+    }
+  }
+
+  return dist - bevel;
+}
+
+/**
+ * Apply distance modifiers to SDF distance (after primitive evaluation).
+ * Applied in forward stack order.
+ */
+float applyDistanceModifiers(float dist, int mod_start, int mod_count)
+{
+  for (int i = mod_start; i < mod_start + mod_count; i++) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+
+    if (mtype == SDF_MOD_HOLLOW) {
+      dist = abs(dist) - smod.params.x;
+    }
+    else if (mtype == SDF_MOD_ROUND) {
+      dist -= smod.params.x;
+    }
+    else if (mtype == SDF_MOD_ONION) {
+      dist = abs(dist) - smod.params.x;
+    }
+  }
+  return dist;
+}
+
+/**
+ * Evaluate the full SDF for an object with robust branching for CSG modifiers.
+ * Uses exact CSG distance evaluation for up to ONE Array/Mirror for artifact-free smooth blending.
+ */
+float evalObjectSDF(SDFPrimitiveData obj, float3 p)
+{
+  int fork_idx = -1;
+  /* Find the highest (applied last to geometry, evaluated first in domain) forking modifier. */
+  for (int i = obj.modifier_start; i < obj.modifier_start + obj.modifier_count; i++) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+    /* If it has CSG (y), blend_type (z), or blend radius (x), it is configured for true CSG blending. */
+    if ((mtype == SDF_MOD_ARRAY || mtype == SDF_MOD_MIRROR) && (smod.params2.y > 0.0f || smod.params2.z > 0.0f || smod.params2.x > 0.0f)) {
+      fork_idx = i;
+    }
+  }
+
+  if (fork_idx == -1) {
+    p = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count);
+    float d = evalPrimitiveOnly(obj, p);
+    return applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
+  }
+
+  /* Forking path: apply domain modifiers UP TO the forking modifier. */
+  int top_count = (obj.modifier_start + obj.modifier_count) - (fork_idx + 1);
+  if (top_count > 0) {
+    p = applyDomainModifiers(p, fork_idx + 1, top_count);
+  }
+
+  SDFModifierGPU fork_mod = sdf_modifiers[fork_idx];
+  int mtype = fork_mod.header.x;
+  int mflags = fork_mod.header.y;
+  float blend = fork_mod.params2.x;
+  int csg_op = int(fork_mod.params2.y);
+  int blend_type = int(fork_mod.params2.z);
+
+  float final_d = (csg_op == SDF_CSG_OP_INTERSECT) ? -1e10f : 1e10f;
+  int bottom_count = fork_idx - obj.modifier_start;
+
+  if (mtype == SDF_MOD_MIRROR) {
+    int mirrors = 1;
+    if ((mflags & SDF_MOD_MIRROR_X) != 0) mirrors *= 2;
+    if ((mflags & SDF_MOD_MIRROR_Y) != 0) mirrors *= 2;
+    if ((mflags & SDF_MOD_MIRROR_Z) != 0) mirrors *= 2;
+
+    bool first = true;
+    for (int i = 0; i < 8; i++) {
+      if (i >= mirrors) break;
+      float3 cell_p = p;
+      int flip_idx = i;
+      if ((mflags & SDF_MOD_MIRROR_X) != 0) { if ((flip_idx & 1) != 0) cell_p.x = -cell_p.x; flip_idx >>= 1; }
+      if ((mflags & SDF_MOD_MIRROR_Y) != 0) { if ((flip_idx & 1) != 0) cell_p.y = -cell_p.y; flip_idx >>= 1; }
+      if ((mflags & SDF_MOD_MIRROR_Z) != 0) { if ((flip_idx & 1) != 0) cell_p.z = -cell_p.z; }
+
+      float offset = fork_mod.params.x;
+      if ((mflags & SDF_MOD_MIRROR_X) != 0) cell_p.x -= offset;
+      if ((mflags & SDF_MOD_MIRROR_Y) != 0) cell_p.y -= offset;
+      if ((mflags & SDF_MOD_MIRROR_Z) != 0) cell_p.z -= offset;
+
+      if (bottom_count > 0) cell_p = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count);
+      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p), obj.modifier_start, obj.modifier_count);
+      
+      if (first) { final_d = d; first = false; }
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f);
+    }
+  }
+  else if (mtype == SDF_MOD_ARRAY) {
+    float count = fork_mod.params.x;
+    float id;
+    float3 dir = float3(1,0,0);
+    float spacing = 1.0f;
+    if (mflags == SDF_MOD_ARRAY_LINEAR) {
+      float3 offset = fork_mod.params.yzw;
+      spacing = length(offset);
+      if (spacing > 0.0001f) {
+        dir = offset / spacing;
+        id = round(dot(p, dir) / spacing);
+      } else id = 0.0f;
+    } else {
+      float a = (2.0f * SDF_PI) / max(count, 1e-4f);
+      id = round(atan(p.y, p.x) / a);
+    }
+
+    float last_cid = -9999.0f;
+    bool first = true;
+    for(int i = -1; i <= 1; i++) {
+      float cid = clamp(id + float(i), 0.0f, max(0.0f, count - 1.0f));
+      if (cid == last_cid) continue;
+      last_cid = cid;
+
+      float3 cell_p = p;
+      if (mflags == SDF_MOD_ARRAY_LINEAR) {
+        if (spacing > 0.0001f) cell_p -= dir * cid * spacing;
+      } else {
+        float a = (2.0f * SDF_PI) / count;
+        float final_a = atan(p.y, p.x) - cid * a;
+        float r = length(p.xy);
+        float radius = fork_mod.params.y;
+        cell_p.x = r * cos(final_a) - radius;
+        cell_p.y = r * sin(final_a);
+      }
+
+      if (bottom_count > 0) cell_p = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count);
+      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p), obj.modifier_start, obj.modifier_count);
+      
+      if (first) { final_d = d; first = false; }
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f);
+    }
+  }
+
+  return final_d;
 }
 
 /** \} */

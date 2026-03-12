@@ -37,25 +37,7 @@
 #define FxaaTexTop(t, p) textureLod(t, p, 0.0)
 #define FxaaTexOff(t, p, o, r) textureLod(t, p + (vec2(o) * r), 0.0)
 
-/* ---- Color space helpers ---- */
-
-vec3 sdf_fxaa_linear_to_srgb(vec3 linear)
-{
-  vec3 higher = vec3(1.055) * pow(linear, vec3(1.0 / 2.4)) - vec3(0.055);
-  vec3 lower = linear * vec3(12.92);
-  return mix(lower, higher, step(vec3(0.0031308), linear));
-}
-
-vec3 sdf_fxaa_srgb_to_linear(vec3 srgb)
-{
-  vec3 higher = pow((srgb + vec3(0.055)) / vec3(1.055), vec3(2.4));
-  vec3 lower = srgb / vec3(12.92);
-  return mix(lower, higher, step(vec3(0.04045), srgb));
-}
-
-/* Perceptual luma for edge detection.
- * Simple dot-product is sufficient for edge detection and avoids
- * 33+ pow() calls per pixel from the sRGB conversion path. */
+/* Perceptual luma for edge detection. */
 float FxaaLuma(vec3 rgb)
 {
   return dot(rgb, vec3(0.299, 0.587, 0.114));

@@ -942,7 +942,7 @@ if(WITH_BLENDER)
       vis_sel_10
       vis_sel_11
       sdf_data
-      sdf_primitive
+      sdf_cube
       sdf_blend_linear
       sdf_blend_smooth
       sdf_blend_chamfer
@@ -959,6 +959,7 @@ if(WITH_BLENDER)
       sdf_capsule
       sdf_torus
       sdf_ngon
+      sdf_group
       volume_data
       vpaint_hlt
       warning_large

@@ -27,6 +27,8 @@
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_vfont_types.h"
 
 #include "BLI_array_utils.hh"
@@ -90,6 +92,7 @@
 #include "BKE_pointcloud.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_sdf_group.hh"
 #include "BKE_speaker.h"
 #include "BKE_vfont.hh"
 #include "BKE_volume.hh"
@@ -4422,6 +4425,20 @@ static void object_add_sync_rigid_body(Main *bmain, Object *object_src, Object *
   }
 }
 
+/** Add duplicated SDF object to the same group as the original. */
+static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
+{
+  if (object_src->type != OB_SDF || !object_src->data) {
+    return;
+  }
+  SDF *sdf_src = static_cast<SDF *>(object_src->data);
+  SDFGroup *group = sdf_src->sdf_group;
+  if (!group) {
+    return;
+  }
+  BKE_sdf_group_member_add(group, object_new);
+}
+
 /**
  * - Assumes `id.new` is correct.
  * - Leaves selection of base/object unaltered.
@@ -4470,6 +4487,7 @@ static Base *object_add_duplicate_internal(Main *bmain,
     object_add_sync_local_view(base_src, base_new);
   }
   object_add_sync_rigid_body(bmain, ob, object_new);
+  object_add_sync_sdf_group(ob, object_new);
   return base_new;
 }
 
@@ -4563,6 +4581,7 @@ static wmOperatorStatus duplicate_exec(bContext *C, wmOperator *op)
     if (link.object_new) {
       object_add_sync_base_collection(bmain, scene, view_layer, link.base_src, link.object_new);
       object_add_sync_rigid_body(bmain, link.base_src->object, link.object_new);
+      object_add_sync_sdf_group(link.base_src->object, link.object_new);
     }
   }
 

@@ -56,8 +56,10 @@ class Sdfs : Overlay {
   int map_slot_ = -1;
   int obj_slot_ = -1;
   int mod_slot_ = -1;
+  int grp_slot_ = -1;
   int voxel_size_loc_ = -1;
   int object_count_loc_ = -1;
+  int group_count_loc_ = -1;
 
  public:
   Sdfs(const SelectionType selection_type) : selection_type_(selection_type) {};
@@ -123,8 +125,10 @@ class Sdfs : Overlay {
         map_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "select_id_map_buf");
         obj_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "sdf_objects");
         mod_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "sdf_modifiers");
+        grp_slot_ = GPU_shader_get_ssbo_binding(select_march_sh_, "groups");
         voxel_size_loc_ = GPU_shader_get_uniform(select_march_sh_, "voxel_size");
         object_count_loc_ = GPU_shader_get_uniform(select_march_sh_, "object_count");
+        group_count_loc_ = GPU_shader_get_uniform(select_march_sh_, "group_count");
       }
     }
     if (!select_march_sh_) {
@@ -181,6 +185,11 @@ class Sdfs : Overlay {
       GPU_storagebuf_bind(mod_ssbo, mod_slot_);
     }
 
+    gpu::StorageBuf *grp_ssbo = sdf::sdf_groups_ssbo_get();
+    if (grp_ssbo) {
+      GPU_storagebuf_bind(grp_ssbo, grp_slot_);
+    }
+
     /* Bind selection system UBO and output SSBO. */
     if (select_info_buf_) {
       GPU_uniformbuf_bind(select_info_buf_, SELECT_DATA);
@@ -203,6 +212,8 @@ class Sdfs : Overlay {
     GPU_shader_uniform_float_ex(select_march_sh_, voxel_size_loc_, 1, 1, &voxel_size);
     int obj_count = sdf::sdf_object_count_get();
     GPU_shader_uniform_int_ex(select_march_sh_, object_count_loc_, 1, 1, &obj_count);
+    int grp_count = sdf::sdf_group_count_get();
+    GPU_shader_uniform_int_ex(select_march_sh_, group_count_loc_, 1, 1, &grp_count);
 
     /* Bind the view UBO for camera matrices. */
     view.matrices_ubo_get().push_update();

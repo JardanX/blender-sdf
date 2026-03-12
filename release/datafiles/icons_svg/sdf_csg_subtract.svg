@@ -1,6 +1,8 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
-  <g fill="none" stroke="#fff" stroke-width="90" stroke-linejoin="miter">
-    <path d="M 200,200 H 950 V 650 H 650 V 950 H 200 Z"/>
-    <path d="M 650,650 H 1400 V 1400 H 650 Z"/>
+  <g fill="none" stroke="#fff" stroke-width="100" stroke-linejoin="miter">
+    <!-- Top-left square (the subtractor) -->
+    <path d="M 350,350 H 950 V 950 H 350 Z"/>
+    <!-- Bottom-right shape (the subtracted result, an L-shape matching the cropped square in Image 2) -->
+    <path d="M 950,650 H 1250 V 1250 H 650 V 950 H 950 Z"/>
   </g>
 </svg>

@@ -921,6 +921,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     draw(infront, resources.overlay_in_front_fb);
     draw_line(infront, resources.overlay_line_in_front_fb);
+
   }
   {
     /* Color only pass. */

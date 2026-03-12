@@ -160,6 +160,7 @@ class TreeDisplayViewLayer final : public AbstractTreeDisplay {
 
  private:
   void add_view_layer(Scene &, ListBase &, TreeElement *);
+  void add_sdf_groups(Main &bmain, ListBase &tree, TreeElement *parent);
   void add_layer_collections_recursive(ListBase &, ListBase &, TreeElement &);
   void add_layer_collection_objects(ListBase &, LayerCollection &, TreeElement &);
   void add_layer_collection_objects_children(TreeElement &);

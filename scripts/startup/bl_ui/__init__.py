@@ -36,6 +36,7 @@ _modules = [
     "properties_data_lightprobe",
     "properties_data_speaker",
     "properties_data_sdf",
+    "properties_data_sdf_group",
     "properties_data_volume",
     "properties_mask_common",
     "properties_material",

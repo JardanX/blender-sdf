@@ -1,9 +1,9 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
   <g fill="#fff" fill-rule="evenodd">
-    <!-- Outer capsule ring (vertical pill shape) -->
+    <!-- Outer capsule ring (ratio 1.5:1) -->
     <path d="M 300,600 A 500,500 0 0,1 1300,600 V 1000 A 500,500 0 0,1 300,1000 Z
              M 400,600 A 400,400 0 0,1 1200,600 V 1000 A 400,400 0 0,1 400,1000 Z"/>
-    <!-- Inner filled capsule -->
-    <path d="M 600,720 A 200,200 0 0,1 1000,720 V 880 A 200,200 0 0,1 600,880 Z"/>
+    <!-- Inner filled capsule (stretched, matching 1.5:1 ratio of ring) -->
+    <path d="M 600,700 A 200,200 0 0,1 1000,700 V 900 A 200,200 0 0,1 600,900 Z"/>
   </g>
 </svg>

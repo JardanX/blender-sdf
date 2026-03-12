@@ -71,6 +71,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_material_drop);
   WM_operatortype_append(OUTLINER_OT_datastack_drop);
   WM_operatortype_append(OUTLINER_OT_collection_drop);
+  WM_operatortype_append(OUTLINER_OT_sdf_group_drop);
 
   /* collections */
   WM_operatortype_append(OUTLINER_OT_collection_new);

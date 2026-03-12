@@ -30,48 +30,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_shape_bake)
 #define SDF_TYPE_TORUS 5
 #define SDF_TYPE_NGON 6
 
-float sdSphere(float3 p, float r)
-{
-  return length(p) - r;
-}
-
-float sdCapsule(float3 p, float3 size)
-{
-  float h = size.y;
-  float r = size.x;
-  p.z -= clamp(p.z, -h, h);
-  return length(p) - r;
-}
-
-float sdTorus(float3 p, float2 t)
-{
-  float2 q = float2(length(p.xy) - t.x, p.z);
-  return length(q) - t.y;
-}
-
-float sdCylinder(float3 p, float3 size)
-{
-  float2 e = max(size.xy, float2(0.001f));
-  float2 pn = p.xy / e;
-  float rn = length(pn);
-  float2 g = pn / (e * max(rn, 1e-6f));
-  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
-  float vertical = abs(p.z) - size.z;
-  float2 d = float2(radial, vertical);
-  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
-}
-
-float sdCone(float3 p, float r, float h)
-{
-  float2 q = float2(length(p.xy), p.z);
-  float2 k1 = float2(0.0f, h);
-  float2 k2 = float2(-r, 2.0f * h);
-  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
-  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
-  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
-  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
-}
-
 void main()
 {
   /* Active-brick-only dispatch: one workgroup per active brick. */

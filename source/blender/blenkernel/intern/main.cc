@@ -982,6 +982,8 @@ ListBase *which_libbase(Main *bmain, short type)
       return &(bmain->volumes);
     case ID_SF:
       return &(bmain->sdfs);
+    case ID_SG:
+      return &(bmain->sdf_groups);
   }
   return nullptr;
 }
@@ -1023,6 +1025,7 @@ MainListsArray BKE_main_lists_get(Main &bmain)
   lb[INDEX_ID_PT] = &bmain.pointclouds;
   lb[INDEX_ID_VO] = &bmain.volumes;
   lb[INDEX_ID_SF] = &bmain.sdfs;
+  lb[INDEX_ID_SG] = &bmain.sdf_groups;
 
   lb[INDEX_ID_LT] = &bmain.lattices;
   lb[INDEX_ID_LA] = &bmain.lights;

@@ -1974,3 +1974,270 @@ Adds a Text SDF primitive that rasterizes font glyphs to a 2D SDF atlas via BLF,
 | File | Change |
 |------|--------|
 | `source/blender/makesrna/intern/rna_sdf.cc` | Added `RNA_def_property_flag(prop, PROP_TEXTEDIT_UPDATE)` to the `text` property |
+
+---
+
+## SDF Groups — Ordered Evaluation Containers
+
+Added `SDFGroup` as a new ID type (`ID_SG`) that acts as an ordered container for SDF objects.
+Each group evaluates its members sequentially (top-to-bottom), producing a single combined SDF.
+Groups then combine with each other via group-level CSG operations.
+
+### New Files (5)
+
+| File | Purpose |
+|------|---------|
+| `makesdna/DNA_sdf_group_types.h` | `SDFGroup` + `SDFGroupMember` DNA structs |
+| `makesdna/DNA_sdf_group_defaults.h` | Default values (union, smooth blend 0.1, white color) |
+| `blenkernel/BKE_sdf_group.hh` | Public API: add, member_add/remove/move, reindex |
+| `blenkernel/intern/sdf_group.cc` | IDTypeInfo (`IDType_ID_SG`) + API implementation |
+| `makesrna/intern/rna_sdf_group.cc` | RNA property definitions for SDFGroup + SDFGroupMember |
+| `scripts/startup/bl_ui/properties_data_sdf_group.py` | Properties panels for SDFGroup |
+
+### Modified Files — DNA
+
+| File | Change |
+|------|--------|
+| `DNA_ID_enums.h` | Added `ID_SG = MAKE_ID2('S', 'G')` |
+| `DNA_ID.h` | Added `FILTER_ID_SG`, `INDEX_ID_SG`, updated `FILTER_ID_ALL` |
+| `DNA_sdf_types.h` | Added `sdf_group` pointer and `group_order` to SDF struct |
+| `source/blender/CMakeLists.txt` | Added `DNA_sdf_group_types.h` to `SRC_DNA_INC` |
+
+### Modified Files — BKE
+
+| File | Change |
+|------|--------|
+| `intern/idtype.cc` | `INIT_TYPE(ID_SG)` + both `CASE_IDINDEX(SG)` switches |
+| `intern/main.cc` | `case ID_SG` in `which_libbase()` + `BKE_main_lists_get()` |
+| `BKE_main.hh` | Added `ListBase sdf_groups = {}` to Main |
+| `intern/sdf.cc` | Walk `sdf->sdf_group` in `sdf_foreach_id()` |
+| `CMakeLists.txt` | Added `sdf_group.cc` and `BKE_sdf_group.hh` |
+
+### Modified Files — RNA
+
+| File | Change |
+|------|--------|
+| `rna_ID.cc` | `case ID_SG: return &RNA_SDFGroup;` |
+| `rna_main.cc` | `bpy.data.sdf_groups` collection |
+| `rna_main_api.cc` | `.new()` / `.remove()` / `.tag()` API |
+| `makesrna.cc` | Registered `rna_sdf_group.cc` |
+| `rna_sdf.cc` | Added `sdf_group` pointer + `group_order` on SDF struct |
+| `rna_internal.hh` | Declarations for `RNA_def_sdf_group` and `RNA_def_main_sdf_groups` |
+| `CMakeLists.txt` | Added `rna_sdf_group.cc` |
+
+### Modified Files — Depsgraph
+
+| File | Change |
+|------|--------|
+| `deg_builder_nodes.cc` | `case ID_SG:` in generic ID section |
+| `deg_builder_relations.cc` | `case ID_SG:` in generic ID section |
+| `depsgraph_tag.cc` | `case ID_SG: return NodeType::PARAMETERS;` |
+
+### Modified Files — Editors
+
+| File | Change |
+|------|--------|
+| `object/object_sdf.cc` | Auto-grouping on SDF add + 4 new operators: group_add, group_assign, group_remove_member, group_reorder |
+| `object/object_intern.hh` | Declarations for 4 new operators |
+| `object/object_ops.cc` | Registered 4 new operators |
+| `space_buttons/buttons_context.cc` | `context.sdf_group` exposure |
+| `space_outliner/outliner_draw.cc` | `case ID_SG:` icon |
+| `space_outliner/outliner_select.cc` | `case ID_SG:` context panel |
+| `space_outliner/outliner_tools.cc` | `case ID_SG:` standard ID |
+| `space_outliner/tree/tree_element_id.cc` | `case ID_SG:` tree element |
+| `interface/interface_icons.cc` | `case ID_SG:` in `UI_icon_from_id()` |
+
+### Modified Files — Draw (Shader Pipeline)
+
+| File | Change |
+|------|--------|
+| `sdf_shader_shared.hh` | Added `SDFGroupGPU` struct; added `group_id`, `group_first` to `SDFObjectGPU`; added `group_count` to params structs |
+| `sdf_engine.h` | Added `sdf_groups_ssbo_get()` and `sdf_group_count_get()` public API |
+| `sdf_engine.cc` | Group SSBO upload, binding in classify/bake dispatch, group building from `bmain->sdf_groups`, destructor cleanup, static getters |
+| `shaders/infos/sdf_shader_infos.hh` | Added `groups[]` SSBO (slot 5) + `group_count` push constant to classify, bake, select_march, outline_march shaders |
+| `shaders/sdf_bake_comp.glsl` | Replaced two-pass evaluation with sequential group-aware evaluation + ungrouped fallback |
+| `shaders/sdf_classify_comp.glsl` | Same group-aware evaluation change |
+| `shaders/sdf_select_march_frag.glsl` | Group-aware hit verification for CSG-modified surfaces |
+| `shaders/sdf_outline_march_frag.glsl` | Same group-aware hit verification |
+
+### Modified Files — Overlay
+
+| File | Change |
+|------|--------|
+| `overlay_sdf.hh` | Bind group SSBO + set `group_count` uniform for selection shader |
+| `overlay_outline.hh` | Bind group SSBO + set `group_count` uniform for outline shader |
+
+### Modified Files — Python UI
+
+| File | Change |
+|------|--------|
+| `bl_ui/__init__.py` | Registered `properties_data_sdf_group` module |
+| `bl_ui/properties_data_sdf.py` | Removed `DATA_PT_sdf_group` panel — group settings only shown when selecting group root in outliner |
+| `bl_ui/space_view3d.py` | Added "SDF Group" to Add > SDF menu |
+
+### Modified Files — Outliner (Selection & Display)
+
+| File | Change |
+|------|--------|
+| `outliner_select.cc` | Added `ID_SG` selection handling: clicking SDFGroup selects all member objects and activates first member |
+| `outliner_draw.cc` | SDF group order number prefix in outliner names (e.g. "1. Cube"), `ICON_SDF_GROUP` for group entries |
+| `outliner_intern.hh` | Added `ID_SG` to `TREESTORE_ID_TYPE` macro (required for group visibility in outliner) |
+| `tree/tree_display_view_layer.cc` | Added `add_sdf_groups()` method to build SDF group tree entries with member children |
+| `tree/tree_display.hh` | Declared `add_sdf_groups()` private method |
+
+### New Files — Icons
+
+| File | Change |
+|------|--------|
+| `release/datafiles/icons_svg/sdf_group.svg` | Custom SVG icon for SDF groups (overlapping rounded squares) |
+
+### Bug Fixes — Group Lifecycle & Cleanup
+
+| File | Change |
+|------|--------|
+| `blenkernel/intern/sdf.cc` | Changed `sdf_group` pointer walk from `IDWALK_CB_NOP` to `IDWALK_CB_USER` — fixes groups being orphaned during undo/user-count recalculation |
+| `blenkernel/intern/sdf_group.cc` | Added `id_us_plus`/`id_us_min` for group reference when setting/clearing SDF back-pointer; `sdf_group_foreach_id` now removes NULL members (deleted SDFs) and reindexes survivors |
+| `editors/space_buttons/buttons_context.cc` | Added SDFGroup to context path via SDF back-pointer, making group panels visible in Properties editor |
+
+### Group Transform Feature
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_sdf_group_types.h` | Added `loc[3]`, `rot[3]`, `scale[3]` fields to SDFGroup struct |
+| `makesdna/DNA_sdf_group_defaults.h` | Added defaults: loc=0, rot=0, scale=1 |
+| `makesrna/intern/rna_sdf_group.cc` | Added `location`, `rotation`, `scale` RNA properties |
+| `draw/engines/sdf/sdf_engine.cc` | Group transform composed with member object matrices via `loc_eul_size_to_mat4` in `object_sync`; added `BLI_math_matrix.h` include |
+| `bl_ui/properties_data_sdf_group.py` | Added `DATA_PT_sdf_group_transform` panel with location/rotation/scale fields |
+
+### Outliner Cleanup — SDF Objects Hidden from Scene Collection
+
+| File | Change |
+|------|--------|
+| `tree/tree_display_view_layer.cc` | SDF objects (`OB_SDF`) filtered from `add_layer_collection_objects` and flat view — they only appear under SDF Groups; NULL members cleaned up in `add_sdf_groups` before tree build |
+
+### Properties Editor — Exclusive Group/SDF Panel Display
+
+| File | Change |
+|------|--------|
+| `editors/space_buttons/buttons_context.cc` | Added `RNA_SDFGroup` to data path checks (with `type == -1` guard to prevent bone tab showing); removed SDFGroup-alongside-SDF path addition; added `"sdf_group"` to context directory |
+| `editors/space_outliner/outliner_select.cc` | Added `outliner_sdf_group_update_pin()` helper — pins SDFGroup in Properties editors when group root is clicked, clears pin when anything else is clicked. SDF Group click → only group panels; SDF member click → only SDF panels |
+
+### Bug Fixes — Duplicate, Delete, Reorder, Bone Tab
+
+| File | Change |
+|------|--------|
+| `editors/object/object_add.cc` | Added `object_add_sync_sdf_group()` — duplicated SDF objects auto-added to same group as original; includes for `DNA_sdf_group_types.h`, `DNA_sdf_types.h`, `BKE_sdf_group.hh` |
+| `editors/object/object_sdf.cc` | Reorder and remove operators now use `member_index` parameter instead of active object; find group from pinned SDFGroup or active object; removed `ED_operator_objectmode` poll to work from Properties panel; added `DNA_space_types.h` include |
+| `scripts/startup/bl_ui/properties_data_sdf_group.py` | Reorder and remove buttons now pass `member_index = idx` to operators |
+| `blenkernel/BKE_sdf_group.hh` | Added `BKE_sdf_group_cleanup_null_members()` declaration |
+| `blenkernel/intern/sdf_group.cc` | Added `BKE_sdf_group_cleanup_null_members()` — removes members with NULL object pointers and reindexes |
+| `editors/space_outliner/tree/tree_display_view_layer.cc` | Replaced inline NULL member cleanup with `BKE_sdf_group_cleanup_null_members()` call |
+
+### Outliner Order Display Fix & Reorder from Outliner
+
+| File | Change |
+|------|--------|
+| `editors/space_outliner/outliner_draw.cc` | Order numbers now derived from tree position (sibling index) instead of stale `sdf->group_order` field — checks parent is ID_SG to show "N. Name" prefix |
+| `scripts/startup/bl_ui/space_outliner.py` | Added "Move Up in Group" / "Move Down in Group" to OUTLINER_MT_object right-click menu for SDF objects in groups |
+
+### Outliner Reorder Arrow Buttons
+
+| File | Change |
+|------|--------|
+| `editors/space_outliner/outliner_draw.cc` | Added `outliner_draw_sdf_reorder_buts()` — draws up/down arrow buttons for SDF members under SDF Groups in the outliner; called from `draw_outliner()` after restrict buttons |
+
+### SDF Group Origin Viewport Overlay
+
+| File | Change |
+|------|--------|
+| `draw/engines/overlay/overlay_sdf_group_origins.hh` | **New.** `SdfGroupOrigins` overlay class — draws plain axes (cross) markers at each SDFGroup's `loc` position using the `extra_shape` shader. Iterates `bmain->sdf_groups` in `end_sync()` (groups are not Objects, so no `object_sync`). Uses group's `color` field for marker color |
+| `draw/engines/overlay/overlay_instance.hh` | Added `#include "overlay_sdf_group_origins.hh"`, `SdfGroupOrigins sdf_group_origins` member at Instance level (alongside Origins) |
+| `draw/engines/overlay/overlay_instance.cc` | Added `sdf_group_origins` calls in `begin_sync()`, `end_sync()`, and `draw_v3d()` (after layer draw_line calls) |
+
+### Bug Fixes — Arrow Overlap, Deleted SDF Display, Pin Clearing
+
+| File | Change |
+|------|--------|
+| `editors/space_outliner/outliner_draw.cc` | Arrow button positions now offset by `outliner_right_columns_width()` to avoid overlapping restrict column icons |
+| `editors/space_outliner/tree/tree_display_view_layer.cc` | Skip creating tree elements for group members whose object has no Base in the view layer (prevents grayed-out display of deleted SDFs) |
+| `editors/space_view3d/view3d_select.cc` | Clear SDFGroup pin from Properties editors on viewport click — ensures Properties shows SDF data panels after viewport selection instead of stale group panels |
+
+### Removed Group Transform & Visual Overlay
+
+Group transform (loc/rot/scale) and viewport origin overlay removed — groups are purely organizational containers; members are moved individually.
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_sdf_group_types.h` | Removed `loc[3]`, `rot[3]`, `scale[3]` and padding fields from SDFGroup struct |
+| `makesdna/DNA_sdf_group_defaults.h` | Removed `.loc`, `.rot`, `.scale` defaults |
+| `makesrna/intern/rna_sdf_group.cc` | Removed `location`, `rotation`, `scale` RNA property definitions |
+| `draw/engines/sdf/sdf_engine.cc` | Removed group transform composition (`loc_eul_size_to_mat4` block in `object_sync`); removed `BLI_math_matrix.h` include |
+| `bl_ui/properties_data_sdf_group.py` | Removed `DATA_PT_sdf_group_transform` panel |
+| `draw/engines/overlay/overlay_sdf_group_origins.hh` | **Deleted.** Viewport overlay for group origin markers no longer needed |
+| `draw/engines/overlay/overlay_instance.hh` | Removed `SdfGroupOrigins` include and member |
+| `draw/engines/overlay/overlay_instance.cc` | Removed `sdf_group_origins` calls from `begin_sync()`, `end_sync()`, `draw_v3d()` |
+
+### Fixed Arrow Buttons — Group Name Passing
+
+Outliner reorder/remove buttons now work by passing `group_name` directly to operators instead of relying on Properties editor context (which is unavailable in outliner).
+
+| File | Change |
+|------|--------|
+| `editors/object/object_sdf.cc` | Added `sdf_group_from_operator()` helper that resolves SDFGroup from: (1) `group_name` operator property, (2) pinned ID, (3) active object; added `group_name` string property to both reorder and remove operators; added `BKE_lib_id.hh` include |
+| `editors/space_outliner/outliner_draw.cc` | Arrow buttons now set `group_name` property on operator via `RNA_string_set()` |
+| `bl_ui/properties_data_sdf_group.py` | Python panel buttons also pass `group_name` for consistency |
+
+### Improved SDF Group Icon
+
+| File | Change |
+|------|--------|
+| `release/datafiles/icons_svg/sdf_group.svg` | Redesigned icon: overlapping cube, sphere ring, and cone silhouettes (matches reference image of grouped 3D objects) |
+
+### Outliner Sort Fix — Preserve SDF Group Member Order
+
+| File | Change |
+|------|--------|
+| `editors/space_outliner/outliner_tree.cc` | Both `outliner_sort()` and `outliner_collections_children_sort()` now early-return when `lb` is a subtree whose parent is an `ID_SG` element — checked via `first_te->parent`. Previous approach (guarding only the recursive descent) was insufficient because the sort fires on the list **before** recursing into children. The early-return prevents any qsort from touching SDF group member order while still recursing into members' own subtrees |
+
+### CSG/Blend Controls Moved to Outliner
+
+Removed per-SDF Operation panel from Properties. CSG operation and blend type are now controlled via icon buttons in the outliner for each SDF group member.
+
+| File | Change |
+|------|--------|
+| `bl_ui/properties_data_sdf.py` | Removed `DATA_PT_sdf_operation` panel class and registration |
+| `editors/object/object_sdf.cc` | Added `OBJECT_OT_sdf_set_csg` and `OBJECT_OT_sdf_set_blend` operators for setting CSG/blend on SDF objects by name |
+| `editors/object/object_intern.hh` | Declared new operators |
+| `editors/object/object_ops.cc` | Registered new operators |
+| `editors/space_outliner/outliner_draw.cc` | Added `sdf_csg_icon()`, `sdf_blend_icon()`, `sdf_csg_next()`, `sdf_blend_next()` helpers; CSG and blend icon buttons drawn for each SDF group member (skipped for first member which acts as base); reorder arrows moved to columns 3-4 to make room |
+
+### Reorder Button Fix — ExecRegionWin + Notifiers
+
+| File | Change |
+|------|--------|
+| `editors/space_outliner/outliner_draw.cc` | Changed reorder button `OpCallContext` from `ExecDefault` to `ExecRegionWin` |
+| `editors/object/object_sdf.cc` | Added `NC_SCENE \| ND_OB_ACTIVE` notifier to reorder and remove operators for outliner rebuild |
+
+---
+
+## Async Shader Precompilation
+
+### Problem
+
+SDF shaders were compiled lazily on first draw via `ensure_shaders()` — 6 synchronous calls to `GPU_shader_create_from_info_name()`. Despite `DO_STATIC_COMPILATION()` flags, Blender only uses those for a debug validation tool (`--debug-gpu-compile-shaders`), not for startup warmup. First frame with SDF objects would stall while all shaders compiled sequentially.
+
+### Solution
+
+Shader compilation now starts asynchronously in `init()` using `GPU_shader_batch_create_from_infos()`, which dispatches compilation to a background subprocess. By the time `draw()` calls `ensure_shaders()`, binaries are typically ready. On subsequent launches, the OpenGL binary cache (`gl-shader-cache/`) provides near-instant loads.
+
+### Architecture
+
+- **Table-driven**: Shader names and pointers managed via `ShaderIndex` enum + `shader_info_names_[]` array. Adding a shader = one enum value + one string.
+- **Reference aliases**: `classify_sh_`, `bake_sh_`, etc. are C++ references into `shaders_[SH_COUNT]`, so all existing code works unchanged.
+- **Lifecycle**: Destructor cancels in-flight batches and frees all shaders (fixes pre-existing leak).
+
+### Modified Files (Draw)
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Replaced 6 raw `gpu::Shader*` members with `ShaderIndex` enum, `shader_info_names_[]` table, `shaders_[SH_COUNT]` array, and reference aliases. Added `BatchHandle shader_compile_batch_` and `bool shaders_compiled_` members. `init()` kicks off `GPU_shader_batch_create_from_infos()` on first call. `ensure_shaders()` finalizes the batch (blocking only if subprocess not done) with synchronous fallback. Destructor cancels in-flight batch and frees all shaders via loop |

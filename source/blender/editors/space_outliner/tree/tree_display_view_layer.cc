@@ -6,17 +6,25 @@
  * \ingroup spoutliner
  */
 
+#include "MEM_guardedalloc.h"
+
 #include "DNA_collection_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
 #include "BKE_layer.hh"
 #include "BKE_library.hh"
+#include "BKE_main.hh"
+#include "BKE_sdf_group.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
 #include "BLI_set.hh"
+#include "BLI_string.h"
 #include "BLI_vector.hh"
 
 #include "../outliner_intern.hh"
@@ -83,6 +91,9 @@ ListBase TreeDisplayViewLayer::build_tree(const TreeSourceData &source_data)
         continue;
       }
 
+      /* SDF Groups section (before scene collections). */
+      add_sdf_groups(*source_data.bmain, tree, nullptr);
+
       add_view_layer(*scene, tree, (TreeElement *)nullptr);
     }
     else {
@@ -98,6 +109,9 @@ ListBase TreeDisplayViewLayer::build_tree(const TreeSourceData &source_data)
       te_view_layer.name = view_layer->name;
       te_view_layer.directdata = view_layer;
 
+      /* SDF Groups section (before collections inside view layer). */
+      add_sdf_groups(*source_data.bmain, te_view_layer.subtree, &te_view_layer);
+
       add_view_layer(*scene, te_view_layer.subtree, &te_view_layer);
     }
   }
@@ -105,14 +119,67 @@ ListBase TreeDisplayViewLayer::build_tree(const TreeSourceData &source_data)
   return tree;
 }
 
+void TreeDisplayViewLayer::add_sdf_groups(Main &bmain, ListBase &tree, TreeElement *parent)
+{
+  if (BLI_listbase_is_empty(&bmain.sdf_groups)) {
+    return;
+  }
+
+  LISTBASE_FOREACH (SDFGroup *, group, &bmain.sdf_groups) {
+    /* Clean up members whose objects were deleted (pointer became NULL). */
+    BKE_sdf_group_cleanup_null_members(group);
+
+    /* Add the group as a tree element (uses group->id.name for display). */
+    TreeElement *te_group = add_element(
+        &tree, &group->id, nullptr, parent, TSE_SOME_ID, 0, false);
+    if (!te_group) {
+      continue;
+    }
+
+    /* Open SDF group entries by default. */
+    TreeStoreElem *tselem = TREESTORE(te_group);
+    if (!tselem->used) {
+      tselem->flag &= ~TSE_CLOSED;
+    }
+
+    /* Add member objects as children. The outliner_draw code handles
+     * prepending the order number (e.g. "1. Cube") for SDF objects. */
+    BKE_view_layer_synced_ensure(scene_, view_layer_);
+    LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+      if (!member->object) {
+        continue;
+      }
+      Base *base = BKE_view_layer_base_find(view_layer_, member->object);
+      /* Skip members whose object was removed from the view layer (deleted). */
+      if (!base) {
+        continue;
+      }
+      TreeElement *te_member = add_element(
+          &te_group->subtree,
+          reinterpret_cast<ID *>(member->object),
+          nullptr,
+          te_group,
+          TSE_SOME_ID,
+          0,
+          false);
+      if (te_member) {
+        te_member->directdata = base;
+      }
+    }
+  }
+}
+
 void TreeDisplayViewLayer::add_view_layer(Scene &scene, ListBase &tree, TreeElement *parent)
 {
   const bool show_children = (space_outliner_.filter & SO_FILTER_NO_CHILDREN) == 0;
 
   if (space_outliner_.filter & SO_FILTER_NO_COLLECTION) {
-    /* Show objects in the view layer. */
+    /* Show objects in the view layer (SDF objects are shown under SDF Groups instead). */
     BKE_view_layer_synced_ensure(&scene, view_layer_);
     for (Base *base : List<Base>(*BKE_view_layer_object_bases_get(view_layer_))) {
+      if (base->object->type == OB_SDF) {
+        continue;
+      }
       TreeElement *te_object = add_element(
           &tree, reinterpret_cast<ID *>(base->object), nullptr, parent, TSE_SOME_ID, 0);
       te_object->directdata = base;
@@ -179,6 +246,10 @@ void TreeDisplayViewLayer::add_layer_collection_objects(ListBase &tree,
 {
   BKE_view_layer_synced_ensure(scene_, view_layer_);
   for (CollectionObject *cob : List<CollectionObject>(lc.collection->gobject)) {
+    /* SDF objects are shown under their SDF Group, not in the collection tree. */
+    if (cob->ob->type == OB_SDF) {
+      continue;
+    }
     Base *base = BKE_view_layer_base_find(view_layer_, cob->ob);
     TreeElement *te_object = add_element(
         &tree, reinterpret_cast<ID *>(base->object), nullptr, &ten, TSE_SOME_ID, 0);

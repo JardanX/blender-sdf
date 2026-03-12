@@ -309,6 +309,7 @@ set(SRC
   intern/vfont_curve.cc
   intern/vfontdata_freetype.cc
   intern/sdf.cc
+  intern/sdf_group.cc
   intern/viewer_path.cc
   intern/volume.cc
   intern/volume_grid.cc
@@ -526,6 +527,7 @@ set(SRC
   BKE_vfont.hh
   BKE_vfontdata.hh
   BKE_sdf.hh
+  BKE_sdf_group.hh
   BKE_viewer_path.hh
   BKE_volume.hh
   BKE_volume_enums.hh

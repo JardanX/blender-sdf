@@ -62,4 +62,10 @@ gpu::StorageBuf *sdf_objects_ssbo_get();
 /** Returns the modifiers SSBO (SDFModifierGPU[]), or nullptr. */
 gpu::StorageBuf *sdf_modifiers_ssbo_get();
 
+/** Returns the groups SSBO (SDFGroupGPU[]), or nullptr. */
+gpu::StorageBuf *sdf_groups_ssbo_get();
+
+/** Returns the number of SDF groups in the current bake. */
+int sdf_group_count_get();
+
 }  // namespace blender::draw::sdf

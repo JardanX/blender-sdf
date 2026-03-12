@@ -2518,7 +2518,7 @@ class VIEW3D_MT_sdf_add(Menu):
     def draw(self, _context):
         layout = self.layout
         layout.operator_context = 'EXEC_REGION_WIN'
-        layout.operator("object.sdf_add", text="SDF Cube", icon='SDF_PRIMITIVE').type = 'BOX'
+        layout.operator("object.sdf_add", text="SDF Cube", icon='SDF_CUBE').type = 'BOX'
         layout.operator("object.sdf_add", text="SDF Sphere", icon='SDF_SPHERE').type = 'SPHERE'
         layout.operator("object.sdf_add", text="SDF Cylinder", icon='SDF_CYLINDER').type = 'CYLINDER'
         layout.operator("object.sdf_add", text="SDF Cone", icon='SDF_CONE').type = 'CONE'
@@ -2527,6 +2527,8 @@ class VIEW3D_MT_sdf_add(Menu):
         layout.operator("object.sdf_add", text="SDF N-Gon", icon='SDF_NGON').type = 'NGON'
         layout.separator()
         layout.operator("object.mesh_to_sdf_grid", text="Mesh to SDF Grid", icon='MESH_GRID')
+        layout.separator()
+        layout.operator("object.sdf_group_add", text="SDF Group", icon='SDF_DATA')
 
 
 class VIEW3D_MT_volume_add(Menu):
