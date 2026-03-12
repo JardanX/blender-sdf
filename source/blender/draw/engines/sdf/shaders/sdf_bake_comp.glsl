@@ -86,9 +86,13 @@ void main()
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
   /* Per-brick AABB for object culling (includes 2-voxel overlap border).
-   * Expand by max_blend for smooth union and max_shell_distance so bricks in
-   * the shell zone can find base union objects as candidates. */
-  float candidate_expand = max_blend + max_shell_distance;
+   * Expand by brick_half_diag to match the classify shader's surface detection
+   * radius, plus max_blend for smooth union and max_shell_distance so bricks
+   * in the shell zone can find base union objects as candidates.
+   * Without brick_half_diag, the bake shader can miss objects that the classify
+   * shader found — producing stale voxels (e.g., subtraction not applied). */
+  float bhd = float(BRICK_SIZE) * voxel_size * 0.866025f;
+  float candidate_expand = bhd + max_blend + max_shell_distance;
   float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
                       float3(candidate_expand);
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +

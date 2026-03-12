@@ -162,6 +162,8 @@ class Instance : public DrawEngine {
   Vector<SDFObjectGPU> objects_;
   /** Per-object SDFGroup pointer (for group_id resolution in end_sync). */
   Vector<SDFGroup *> object_group_ptrs_;
+  /** Per-object original Object pointer (for group_order resolution in end_sync). */
+  Vector<Object *> object_ptrs_;
 
   /** Scene AABB accumulated from all SDF objects. */
   float3 scene_min_ = float3(1e30f);
@@ -464,6 +466,7 @@ class Instance : public DrawEngine {
 
     objects_.clear();
     object_group_ptrs_.clear();
+    object_ptrs_.clear();
     modifiers_.clear();
     groups_gpu_.clear();
     pending_grid_objects_.clear();
@@ -579,6 +582,7 @@ class Instance : public DrawEngine {
     gpu_obj.group_order = sdf_data->group_order;
     gpu_obj.original_index = int(objects_.size());
     object_group_ptrs_.append(sdf_data->sdf_group);
+    object_ptrs_.append(ob);
 
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
@@ -953,11 +957,23 @@ class Instance : public DrawEngine {
     }
 
     /* Build group GPU data from Main's sdf_groups list.
-     * Also build a pointer→index map to resolve per-object group_id values. */
+     * Also build maps to resolve per-object group_id and group_order values
+     * directly from the original group member lists (not from evaluated SDF
+     * copies, which may have stale group_order values). */
     {
       Main *bmain = DEG_get_bmain(draw_ctx_->depsgraph);
       groups_gpu_.clear();
       Map<SDFGroup *, int> group_index_map;
+
+      /* Map from original Object* → (group_id, group_order).
+       * Built by iterating the original group member lists, so the order
+       * always matches the outliner display order. */
+      struct GroupMembership {
+        int group_id;
+        int group_order;
+      };
+      Map<Object *, GroupMembership> object_membership_map;
+
       int g_idx = 0;
       int obj_offset = 0;
       LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
@@ -970,17 +986,32 @@ class Instance : public DrawEngine {
         gpu_grp.object_count = group->totmember;
         groups_gpu_.append(gpu_grp);
         group_index_map.add(group, g_idx);
+
+        /* Record each member's (group_id, group_order) from the original list order. */
+        int member_order = 0;
+        LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+          if (member->object) {
+            object_membership_map.add_overwrite(member->object,
+                                                {g_idx, member_order});
+          }
+          member_order++;
+        }
+
         g_idx++;
         obj_offset += group->totmember;
       }
 
-      /* Resolve group_id on objects using the pointer→index map. */
-      BLI_assert(int(object_group_ptrs_.size()) == int(objects_.size()));
+      /* Resolve group_id and group_order on objects using the membership map.
+       * Uses the original Object pointer (via DEG_get_original) to look up
+       * the correct order from the original group member list. */
+      BLI_assert(int(object_ptrs_.size()) == int(objects_.size()));
       for (int i = 0; i < int(objects_.size()); i++) {
-        SDFGroup *grp = object_group_ptrs_[i];
-        if (grp) {
-          const int *idx = group_index_map.lookup_ptr(grp);
-          objects_[i].group_id = idx ? *idx : -1;
+        Object *eval_ob = object_ptrs_[i];
+        Object *orig_ob = DEG_get_original(eval_ob);
+        const GroupMembership *membership = object_membership_map.lookup_ptr(orig_ob);
+        if (membership) {
+          objects_[i].group_id = membership->group_id;
+          objects_[i].group_order = membership->group_order;
         }
       }
 
@@ -1039,6 +1070,42 @@ class Instance : public DrawEngine {
         }
         groups_gpu_[gi].first_object = (first >= 0) ? first : 0;
         groups_gpu_[gi].object_count = count;
+      }
+    }
+
+    /* Group-combined AABBs: every member of a group gets the union of ALL
+     * members' AABBs. CSG operations (subtract, intersect, shell, etc.) need
+     * every participating shape to produce correct distances. If a brick near
+     * the combined surface only finds the base shape but not the subtraction,
+     * the baked voxels contain raw base distances (all negative / inside),
+     * creating false solid surfaces inside subtraction cavities.
+     *
+     * By giving all group members the same combined AABB, any brick that sees
+     * ANY member will see ALL members as BVH candidates. This is slightly
+     * conservative (subtraction objects are candidates even far from their
+     * own surface) but guarantees correctness for all CSG configurations. */
+    {
+      const int num_groups = int(groups_gpu_.size());
+      for (int gi = 0; gi < num_groups; gi++) {
+        /* Compute union AABB of all members in this group. */
+        float3 group_min = float3(1e30f);
+        float3 group_max = float3(-1e30f);
+        for (const SDFObjectGPU &obj : objects_) {
+          if (obj.group_id == gi) {
+            group_min = math::min(group_min, float3(obj.bbox_min));
+            group_max = math::max(group_max, float3(obj.bbox_max));
+          }
+        }
+        if (group_min.x > 1e29f) {
+          continue; /* No members found for this group. */
+        }
+        /* Apply the combined AABB to every member. */
+        for (SDFObjectGPU &obj : objects_) {
+          if (obj.group_id == gi) {
+            obj.bbox_min = float4(group_min, 0.0f);
+            obj.bbox_max = float4(group_max, 0.0f);
+          }
+        }
       }
     }
 
