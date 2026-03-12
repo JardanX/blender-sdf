@@ -1,0 +1,30 @@
+/* SPDX-FileCopyrightText: 2025 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup DNA
+ */
+
+#pragma once
+
+/* clang-format off */
+
+/* -------------------------------------------------------------------- */
+/** \name SDFGroup Struct
+ * \{ */
+
+#define _DNA_DEFAULT_SDFGroup \
+  { \
+    .csg_operation = 0, /* SDF_CSG_UNION */ \
+    .blend_type = 1, /* SDF_BLEND_SMOOTH */ \
+    .blend = 0.1f, \
+    .shell_distance = 0.2f, \
+    .color = {1.0f, 1.0f, 1.0f, 1.0f}, \
+    .totmember = 0, \
+    .group_order = 0, \
+  }
+
+/** \} */
+
+/* clang-format on */

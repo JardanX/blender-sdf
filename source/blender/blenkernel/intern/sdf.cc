@@ -11,6 +11,7 @@
 #include "DNA_defaults.h"
 #include "DNA_material_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 
 #include "BLI_listbase.h"
@@ -67,6 +68,7 @@ static void sdf_foreach_id(ID *id, LibraryForeachIDData *data)
   for (int i = 0; i < sdf->totcol; i++) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->mat[i], IDWALK_CB_USER);
   }
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->sdf_group, IDWALK_CB_USER);
 }
 
 static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
@@ -159,6 +161,8 @@ static const char *sdf_modifier_type_name(int type)
       return "Onion";
     case SDF_MOD_BEVEL:
       return "Bevel";
+    case SDF_MOD_ARRAY:
+      return "Array";
     default:
       return "Modifier";
   }
@@ -174,6 +178,7 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
   switch (type) {
     case SDF_MOD_MIRROR:
       mod->flag = SDF_MOD_MIRROR_X;
+      mod->params[0] = 0.0f; /* Offset distance */
       break;
     case SDF_MOD_TWIST:
       mod->params[0] = 1.0f;
@@ -198,6 +203,13 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
       break;
     case SDF_MOD_BEVEL:
       mod->params[0] = 0.1f;
+      break;
+    case SDF_MOD_ARRAY:
+      mod->flag = SDF_MOD_ARRAY_LINEAR; /* Default to linear array */
+      mod->params[0] = 3.0f; /* Count */
+      mod->params[1] = 1.0f; /* Offset X / Radius */
+      mod->params[2] = 0.0f; /* Offset Y */
+      mod->params[3] = 0.0f; /* Offset Z */
       break;
     default:
       break;

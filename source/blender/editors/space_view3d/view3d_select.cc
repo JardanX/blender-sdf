@@ -19,6 +19,7 @@
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_types.h"
 #include "DNA_tracking_types.h"
 
 #include "MEM_guardedalloc.h"
@@ -3493,6 +3494,20 @@ static bool ed_grease_pencil_select_pick(bContext *C,
 
 static wmOperatorStatus view3d_select_exec(bContext *C, wmOperator *op)
 {
+  /* Clear SDFGroup pin from Properties editors on viewport click.
+   * The pin is set when clicking an SDF Group root in the outliner;
+   * a viewport click means the user has moved on to direct selection. */
+  bScreen *screen = CTX_wm_screen(C);
+  LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
+    if (area->spacetype != SPACE_PROPERTIES) {
+      continue;
+    }
+    SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+    if (sbuts->pinid && GS(sbuts->pinid->name) == ID_SG) {
+      sbuts->pinid = nullptr;
+    }
+  }
+
   Scene *scene = CTX_data_scene(C);
   Object *obedit = CTX_data_edit_object(C);
   Object *obact = CTX_data_active_object(C);

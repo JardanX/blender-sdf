@@ -345,6 +345,27 @@ class OUTLINER_MT_object(Menu):
 
         layout.separator()
 
+        # SDF Group reorder: show Move Up/Down when the active object is in a group.
+        ob = context.active_object
+        if ob and ob.type == 'SDF' and hasattr(ob.data, 'sdf_group') and ob.data.sdf_group:
+            grp = ob.data.sdf_group
+            # Find member index.
+            member_idx = -1
+            for i, m in enumerate(grp.members):
+                if m.object == ob:
+                    member_idx = i
+                    break
+            if member_idx >= 0:
+                layout.separator()
+                op = layout.operator("object.sdf_group_reorder", text="Move Up in Group", icon='TRIA_UP')
+                op.member_index = member_idx
+                op.direction = -1
+                op = layout.operator("object.sdf_group_reorder", text="Move Down in Group", icon='TRIA_DOWN')
+                op.member_index = member_idx
+                op.direction = 1
+
+        layout.separator()
+
         layout.menu("OUTLINER_MT_id_data")
 
         layout.separator()

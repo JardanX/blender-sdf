@@ -13,6 +13,8 @@
 #include "DNA_collection_types.h"
 #include "DNA_material_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_group_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
 #include "BLI_listbase.h"
@@ -28,6 +30,7 @@
 #include "BKE_material.hh"
 #include "BKE_object.hh"
 #include "BKE_report.hh"
+#include "BKE_sdf_group.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
@@ -1153,6 +1156,14 @@ static bool collection_drop_init(bContext *C, wmDrag *drag, const int xy[2], Col
     return false;
   }
 
+  /* SDF objects belong in SDF Groups, not collections. */
+  if (GS(id->name) == ID_OB) {
+    Object *ob = (Object *)id;
+    if (ob->type == OB_SDF) {
+      return false;
+    }
+  }
+
   /* Get collection to drag out of. */
   ID *parent = drag_id->from_parent;
   Collection *from_collection = collection_parent_from_ID(parent);
@@ -1516,7 +1527,9 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
         id = &outliner_collection_from_tree_element(te_selected)->id;
       }
 
-      /* Find parent collection. */
+      /* Find parent collection. SDF objects may live under SDF Groups
+       * which are not collection tree elements, so fall back to the
+       * scene master collection when no collection parent is found. */
       Collection *parent = nullptr;
 
       if (te_selected->parent) {
@@ -1529,7 +1542,8 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
           }
         }
       }
-      else {
+
+      if (!parent) {
         Scene *scene = CTX_data_scene(C);
         parent = scene->master_collection;
       }
@@ -1570,6 +1584,196 @@ void OUTLINER_OT_item_drag_drop(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Group Drop Operator
+ * \{ */
+
+/**
+ * Find the SDF Group tree element at the given position.
+ * Returns the group pointer if hovering over an SDF Group element.
+ */
+static SDFGroup *sdf_group_drop_find(bContext *C, const int xy[2])
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  ARegion *region = CTX_wm_region(C);
+
+  if (BLI_listbase_is_empty(&space_outliner->tree)) {
+    return nullptr;
+  }
+
+  int mval[2];
+  mval[0] = xy[0] - region->winrct.xmin;
+  mval[1] = xy[1] - region->winrct.ymin;
+
+  float view_mval[2];
+  UI_view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
+
+  TreeElement *te = outliner_find_item_at_y(space_outliner, &space_outliner->tree, view_mval[1]);
+  if (!te) {
+    return nullptr;
+  }
+
+  TreeStoreElem *tselem = TREESTORE(te);
+  if (!tselem->id || GS(tselem->id->name) != ID_SG) {
+    return nullptr;
+  }
+
+  return (SDFGroup *)tselem->id;
+}
+
+static bool sdf_group_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  ARegion *region = CTX_wm_region(C);
+  bool changed = outliner_flag_set(*space_outliner, TSE_HIGHLIGHTED_ANY | TSE_DRAG_ANY, false);
+
+  /* Only accept ID drags. */
+  if (drag->type != WM_DRAG_ID) {
+    if (changed) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+    return false;
+  }
+
+  /* Only accept SDF objects (OB_SDF). */
+  wmDragID *drag_id = static_cast<wmDragID *>(drag->ids.first);
+  if (!drag_id || !drag_id->id || GS(drag_id->id->name) != ID_OB) {
+    if (changed) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+    return false;
+  }
+  Object *ob = (Object *)drag_id->id;
+  if (ob->type != OB_SDF) {
+    if (changed) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+    return false;
+  }
+
+  SDFGroup *group = sdf_group_drop_find(C, event->xy);
+  if (!group) {
+    if (changed) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+    return false;
+  }
+
+  /* Check that the object isn't already in this group. */
+  SDF *sdf_data = (ob->data && ob->type == OB_SDF) ? static_cast<SDF *>(ob->data) : nullptr;
+  if (sdf_data && sdf_data->sdf_group == group) {
+    if (changed) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+    return false;
+  }
+
+  /* Highlight the drop target. */
+  int mval[2];
+  mval[0] = event->xy[0] - region->winrct.xmin;
+  mval[1] = event->xy[1] - region->winrct.ymin;
+  float view_mval[2];
+  UI_view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
+
+  TreeElement *te = outliner_find_item_at_y(
+      space_outliner, &space_outliner->tree, view_mval[1]);
+  if (te) {
+    TreeStoreElem *tselem = TREESTORE(te);
+    tselem->flag |= TSE_DRAG_INTO;
+    changed = true;
+  }
+
+  if (changed) {
+    ED_region_tag_redraw_no_rebuild(region);
+  }
+  return true;
+}
+
+static std::string sdf_group_drop_tooltip(bContext *C,
+                                           wmDrag * /*drag*/,
+                                           const int xy[2],
+                                           wmDropBox * /*drop*/)
+{
+  SDFGroup *group = sdf_group_drop_find(C, xy);
+  if (group) {
+    return TIP_("Add to SDF Group");
+  }
+  return {};
+}
+
+static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
+                                               wmOperator * /*op*/,
+                                               const wmEvent *event)
+{
+  Main *bmain = CTX_data_main(C);
+
+  if (event->custom != EVT_DATA_DRAGDROP) {
+    return OPERATOR_CANCELLED;
+  }
+
+  ListBase *lb = static_cast<ListBase *>(event->customdata);
+  wmDrag *drag = static_cast<wmDrag *>(lb->first);
+
+  SDFGroup *group = sdf_group_drop_find(C, event->xy);
+  if (!group) {
+    return OPERATOR_CANCELLED;
+  }
+
+  LISTBASE_FOREACH (wmDragID *, drag_id, &drag->ids) {
+    if (!drag_id->id || GS(drag_id->id->name) != ID_OB) {
+      continue;
+    }
+
+    Object *ob = (Object *)drag_id->id;
+    if (ob->type != OB_SDF || !ob->data) {
+      continue;
+    }
+
+    SDF *sdf_data = static_cast<SDF *>(ob->data);
+
+    /* Remove from old group first. */
+    if (sdf_data->sdf_group && sdf_data->sdf_group != group) {
+      SDFGroup *old_group = sdf_data->sdf_group;
+      LISTBASE_FOREACH (SDFGroupMember *, member, &old_group->members) {
+        if (member->object == ob) {
+          BKE_sdf_group_member_remove(old_group, member);
+          break;
+        }
+      }
+      DEG_id_tag_update(&old_group->id, ID_RECALC_GEOMETRY);
+    }
+
+    /* Skip if already in target group. */
+    if (sdf_data->sdf_group == group) {
+      continue;
+    }
+
+    /* Add to new group. */
+    BKE_sdf_group_member_add(group, ob);
+  }
+
+  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
+  DEG_relations_tag_update(bmain);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  WM_event_add_notifier(C, NC_SCENE | ND_OB_ACTIVE, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_sdf_group_drop(wmOperatorType *ot)
+{
+  ot->name = "Add to SDF Group";
+  ot->description = "Drag SDF object into an SDF group in Outliner";
+  ot->idname = "OUTLINER_OT_sdf_group_drop";
+
+  ot->invoke = sdf_group_drop_invoke;
+  ot->poll = ED_operator_outliner_active;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Drop Boxes
  * \{ */
 
@@ -1587,6 +1791,12 @@ void outliner_dropboxes()
                  nullptr,
                  nullptr,
                  datastack_drop_tooltip);
+  WM_dropbox_add(lb,
+                 "OUTLINER_OT_sdf_group_drop",
+                 sdf_group_drop_poll,
+                 nullptr,
+                 nullptr,
+                 sdf_group_drop_tooltip);
   WM_dropbox_add(lb,
                  "OUTLINER_OT_collection_drop",
                  collection_drop_poll,

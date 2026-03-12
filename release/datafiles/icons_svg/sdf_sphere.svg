@@ -1,9 +1,8 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
   <g fill="#fff" fill-rule="evenodd">
-    <!-- Outer circular ring -->
     <path d="M 800,100 A 700,700 0 1,1 800,1500 A 700,700 0 1,1 800,100 Z
              M 800,200 A 600,600 0 1,0 800,1400 A 600,600 0 1,0 800,200 Z"/>
-    <!-- Inner filled circle -->
-    <circle cx="800" cy="800" r="260"/>
+    <!-- Inner circle (gap=200: ring inner r=600, inner r=400) -->
+    <circle cx="800" cy="800" r="400"/>
   </g>
 </svg>

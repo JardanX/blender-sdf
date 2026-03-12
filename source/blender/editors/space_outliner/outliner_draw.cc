@@ -15,6 +15,7 @@
 #include "DNA_object_force_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_text_types.h"
@@ -35,6 +36,7 @@
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
 #include "BKE_deform.hh"
+#include "BKE_global.hh"
 #include "BKE_gpencil_legacy.h"
 #include "BKE_grease_pencil.hh"
 #include "BKE_idtype.hh"
@@ -2487,7 +2489,7 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
           case SDF_TYPE_NGON:
             return ICON_SDF_NGON;
           default:
-            return ICON_SDF_PRIMITIVE;
+            return ICON_SDF_CUBE;
         }
       }
       case OB_EMPTY:
@@ -2586,6 +2588,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       return ICON_OUTLINER_DATA_VOLUME;
     case ID_SF:
       return ICON_SDF_DATA;
+    case ID_SG:
+      return ICON_SDF_GROUP;
     case ID_LI:
       if (id->tag & ID_TAG_MISSING) {
         return ICON_LIBRARY_DATA_BROKEN;
@@ -3539,10 +3543,40 @@ static void outliner_draw_tree_element(uiBlock *block,
         text_color[3] = 255;
       }
       text_color[3] *= alpha_fac;
-      UI_fontstyle_draw_simple(fstyle, startx + offsx, *starty + 5 * ufac, te->name, text_color);
+
+      /* SDF objects under a group: prepend position number (e.g. "1. Cube").
+       * Use the tree position (sibling index) rather than the stored group_order
+       * to guarantee the displayed number always matches the visual order. */
+      char sdf_prefixed_name[256];
+      const char *display_name = te->name;
+      if (tselem->type == TSE_SOME_ID && te->idcode == ID_OB && te->parent) {
+        TreeStoreElem *parent_tselem = TREESTORE(te->parent);
+        if (parent_tselem->type == TSE_SOME_ID && GS(parent_tselem->id->name) == ID_SG) {
+          int pos = BLI_findindex(&te->parent->subtree, te);
+          BLI_snprintf(sdf_prefixed_name, sizeof(sdf_prefixed_name), "%d. %s", pos + 1, te->name);
+          display_name = sdf_prefixed_name;
+        }
+      }
+
+      UI_fontstyle_draw_simple(
+          fstyle, startx + offsx, *starty + 5 * ufac, display_name, text_color);
     }
 
-    offsx += int(UI_UNIT_X + UI_fontstyle_string_width(fstyle, te->name));
+    /* SDF objects: use prefixed name width for offset calculation too. */
+    {
+      const char *width_name = te->name;
+      char sdf_prefixed_name2[256];
+      if (tselem->type == TSE_SOME_ID && te->idcode == ID_OB && te->parent) {
+        TreeStoreElem *parent_tselem2 = TREESTORE(te->parent);
+        if (parent_tselem2->type == TSE_SOME_ID && GS(parent_tselem2->id->name) == ID_SG) {
+          int pos = BLI_findindex(&te->parent->subtree, te);
+          BLI_snprintf(
+              sdf_prefixed_name2, sizeof(sdf_prefixed_name2), "%d. %s", pos + 1, te->name);
+          width_name = sdf_prefixed_name2;
+        }
+      }
+      offsx += int(UI_UNIT_X + UI_fontstyle_string_width(fstyle, width_name));
+    }
 
     /* Closed item, we draw the icons, not when it's a scene, or master-server list though. */
     if (!TSELEM_OPEN(tselem, space_outliner)) {
@@ -4042,6 +4076,207 @@ static void outliner_update_viewable_area(ARegion *region,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Group Reorder Arrows
+ * \{ */
+
+/**
+ * Draw up/down reorder arrows for SDF members under SDF Group parents.
+ */
+static BIFIconID sdf_csg_icon(int csg_op)
+{
+  switch (csg_op) {
+    case SDF_CSG_UNION:
+      return ICON_SDF_CSG_UNION;
+    case SDF_CSG_SUBTRACT:
+      return ICON_SDF_CSG_SUBTRACT;
+    case SDF_CSG_INTERSECT:
+      return ICON_SDF_CSG_INTERSECT;
+    case SDF_CSG_SHELL:
+      return ICON_SDF_CSG_EXTRUDE;
+    case SDF_CSG_PUSH:
+      return ICON_SDF_CSG_PUSH;
+    case SDF_CSG_AVOID:
+      return ICON_SDF_CSG_AVOID;
+    default:
+      return ICON_SDF_CSG_UNION;
+  }
+}
+
+static BIFIconID sdf_blend_icon(int blend_type)
+{
+  switch (blend_type) {
+    case SDF_BLEND_LINEAR:
+      return ICON_SDF_BLEND_LINEAR;
+    case SDF_BLEND_SMOOTH:
+      return ICON_SDF_BLEND_SMOOTH;
+    case SDF_BLEND_CHAMFER:
+      return ICON_SDF_BLEND_CHAMFER;
+    case SDF_BLEND_ROUND:
+      return ICON_SDF_BLEND_ROUND;
+    default:
+      return ICON_SDF_BLEND_LINEAR;
+  }
+}
+
+static int sdf_csg_next(int csg_op)
+{
+  /* Cycle: union -> subtract -> intersect -> shell -> push -> avoid -> union. */
+  return (csg_op + 1) % 6;
+}
+
+static int sdf_blend_next(int blend_type)
+{
+  /* Cycle: linear -> smooth -> chamfer -> round -> linear. */
+  return (blend_type + 1) % 4;
+}
+
+static void outliner_draw_sdf_reorder_buts(uiBlock *block,
+                                           ARegion *region,
+                                           SpaceOutliner *space_outliner,
+                                           ListBase *lb)
+{
+  LISTBASE_FOREACH (TreeElement *, te, lb) {
+    TreeStoreElem *tselem = TREESTORE(te);
+
+    if (te->ys + 2 * UI_UNIT_Y >= region->v2d.cur.ymin && te->ys <= region->v2d.cur.ymax) {
+
+      /* --- SDFGroup row: draw group reorder arrows --- */
+      if (tselem->type == TSE_SOME_ID && tselem->id && GS(tselem->id->name) == ID_SG) {
+        SDFGroup *group = (SDFGroup *)tselem->id;
+        const char *group_name = group->id.name + 2;
+
+        /* Find group index and total for enable/disable. */
+        Main *bmain = G_MAIN;
+        int group_index = BLI_findindex(&bmain->sdf_groups, group);
+        int group_total = BLI_listbase_count(&bmain->sdf_groups);
+
+        const float restrict_width = outliner_right_columns_width(space_outliner);
+        const int col_up = int(restrict_width) + 2 * UI_UNIT_X;
+        const int col_down = int(restrict_width) + UI_UNIT_X;
+
+        /* Up arrow (disabled for first group). */
+        uiBut *bt_gup = uiDefIconButO(block,
+                                      ButType::But,
+                                      "OBJECT_OT_sdf_group_reorder_group",
+                                      wm::OpCallContext::ExecRegionWin,
+                                      ICON_TRIA_UP,
+                                      int(region->v2d.cur.xmax - col_up),
+                                      te->ys,
+                                      UI_UNIT_X,
+                                      UI_UNIT_Y,
+                                      TIP_("Move group up"));
+        PointerRNA *gup_props = UI_but_operator_ptr_ensure(bt_gup);
+        RNA_string_set(gup_props, "group_name", group_name);
+        RNA_int_set(gup_props, "direction", -1);
+        UI_but_flag_enable(bt_gup, UI_BUT_DRAG_LOCK);
+        if (group_index == 0) {
+          UI_but_disable(bt_gup, "Already first");
+        }
+
+        /* Down arrow (disabled for last group). */
+        uiBut *bt_gdn = uiDefIconButO(block,
+                                      ButType::But,
+                                      "OBJECT_OT_sdf_group_reorder_group",
+                                      wm::OpCallContext::ExecRegionWin,
+                                      ICON_TRIA_DOWN,
+                                      int(region->v2d.cur.xmax - col_down),
+                                      te->ys,
+                                      UI_UNIT_X,
+                                      UI_UNIT_Y,
+                                      TIP_("Move group down"));
+        PointerRNA *gdn_props = UI_but_operator_ptr_ensure(bt_gdn);
+        RNA_string_set(gdn_props, "group_name", group_name);
+        RNA_int_set(gdn_props, "direction", 1);
+        UI_but_flag_enable(bt_gdn, UI_BUT_DRAG_LOCK);
+        if (group_index >= group_total - 1) {
+          UI_but_disable(bt_gdn, "Already last");
+        }
+      }
+
+      /* --- SDF member row: draw reorder and remove buttons --- */
+      if (tselem->type == TSE_SOME_ID && te->idcode == ID_OB && te->parent) {
+        TreeStoreElem *parent_tselem = TREESTORE(te->parent);
+        if (parent_tselem->type == TSE_SOME_ID && GS(parent_tselem->id->name) == ID_SG) {
+          int member_index = BLI_findindex(&te->parent->subtree, te);
+          int total = BLI_listbase_count(&te->parent->subtree);
+          const char *group_name = parent_tselem->id->name + 2;
+
+          Object *ob = (Object *)tselem->id;
+
+          /* Layout from right: [restrict cols] [X] [down] [up] */
+          const float restrict_width = outliner_right_columns_width(space_outliner);
+          const int col_up = int(restrict_width) + 3 * UI_UNIT_X;   /* Up arrow */
+          const int col_down = int(restrict_width) + 2 * UI_UNIT_X; /* Down arrow */
+          const int col_rm = int(restrict_width) + UI_UNIT_X;       /* X remove */
+
+          /* Up arrow (disabled for first member). */
+          uiBut *bt_up = uiDefIconButO(block,
+                                       ButType::But,
+                                       "OBJECT_OT_sdf_group_reorder",
+                                       wm::OpCallContext::ExecRegionWin,
+                                       ICON_TRIA_UP,
+                                       int(region->v2d.cur.xmax - col_up),
+                                       te->ys,
+                                       UI_UNIT_X,
+                                       UI_UNIT_Y,
+                                       TIP_("Move up in SDF group"));
+          PointerRNA *up_props = UI_but_operator_ptr_ensure(bt_up);
+          RNA_int_set(up_props, "member_index", member_index);
+          RNA_int_set(up_props, "direction", -1);
+          RNA_string_set(up_props, "group_name", group_name);
+          UI_but_flag_enable(bt_up, UI_BUT_DRAG_LOCK);
+          if (member_index == 0) {
+            UI_but_disable(bt_up, "Already first");
+          }
+
+          /* Down arrow (disabled for last member). */
+          uiBut *bt_down = uiDefIconButO(block,
+                                         ButType::But,
+                                         "OBJECT_OT_sdf_group_reorder",
+                                         wm::OpCallContext::ExecRegionWin,
+                                         ICON_TRIA_DOWN,
+                                         int(region->v2d.cur.xmax - col_down),
+                                         te->ys,
+                                         UI_UNIT_X,
+                                         UI_UNIT_Y,
+                                         TIP_("Move down in SDF group"));
+          PointerRNA *down_props = UI_but_operator_ptr_ensure(bt_down);
+          RNA_int_set(down_props, "member_index", member_index);
+          RNA_int_set(down_props, "direction", 1);
+          RNA_string_set(down_props, "group_name", group_name);
+          UI_but_flag_enable(bt_down, UI_BUT_DRAG_LOCK);
+          if (member_index >= total - 1) {
+            UI_but_disable(bt_down, "Already last");
+          }
+
+          /* Remove member (X) button. */
+          uiBut *bt_rm = uiDefIconButO(block,
+                                       ButType::But,
+                                       "OBJECT_OT_sdf_group_remove_member",
+                                       wm::OpCallContext::ExecRegionWin,
+                                       ICON_X,
+                                       int(region->v2d.cur.xmax - col_rm),
+                                       te->ys,
+                                       UI_UNIT_X,
+                                       UI_UNIT_Y,
+                                       TIP_("Remove from SDF group"));
+          PointerRNA *rm_props = UI_but_operator_ptr_ensure(bt_rm);
+          RNA_int_set(rm_props, "member_index", member_index);
+          RNA_string_set(rm_props, "group_name", group_name);
+          UI_but_flag_enable(bt_rm, UI_BUT_DRAG_LOCK);
+        }
+      }
+    }
+
+    if (TSELEM_OPEN(tselem, space_outliner)) {
+      outliner_draw_sdf_reorder_buts(block, region, space_outliner, &te->subtree);
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Main Entry-point
  *
  * Draw contents of Outliner editor.
@@ -4158,6 +4393,9 @@ void draw_outliner(const bContext *C, bool do_rebuild)
                                &space_outliner->tree,
                                props_active);
   }
+
+  /* Draw SDF group reorder arrows. */
+  outliner_draw_sdf_reorder_buts(block, region, space_outliner, &space_outliner->tree);
 
   /* Draw mode icons */
   if (use_mode_column) {

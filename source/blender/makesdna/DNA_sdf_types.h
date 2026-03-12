@@ -14,6 +14,7 @@
 
 struct AnimData;
 struct Material;
+struct SDFGroup;
 
 #ifdef __cplusplus
 namespace blender::bke {
@@ -66,6 +67,7 @@ typedef enum eSDFModifierType {
   SDF_MOD_ROUND = 5,
   SDF_MOD_ONION = 6,
   SDF_MOD_BEVEL = 7,
+  SDF_MOD_ARRAY = 8,
 } eSDFModifierType;
 
 /** Mirror axis flags. */
@@ -75,25 +77,33 @@ enum {
   SDF_MOD_MIRROR_Z = (1 << 2),
 };
 
+/** Array modifier types. */
+enum {
+  SDF_MOD_ARRAY_LINEAR = 0,
+  SDF_MOD_ARRAY_RADIAL = 1,
+};
+
 /** Single SDF modifier in the stack. */
 typedef struct SDFModifier {
   struct SDFModifier *next, *prev;
 
   /** Modifier type (eSDFModifierType). */
   int type;
-  /** Modifier-specific flags (e.g., mirror axes). */
+  /** Modifier-specific flags (e.g., mirror axes, array type). */
   int flag;
 
   /** Generic parameters — meaning depends on type:
-   *  Mirror:   (unused, axes in .flag)
+   *  Mirror:   params[0] = offset distance, params[1] = blend
    *  Twist:    params[0] = strength (radians/unit)
    *  Bend:     params[0] = strength, params[1] = axis (0=X,1=Y,2=Z)
    *  Elongate: params[0..2] = elongation per axis
    *  Hollow:   params[0] = wall thickness
    *  Round:    params[0] = radius
    *  Onion:    params[0] = layer thickness
+   *  Array:    params[0] = count, params[1..3] = offset, params[4] = blend (linear)
+   *            params[1] = radius, params[4] = blend (radial)
    */
-  float params[4];
+  float params[8];
 
   /** Display name. */
   char name[64];
@@ -163,9 +173,15 @@ typedef struct SDF {
   /** N-Gon star factor (0 = regular polygon, 1 = maximum star). */
   float ngon_star;
 
-  /** Torus angle aperture (degrees, 0–360; 360 = full torus). */
+  /** Torus angle aperture (radians, 0-2*PI; 2*PI = full torus). */
   float torus_angle;
   char _pad4[4];
+
+  /** Back-pointer to owning SDFGroup (nullptr if ungrouped). */
+  struct SDFGroup *sdf_group;
+  /** Order within group (mirrors SDFGroupMember.order). */
+  int group_order;
+  char _pad5[4];
 
   /** Ordered modifier stack. */
   ListBase modifiers; /* SDFModifier */

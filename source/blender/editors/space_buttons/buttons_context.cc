@@ -24,6 +24,8 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_world_types.h"
@@ -275,6 +277,9 @@ static bool buttons_context_path_data(ButsContextPath *path, int type)
   if (RNA_struct_is_a(ptr->type, &RNA_SDF) && ELEM(type, -1, OB_SDF)) {
     return true;
   }
+  if (RNA_struct_is_a(ptr->type, &RNA_SDFGroup) && type == -1) {
+    return true;
+  }
   /* try to get an object in the path, no pinning supported here */
   if (buttons_context_path_object(path)) {
     Object *ob = static_cast<Object *>(path->ptr[path->len - 1].data);
@@ -282,7 +287,6 @@ static bool buttons_context_path_data(ButsContextPath *path, int type)
     if (ob && ELEM(type, -1, ob->type)) {
       path->ptr[path->len] = RNA_id_pointer_create(static_cast<ID *>(ob->data));
       path->len++;
-
       return true;
     }
   }
@@ -915,6 +919,7 @@ const char *buttons_context_dir[] = {
     "pointcloud",
     "volume",
     "sdf",
+    "sdf_group",
     "strip",
     "strip_modifier",
     nullptr,
@@ -1016,6 +1021,10 @@ int /*eContextResult*/ buttons_context(const bContext *C,
   }
   if (CTX_data_equals(member, "sdf")) {
     set_pointer_type(path, result, &RNA_SDF);
+    return CTX_RESULT_OK;
+  }
+  if (CTX_data_equals(member, "sdf_group")) {
+    set_pointer_type(path, result, &RNA_SDFGroup);
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "material")) {

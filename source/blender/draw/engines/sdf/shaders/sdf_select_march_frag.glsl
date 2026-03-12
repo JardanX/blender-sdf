@@ -22,152 +22,23 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-/* SDF primitive types (must match eSDFType in DNA_sdf_types.h). */
-#define SDF_TYPE_BOX 0
-#define SDF_TYPE_SPHERE 1
-#define SDF_TYPE_CYLINDER 2
-#define SDF_TYPE_CONE 3
-#define SDF_TYPE_CAPSULE 4
-#define SDF_TYPE_TORUS 5
-#define SDF_TYPE_NGON 6
-
 #define MAX_MARCH_STEPS 48
-
-/* ---- Local SDF primitives (same as outline shader) ---- */
-
-float sdSphere(float3 p, float r)
-{
-  return length(p) - r;
-}
-
-float sdCapsule(float3 p, float3 size)
-{
-  float h = size.y;
-  float r = size.x;
-  p.z -= clamp(p.z, -h, h);
-  return length(p) - r;
-}
-
-float sdTorus(float3 p, float2 t)
-{
-  float2 q = float2(length(p.xy) - t.x, p.z);
-  return length(q) - t.y;
-}
-
-float sdCylinder(float3 p, float3 size)
-{
-  float2 e = max(size.xy, float2(0.001f));
-  float2 pn = p.xy / e;
-  float rn = length(pn);
-  float2 g = pn / (e * max(rn, 1e-6f));
-  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
-  float vertical = abs(p.z) - size.z;
-  float2 d = float2(radial, vertical);
-  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
-}
-
-float sdCone(float3 p, float r, float h)
-{
-  float2 q = float2(length(p.xy), p.z);
-  float2 k1 = float2(0.0f, h);
-  float2 k2 = float2(-r, 2.0f * h);
-  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
-  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
-  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
-  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
-}
 
 /* ---- Evaluate a single SDF primitive with modifiers ---- */
 
 float evalSelectPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
-  /* Apply domain modifiers (warp sampling space). */
-  if (obj.modifier_count > 0) {
-    local_pos = applyDomainModifiers(local_pos, obj.modifier_start, obj.modifier_count);
-  }
+  SDFPrimitiveData prim_data;
+  prim_data.sdf_type = obj.sdf_type;
+  prim_data.size = obj.sdf_size.xyz;
+  prim_data.bevel = obj.bevel;
+  prim_data.box_corners = obj.box_corners;
+  prim_data.box_edges = obj.box_edges;
+  prim_data.box_modes = obj.box_modes;
+  prim_data.modifier_start = obj.modifier_start;
+  prim_data.modifier_count = obj.modifier_count;
 
-  float3 size = obj.sdf_size.xyz;
-  float bevel = obj.bevel;
-  float dist;
-
-  if (obj.sdf_type == SDF_TYPE_SPHERE) {
-    dist = sdSphere(local_pos, size.x - bevel);
-  }
-  else if (obj.sdf_type == SDF_TYPE_CYLINDER) {
-    float3 cyl_size = max(size - float3(bevel), float3(0.001f));
-    dist = sdCylinder(local_pos, cyl_size);
-  }
-  else if (obj.sdf_type == SDF_TYPE_CONE) {
-    float cone_r = max(size.x - bevel, 0.001f);
-    float cone_h = max(size.y - bevel, 0.001f);
-    dist = sdCone(local_pos, cone_r, cone_h);
-  }
-  else if (obj.sdf_type == SDF_TYPE_CAPSULE) {
-    float3 cap_size = max(size - float3(bevel), float3(0.001f));
-    dist = sdCapsule(local_pos, cap_size);
-  }
-  else if (obj.sdf_type == SDF_TYPE_TORUS) {
-    float major = max(size.x - bevel, 0.001f);
-    float minor = max(size.y - bevel, 0.001f);
-    if (obj.box_modes.w != 0) {
-      dist = sdCappedTorus(local_pos, obj.box_corners.xy, major, minor);
-    }
-    else {
-      dist = sdTorus(local_pos, float2(major, minor));
-    }
-  }
-  else if (obj.sdf_type == SDF_TYPE_NGON) {
-    float R = max(size.x - bevel, 0.001f);
-    float halfH = max(size.z - bevel, 0.001f);
-    int sides = obj.box_modes.z;
-    float corner = obj.box_corners.x;
-    float star = obj.box_corners.y;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    int edgeMode = obj.box_modes.y;
-    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f;
-    if (hasAdvanced) {
-      dist = sdAdvancedNgon(
-          local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH,
-          star);
-    }
-    else {
-      float d2d = sdRegularPolygon2D(local_pos.xy, R, sides);
-      float dz = abs(local_pos.z) - halfH;
-      float2 dd = float2(d2d, dz);
-      dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
-    }
-  }
-  else {
-    /* SDF_TYPE_BOX (default). */
-    float4 corners = obj.box_corners;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot +
-                        tapTop + tapBot) > 0.001f;
-    if (hasAdvanced) {
-      float3 box_size = max(size - float3(bevel), float3(0.001f));
-      dist = sdAdvancedBox(local_pos, box_size, corners, edgeTop, edgeBot, tapTop, tapBot,
-                           obj.box_modes.x, obj.box_modes.y, box_size.z);
-    }
-    else {
-      float3 box_size = max(size - float3(bevel), float3(0.001f));
-      dist = sdBox(local_pos, box_size);
-    }
-  }
-
-  dist -= bevel;
-
-  /* Apply distance modifiers. */
-  if (obj.modifier_count > 0) {
-    dist = applyDistanceModifiers(dist, obj.modifier_start, obj.modifier_count);
-  }
-
-  return dist;
+  return evalObjectSDF(prim_data, local_pos);
 }
 
 /* ---- Write a single hit to the selection buffer ---- */
@@ -214,12 +85,11 @@ void main()
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
   float3 inv_dir = 1.0f / ray_dir;
 
-  /* ---- 2. Per-object analytical sphere-march ----
-   * March ALL objects and write a hit for EACH one that intersects.
-   * This is essential for Blender's selection cycling (SELECT_PICK_ALL mode):
-   * the C++ side collects all hit objects sorted by depth, then cycles through
-   * them when clicking on the same spot repeatedly. atomicMin in each mode
-   * ensures correct results regardless of iteration order. */
+  /* ---- 2. Group-aware per-object analytical sphere-march ----
+   * For grouped objects, evaluate the combined group SDF at each march step
+   * so CSG operations are respected (e.g., subtract carves away geometry).
+   * For each pixel, the closest hit across all objects is tracked.
+   * Selection cycling is supported: each individual object writes a hit. */
   float best_depth = 1.0f;
   bool any_hit = false;
 
@@ -257,6 +127,36 @@ void main()
       float3 lp = (obj.inverse_matrix * float4(wp - obj.position.xyz, 1.0f)).xyz;
       float d = evalSelectPrimitive(lp, obj);
 
+      /* For grouped objects with CSG subtract/intersect, check if this point
+       * is actually visible (not carved away by the group's combined SDF).
+       * We evaluate the full group at the hit candidate to verify. */
+      if (d < thr && obj.group_id >= 0 && obj.group_first != 1) {
+        /* Evaluate group combined SDF at this world position.
+         * Iterate all objects filtering by group_id (members may not be contiguous). */
+        int gid = obj.group_id;
+        float grp_dist = 1e10f;
+        for (int m = 0; m < object_count; m++) {
+          SDFObjectGPU mobj = sdf_objects[m];
+          if (mobj.group_id != gid) {
+            continue;
+          }
+          float3 mlp = (mobj.inverse_matrix * float4(wp - mobj.position.xyz, 1.0f)).xyz;
+          float md = evalSelectPrimitive(mlp, mobj);
+          if (grp_dist >= 1e9f) {
+            /* First object in group is always the base shape — CSG op ignored. */
+            grp_dist = md;
+          }
+          else {
+            grp_dist = combineCSG(grp_dist, md, mobj.csg_operation, mobj.blend_type,
+                                  mobj.blend, mobj.shell_distance);
+          }
+        }
+        /* Only count as hit if the combined group surface is near. */
+        if (grp_dist >= thr * 2.0f) {
+          d = grp_dist; /* Not a real surface here, continue marching. */
+        }
+      }
+
       if (d < thr) {
         hit = true;
         hit_pos = wp;
@@ -275,7 +175,7 @@ void main()
        * For SELECT_PICK_NEAREST: atomicMin picks the closest automatically.
        * For SELECT_ALL: bitmap OR records all objects. */
       float depth = drw_point_world_to_screen(hit_pos).z;
-      uint sel_id = select_id_map_buf[i];
+      uint sel_id = select_id_map_buf[obj.original_index];
       writeSelectHit(sel_id, depth);
 
       if (depth < best_depth) {

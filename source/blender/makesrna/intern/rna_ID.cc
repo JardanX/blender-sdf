@@ -567,6 +567,8 @@ StructRNA *ID_code_to_RNA_type(short idcode)
       return &RNA_Volume;
     case ID_SF:
       return &RNA_SDF;
+    case ID_SG:
+      return &RNA_SDFGroup;
     case ID_WM:
       return &RNA_WindowManager;
     case ID_WO:

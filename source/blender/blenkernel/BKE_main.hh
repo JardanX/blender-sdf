@@ -321,6 +321,7 @@ struct Main : blender::NonCopyable, blender::NonMovable {
   ListBase pointclouds = {};
   ListBase volumes = {};
   ListBase sdfs = {};
+  ListBase sdf_groups = {};
 
   /**
    * Must be generated, used and freed by same code - never assume this is valid data unless you

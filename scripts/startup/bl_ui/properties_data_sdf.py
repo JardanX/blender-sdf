@@ -119,53 +119,6 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         layout.prop(sdf, "color")
 
 
-class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
-    bl_label = "Operation"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_decorate = False
-
-        sdf = context.sdf
-
-        # CSG operation — 2 rows of 3
-        layout.label(text="Operation")
-        col = layout.column(align=True)
-        row = col.row(align=True)
-        row.scale_y = 1.6
-        row.prop_enum(sdf, "csg_operation", "UNION", text="")
-        row.prop_enum(sdf, "csg_operation", "SUBTRACT", text="")
-        row.prop_enum(sdf, "csg_operation", "INTERSECT", text="")
-        row = col.row(align=True)
-        row.scale_y = 1.6
-        row.prop_enum(sdf, "csg_operation", "SHELL", text="")
-        row.prop_enum(sdf, "csg_operation", "PUSH", text="")
-        row.prop_enum(sdf, "csg_operation", "AVOID", text="")
-
-        layout.separator()
-
-        # Blend type — single row of 4
-        layout.label(text="Blend Type")
-        row = layout.row(align=True)
-        row.scale_y = 1.6
-        row.prop(sdf, "blend_type", expand=True, icon_only=True)
-
-        layout.separator()
-
-        # Shell distance — only visible when CSG is Shell
-        if sdf.csg_operation == 'SHELL':
-            col = layout.column(align=True)
-            col.label(text="Shell Thickness")
-            col.prop(sdf, "shell_distance", text="")
-
-        # Blend amount — disabled for Linear (no blending needed)
-        col = layout.column(align=True)
-        col.label(text="Blend")
-        sub = col.row()
-        sub.enabled = (sdf.blend_type != 'LINEAR')
-        sub.prop(sdf, "blend", text="")
-
-
 # -- Shape Property Panel (box-specific) --------------------------------------
 
 class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
@@ -267,6 +220,36 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
 
 
 
+# -- Operation Panel ----------------------------------------------------------
+
+class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
+    bl_label = "Operation"
+
+    def draw(self, context):
+        layout = self.layout
+        sdf = context.sdf
+
+        # CSG operation — full-width icon-only buttons
+        layout.label(text="CSG Operation")
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        row.prop(sdf, "csg_operation", expand=True, icon_only=True)
+
+        layout.separator()
+
+        # Blend type — full-width icon-only buttons
+        layout.label(text="Blend Type")
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        row.prop(sdf, "blend_type", expand=True, icon_only=True)
+
+        # Blend amount — only show when not linear
+        if sdf.blend_type != 'LINEAR':
+            layout.use_property_split = True
+            layout.use_property_decorate = False
+            layout.prop(sdf, "blend")
+
+
 # -- Modifier Operators -------------------------------------------------------
 
 class SDF_OT_modifier_add(Operator):
@@ -286,6 +269,7 @@ class SDF_OT_modifier_add(Operator):
             ('ROUND', "Round", "Additional rounding", 'MOD_SMOOTH', 5),
             ('ONION', "Onion", "Concentric shells", 'MOD_SOLIDIFY', 6),
             ('BEVEL', "Bevel", "Bevel/round edges", 'MOD_BEVEL', 7),
+            ('ARRAY', "Array", "Duplicate geometry", 'MOD_ARRAY', 8),
         ],
     )
 
@@ -393,6 +377,20 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 row.prop(mod, "use_mirror_x", toggle=True)
                 row.prop(mod, "use_mirror_y", toggle=True)
                 row.prop(mod, "use_mirror_z", toggle=True)
+                col.prop(mod, "offset_distance")
+                
+                # CSG Panel for Mirror
+                box_csg = box.box()
+                box_csg.label(text="Mirror Blending:")
+                
+                row = box_csg.row(align=True)
+                row.scale_y = 1.2
+                row.prop(mod, "blend_type", expand=True, icon_only=True)
+                
+                sub = box_csg.row()
+                sub.enabled = (mod.blend_type != 'LINEAR')
+                sub.prop(mod, "mirror_blend", text="Radius")
+
             elif mod.type == 'TWIST':
                 col.prop(mod, "strength", text="Strength")
             elif mod.type == 'BEND':
@@ -407,6 +405,25 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 col.prop(mod, "thickness")
             elif mod.type == 'BEVEL':
                 col.prop(mod, "radius")
+            elif mod.type == 'ARRAY':
+                col.prop(mod, "array_type")
+                col.prop(mod, "count")
+                if mod.array_type == 'LINEAR':
+                    col.prop(mod, "offset")
+                elif mod.array_type == 'RADIAL':
+                    col.prop(mod, "array_radius")
+                
+                # CSG Panel for Array
+                box_csg = box.box()
+                box_csg.label(text="Array Blending:")
+                
+                row = box_csg.row(align=True)
+                row.scale_y = 1.2
+                row.prop(mod, "blend_type", expand=True, icon_only=True)
+                
+                sub = box_csg.row()
+                sub.enabled = (mod.blend_type != 'LINEAR')
+                sub.prop(mod, "array_blend", text="Radius")
 
 
 class SDF_MT_modifier_add(Menu):
@@ -425,6 +442,7 @@ class SDF_MT_modifier_add(Menu):
         layout.operator("sdf.modifier_add", text="Onion", icon='MOD_SOLIDIFY').type = 'ONION'
         layout.separator()
         layout.operator("sdf.modifier_add", text="Bevel", icon='MOD_BEVEL').type = 'BEVEL'
+        layout.operator("sdf.modifier_add", text="Array", icon='MOD_ARRAY').type = 'ARRAY'
 
 
 # -- Registration -------------------------------------------------------------

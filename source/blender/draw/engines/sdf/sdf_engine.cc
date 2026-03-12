@@ -8,6 +8,8 @@
  * SDF draw engine: bakes SDF objects into a sparse brick atlas, then ray-marches it.
  */
 
+#include <algorithm>
+
 #include "BLI_map.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
@@ -15,17 +17,22 @@
 
 #include "BKE_geometry_set.hh"
 #include "BKE_idprop.hh"
+#include "BKE_main.hh"
 #include "BKE_object.hh"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_group.hh"
 #include "BKE_object_types.hh"
 #include "BKE_studiolight.h"
 #include "BKE_volume.hh"
 #include "BKE_volume_render.hh"
 
+#include "DEG_depsgraph_query.hh"
+
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_enums.h"
@@ -82,7 +89,7 @@ static uint64_t sdf_shape_fingerprint(int sdf_type,
                                        const float3 &effective_size,
                                        float effective_bevel,
                                        int ngon_sides = 0,
-                                       float torus_angle = 360.0f,
+                                       float torus_angle = (float)M_PI * 2.0f,
                                        float ngon_star = 0.0f)
 {
   /* Normalize by max component to make scale-independent. */
@@ -146,11 +153,15 @@ static int s_bricks_per_axis = 0;
 static int s_object_count = 0;
 static gpu::StorageBuf *s_object_ssbo = nullptr;
 static gpu::StorageBuf *s_modifier_ssbo = nullptr;
+static gpu::StorageBuf *s_group_ssbo = nullptr;
+static int s_group_count = 0;
 
 class Instance : public DrawEngine {
  private:
   /** Collected SDF objects for this frame. */
   Vector<SDFObjectGPU> objects_;
+  /** Per-object SDFGroup pointer (for group_id resolution in end_sync). */
+  Vector<SDFGroup *> object_group_ptrs_;
 
   /** Scene AABB accumulated from all SDF objects. */
   float3 scene_min_ = float3(1e30f);
@@ -227,13 +238,39 @@ class Instance : public DrawEngine {
   };
   Vector<GridObject> grid_objects_;
 
-  /** Cached shaders. */
-  gpu::Shader *classify_sh_ = nullptr;
-  gpu::Shader *bake_sh_ = nullptr;
-  gpu::Shader *shape_bake_sh_ = nullptr;
-  gpu::Shader *march_sh_ = nullptr;
-  gpu::Shader *grid_blend_sh_ = nullptr;
-  gpu::Shader *fxaa_sh_ = nullptr;
+  /** Cached shaders — indexed by ShaderIndex for table-driven compilation. */
+  enum ShaderIndex {
+    SH_CLASSIFY = 0,
+    SH_BAKE,
+    SH_SHAPE_BAKE,
+    SH_MARCH,
+    SH_GRID_BLEND,
+    SH_FXAA,
+    SH_COUNT,
+  };
+
+  static constexpr const char *shader_info_names_[SH_COUNT] = {
+      "sdf_classify",
+      "sdf_bake",
+      "sdf_shape_bake",
+      "sdf_march",
+      "sdf_grid_blend",
+      "sdf_fxaa",
+  };
+
+  gpu::Shader *shaders_[SH_COUNT] = {};
+
+  /* Convenience aliases (read-only refs into the shaders_ array). */
+  gpu::Shader *&classify_sh_ = shaders_[SH_CLASSIFY];
+  gpu::Shader *&bake_sh_ = shaders_[SH_BAKE];
+  gpu::Shader *&shape_bake_sh_ = shaders_[SH_SHAPE_BAKE];
+  gpu::Shader *&march_sh_ = shaders_[SH_MARCH];
+  gpu::Shader *&grid_blend_sh_ = shaders_[SH_GRID_BLEND];
+  gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
+
+  /** Async shader compilation. */
+  BatchHandle shader_compile_batch_ = 0;
+  bool shaders_compiled_ = false;
 
   /** FXAA offscreen target: march renders here, then FXAA composites to default FB. */
   gpu::Texture *march_color_tx_ = nullptr;
@@ -249,6 +286,11 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *modifier_ssbo_ = nullptr;
   int modifier_ssbo_count_ = 0;
 
+  /** Group data for GPU upload. */
+  Vector<SDFGroupGPU> groups_gpu_;
+  gpu::StorageBuf *group_ssbo_ = nullptr;
+  int group_ssbo_count_ = 0;
+
   /** BVH for object AABB culling on GPU. */
   Vector<BVHNodeGPU> bvh_nodes_;
   gpu::StorageBuf *bvh_ssbo_ = nullptr;
@@ -261,7 +303,7 @@ class Instance : public DrawEngine {
     int sdf_type;
     int ngon_sides = 6;     /* Number of polygon sides (for SDF_TYPE_NGON). */
     float ngon_star = 0.0f;  /* Star factor (for SDF_TYPE_NGON). */
-    float torus_angle = 360.0f; /* Angle aperture in degrees (for SDF_TYPE_TORUS). */
+    float torus_angle = (float)M_PI * 2.0f; /* Angle aperture in radians (for SDF_TYPE_TORUS). */
     float3 size_normalized; /* Aspect ratio (max = 1.0). */
     float bevel_normalized; /* bevel / max_size. */
     float world_scale;      /* Max effective size for first instance (representative). */
@@ -397,6 +439,18 @@ class Instance : public DrawEngine {
      * Previously this ran in draw(), after end_sync had already computed the
      * grid using stale sdf_resolution_ / surface_margin_ defaults. */
     sync_sdf_settings();
+
+    /* Kick off async shader compilation on first init so the GPU backend can
+     * compile in a subprocess while we do sync work (object_sync, end_sync).
+     * By the time draw() calls ensure_shaders(), binaries are often ready. */
+    if (!shaders_compiled_ && shader_compile_batch_ == 0) {
+      const GPUShaderCreateInfo *infos[SH_COUNT];
+      for (int i = 0; i < SH_COUNT; i++) {
+        infos[i] = GPU_shader_create_info_get(shader_info_names_[i]);
+      }
+      shader_compile_batch_ = GPU_shader_batch_create_from_infos(
+          {infos, SH_COUNT}, CompilationPriority::High);
+    }
   }
 
   void begin_sync() final
@@ -409,7 +463,9 @@ class Instance : public DrawEngine {
     }
 
     objects_.clear();
+    object_group_ptrs_.clear();
     modifiers_.clear();
+    groups_gpu_.clear();
     pending_grid_objects_.clear();
     shapes_.clear();
     shape_fingerprint_map_.clear();
@@ -465,7 +521,8 @@ class Instance : public DrawEngine {
     }
 
     /* Decompose object_to_world into rotation + scale.
-     * Scale is baked into sdf_size; inverse matrix is rotation-only. */
+     * Scale is baked into sdf_size; inverse matrix is rotation-only.
+     * If the SDF belongs to a group with a non-identity transform, compose it first. */
     const float4x4 &mat = ob->object_to_world();
 
     float3 scale;
@@ -515,6 +572,14 @@ class Instance : public DrawEngine {
     gpu_obj.csg_operation = sdf_data->csg_operation;
     gpu_obj.shell_distance = sdf_data->shell_distance;
 
+    /* Group membership: store pointer for resolution in end_sync.
+     * group_id is set to -1 here and resolved after groups_gpu_ is built. */
+    gpu_obj.group_id = -1;
+    gpu_obj.group_first = 0;
+    gpu_obj.group_order = sdf_data->group_order;
+    gpu_obj.original_index = int(objects_.size());
+    object_group_ptrs_.append(sdf_data->sdf_group);
+
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
 
@@ -530,11 +595,11 @@ class Instance : public DrawEngine {
     }
     else if (sdf_data->sdf_type == SDF_TYPE_TORUS) {
       /* Precompute sin/cos of half-angle for capped torus. */
-      float angle_deg = sdf_data->torus_angle;
-      float half_rad = angle_deg * 0.5f * float(M_PI) / 180.0f;
+      float angle_rad = sdf_data->torus_angle;
+      float half_rad = angle_rad * 0.5f;
       gpu_obj.box_corners = float4(sinf(half_rad), cosf(half_rad), 0.0f, 0.0f);
       gpu_obj.box_edges = float4(0.0f);
-      gpu_obj.box_modes = int4(0, 0, 0, (angle_deg < 359.9f) ? 1 : 0);
+      gpu_obj.box_modes = int4(0, 0, 0, (angle_rad < (float(M_PI) * 2.0f) - 0.001f) ? 1 : 0);
     }
     else {
       gpu_obj.box_corners = float4(sdf_data->box_corners[0],
@@ -559,6 +624,7 @@ class Instance : public DrawEngine {
       SDFModifierGPU gpu_mod = {};
       gpu_mod.header = int4(mod->type, mod->flag, 0, 0);
       gpu_mod.params = float4(mod->params[0], mod->params[1], mod->params[2], mod->params[3]);
+      gpu_mod.params2 = float4(mod->params[4], mod->params[5], mod->params[6], mod->params[7]);
       modifiers_.append(gpu_mod);
       gpu_obj.modifier_count++;
     }
@@ -615,6 +681,15 @@ class Instance : public DrawEngine {
         continue;
       }
       switch (mod->type) {
+        case SDF_MOD_MIRROR: {
+          /* Mirror with offset expands bounds opposite to the mirror side by offset.
+           * For simplicity, expand uniformly by offset. */
+          float offset = fabsf(mod->params[0]);
+          if ((mod->flag & SDF_MOD_MIRROR_X) != 0) local_extent.x += offset;
+          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) local_extent.y += offset;
+          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) local_extent.z += offset;
+          break;
+        }
         case SDF_MOD_ELONGATE:
           local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
           break;
@@ -625,6 +700,21 @@ class Instance : public DrawEngine {
         case SDF_MOD_ROUND:
           local_extent += float3(mod->params[0]);
           break;
+        case SDF_MOD_ARRAY: {
+          float count = mod->params[0];
+          if (count > 0.5f) {
+            if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
+              float3 offset = float3(mod->params[1], mod->params[2], mod->params[3]);
+              local_extent += math::abs(offset) * (count - 1.0f);
+            }
+            else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
+              float radius = mod->params[1];
+              local_extent.x += radius;
+              local_extent.y += radius;
+            }
+          }
+          break;
+        }
         default:
           break;
       }
@@ -676,7 +766,7 @@ class Instance : public DrawEngine {
     float effective_bevel = gpu_obj.bevel;
     int ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 0;
     float ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
-    float torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : 360.0f;
+    float torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : ((float)M_PI * 2.0f);
     uint64_t fp = sdf_shape_fingerprint(
         sdf_data->sdf_type, effective_size, effective_bevel, ngon_sides, torus_angle, ngon_star);
 
@@ -697,7 +787,7 @@ class Instance : public DrawEngine {
       shape.sdf_type = sdf_data->sdf_type;
       shape.ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 6;
       shape.ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
-      shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : 360.0f;
+      shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : ((float)M_PI * 2.0f);
       shape.size_normalized = effective_size / max_dim;
       shape.bevel_normalized = effective_bevel / max_dim;
       shape.world_scale = max_dim;
@@ -862,6 +952,96 @@ class Instance : public DrawEngine {
       prev_active_brick_count_ = 0;
     }
 
+    /* Build group GPU data from Main's sdf_groups list.
+     * Also build a pointer→index map to resolve per-object group_id values. */
+    {
+      Main *bmain = DEG_get_bmain(draw_ctx_->depsgraph);
+      groups_gpu_.clear();
+      Map<SDFGroup *, int> group_index_map;
+      int g_idx = 0;
+      int obj_offset = 0;
+      LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+        SDFGroupGPU gpu_grp = {};
+        gpu_grp.csg_operation = group->csg_operation;
+        gpu_grp.blend_type = group->blend_type;
+        gpu_grp.blend = group->blend;
+        gpu_grp.shell_distance = group->shell_distance;
+        gpu_grp.first_object = obj_offset;
+        gpu_grp.object_count = group->totmember;
+        groups_gpu_.append(gpu_grp);
+        group_index_map.add(group, g_idx);
+        g_idx++;
+        obj_offset += group->totmember;
+      }
+
+      /* Resolve group_id on objects using the pointer→index map. */
+      BLI_assert(int(object_group_ptrs_.size()) == int(objects_.size()));
+      for (int i = 0; i < int(objects_.size()); i++) {
+        SDFGroup *grp = object_group_ptrs_[i];
+        if (grp) {
+          const int *idx = group_index_map.lookup_ptr(grp);
+          objects_[i].group_id = idx ? *idx : -1;
+        }
+      }
+
+      /* Sort objects so that within each group, members appear in ascending
+       * group_order. This ensures the GPU evaluates CSG operations in the
+       * correct user-specified order. Ungrouped objects are placed after
+       * all grouped objects in their original relative order. */
+      {
+        const int n = int(objects_.size());
+        if (n > 0) {
+          /* Build (sort_key, original_index) pairs for stable sort. */
+          Vector<std::pair<int64_t, int>> sort_pairs(n);
+          for (int i = 0; i < n; i++) {
+            if (objects_[i].group_id >= 0) {
+              sort_pairs[i] = {int64_t(objects_[i].group_id) * 100000 +
+                                   objects_[i].group_order,
+                               i};
+            }
+            else {
+              sort_pairs[i] = {int64_t(1000000) + i, i};
+            }
+          }
+          std::stable_sort(sort_pairs.begin(), sort_pairs.end());
+
+          /* Reorder objects and build old→new index mapping. */
+          Vector<SDFObjectGPU> sorted(n);
+          Vector<int> old_to_new(n);
+          for (int new_idx = 0; new_idx < n; new_idx++) {
+            int old_idx = sort_pairs[new_idx].second;
+            sorted[new_idx] = objects_[old_idx];
+            old_to_new[old_idx] = new_idx;
+          }
+          objects_ = std::move(sorted);
+
+          /* Update instance object_ids to match new indices. */
+          for (InstanceInfo &inst : instances_) {
+            inst.object_id = old_to_new[inst.object_id];
+          }
+        }
+      }
+
+      /* Resolve group_first and fix first_object/object_count in groups_gpu_.
+       * After sorting, group members are contiguous and in group_order,
+       * so the first encountered member per group is the base shape. */
+      for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
+        int first = -1;
+        int count = 0;
+        for (int i = 0; i < int(objects_.size()); i++) {
+          if (objects_[i].group_id == gi) {
+            if (first == -1) {
+              first = i;
+              objects_[i].group_first = 1;
+            }
+            count++;
+          }
+        }
+        groups_gpu_[gi].first_object = (first >= 0) ? first : 0;
+        groups_gpu_[gi].object_count = count;
+      }
+    }
+
     /* Compute scene hash for dirty tracking (analytic + grid + text combined). */
     uint64_t hash = uint64_t(objects_.size()) + grid_hash;
     for (const SDFObjectGPU &obj : objects_) {
@@ -898,6 +1078,16 @@ class Instance : public DrawEngine {
              float_as_uint(obj.inverse_matrix[1][1]);
       hash = hash * 6364136223846793005ULL +
              float_as_uint(obj.inverse_matrix[2][2]);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.group_id);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.group_first);
+      hash = hash * 6364136223846793005ULL + uint64_t(obj.group_order);
+    }
+    /* Include group data in hash. */
+    for (const SDFGroupGPU &grp : groups_gpu_) {
+      hash = hash * 6364136223846793005ULL + uint64_t(grp.csg_operation);
+      hash = hash * 6364136223846793005ULL + uint64_t(grp.blend_type);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.blend);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
     }
     /* Include modifier data in hash. */
     for (const SDFModifierGPU &mod : modifiers_) {
@@ -907,6 +1097,19 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.y);
       hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.z);
       hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.w);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.x);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.z);
+      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.w);
+    }
+    /* Include group data in hash. */
+    for (const SDFGroupGPU &grp : groups_gpu_) {
+      hash = hash * 6364136223846793005ULL + uint64_t(grp.csg_operation);
+      hash = hash * 6364136223846793005ULL + uint64_t(grp.blend_type);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.blend);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
+      hash = hash * 6364136223846793005ULL + uint64_t(grp.first_object);
+      hash = hash * 6364136223846793005ULL + uint64_t(grp.object_count);
     }
     /* Include surface margin so changes trigger rebake. */
     hash = hash * 6364136223846793005ULL + float_as_uint(surface_margin_);
@@ -1222,6 +1425,8 @@ class Instance : public DrawEngine {
     s_object_count = int(objects_.size());
     s_object_ssbo = object_ssbo_;
     s_modifier_ssbo = modifier_ssbo_;
+    s_group_ssbo = group_ssbo_;
+    s_group_count = int(groups_gpu_.size());
 
     if (perf_enabled_) {
       perf_end_frame(needs_bake_);
@@ -1417,24 +1622,29 @@ class Instance : public DrawEngine {
 
   void ensure_shaders()
   {
-    if (classify_sh_ == nullptr) {
-      classify_sh_ = GPU_shader_create_from_info_name("sdf_classify");
+    if (shaders_compiled_) {
+      return;
     }
-    if (bake_sh_ == nullptr) {
-      bake_sh_ = GPU_shader_create_from_info_name("sdf_bake");
+
+    /* Finalize the async batch started in init(). This blocks only if the
+     * subprocess hasn't finished yet — typically the sync phase (object_sync,
+     * end_sync) gives it enough time to complete in the background. */
+    if (shader_compile_batch_ != 0) {
+      Vector<gpu::Shader *> result = GPU_shader_batch_finalize(shader_compile_batch_);
+      for (int i = 0; i < SH_COUNT; i++) {
+        shaders_[i] = result[i];
+      }
+      shaders_compiled_ = true;
+      return;
     }
-    if (shape_bake_sh_ == nullptr) {
-      shape_bake_sh_ = GPU_shader_create_from_info_name("sdf_shape_bake");
+
+    /* Fallback: synchronous compilation (should not normally be reached). */
+    for (int i = 0; i < SH_COUNT; i++) {
+      if (shaders_[i] == nullptr) {
+        shaders_[i] = GPU_shader_create_from_info_name(shader_info_names_[i]);
+      }
     }
-    if (march_sh_ == nullptr) {
-      march_sh_ = GPU_shader_create_from_info_name("sdf_march");
-    }
-    if (grid_blend_sh_ == nullptr) {
-      grid_blend_sh_ = GPU_shader_create_from_info_name("sdf_grid_blend");
-    }
-    if (fxaa_sh_ == nullptr) {
-      fxaa_sh_ = GPU_shader_create_from_info_name("sdf_fxaa");
-    }
+    shaders_compiled_ = true;
   }
 
   void ensure_indirection()
@@ -1539,6 +1749,33 @@ class Instance : public DrawEngine {
     else {
       if (!modifiers_.is_empty()) {
         GPU_storagebuf_update(modifier_ssbo_, modifiers_.data());
+      }
+    }
+
+    /* Upload group SSBO. Ensure at least 1 element for binding. */
+    const int grp_count = math::max(int(groups_gpu_.size()), 1);
+    const size_t grp_buf_size = grp_count * sizeof(SDFGroupGPU);
+
+    if (group_ssbo_ != nullptr && group_ssbo_count_ != grp_count) {
+      GPU_storagebuf_free(group_ssbo_);
+      group_ssbo_ = nullptr;
+    }
+
+    if (group_ssbo_ == nullptr) {
+      if (groups_gpu_.is_empty()) {
+        SDFGroupGPU dummy = {};
+        group_ssbo_ = GPU_storagebuf_create_ex(
+            grp_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_groups_ssbo");
+      }
+      else {
+        group_ssbo_ = GPU_storagebuf_create_ex(
+            grp_buf_size, groups_gpu_.data(), GPU_USAGE_DYNAMIC, "sdf_groups_ssbo");
+      }
+      group_ssbo_count_ = grp_count;
+    }
+    else {
+      if (!groups_gpu_.is_empty()) {
+        GPU_storagebuf_update(group_ssbo_, groups_gpu_.data());
       }
     }
   }
@@ -1972,9 +2209,9 @@ class Instance : public DrawEngine {
               case SDF_TYPE_TORUS: {
                 float major = math::max(shape.size_normalized.x - bev, 0.001f);
                 float minor = math::max(shape.size_normalized.y - bev, 0.001f);
-                if (shape.torus_angle < 359.9f) {
+                if (shape.torus_angle < ((float)M_PI * 2.0f) - 0.001f) {
                   /* Capped torus. */
-                  float half_rad = shape.torus_angle * 0.5f * float(M_PI) / 180.0f;
+                  float half_rad = shape.torus_angle * 0.5f;
                   float sc_x = sinf(half_rad);
                   float sc_y = cosf(half_rad);
                   float px = math::abs(p.x);
@@ -2119,7 +2356,7 @@ class Instance : public DrawEngine {
         GPU_shader_uniform_1i(shape_bake_sh_, "shape_sides", shape.ngon_sides);
         GPU_shader_uniform_1f(shape_bake_sh_, "shape_star", shape.ngon_star);
         {
-          float half_rad = shape.torus_angle * 0.5f * float(M_PI) / 180.0f;
+          float half_rad = shape.torus_angle * 0.5f;
           float sc[2] = {sinf(half_rad), cosf(half_rad)};
           GPU_shader_uniform_2fv(shape_bake_sh_, "shape_torus_sc", sc);
         }
@@ -2204,6 +2441,12 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
     }
 
+    /* Bind group SSBO. */
+    if (group_ssbo_) {
+      int grp_slot = GPU_shader_get_ssbo_binding(classify_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, grp_slot);
+    }
+
     /* Bind indirection texture as image. */
     GPU_texture_image_bind(indirection_tx_, 0);
 
@@ -2223,6 +2466,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(classify_sh_, "max_blend", max_blend_);
     GPU_shader_uniform_1f(classify_sh_, "max_shell_distance", max_shell_distance_);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
+    GPU_shader_uniform_1i(classify_sh_, "group_count", int(groups_gpu_.size()));
 
     /* Dispatch: one thread per brick, local group size is 4x4x4. */
     GPU_compute_dispatch(classify_sh_,
@@ -2282,6 +2526,12 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
     }
 
+    /* Bind group SSBO. */
+    if (group_ssbo_) {
+      int grp_slot = GPU_shader_get_ssbo_binding(bake_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, grp_slot);
+    }
+
     /* Bind atlas images. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
     if (object_id_tx_) {
@@ -2296,6 +2546,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
     GPU_shader_uniform_1f(bake_sh_, "max_shell_distance", max_shell_distance_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
+    GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
      * early-exit after reading brick_counter.count from SSBO. */
@@ -2934,14 +3185,14 @@ class Instance : public DrawEngine {
      * lines give spatial context without visual clutter. */
     GPU_depth_test(GPU_DEPTH_GREATER);
     GPU_line_width(1.0f);
-    GPU_shader_uniform_4f(shader, "color", 0.0f, 0.6f, 0.0f, 0.1f);
+    GPU_shader_uniform_4f(shader, "color", 0.3f, 0.5f, 0.7f, 0.08f);
     GPU_batch_draw(grid_batch_);
 
     /* --- Pass 2: Front lines (in front of SDF surface) ---
      * Bright and slightly thicker for clear readability. */
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
     GPU_line_width(1.5f);
-    GPU_shader_uniform_4f(shader, "color", 0.0f, 1.0f, 0.0f, 0.8f);
+    GPU_shader_uniform_4f(shader, "color", 0.4f, 0.65f, 0.9f, 0.6f);
     GPU_batch_draw(grid_batch_);
 
     /* Restore state. */
@@ -3440,6 +3691,14 @@ class Instance : public DrawEngine {
  public:
   ~Instance() override
   {
+    /* Cancel any in-flight async shader compilation. */
+    if (shader_compile_batch_ != 0) {
+      GPU_shader_batch_cancel(shader_compile_batch_);
+    }
+    for (int i = 0; i < SH_COUNT; i++) {
+      GPU_SHADER_FREE_SAFE(shaders_[i]);
+    }
+
     perf_cleanup();
     free_grid_objects();
 
@@ -3450,6 +3709,8 @@ class Instance : public DrawEngine {
     s_object_id_atlas = nullptr;
     s_object_ssbo = nullptr;
     s_modifier_ssbo = nullptr;
+    s_group_ssbo = nullptr;
+    s_group_count = 0;
     s_perf_active = false;
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);
@@ -3480,6 +3741,9 @@ class Instance : public DrawEngine {
     }
     if (modifier_ssbo_) {
       GPU_storagebuf_free(modifier_ssbo_);
+    }
+    if (group_ssbo_) {
+      GPU_storagebuf_free(group_ssbo_);
     }
     if (bvh_ssbo_) {
       GPU_storagebuf_free(bvh_ssbo_);
@@ -3557,6 +3821,16 @@ gpu::StorageBuf *sdf_objects_ssbo_get()
 gpu::StorageBuf *sdf_modifiers_ssbo_get()
 {
   return s_modifier_ssbo;
+}
+
+gpu::StorageBuf *sdf_groups_ssbo_get()
+{
+  return s_group_ssbo;
+}
+
+int sdf_group_count_get()
+{
+  return s_group_count;
 }
 
 DrawEngine *Engine::create_instance()

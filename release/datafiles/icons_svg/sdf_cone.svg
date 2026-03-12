@@ -1,9 +1,6 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
-  <g fill="#fff" fill-rule="evenodd">
-    <!-- Outer cone ring (triangle filling the canvas) -->
-    <path d="M 800,100 L 1500,1500 H 100 Z
-             M 800,320 L 1350,1380 H 250 Z"/>
-    <!-- Inner filled cone -->
-    <path d="M 800,560 L 1120,1130 H 480 Z"/>
-  </g>
+  <!-- Outer hollow triangle with smooth corners -->
+  <path d="M 800,200 L 1400,1400 H 200 Z" fill="none" stroke="#fff" stroke-width="100" stroke-linejoin="round"/>
+  <!-- Inner solid triangle: proportionally scaled from centroid (800,1000) at 50%, sharp corners -->
+  <path d="M 800,600 L 1100,1200 H 500 Z" fill="#fff"/>
 </svg>

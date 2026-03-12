@@ -562,6 +562,22 @@ static void outliner_sort(ListBase *lb)
   if (last_te == nullptr) {
     return;
   }
+
+  /* Never sort SDF Group member lists — their order IS the evaluation order. */
+  TreeElement *first_te = static_cast<TreeElement *>(lb->first);
+  if (first_te && first_te->parent) {
+    TreeStoreElem *parent_tselem = TREESTORE(first_te->parent);
+    if (parent_tselem->type == TSE_SOME_ID && parent_tselem->id &&
+        GS(parent_tselem->id->name) == ID_SG)
+    {
+      /* Still recurse into children of each member. */
+      LISTBASE_FOREACH (TreeElement *, te_iter, lb) {
+        outliner_sort(&te_iter->subtree);
+      }
+      return;
+    }
+  }
+
   TreeStoreElem *last_tselem = TREESTORE(last_te);
 
   /* Sorting rules; only object lists, ID lists, or deform-groups. */
@@ -630,6 +646,21 @@ static void outliner_collections_children_sort(ListBase *lb)
   if (last_te == nullptr) {
     return;
   }
+
+  /* Never sort SDF Group member lists — their order IS the evaluation order. */
+  TreeElement *first_te = static_cast<TreeElement *>(lb->first);
+  if (first_te && first_te->parent) {
+    TreeStoreElem *parent_tselem = TREESTORE(first_te->parent);
+    if (parent_tselem->type == TSE_SOME_ID && parent_tselem->id &&
+        GS(parent_tselem->id->name) == ID_SG)
+    {
+      LISTBASE_FOREACH (TreeElement *, te_iter, lb) {
+        outliner_collections_children_sort(&te_iter->subtree);
+      }
+      return;
+    }
+  }
+
   TreeStoreElem *last_tselem = TREESTORE(last_te);
 
   /* Sorting rules: only object lists. */

@@ -11,12 +11,13 @@
 
 #include "rna_internal.hh"
 
+#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 
 #include "BLI_math_base.h"
 
 const EnumPropertyItem rna_enum_sdf_type_items[] = {
-    {SDF_TYPE_BOX, "BOX", ICON_SDF_PRIMITIVE, "Cube", "Cube SDF primitive"},
+    {SDF_TYPE_BOX, "BOX", ICON_SDF_CUBE, "Cube", "Cube SDF primitive"},
     {SDF_TYPE_SPHERE, "SPHERE", ICON_SDF_SPHERE, "Sphere", "Sphere SDF primitive"},
     {SDF_TYPE_CYLINDER, "CYLINDER", ICON_SDF_CYLINDER, "Cylinder", "Cylinder SDF primitive"},
     {SDF_TYPE_CONE, "CONE", ICON_SDF_CONE, "Cone", "Cone SDF primitive"},
@@ -143,6 +144,46 @@ static void rna_SDF_modifier_move(SDF *sdf, ReportList *reports, int from, int t
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
+static void rna_SDFModifier_offset_get(PointerRNA *ptr, float *values)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  values[0] = mod->params[1];
+  values[1] = mod->params[2];
+  values[2] = mod->params[3];
+}
+
+static void rna_SDFModifier_offset_set(PointerRNA *ptr, const float *values)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  mod->params[1] = values[0];
+  mod->params[2] = values[1];
+  mod->params[3] = values[2];
+}
+
+static int rna_SDFModifier_csg_operation_get(PointerRNA *ptr)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  return (int)mod->params[5];
+}
+
+static void rna_SDFModifier_csg_operation_set(PointerRNA *ptr, int value)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  mod->params[5] = (float)value;
+}
+
+static int rna_SDFModifier_blend_type_get(PointerRNA *ptr)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  return (int)mod->params[6];
+}
+
+static void rna_SDFModifier_blend_type_set(PointerRNA *ptr, int value)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  mod->params[6] = (float)value;
+}
+
 #else
 
 static const EnumPropertyItem rna_enum_sdf_blend_type_items[] = {
@@ -186,6 +227,13 @@ static const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Round", "Additional rounding"},
     {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
     {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
+    {SDF_MOD_ARRAY, "ARRAY", ICON_MOD_ARRAY, "Array", "Duplicate geometry"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_sdf_array_type_items[] = {
+    {SDF_MOD_ARRAY_LINEAR, "LINEAR", 0, "Linear", "Linear repeating array"},
+    {SDF_MOD_ARRAY_RADIAL, "RADIAL", 0, "Radial", "Radial repeating array"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -231,6 +279,79 @@ static void rna_def_sdf_modifier(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_mirror_z", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_Z);
   RNA_def_property_ui_text(prop, "Z", "Mirror across Z axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Mirror offset */
+  prop = RNA_def_property(srna, "offset_distance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Mirror Offset", "Offset distance for mirror plane");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Mirror blend */
+  prop = RNA_def_property(srna, "mirror_blend", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[4]");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Blend", "Smooth blend radius for mirroring");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Array type */
+  prop = RNA_def_property(srna, "array_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "flag");
+  RNA_def_property_enum_items(prop, rna_enum_sdf_array_type_items);
+  RNA_def_property_ui_text(prop, "Array Type", "Type of array (linear or radial)");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Array count */
+  prop = RNA_def_property(srna, "count", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
+  RNA_def_property_range(prop, 0.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 50.0f, 100.0f, 0);
+  RNA_def_property_ui_text(prop, "Count", "Number of array duplicates");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Array offset (Linear) */
+  prop = RNA_def_property(srna, "offset", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(
+      prop, "rna_SDFModifier_offset_get", "rna_SDFModifier_offset_set", nullptr);
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Offset", "Linear array offset vector");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Array radius (Radial) */
+  prop = RNA_def_property(srna, "array_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[1]");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 10.0f, 3);
+  RNA_def_property_ui_text(prop, "Radius", "Radius for radial array");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Array blend */
+  prop = RNA_def_property(srna, "array_blend", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "params[4]");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Blend", "Smooth transition across array cells");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Modifier CSG Operation */
+  prop = RNA_def_property(srna, "csg_operation", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop, "rna_SDFModifier_csg_operation_get", "rna_SDFModifier_csg_operation_set", nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_csg_items);
+  RNA_def_property_ui_text(prop, "CSG Operation", "Operation for array/mirror branches");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Modifier Blend Type */
+  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop, "rna_SDFModifier_blend_type_get", "rna_SDFModifier_blend_type_set", nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_blend_type_items);
+  RNA_def_property_ui_text(prop, "Blend Type", "Blending method for array/mirror branches");
   RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
 
   /* Strength (Twist, Bend) */
@@ -396,7 +517,8 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "box_taper");
   RNA_def_property_range(prop, -1.0f, 1.0f);
   RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
-  RNA_def_property_ui_text(prop, "Taper", "Taper factor (positive tapers top, negative tapers bottom)");
+  RNA_def_property_ui_text(
+      prop, "Taper", "Taper factor (positive tapers top, negative tapers bottom)");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Box Corner Mode */
@@ -463,17 +585,15 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "ngon_star");
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
-  RNA_def_property_ui_text(
-      prop, "Star", "Star factor (0 = regular polygon, 1 = maximum star)");
+  RNA_def_property_ui_text(prop, "Star", "Star factor (0 = regular polygon, 1 = maximum star)");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Torus Angle */
   prop = RNA_def_property(srna, "torus_angle", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_float_sdna(prop, nullptr, "torus_angle");
-  RNA_def_property_range(prop, 0.0f, 360.0f);
-  RNA_def_property_ui_range(prop, 0.0f, 360.0f, 5.0f, 1);
-  RNA_def_property_ui_text(
-      prop, "Angle", "Aperture angle (360 = full torus, less = capped arc)");
+  RNA_def_property_range(prop, 0.0f, (float)M_PI * 2.0f);
+  RNA_def_property_ui_range(prop, 0.0f, (float)M_PI * 2.0f, 10.0f, 3);
+  RNA_def_property_ui_text(prop, "Angle", "Aperture angle (360 = full torus, less = capped arc)");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Materials */
@@ -498,6 +618,20 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "SDFModifier");
   RNA_def_property_ui_text(prop, "Modifiers", "SDF modifier stack");
   rna_def_sdf_modifiers(brna, prop);
+
+  /* SDF Group */
+  prop = RNA_def_property(srna, "sdf_group", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "sdf_group");
+  RNA_def_property_struct_type(prop, "SDFGroup");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "SDF Group", "Group this SDF belongs to");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Group Order */
+  prop = RNA_def_property(srna, "group_order", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "group_order");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Group Order", "Evaluation order within group");
 
   /* Animation data */
   rna_def_animdata_common(srna);

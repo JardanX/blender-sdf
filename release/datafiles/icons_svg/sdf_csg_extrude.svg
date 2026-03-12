@@ -1,7 +1,8 @@
 <svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
-  <g fill="none" stroke="#fff" stroke-width="90" stroke-linejoin="miter">
-    <path d="M 200,200 H 950 V 950 H 200 Z"/>
-    <path d="M 650,650 H 1400 V 1400 H 650 Z"/>
-    <rect x="530" y="530" width="540" height="540"/>
+  <g fill="none" stroke="#fff" stroke-width="100" stroke-linejoin="miter">
+    <!-- Shape A (first SDF) - ghost/reference outline -->
+    <path d="M 250,250 H 950 V 950 H 250 Z" opacity="0.4"/>
+    <!-- Result: Shape B with expanded intersection protrusion into A -->
+    <path d="M 450,450 H 950 V 650 H 1350 V 1350 H 650 V 950 H 450 Z"/>
   </g>
 </svg>
