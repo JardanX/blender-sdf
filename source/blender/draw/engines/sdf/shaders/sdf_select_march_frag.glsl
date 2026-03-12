@@ -127,10 +127,11 @@ void main()
       float3 lp = (obj.inverse_matrix * float4(wp - obj.position.xyz, 1.0f)).xyz;
       float d = evalSelectPrimitive(lp, obj);
 
-      /* For grouped objects with CSG subtract/intersect, check if this point
-       * is actually visible (not carved away by the group's combined SDF).
-       * We evaluate the full group at the hit candidate to verify. */
-      if (d < thr && obj.group_id >= 0 && obj.group_first != 1) {
+      /* For grouped objects, verify this hit against the combined group SDF.
+       * Without this, the base shape registers false hits at its raw surface
+       * even where subtract/intersect operations have carved it away, blocking
+       * selection of the objects that perform those CSG operations. */
+      if (d < thr && obj.group_id >= 0) {
         /* Evaluate group combined SDF at this world position.
          * Iterate all objects filtering by group_id (members may not be contiguous). */
         int gid = obj.group_id;

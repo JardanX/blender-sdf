@@ -1048,7 +1048,10 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
     float last_cid = -9999.0f;
     bool first = true;
     for(int i = -1; i <= 1; i++) {
-      float cid = clamp(id + float(i), 0.0f, max(0.0f, count - 1.0f));
+      float cid = id + float(i);
+      if (mflags == SDF_MOD_ARRAY_LINEAR) {
+        cid = clamp(cid, 0.0f, max(0.0f, count - 1.0f));
+      }
       if (cid == last_cid) continue;
       last_cid = cid;
 
