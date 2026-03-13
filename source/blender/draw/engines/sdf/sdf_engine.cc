@@ -955,6 +955,49 @@ class Instance : public DrawEngine {
     float3 grid_min = math::floor(padded_min / chunk_size) * chunk_size;
     float3 grid_max = math::ceil(padded_max / chunk_size) * chunk_size;
 
+    /* Hysteresis: prevent frequent grid reallocations (full rebakes) when moving objects.
+     * We try to keep the previous grid bounds if the new scene bounds fit inside, or
+     * we expand by chunks to absorb small movements. */
+    if (prev_grid_res_.x > 0 && voxel_size_ == prev_voxel_size_) {
+      float3 prev_grid_min = prev_atlas_origin_;
+      float3 prev_grid_max = prev_atlas_origin_ + float3(prev_grid_res_) * chunk_size;
+
+      float3 expanded_min = prev_grid_min;
+      float3 expanded_max = prev_grid_max;
+
+      /* Add 8 chunks (64 voxels) of padding in the direction of movement to avoid hitting the edge again immediately. */
+      float padding = chunk_size * 8.0f;
+      
+      if (grid_min.x < prev_grid_min.x) expanded_min.x = grid_min.x - padding;
+      if (grid_min.y < prev_grid_min.y) expanded_min.y = grid_min.y - padding;
+      if (grid_min.z < prev_grid_min.z) expanded_min.z = grid_min.z - padding;
+      
+      if (grid_max.x > prev_grid_max.x) expanded_max.x = grid_max.x + padding;
+      if (grid_max.y > prev_grid_max.y) expanded_max.y = grid_max.y + padding;
+      if (grid_max.z > prev_grid_max.z) expanded_max.z = grid_max.z + padding;
+
+      expanded_min = math::floor(expanded_min / chunk_size) * chunk_size;
+      expanded_max = math::ceil(expanded_max / chunk_size) * chunk_size;
+
+      float3 ideal_size = grid_max - grid_min;
+      float3 expanded_size = expanded_max - expanded_min;
+      float ideal_vol = ideal_size.x * ideal_size.y * ideal_size.z;
+      float expanded_vol = expanded_size.x * expanded_size.y * expanded_size.z;
+
+      int3 expanded_res = int3(math::round((expanded_max - expanded_min) / chunk_size));
+      
+      /* Only use expanded bounds if they don't exceed max resolution,
+       * and we aren't wasting too much space (> 8x volume). */
+      if (expanded_res.x <= SDF_MAX_GRID_RES && 
+          expanded_res.y <= SDF_MAX_GRID_RES && 
+          expanded_res.z <= SDF_MAX_GRID_RES && 
+          ideal_vol > expanded_vol * 0.125f) 
+      {
+        grid_min = expanded_min;
+        grid_max = expanded_max;
+      }
+    }
+
     /* Per-axis grid resolution in bricks. */
     int3 new_grid_res = int3(math::round((grid_max - grid_min) / chunk_size));
     new_grid_res = math::clamp(new_grid_res, int3(1), int3(SDF_MAX_GRID_RES));
@@ -1150,7 +1193,7 @@ class Instance : public DrawEngine {
     }
 
     /* 2. Groups (evaluated in order from 0 to group_count - 1). */
-    float running_scene_expand = 0.0f;
+    running_scene_expand = 0.0f;
     for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
       SDFGroupGPU &grp = groups_gpu_[g];
 
