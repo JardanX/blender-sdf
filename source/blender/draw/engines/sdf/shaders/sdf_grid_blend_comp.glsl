@@ -87,29 +87,10 @@ void main()
       float new_dist = combineCSG(
           acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance);
 
-      if (grid_csg_operation == SDF_CSG_OP_SUBTRACT) {
-        acc_dist = new_dist;
-      }
-      else if (k > 0.0f && grid_blend_type == SDF_BLEND_TYPE_SMOOTH) {
-        float h;
-        if (grid_csg_operation == SDF_CSG_OP_UNION) {
-          h = clamp(0.5f + 0.5f * (acc_dist - grid_dist) / k, 0.0f, 1.0f);
-        }
-        else {
-          h = clamp(0.5f - 0.5f * (acc_dist - grid_dist) / k, 0.0f, 1.0f);
-        }
-        acc_color = mix(acc_color, grid_color.rgb, h);
-        acc_dist = new_dist;
-      }
-      else {
-        if (grid_csg_operation == SDF_CSG_OP_UNION && grid_dist < acc_dist) {
-          acc_color = grid_color.rgb;
-        }
-        else if (grid_csg_operation == SDF_CSG_OP_INTERSECT && grid_dist > acc_dist) {
-          acc_color = grid_color.rgb;
-        }
-        acc_dist = new_dist;
-      }
+      float h = csgColorWeight(
+          acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance);
+      acc_color = mix(acc_color, grid_color.rgb, h);
+      acc_dist = new_dist;
     }
 
     imageStore(compact_atlas, atlas_coord, float4(acc_dist, acc_color));

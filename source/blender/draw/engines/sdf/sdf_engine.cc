@@ -226,6 +226,30 @@ class Instance : public DrawEngine {
    * draw and only runs the ray-march for depth writes. */
   bool depth_mode_ = false;
 
+  /** Incremental rebake: per-object dirty detection.
+   * When only a few objects change, we reclassify and rebake only the affected
+   * brick region instead of the entire grid. Gives near-constant performance
+   * regardless of total scene object count. */
+  Vector<uint64_t> prev_object_hashes_;
+  Vector<float4> prev_bbox_mins_;
+  Vector<float4> prev_bbox_maxs_;
+  int prev_object_count_ = 0;
+  float3 prev_atlas_origin_ = float3(0);
+  int3 prev_grid_res_ = int3(0);
+  float prev_voxel_size_ = 0.0f;
+  uint64_t prev_group_structure_hash_ = 0;
+  float prev_max_blend_ = 0.0f;
+  float prev_max_shell_distance_ = 0.0f;
+  bool prev_had_grid_objects_ = false;
+  /** Whether this frame uses incremental rebake (dirty-region-only). */
+  bool incremental_bake_ = false;
+  /** Brick-space dirty region bounds (inclusive min, exclusive max). */
+  int3 dirty_brick_min_ = int3(0);
+  int3 dirty_brick_max_ = int3(0);
+  /** Total atlas slots allocated across all frames (grows in incremental mode,
+   * reset on full rebake). Used to detect fragmentation and atlas overflow. */
+  int total_allocated_slots_ = 0;
+
   /** Mesh-to-SDF grid objects pending processing. */
   struct PendingGridObject {
     const Object *ob;
@@ -1100,31 +1124,163 @@ class Instance : public DrawEngine {
     /* 2. Groups (evaluated in order from 0 to group_count - 1). */
     for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
       SDFGroupGPU &grp = groups_gpu_[g];
-      
+
       float running_group_expand = 0.0f;
-      
+
+      /* The group's CSG operation blends its result with the scene accumulator.
+       * This blend region extends from BOTH sides of the group boundary, so
+       * the group's own members need their AABBs expanded by the group's blend
+       * amount (not just earlier groups). Include it before processing members. */
+      float grp_expand = grp.blend + fabsf(grp.shell_distance);
+      float effective_scene_expand = math::max(running_scene_expand, grp_expand);
+
       int end_idx = grp.first_object + grp.object_count - 1;
       int start_idx = grp.first_object;
-      
+
       if (grp.object_count > 0 && start_idx >= 0 && end_idx < int(objects_.size())) {
         for (int i = end_idx; i >= start_idx; i--) {
           SDFObjectGPU &obj = objects_[i];
-          
+
           /* Need to cover both subsequent operations WITHIN the group,
-           * and subsequent operations in the SCENE (after this group). */
-          float total_expand = math::max(running_scene_expand, running_group_expand);
-          
+           * and subsequent operations in the SCENE (after this group),
+           * including this group's own scene-level blend. */
+          float total_expand = math::max(effective_scene_expand, running_group_expand);
+
           obj.bbox_min -= float4(total_expand, total_expand, total_expand, 0.0f);
           obj.bbox_max += float4(total_expand, total_expand, total_expand, 0.0f);
-          
+
           float this_expand = obj.blend + fabsf(obj.shell_distance);
           running_group_expand = math::max(running_group_expand, this_expand);
         }
       }
-      
-      /* This group's blend expands all previous groups in the scene. */
-      float grp_expand = grp.blend + fabsf(grp.shell_distance);
+
+      /* This group's blend also expands all previous groups in the scene. */
       running_scene_expand = math::max(running_scene_expand, grp_expand);
+    }
+
+    /* ---- Incremental rebake detection ----
+     * Compute per-object hashes AFTER sorting and AABB expansion so that
+     * any change (intrinsic property, group membership, expansion) is captured.
+     * Then compare with previous frame to find dirty objects and compute
+     * the minimal brick region that needs reclassification and rebaking. */
+    {
+      const int n = int(objects_.size());
+      Vector<uint64_t> current_hashes(n);
+      for (int i = 0; i < n; i++) {
+        current_hashes[i] = compute_object_hash(i);
+      }
+
+      /* Compute group structure hash (membership, order, group-level params). */
+      uint64_t group_struct_hash = uint64_t(groups_gpu_.size()) * 997;
+      for (const SDFGroupGPU &grp : groups_gpu_) {
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.csg_operation);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.blend_type);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.blend);
+        group_struct_hash =
+            group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.first_object);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.object_count);
+      }
+
+      incremental_bake_ = false;
+
+      /* Incremental is possible when the grid geometry and structure are stable
+       * and only a subset of objects changed their intrinsic properties. */
+      if (prev_object_count_ == n &&                     /* Same object count. */
+          prev_atlas_origin_ == atlas_origin_ &&          /* Grid didn't shift. */
+          prev_grid_res_ == grid_res_ &&                  /* Grid didn't resize. */
+          prev_voxel_size_ == voxel_size_ &&              /* Voxel density unchanged. */
+          prev_group_structure_hash_ == group_struct_hash && /* Group structure stable. */
+          !grids_changed &&                               /* No grid object changes. */
+          grid_objects_.is_empty() &&                      /* No grid objects this frame. */
+          !prev_had_grid_objects_ &&                       /* No grid objects last frame. */
+          compact_atlas_tx_ != nullptr &&                  /* Atlas exists. */
+          indirection_tx_ != nullptr &&                    /* Indirection exists. */
+          total_allocated_slots_ > 0)                      /* Had a previous bake. */
+      {
+        /* Find which objects changed. */
+        Vector<int> dirty_indices;
+        for (int i = 0; i < n; i++) {
+          if (current_hashes[i] != prev_object_hashes_[i]) {
+            dirty_indices.append(i);
+          }
+        }
+
+        if (!dirty_indices.is_empty() && dirty_indices.size() < n) {
+          /* Compute dirty AABB: union of old+new AABBs for all dirty objects. */
+          float3 dirty_min = float3(1e30f);
+          float3 dirty_max = float3(-1e30f);
+
+          for (int idx : dirty_indices) {
+            /* Current frame's expanded AABB. */
+            dirty_min = math::min(dirty_min, float3(objects_[idx].bbox_min));
+            dirty_max = math::max(dirty_max, float3(objects_[idx].bbox_max));
+            /* Previous frame's expanded AABB. */
+            dirty_min = math::min(dirty_min, float3(prev_bbox_mins_[idx]));
+            dirty_max = math::max(dirty_max, float3(prev_bbox_maxs_[idx]));
+          }
+
+          /* Convert to brick coordinates. */
+          float chunk = float(SDF_BRICK_SIZE) * voxel_size_;
+          dirty_brick_min_ = int3(math::floor((dirty_min - atlas_origin_) / chunk));
+          dirty_brick_max_ = int3(math::ceil((dirty_max - atlas_origin_) / chunk));
+
+          /* Clamp to grid bounds. */
+          dirty_brick_min_ = math::clamp(dirty_brick_min_, int3(0), grid_res_);
+          dirty_brick_max_ = math::clamp(dirty_brick_max_, int3(0), grid_res_);
+
+          int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
+          int dirty_volume = dirty_size.x * dirty_size.y * dirty_size.z;
+          int total_volume = grid_res_.x * grid_res_.y * grid_res_.z;
+
+          /* Only use incremental if dirty region < 50% of total grid. */
+          if (dirty_volume > 0 && dirty_volume < total_volume / 2) {
+            /* Check atlas capacity: worst case all dirty bricks become newly active. */
+            int max_atlas_slots = bricks_per_axis_ * bricks_per_axis_ * bricks_per_axis_;
+            if (total_allocated_slots_ + dirty_volume <= max_atlas_slots) {
+              /* Check fragmentation: if allocated slots > 3x the previous active count,
+               * force full rebake to compact the atlas. */
+              if (total_allocated_slots_ <= prev_active_brick_count_ * 3 ||
+                  prev_active_brick_count_ == 0)
+              {
+                incremental_bake_ = true;
+
+                if (G.debug & G_DEBUG_GPU) {
+                  printf(
+                      "[SDF] incremental rebake: %d dirty objects, dirty region "
+                      "[%d,%d,%d]-[%d,%d,%d] (%d bricks / %d total)\n",
+                      int(dirty_indices.size()),
+                      dirty_brick_min_.x,
+                      dirty_brick_min_.y,
+                      dirty_brick_min_.z,
+                      dirty_brick_max_.x,
+                      dirty_brick_max_.y,
+                      dirty_brick_max_.z,
+                      dirty_volume,
+                      total_volume);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      /* Store current state for next frame's incremental comparison. */
+      prev_object_hashes_ = std::move(current_hashes);
+      prev_bbox_mins_.resize(n);
+      prev_bbox_maxs_.resize(n);
+      for (int i = 0; i < n; i++) {
+        prev_bbox_mins_[i] = objects_[i].bbox_min;
+        prev_bbox_maxs_[i] = objects_[i].bbox_max;
+      }
+      prev_object_count_ = n;
+      prev_atlas_origin_ = atlas_origin_;
+      prev_grid_res_ = grid_res_;
+      prev_voxel_size_ = voxel_size_;
+      prev_group_structure_hash_ = group_struct_hash;
+      prev_max_blend_ = max_blend_;
+      prev_max_shell_distance_ = max_shell_distance_;
+      prev_had_grid_objects_ = !grid_objects_.is_empty();
     }
 
     /* Compute scene hash for dirty tracking (analytic + grid + text combined). */
@@ -1380,8 +1536,45 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_GRID);
         }
       }
+      else if (incremental_bake_) {
+        /* ---- Incremental world-space pipeline ----
+         * Only reclassify and rebake bricks within the dirty region.
+         * Indirection and atlas are preserved from the previous frame;
+         * dirty bricks reuse their existing atlas slots when possible. */
+
+        /* Phase 1: Classify dirty region only. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_CLASSIFY);
+        }
+        ensure_indirection();
+        if (!objects_.is_empty()) {
+          /* Do NOT clear indirection — preserve cached brick data. */
+          dispatch_classify();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_CLASSIFY);
+        }
+
+        /* Phase 2: Bake dirty bricks only. Atlas NOT cleared. */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_BAKE);
+        }
+        if (!objects_.is_empty() && active_brick_count_ > 0) {
+          dispatch_bake();
+        }
+        if (perf_enabled_) {
+          perf_end_pass(PERF_PASS_BAKE);
+        }
+
+        /* No grid blend in incremental mode (grid_objects_.is_empty()
+         * is a prerequisite for incremental). */
+        if (perf_enabled_) {
+          perf_begin_pass(PERF_PASS_GRID);
+          perf_end_pass(PERF_PASS_GRID);
+        }
+      }
       else {
-        /* ---- World-space pipeline ---- */
+        /* ---- Full world-space pipeline ---- */
 
         /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
         if (perf_enabled_) {
@@ -1518,6 +1711,74 @@ class Instance : public DrawEngine {
   }
 
  private:
+  /** Compute a 64-bit FNV-1a hash capturing all SDF-relevant properties of a
+   * single object. Used for per-object dirty detection in incremental rebake. */
+  uint64_t compute_object_hash(int obj_idx) const
+  {
+    const SDFObjectGPU &obj = objects_[obj_idx];
+    uint64_t h = 14695981039346656037ULL;
+    auto mix = [&](uint64_t v) {
+      h ^= v;
+      h *= 1099511628211ULL;
+    };
+    /* Position and size. */
+    mix(float_as_uint(obj.position.x));
+    mix(float_as_uint(obj.position.y));
+    mix(float_as_uint(obj.position.z));
+    mix(float_as_uint(obj.sdf_size.x));
+    mix(float_as_uint(obj.sdf_size.y));
+    mix(float_as_uint(obj.sdf_size.z));
+    /* Shape parameters. */
+    mix(float_as_uint(obj.bevel));
+    mix(float_as_uint(obj.blend));
+    mix(uint64_t(obj.blend_type));
+    mix(uint64_t(obj.sdf_type));
+    mix(uint64_t(obj.csg_operation));
+    mix(float_as_uint(obj.shell_distance));
+    /* Color. */
+    mix(float_as_uint(obj.color.x));
+    mix(float_as_uint(obj.color.y));
+    mix(float_as_uint(obj.color.z));
+    mix(float_as_uint(obj.color.w));
+    /* Box/Ngon specifics. */
+    mix(float_as_uint(obj.box_corners.x));
+    mix(float_as_uint(obj.box_corners.y));
+    mix(float_as_uint(obj.box_corners.z));
+    mix(float_as_uint(obj.box_corners.w));
+    mix(float_as_uint(obj.box_edges.x));
+    mix(float_as_uint(obj.box_edges.y));
+    mix(float_as_uint(obj.box_edges.z));
+    mix(float_as_uint(obj.box_edges.w));
+    mix(uint64_t(obj.box_modes.x));
+    mix(uint64_t(obj.box_modes.y));
+    mix(uint64_t(obj.box_modes.z));
+    /* Rotation (from inverse matrix diagonal). */
+    mix(float_as_uint(obj.inverse_matrix[0][0]));
+    mix(float_as_uint(obj.inverse_matrix[1][1]));
+    mix(float_as_uint(obj.inverse_matrix[2][2]));
+    /* Group membership. */
+    mix(uint64_t(uint32_t(obj.group_id + 1)));
+    mix(uint64_t(obj.group_first));
+    mix(uint64_t(uint32_t(obj.group_order + 1)));
+    /* Modifiers. */
+    for (int m = obj.modifier_start; m < obj.modifier_start + obj.modifier_count; m++) {
+      if (m >= 0 && m < int(modifiers_.size())) {
+        const SDFModifierGPU &mod = modifiers_[m];
+        mix(uint64_t(mod.header.x));
+        mix(uint64_t(mod.header.y));
+        mix(float_as_uint(mod.params.x));
+        mix(float_as_uint(mod.params.y));
+        mix(float_as_uint(mod.params.z));
+        mix(float_as_uint(mod.params.w));
+        mix(float_as_uint(mod.params2.x));
+        mix(float_as_uint(mod.params2.y));
+        mix(float_as_uint(mod.params2.z));
+        mix(float_as_uint(mod.params2.w));
+      }
+    }
+    return h;
+  }
+
   void sync_sdf_settings()
   {
     const View3D *v3d = draw_ctx_->v3d;
@@ -2465,25 +2726,42 @@ class Instance : public DrawEngine {
 
   void dispatch_classify()
   {
+    const bool incremental = incremental_bake_;
+
     /* Create / reset brick counter SSBO. */
-    BrickCounter zero_counter = {};
-    zero_counter.count = 0;
-    zero_counter._pad0 = 0;
-    zero_counter._pad1 = 0;
-    zero_counter._pad2 = 0;
+    BrickCounter init_counter = {};
+    init_counter.count = 0;
+    if (incremental) {
+      /* Incremental: new slots start after all previously allocated slots. */
+      init_counter.next_slot = uint(total_allocated_slots_);
+    }
+    else {
+      init_counter.next_slot = 0;
+    }
+    init_counter._pad1 = 0;
+    init_counter._pad2 = 0;
 
     if (brick_counter_ == nullptr) {
       brick_counter_ = GPU_storagebuf_create_ex(
-          sizeof(BrickCounter), &zero_counter, GPU_USAGE_DYNAMIC, "sdf_brick_counter");
+          sizeof(BrickCounter), &init_counter, GPU_USAGE_DYNAMIC, "sdf_brick_counter");
     }
     else {
-      GPU_storagebuf_update(brick_counter_, &zero_counter);
+      GPU_storagebuf_update(brick_counter_, &init_counter);
     }
 
-    /* Ensure active bricks SSBO is large enough for worst case (all bricks active). */
-    int max_bricks = grid_res_.x * grid_res_.y * grid_res_.z;
-    if (max_bricks < 1) {
-      max_bricks = 1;
+    /* Ensure active bricks SSBO is large enough.
+     * Full mode: worst case = all bricks active.
+     * Incremental: worst case = dirty region volume. */
+    int max_bricks;
+    if (incremental) {
+      int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
+      max_bricks = math::max(dirty_size.x * dirty_size.y * dirty_size.z, 1);
+    }
+    else {
+      max_bricks = grid_res_.x * grid_res_.y * grid_res_.z;
+      if (max_bricks < 1) {
+        max_bricks = 1;
+      }
     }
     if (active_bricks_ == nullptr || active_bricks_capacity_ < max_bricks) {
       if (active_bricks_) {
@@ -2543,24 +2821,45 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(classify_sh_, "group_count", int(groups_gpu_.size()));
 
+    /* Incremental mode uniforms. */
+    GPU_shader_uniform_1i(classify_sh_, "incremental_mode", incremental ? 1 : 0);
+    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_min", dirty_brick_min_);
+    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", dirty_brick_max_);
+
     /* Dispatch: one thread per brick, local group size is 4x4x4. */
-    GPU_compute_dispatch(classify_sh_,
-                         divide_ceil_u(grid_res_.x, 4),
-                         divide_ceil_u(grid_res_.y, 4),
-                         divide_ceil_u(grid_res_.z, 4));
+    if (incremental) {
+      int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
+      GPU_compute_dispatch(classify_sh_,
+                           divide_ceil_u(dirty_size.x, 4),
+                           divide_ceil_u(dirty_size.y, 4),
+                           divide_ceil_u(dirty_size.z, 4));
+    }
+    else {
+      GPU_compute_dispatch(classify_sh_,
+                           divide_ceil_u(grid_res_.x, 4),
+                           divide_ceil_u(grid_res_.y, 4),
+                           divide_ceil_u(grid_res_.z, 4));
+    }
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
     GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    /* Always read actual brick count after classify. The memory barrier above
-     * already flushed the GPU pipeline, so the readback is effectively free.
-     * This allows dispatch_bake() to dispatch the exact number of workgroups
-     * instead of the worst-case grid_res^3 capacity (often 100-1000x fewer). */
+    /* Read back brick counter after classify. */
     {
       BrickCounter readback = {};
       GPU_storagebuf_read(brick_counter_, &readback);
       active_brick_count_ = int(readback.count);
+
+      if (incremental) {
+        /* In incremental mode, count = dirty active bricks (for bake dispatch).
+         * next_slot = new total allocated slots (may have grown). */
+        total_allocated_slots_ = int(readback.next_slot);
+      }
+      else {
+        /* In full mode, count = total active bricks = total allocated slots. */
+        total_allocated_slots_ = active_brick_count_;
+      }
     }
   }
 

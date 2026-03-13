@@ -22,7 +22,7 @@ STORAGE_BUF(2, write, ActiveBrick, active_bricks[])
 STORAGE_BUF(3, read, BVHNodeGPU, bvh_nodes[])
 STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(5, read, SDFGroupGPU, groups[])
-IMAGE(0, SINT_32, write, iimage3D, indirection_tex)
+IMAGE(0, SINT_32, read_write, iimage3D, indirection_tex)
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(float, voxel_size)
 PUSH_CONSTANT(float3, atlas_origin)
@@ -30,6 +30,9 @@ PUSH_CONSTANT(int3, grid_resolution)
 PUSH_CONSTANT(float, brick_half_diag)
 PUSH_CONSTANT(int, bvh_node_count)
 PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(int, incremental_mode)
+PUSH_CONSTANT(int3, dirty_brick_min)
+PUSH_CONSTANT(int3, dirty_brick_max)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_classify_comp.glsl")
 GPU_SHADER_CREATE_END()
@@ -213,22 +216,33 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Outline March Fragment Shader
+/** \name SDF Outline March — Instanced AABB Rasterization
  * \{ */
+
+/**
+ * Interface between vertex and fragment shaders for instanced SDF outline.
+ * Each instance is one selected SDF object; the vertex shader passes the
+ * object index so the fragment shader evaluates only that single object.
+ */
+GPU_SHADER_INTERFACE_INFO(sdf_outline_inst_iface)
+FLAT(int, obj_index)
+GPU_SHADER_INTERFACE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_outline_march)
 DO_STATIC_COMPILATION()
 STORAGE_BUF(0, read, uint, outline_id_map_buf[])
 STORAGE_BUF(1, read, SDFObjectGPU, sdf_objects[])
+STORAGE_BUF(2, read, int, selected_indices[])
 STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
 PUSH_CONSTANT(float, voxel_size)
-PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(float2, viewport_size_inv)
+VERTEX_OUT(sdf_outline_inst_iface)
 /* Using uint because 16bit uint can contain more ids than int. */
 FRAGMENT_OUT(0, uint, out_object_id)
 DEPTH_WRITE(DepthWrite::ANY)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
-ADDITIONAL_INFO(gpu_fullscreen)
 ADDITIONAL_INFO(draw_view)
+VERTEX_SOURCE("sdf_outline_march_vert.glsl")
 FRAGMENT_SOURCE("sdf_outline_march_frag.glsl")
 GPU_SHADER_CREATE_END()
 

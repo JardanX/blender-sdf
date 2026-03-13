@@ -34,19 +34,31 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
         grp = context.sdf_group
 
-        layout.prop(grp, "csg_operation")
-        layout.prop(grp, "blend_type")
+        # CSG operation — full-width icon-only buttons
+        layout.label(text="CSG Operation")
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        row.prop(grp, "csg_operation", expand=True, icon_only=True)
 
-        sub = layout.row()
-        sub.enabled = (grp.blend_type != 'LINEAR')
-        sub.prop(grp, "blend")
+        layout.separator()
+
+        # Blend type — full-width icon-only buttons
+        layout.label(text="Blend Type")
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        row.prop(grp, "blend_type", expand=True, icon_only=True)
+
+        # Blend amount — only show when not linear
+        if grp.blend_type != 'LINEAR':
+            layout.use_property_split = True
+            layout.use_property_decorate = False
+            layout.prop(grp, "blend")
 
         if grp.csg_operation == 'SHELL':
+            layout.use_property_split = True
+            layout.use_property_decorate = False
             layout.prop(grp, "shell_distance")
 
 
@@ -85,7 +97,7 @@ class DATA_PT_sdf_group_members(SDFGroupButtonsPanel, Panel):
 
 
 class DATA_PT_sdf_group_display(SDFGroupButtonsPanel, Panel):
-    bl_label = "Display"
+    bl_label = "Global Tint"
 
     def draw(self, context):
         layout = self.layout

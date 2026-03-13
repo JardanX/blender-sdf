@@ -110,9 +110,16 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         break;
     }
 
-    /* Auto-group: assign to existing group or create one. */
+    /* Auto-group: prefer active object's group, fall back to last group. */
     Main *bmain = CTX_data_main(C);
-    SDFGroup *group = static_cast<SDFGroup *>(bmain->sdf_groups.last);
+    SDFGroup *group = nullptr;
+    Object *active = CTX_data_active_object(C);
+    if (active && active->type == OB_SDF && active->data) {
+      group = static_cast<SDF *>(active->data)->sdf_group;
+    }
+    if (!group) {
+      group = static_cast<SDFGroup *>(bmain->sdf_groups.last);
+    }
     if (!group) {
       group = BKE_sdf_group_add(bmain, "SDF Group");
     }
