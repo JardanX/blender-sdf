@@ -1024,7 +1024,17 @@ int /*eContextResult*/ buttons_context(const bContext *C,
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "sdf_group")) {
-    set_pointer_type(path, result, &RNA_SDFGroup);
+    /* Check if SDFGroup is directly on the path (e.g. pinned). */
+    if (set_pointer_type(path, result, &RNA_SDFGroup) != CTX_RESULT_OK) {
+      /* Otherwise follow the SDF -> sdf_group back-pointer. */
+      PointerRNA *ptr = get_pointer_type(path, &RNA_SDF);
+      if (ptr) {
+        SDF *sdf = static_cast<SDF *>(ptr->data);
+        if (sdf->sdf_group) {
+          CTX_data_pointer_set(result, &sdf->sdf_group->id, &RNA_SDFGroup, sdf->sdf_group);
+        }
+      }
+    }
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "material")) {

@@ -36,6 +36,15 @@
 static void rna_SDFGroup_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+
+  /* Tag all member objects so the draw engine picks up group changes immediately. */
+  SDFGroup *group = (SDFGroup *)ptr->owner_id;
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    if (member->object) {
+      DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
+    }
+  }
+
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 

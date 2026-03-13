@@ -91,9 +91,7 @@ static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
   BLO_write_pointer_array(writer, sdf->totcol, sdf->mat);
 
   /* Modifier stack */
-  LISTBASE_FOREACH (SDFModifier *, mod, &sdf->modifiers) {
-    BLO_write_struct(writer, SDFModifier, mod);
-  }
+  BLO_write_struct_list(writer, SDFModifier, &sdf->modifiers);
 }
 
 static void sdf_blend_read_data(BlendDataReader *reader, ID *id)

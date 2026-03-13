@@ -161,6 +161,10 @@ static gpu::StorageBuf *s_object_ssbo = nullptr;
 static gpu::StorageBuf *s_modifier_ssbo = nullptr;
 static gpu::StorageBuf *s_group_ssbo = nullptr;
 static int s_group_count = 0;
+/** Maps depsgraph-order index → sorted-order index in sdf_objects[].
+ * Used by the overlay outline code to translate its depsgraph-order indices
+ * into valid indices for the sorted SSBO. */
+static Vector<int> s_depsgraph_to_sorted;
 
 class Instance : public DrawEngine {
  private:
@@ -496,6 +500,7 @@ class Instance : public DrawEngine {
     object_ptrs_.clear();
     modifiers_.clear();
     groups_gpu_.clear();
+    s_depsgraph_to_sorted.clear();
     pending_grid_objects_.clear();
     shapes_.clear();
     shape_fingerprint_map_.clear();
@@ -1069,9 +1074,12 @@ class Instance : public DrawEngine {
           }
           objects_ = std::move(sorted);
 
+          /* Export depsgraph→sorted mapping for overlay outline code. */
+          s_depsgraph_to_sorted = std::move(old_to_new);
+
           /* Update instance object_ids to match new indices. */
           for (InstanceInfo &inst : instances_) {
-            inst.object_id = old_to_new[inst.object_id];
+            inst.object_id = s_depsgraph_to_sorted[inst.object_id];
           }
         }
       }
@@ -1112,27 +1120,55 @@ class Instance : public DrawEngine {
         break; /* Reached grouped objects. */
       }
 
-      /* Expand AABB by the max blend radius of any subsequent operations. */
-      obj.bbox_min -= float4(running_scene_expand, running_scene_expand, running_scene_expand, 0.0f);
-      obj.bbox_max += float4(running_scene_expand, running_scene_expand, running_scene_expand, 0.0f);
+      float effective_expand = obj.blend + fabsf(obj.shell_distance);
 
-      /* Update running max with this object's blend requirements. */
-      float this_expand = obj.blend + fabsf(obj.shell_distance);
-      running_scene_expand = math::max(running_scene_expand, this_expand);
+      /* Check subsequent ungrouped objects to see if their blend radius affects this object.
+       * We only expand this object's AABB by a subsequent object's blend radius if they
+       * could potentially overlap within that blend radius. */
+      for (int j = i + 1; j < int(objects_.size()); j++) {
+        const SDFObjectGPU &sub_obj = objects_[j];
+        float sub_blend = sub_obj.blend + fabsf(sub_obj.shell_distance);
+        if (sub_blend > effective_expand) {
+          /* Check if AABBs expanded by sub_blend would overlap. */
+          bool overlap = true;
+          for (int axis = 0; axis < 3; axis++) {
+            if (obj.bbox_max[axis] + sub_blend < sub_obj.bbox_min[axis] - sub_blend ||
+                obj.bbox_min[axis] - sub_blend > sub_obj.bbox_max[axis] + sub_blend) {
+              overlap = false;
+              break;
+            }
+          }
+          if (overlap) {
+            effective_expand = sub_blend;
+          }
+        }
+      }
+
+      /* Expand AABB by the calculated effective expand. */
+      obj.bbox_min -= float4(effective_expand, effective_expand, effective_expand, 0.0f);
+      obj.bbox_max += float4(effective_expand, effective_expand, effective_expand, 0.0f);
     }
 
     /* 2. Groups (evaluated in order from 0 to group_count - 1). */
+    float running_scene_expand = 0.0f;
     for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
       SDFGroupGPU &grp = groups_gpu_[g];
 
       float running_group_expand = 0.0f;
 
-      /* The group's CSG operation blends its result with the scene accumulator.
-       * This blend region extends from BOTH sides of the group boundary, so
-       * the group's own members need their AABBs expanded by the group's blend
-       * amount (not just earlier groups). Include it before processing members. */
       float grp_expand = grp.blend + fabsf(grp.shell_distance);
-      float effective_scene_expand = math::max(running_scene_expand, grp_expand);
+      
+      /* Check subsequent groups and ungrouped objects to see if their blend affects this group. */
+      float effective_scene_expand = grp_expand;
+      
+      /* Check against subsequent groups. */
+      for (int sub_g = g + 1; sub_g < int(groups_gpu_.size()); sub_g++) {
+        const SDFGroupGPU &sub_grp = groups_gpu_[sub_g];
+        float sub_blend = sub_grp.blend + fabsf(sub_grp.shell_distance);
+        if (sub_blend > effective_scene_expand) {
+           effective_scene_expand = math::max(effective_scene_expand, sub_blend); /* Rough approx, or we could do AABB check for groups. To be safe, we can just do AABB check of the group. But groups don't have explicit AABBs stored here. We'll refine this. */
+        }
+      }
 
       int end_idx = grp.first_object + grp.object_count - 1;
       int start_idx = grp.first_object;
@@ -1234,14 +1270,14 @@ class Instance : public DrawEngine {
           int total_volume = grid_res_.x * grid_res_.y * grid_res_.z;
 
           /* Only use incremental if dirty region < 50% of total grid. */
-          if (dirty_volume > 0 && dirty_volume < total_volume / 2) {
+          if (dirty_volume >= 0 && dirty_volume < total_volume / 2) {
             /* Check atlas capacity: worst case all dirty bricks become newly active. */
             int max_atlas_slots = bricks_per_axis_ * bricks_per_axis_ * bricks_per_axis_;
             if (total_allocated_slots_ + dirty_volume <= max_atlas_slots) {
               /* Check fragmentation: if allocated slots > 3x the previous active count,
                * force full rebake to compact the atlas. */
               if (total_allocated_slots_ <= prev_active_brick_count_ * 3 ||
-                  prev_active_brick_count_ == 0)
+                  prev_active_brick_count_ == 0 || dirty_volume == 0)
               {
                 incremental_bake_ = true;
 
@@ -2829,10 +2865,12 @@ class Instance : public DrawEngine {
     /* Dispatch: one thread per brick, local group size is 4x4x4. */
     if (incremental) {
       int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
-      GPU_compute_dispatch(classify_sh_,
-                           divide_ceil_u(dirty_size.x, 4),
-                           divide_ceil_u(dirty_size.y, 4),
-                           divide_ceil_u(dirty_size.z, 4));
+      if (dirty_size.x > 0 && dirty_size.y > 0 && dirty_size.z > 0) {
+        GPU_compute_dispatch(classify_sh_,
+                             divide_ceil_u(dirty_size.x, 4),
+                             divide_ceil_u(dirty_size.y, 4),
+                             divide_ceil_u(dirty_size.z, 4));
+      }
     }
     else {
       GPU_compute_dispatch(classify_sh_,
@@ -4164,6 +4202,16 @@ gpu::StorageBuf *sdf_groups_ssbo_get()
 int sdf_group_count_get()
 {
   return s_group_count;
+}
+
+const int *sdf_depsgraph_to_sorted_get(int *out_count)
+{
+  if (s_depsgraph_to_sorted.is_empty()) {
+    *out_count = 0;
+    return nullptr;
+  }
+  *out_count = int(s_depsgraph_to_sorted.size());
+  return s_depsgraph_to_sorted.data();
 }
 
 DrawEngine *Engine::create_instance()

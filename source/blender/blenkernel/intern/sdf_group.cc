@@ -77,9 +77,7 @@ static void sdf_group_blend_write(BlendWriter *writer, ID *id, const void *id_ad
   BKE_id_blend_write(writer, &group->id);
 
   /* Write member list. */
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
-    BLO_write_struct(writer, SDFGroupMember, member);
-  }
+  BLO_write_struct_list(writer, SDFGroupMember, &group->members);
 }
 
 static void sdf_group_blend_read_data(BlendDataReader *reader, ID *id)

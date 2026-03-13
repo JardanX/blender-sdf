@@ -430,6 +430,19 @@ class Outline : Overlay {
       GPU_storagebuf_update(sdf_outline_ssbo_, sdf_outline_ids_.data());
     }
 
+    /* Remap selected indices from depsgraph order to sorted order.
+     * The SDF engine sorts objects by group/order for CSG evaluation,
+     * so sdf_objects[] is in sorted order, not depsgraph order. */
+    int mapping_count = 0;
+    const int *depsgraph_to_sorted = sdf::sdf_depsgraph_to_sorted_get(&mapping_count);
+    if (depsgraph_to_sorted && mapping_count > 0) {
+      for (int32_t &idx : sdf_selected_indices_) {
+        if (idx >= 0 && idx < mapping_count) {
+          idx = int32_t(depsgraph_to_sorted[idx]);
+        }
+      }
+    }
+
     /* Upload selected indices SSBO (compact list for instancing). */
     const int sel_count = int(sdf_selected_indices_.size());
     if (sel_count == 0) {
