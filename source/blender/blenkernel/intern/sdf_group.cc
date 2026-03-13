@@ -21,6 +21,7 @@
 #include "BKE_idtype.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
+#include "BKE_main.hh"
 #include "BKE_sdf_group.hh"
 
 #include "BLT_translation.hh"
@@ -64,7 +65,7 @@ static void sdf_group_foreach_id(ID *id, LibraryForeachIDData *data)
 {
   SDFGroup *group = (SDFGroup *)id;
   LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
-    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, member->object, IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, member->object, IDWALK_CB_NOP);
   }
 }
 
@@ -91,6 +92,13 @@ static void sdf_group_blend_read_data(BlendDataReader *reader, ID *id)
   group->runtime = new blender::bke::SDFGroupRuntime();
 }
 
+static void sdf_group_blend_read_after_liblink(BlendLibReader * /*reader*/, ID *id)
+{
+  /* Clean up zombie members (object was deleted before save, or link failed). */
+  SDFGroup *group = (SDFGroup *)id;
+  BKE_sdf_group_cleanup_null_members(group);
+}
+
 IDTypeInfo IDType_ID_SG = {
     /*id_code*/ SDFGroup::id_type,
     /*id_filter*/ FILTER_ID_SG,
@@ -115,7 +123,7 @@ IDTypeInfo IDType_ID_SG = {
 
     /*blend_write*/ sdf_group_blend_write,
     /*blend_read_data*/ sdf_group_blend_read_data,
-    /*blend_read_after_liblink*/ nullptr,
+    /*blend_read_after_liblink*/ sdf_group_blend_read_after_liblink,
 
     /*blend_read_undo_preserve*/ nullptr,
 
@@ -136,11 +144,6 @@ SDFGroupMember *BKE_sdf_group_member_add(SDFGroup *group, Object *ob)
   member->order = group->totmember;
   BLI_addtail(&group->members, member);
   group->totmember++;
-
-  /* The group holds a user reference to the object (matches IDWALK_CB_USER in foreach_id). */
-  if (ob) {
-    id_us_plus(&ob->id);
-  }
 
   /* Set back-pointer on the SDF data (SDF holds a USER reference to the group,
    * matching IDWALK_CB_USER in sdf_foreach_id). */
@@ -164,11 +167,6 @@ void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member)
       sdf->sdf_group = nullptr;
       sdf->group_order = 0;
     }
-  }
-
-  /* Release user reference (matches id_us_plus in member_add). */
-  if (member->object) {
-    id_us_min(&member->object->id);
   }
 
   BLI_remlink(&group->members, member);
@@ -202,15 +200,30 @@ void BKE_sdf_group_cleanup_null_members(SDFGroup *group)
 {
   bool changed = false;
   LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &group->members) {
-    if (member->object == nullptr) {
-      BLI_remlink(&group->members, member);
-      MEM_freeN(member);
-      group->totmember--;
+    if (member->object == nullptr || member->object->type != OB_SDF || member->object->data == nullptr) {
+      /* Properly remove the member to ensure user counts and back-pointers are updated. */
+      BKE_sdf_group_member_remove(group, member);
       changed = true;
     }
   }
-  if (changed) {
-    BKE_sdf_group_reindex_members(group);
+}
+
+void BKE_sdf_groups_cleanup_all_null_members(Main *bmain)
+{
+  LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+    BKE_sdf_group_cleanup_null_members(group);
+  }
+}
+
+void BKE_sdf_groups_remove_object(Main *bmain, Object *ob)
+{
+  LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+    LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &group->members) {
+      if (member->object == ob) {
+        /* BKE_sdf_group_member_remove handles user counts and SDF back-pointer. */
+        BKE_sdf_group_member_remove(group, member);
+      }
+    }
   }
 }
 
