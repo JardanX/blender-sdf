@@ -16,7 +16,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
-#define MAX_CANDIDATES 64
+#define MAX_CANDIDATES 128
 
 /* Compact per-object data cached in shared memory.
  * Only the fields needed for SDF evaluation — avoids re-reading the
@@ -32,7 +32,7 @@ struct SharedObj {
   int blend_type;
   int csg_operation;
   float shell_distance;
-  int obj_index;
+
   int modifier_start;
   int modifier_count;
   int group_id;
@@ -86,13 +86,11 @@ void main()
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
   /* Per-brick AABB for object culling (includes 2-voxel overlap border).
-   * Expand by brick_half_diag to match the classify shader's surface detection
-   * radius, plus max_blend for smooth union and max_shell_distance so bricks
-   * in the shell zone can find base union objects as candidates.
-   * Without brick_half_diag, the bake shader can miss objects that the classify
-   * shader found — producing stale voxels (e.g., subtraction not applied). */
+   * Expand only by brick_half_diag (same as classify shader).
+   * Per-object AABBs already include their own blend + shell_distance padding,
+   * so no global expansion is needed. */
   float bhd = float(BRICK_SIZE) * voxel_size * 0.866025f;
-  float candidate_expand = bhd + max_blend + max_shell_distance;
+  float candidate_expand = bhd;
   float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
                       float3(candidate_expand);
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
@@ -185,7 +183,7 @@ void main()
     shared_objs[c].blend_type = obj.blend_type;
     shared_objs[c].csg_operation = obj.csg_operation;
     shared_objs[c].shell_distance = obj.shell_distance;
-    shared_objs[c].obj_index = i;
+
     shared_objs[c].modifier_start = obj.modifier_start;
     shared_objs[c].modifier_count = obj.modifier_count;
     shared_objs[c].group_id = obj.group_id;
@@ -211,9 +209,6 @@ void main()
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
-    int acc_obj_id = -1;
-    float closest_raw_dist = 1e10f;
-
     /* Group-aware sequential evaluation.
      * Objects are sorted by group, then by order within group.
      * Each group evaluates its members sequentially (first object = base,
@@ -240,12 +235,7 @@ void main()
         float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
         float dist = evalSDFPrimitiveSh(local_pos, sobj);
 
-        if (dist < closest_raw_dist) {
-          closest_raw_dist = dist;
-          acc_obj_id = sobj.obj_index;
-        }
-
-        if (grp_dist >= 1e9f) {
+        if (sobj.group_first == 1) {
           /* First object in group is always the base shape — CSG op ignored. */
           grp_dist = dist;
           grp_color = sobj.color.rgb;
@@ -331,7 +321,7 @@ void main()
       }
 
       /* Combine group result with scene using group-level CSG. */
-      if (acc_dist >= 1e9f) {
+      if (g == 0) {
         acc_dist = grp_dist;
         acc_color = grp_color;
       }
@@ -400,17 +390,7 @@ void main()
       float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
       float dist = evalSDFPrimitiveSh(local_pos, sobj);
 
-      if (dist < closest_raw_dist) {
-        closest_raw_dist = dist;
-        acc_obj_id = sobj.obj_index;
-      }
-
-      if (acc_dist >= 1e9f) {
-        /* First ungrouped object is the base shape — CSG op ignored. */
-        acc_color = sobj.color.rgb;
-        acc_dist = dist;
-      }
-      else {
+      {
         float k = sobj.blend;
         int bt = sobj.blend_type;
         int op = sobj.csg_operation;
@@ -487,6 +467,5 @@ void main()
 
     int3 atlas_coord = slot_origin + local_voxel;
     imageStore(compact_atlas, atlas_coord, float4(acc_dist, acc_color));
-    imageStore(object_id_atlas, atlas_coord, int4(acc_obj_id, 0, 0, 0));
   }
 }

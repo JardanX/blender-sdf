@@ -16,7 +16,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 #include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
-#define MAX_CANDIDATES 64
+#define MAX_CANDIDATES 128
 
 /** Evaluate the actual SDF primitive for an object, with modifiers. */
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
@@ -48,10 +48,10 @@ void main()
                              voxel_size;
 
   /* Per-brick AABB for object culling.
-   * Expand by brick_half_diag to match the surface test threshold,
-   * plus max_blend for smooth union and max_shell_distance so bricks in the
-   * shell zone can find base union objects as candidates. */
-  float expand = brick_half_diag + max_blend + max_shell_distance;
+   * Expand only by brick_half_diag (surface test threshold).
+   * Per-object AABBs already include their own blend + shell_distance padding,
+   * so no global expansion is needed — eliminates O(N^2) candidate blowup. */
+  float expand = brick_half_diag;
   float3 brick_min = brick_center - float3(expand);
   float3 brick_max = brick_center + float3(expand);
 
@@ -137,7 +137,7 @@ void main()
       float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
       float dist = evalSDFPrimitive(local_pos, obj);
 
-      if (grp_dist >= 1e9f) {
+      if (obj.group_first == 1) {
         /* First object in group is always the base shape — CSG op ignored. */
         grp_dist = dist;
       }
@@ -151,7 +151,7 @@ void main()
       continue;
     }
 
-    if (acc_dist >= 1e9f) {
+    if (g == 0) {
       /* First group is always the base — group-level CSG op ignored. */
       acc_dist = grp_dist;
     }
@@ -173,14 +173,8 @@ void main()
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
     float dist = evalSDFPrimitive(local_pos, obj);
 
-    if (acc_dist >= 1e9f) {
-      /* First ungrouped object is the base shape — CSG op ignored. */
-      acc_dist = dist;
-    }
-    else {
-      acc_dist = combineCSG(
-          acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
-    }
+    acc_dist = combineCSG(
+        acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
   }
 
   /* Surface test: brick_half_diag is sufficient — the shell operation in

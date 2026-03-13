@@ -701,57 +701,6 @@ void main()
     }
   }
 
-  /* ---- Debug: Object ID visualization ---- */
-  if (debug_mode == 1 && use_instanced == 0) {
-    float inv_voxel = 1.0f / voxel_size;
-    float3 brick_origin_dbg = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
-    float3 local_pos_dbg = (hit_pos - brick_origin_dbg) * inv_voxel;
-
-    int bpa_dbg = bricks_per_axis;
-    int3 slot_block_dbg = int3(hit_slot % bpa_dbg,
-                               (hit_slot / bpa_dbg) % bpa_dbg,
-                               hit_slot / (bpa_dbg * bpa_dbg));
-    int3 atlas_coord_dbg = slot_block_dbg * BRICK_STORAGE + int3(floor(local_pos_dbg)) + int3(2);
-    int obj_id = texelFetch(object_id_tx, atlas_coord_dbg, 0).r;
-
-    float3 id_color;
-    if (obj_id < 0) {
-      id_color = float3(0.15f);
-    }
-    else {
-      float hue = fract(float(obj_id) * 0.618033988749895f + 0.1f);
-      float3 k = fract(float3(hue) + float3(0.0f, 0.6667f, 0.3333f)) * 6.0f;
-      id_color = 0.9f * (1.0f - 0.75f * max(1.0f - abs(k - 3.0f), float3(0.0f)));
-    }
-
-    float NdotL = max(dot(normalize(hit_normal), normalize(float3(0.5f, 0.7f, 1.0f))), 0.0f);
-    float shade = 0.35f + 0.65f * NdotL;
-
-    out_color = float4(id_color * shade, 1.0f);
-    gl_FragDepth = drw_point_world_to_screen(hit_pos).z;
-    return;
-  }
-
-  /* In instanced mode, debug_mode 1 → color-per-instance. */
-  if (debug_mode == 1 && use_instanced != 0) {
-    int iid = hit_instance_id;
-    float3 id_color;
-    if (iid < 0) {
-      id_color = float3(0.15f);
-    }
-    else {
-      float hue = fract(float(iid) * 0.618033988749895f + 0.1f);
-      float3 k = fract(float3(hue) + float3(0.0f, 0.6667f, 0.3333f)) * 6.0f;
-      id_color = 0.9f * (1.0f - 0.75f * max(1.0f - abs(k - 3.0f), float3(0.0f)));
-    }
-
-    float NdotL = max(dot(normalize(hit_normal), normalize(float3(0.5f, 0.7f, 1.0f))), 0.0f);
-    float shade = 0.35f + 0.65f * NdotL;
-
-    out_color = float4(id_color * shade, 1.0f);
-    gl_FragDepth = drw_point_world_to_screen(hit_pos).z;
-    return;
-  }
 
   /* ---- Shading ---- */
   float3 normal = hit_normal;
