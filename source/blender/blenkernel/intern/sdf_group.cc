@@ -198,13 +198,23 @@ void BKE_sdf_group_member_move(SDFGroup *group, SDFGroupMember *member, int dire
 
 void BKE_sdf_group_cleanup_null_members(SDFGroup *group)
 {
-  bool changed = false;
   LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &group->members) {
-    if (member->object == nullptr || member->object->type != OB_SDF || member->object->data == nullptr) {
-      /* Properly remove the member to ensure user counts and back-pointers are updated. */
-      BKE_sdf_group_member_remove(group, member);
-      changed = true;
+    if (member->object == nullptr) {
+      /* Simple removal: just free the list node without accessing potentially
+       * un-remapped pointers (ob->data may not be resolved during file read).
+       * Matches Collection's pattern in collection_blend_read_after_liblink. */
+      BLI_remlink(&group->members, member);
+      MEM_freeN(member);
+      group->totmember--;
     }
+  }
+  /* Re-assign order values. Only update the member order field here;
+   * do NOT touch member->object->data as it may not be remapped yet
+   * (this function runs from blend_read_after_liblink where Objects
+   * haven't been lib-linked yet). */
+  int i = 0;
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    member->order = i++;
   }
 }
 
@@ -224,6 +234,37 @@ void BKE_sdf_groups_remove_object(Main *bmain, Object *ob)
         BKE_sdf_group_member_remove(group, member);
       }
     }
+  }
+}
+
+void BKE_sdf_groups_after_lib_link(Main *bmain)
+{
+  /* Clear all SDF back-pointers first — they may contain stale values from
+   * a partial or failed lib-link. The member lists are the source of truth. */
+  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
+    SDF *sdf = (SDF *)id;
+    sdf->sdf_group = nullptr;
+    sdf->group_order = 0;
+  }
+
+  /* Rebuild back-pointers from the SDFGroup member lists.
+   * At this point ALL library linking is complete, so member->object
+   * and ob->data are both valid resolved pointers. */
+  int group_idx = 0;
+  LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+    group->group_order = group_idx++;
+
+    int member_order = 0;
+    LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+      member->order = member_order;
+      if (member->object && member->object->type == OB_SDF && member->object->data) {
+        SDF *sdf = static_cast<SDF *>(member->object->data);
+        sdf->sdf_group = group;
+        sdf->group_order = member_order;
+      }
+      member_order++;
+    }
+    group->totmember = member_order;
   }
 }
 

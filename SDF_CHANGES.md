@@ -957,18 +957,17 @@ Two complementary optimizations to the SDF bake pipeline:
 
 **Per-brick object culling:** Each brick now skips SDF objects whose world-space AABB doesn't overlap the brick, in both classify and bake shaders. For scenes with many spread-out objects, this drastically reduces per-brick evaluation cost.
 
-**In-place incremental baking:** When objects move (without add/remove), only bricks overlapping moved objects' old+new AABBs are rebaked **in-place** in the existing atlas. No classify, no copy — clean brick data stays at its correct atlas positions. New slots are allocated on-the-fly for dirty bricks that are currently void. Falls back to full bake on first frame, resolution change, object add/remove, grid object presence, or atlas capacity exceeded.
+**Dirty-region incremental baking:** Per-object FNV-1a hashing detects which objects changed between frames. The dirty region is the union of changed objects' old+new expanded AABBs, converted to brick coordinates. Only bricks within this region are reclassified and rebaked. The classify shader has an `incremental_mode` that reads old indirection values to reuse existing atlas slots for bricks that were already active, and allocates new slots via `brick_counter.next_slot` for newly active bricks. The atlas and indirection textures persist across frames — no clear, no copy. Falls back to full bake on: first frame, grid param change (origin/res/voxel_size), object add/remove, group structure change, grid objects present, dirty region > 50% of grid, atlas overflow, or excessive fragmentation (allocated > 3x active).
 
-Combined: moving 1 of 10 spread-out objects → ~20% bricks rebaked, each evaluating ~1-3 objects.
+Combined: moving 1 of 1000 spread-out objects → only dirty-region bricks reclassified+rebaked, each evaluating ~1-3 objects via BVH. Performance nearly identical for 10 or 1000 objects.
 
 | File | Change |
 |------|--------|
-| `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Added per-brick AABB culling in object loop (expand by `brick_half_diag`) |
-| `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added incremental early-out (skip clean bricks), per-brick AABB culling in object loop (expand by 2-voxel overlap border) |
-| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `dirty_bricks_tx` sampler + `incremental` push constant in `sdf_bake` (copy_bricks info removed) |
-| `source/blender/draw/engines/sdf/sdf_engine.cc` | In-place incremental baking: `prepare_incremental_bake()` reads indirection, computes dirty mask, allocates new slots for void bricks, re-uploads indirection. Removed copy-based infrastructure (`prev_indirection_tx_`, `prev_compact_atlas_tx_`, `copy_bricks_sh_`, `dispatch_copy_bricks()`, `compute_dirty_bricks()`). Simplified `ensure_compact_atlas()` and destructor. Removed debug printfs |
-| `source/blender/draw/engines/sdf/shaders/sdf_copy_bricks_comp.glsl` | **DELETED** — no longer needed; clean bricks stay in-place |
-| `source/blender/draw/CMakeLists.txt` | Removed `sdf_copy_bricks_comp.glsl` from shader file list |
+| `source/blender/draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Per-brick AABB culling + incremental mode: `incremental_mode` uniform dispatches only over dirty brick range, reads old indirection to reuse atlas slots, allocates new via `atomicAdd(brick_counter.next_slot)` |
+| `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Per-brick AABB culling in object loop (expand by 2-voxel overlap border). No changes for incremental — bake shader operates on whatever active_bricks list is provided |
+| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Classify: `IMAGE` changed to `read_write`, added `incremental_mode`/`dirty_brick_min`/`dirty_brick_max` push constants |
+| `source/blender/draw/engines/sdf/sdf_shader_shared.hh` | `BrickCounter._pad0` renamed to `next_slot` for incremental slot allocation |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | Per-object hashing (`compute_object_hash()`), dirty region computation in `end_sync()`, `dispatch_classify()` supports incremental mode, `draw()` has incremental pipeline path that skips indirection/atlas clear. Tracking state: `prev_object_hashes_`, `prev_bbox_mins/maxs_`, `total_allocated_slots_`, `incremental_bake_`, `dirty_brick_min/max_` |
 
 ---
 
@@ -2241,3 +2240,26 @@ Shader compilation now starts asynchronously in `init()` using `GPU_shader_batch
 | File | Change |
 |------|--------|
 | `draw/engines/sdf/sdf_engine.cc` | Replaced 6 raw `gpu::Shader*` members with `ShaderIndex` enum, `shader_info_names_[]` table, `shaders_[SH_COUNT]` array, and reference aliases. Added `BatchHandle shader_compile_batch_` and `bool shaders_compiled_` members. `init()` kicks off `GPU_shader_batch_create_from_infos()` on first call. `ensure_shaders()` finalizes the batch (blocking only if subprocess not done) with synchronous fallback. Destructor cancels in-flight batch and frees all shaders via loop |
+
+---
+
+## SDF Outline — Instanced AABB Rasterization (Performance)
+
+Replaced the fullscreen ray-march outline shader with **instanced AABB box rasterization**. The old approach drew a single fullscreen triangle where each fragment looped over ALL SDF objects (O(pixels × objects × march_steps)). With 1000 selected objects at 1080p, this was ~96 billion SDF evaluations per frame.
+
+The new approach draws one instanced box per selected SDF object. Each fragment evaluates exactly **one** object's SDF, and the GPU depth test resolves overlapping surfaces automatically. This is O(covered_pixels × march_steps) — independent of total object count.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_outline_march_vert.glsl` | Vertex shader: procedural unit cube (36 verts) transformed to each object's world-space AABB via `gl_InstanceID` → `selected_indices[]` → SSBO lookup. Passes flat `obj_index` to fragment shader |
+
+### Modified Files
+
+| File | Change |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_outline_march_frag.glsl` | Removed per-pixel object loop. Fragment shader now evaluates a single object identified by flat `obj_index` input. Uses `gl_FragCoord` + `viewport_size_inv` for ray reconstruction instead of `screen_uv` |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_outline_inst_iface` (flat int obj_index). Shader info now uses own vertex/fragment sources instead of `gpu_fullscreen`. Added `selected_indices[]` SSBO (slot 2) and `viewport_size_inv` push constant. Removed `object_count` push constant |
+| `draw/engines/overlay/overlay_outline.hh` | Builds `sdf_selected_indices_` compact list during `sdf_object_sync()`. `draw_sdf_outline_()` uploads selected indices SSBO, sets front-face culling (renders back faces for camera-inside AABB correctness), and draws instanced boxes via `GPU_batch_draw_advanced()` instead of fullscreen triangle |
+| `draw/CMakeLists.txt` | Registered `sdf_outline_march_vert.glsl` |

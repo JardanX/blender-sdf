@@ -45,3 +45,8 @@ void BKE_sdf_groups_cleanup_all_null_members(Main *bmain);
 /** Remove all group members referencing the given object from all SDFGroups.
  *  Called before object deletion to ensure clean removal. */
 void BKE_sdf_groups_remove_object(Main *bmain, Object *ob);
+
+/** Rebuild sdf->sdf_group back-pointers from SDFGroup member lists.
+ *  Must be called after ALL library linking is complete (ob->data is resolved).
+ *  Analogous to BKE_collections_after_lib_link(). */
+void BKE_sdf_groups_after_lib_link(Main *bmain);

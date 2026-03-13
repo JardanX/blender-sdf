@@ -107,20 +107,20 @@ static bool rna_SDFGroupMember_object_poll(PointerRNA * /*ptr*/, PointerRNA valu
 extern const EnumPropertyItem rna_enum_sdf_type_items[];
 
 static const EnumPropertyItem rna_enum_sdf_group_blend_type_items[] = {
-    {SDF_BLEND_LINEAR, "LINEAR", 0, "Linear", "Hard union/difference"},
-    {SDF_BLEND_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth blend"},
-    {SDF_BLEND_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer blend"},
-    {SDF_BLEND_ROUND, "ROUND", 0, "Round", "Spherical round blend"},
+    {SDF_BLEND_LINEAR, "LINEAR", ICON_SDF_BLEND_LINEAR, "Linear", "Hard union/difference"},
+    {SDF_BLEND_SMOOTH, "SMOOTH", ICON_SDF_BLEND_SMOOTH, "Smooth", "Smooth blend"},
+    {SDF_BLEND_CHAMFER, "CHAMFER", ICON_SDF_BLEND_CHAMFER, "Chamfer", "Chamfer blend"},
+    {SDF_BLEND_ROUND, "ROUND", ICON_SDF_BLEND_ROUND, "Round", "Spherical round blend"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_sdf_group_csg_items[] = {
-    {SDF_CSG_UNION, "UNION", 0, "Union", "Boolean union"},
-    {SDF_CSG_SUBTRACT, "SUBTRACT", 0, "Subtract", "Boolean subtraction"},
-    {SDF_CSG_INTERSECT, "INTERSECT", 0, "Intersect", "Boolean intersection"},
-    {SDF_CSG_SHELL, "SHELL", 0, "Shell", "Shell/extrusion operation"},
-    {SDF_CSG_PUSH, "PUSH", 0, "Push", "Subtract but keep pushing object visible"},
-    {SDF_CSG_AVOID, "AVOID", 0, "Avoid", "Object carved by all other objects"},
+    {SDF_CSG_UNION, "UNION", ICON_SDF_CSG_UNION, "Union", "Boolean union"},
+    {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
+    {SDF_CSG_INTERSECT, "INTERSECT", ICON_SDF_CSG_INTERSECT, "Intersect", "Boolean intersection"},
+    {SDF_CSG_SHELL, "SHELL", ICON_SDF_CSG_EXTRUDE, "Shell", "Shell/extrusion operation"},
+    {SDF_CSG_PUSH, "PUSH", ICON_SDF_CSG_PUSH, "Push", "Subtract but keep pushing object visible"},
+    {SDF_CSG_AVOID, "AVOID", ICON_SDF_CSG_AVOID, "Avoid", "Object carved by all other objects"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -230,7 +230,7 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "color");
   RNA_def_property_array(prop, 4);
   RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_ui_text(prop, "Color", "Display color tag for outliner");
+  RNA_def_property_ui_text(prop, "Color", "Global tint multiplier applied to all group members");
   RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
 
   /* Group Order */

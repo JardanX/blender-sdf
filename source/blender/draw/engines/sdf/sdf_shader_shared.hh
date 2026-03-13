@@ -88,7 +88,8 @@ struct SDFModifierGPU {
 /** Brick counter SSBO (used by classify pass). */
 struct BrickCounter {
   uint count;
-  uint _pad0;
+  /** Next available atlas slot for new brick allocation (incremental mode only). */
+  uint next_slot;
   uint _pad1;
   uint _pad2;
 };

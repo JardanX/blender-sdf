@@ -7,6 +7,10 @@
  * One thread per brick. Evaluates SDF at brick center to determine if the
  * brick contains surface. Active bricks get a compact atlas slot via atomic
  * counter; void bricks are marked -1 (outside) or -2 (inside).
+ *
+ * Supports incremental mode (incremental_mode == 1) where only bricks within
+ * a dirty region are reclassified. Bricks that were already active reuse their
+ * existing atlas slot; newly active bricks allocate from brick_counter.next_slot.
  */
 
 #include "infos/sdf_shader_infos.hh"
@@ -36,10 +40,25 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
 
 void main()
 {
-  int3 brick = int3(gl_GlobalInvocationID);
+  int3 brick;
 
-  if (any(greaterThanEqual(brick, grid_resolution.xyz))) {
-    return;
+  if (incremental_mode == 1) {
+    /* Incremental: dispatch covers dirty brick range only. */
+    brick = dirty_brick_min + int3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(brick, dirty_brick_max))) {
+      return;
+    }
+    /* Safety clamp to grid bounds. */
+    if (any(lessThan(brick, int3(0))) || any(greaterThanEqual(brick, grid_resolution.xyz))) {
+      return;
+    }
+  }
+  else {
+    /* Full: dispatch covers entire grid. */
+    brick = int3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(brick, grid_resolution.xyz))) {
+      return;
+    }
   }
 
   /* World-space center of this brick. */
@@ -182,11 +201,35 @@ void main()
    * so no global expansion needed. */
   float surface_threshold = brick_half_diag;
   if (abs(acc_dist) < surface_threshold) {
-    /* Active brick: allocate a compact atlas slot. */
-    uint slot = atomicAdd(brick_counter.count, 1u);
-    imageStore(indirection_tex, brick, int4(int(slot), 0, 0, 0));
-    /* Record brick coordinate for active-brick-only dispatch in bake/grid_blend. */
-    active_bricks[slot].coord = int4(brick, int(slot));
+    /* Active brick: allocate or reuse a compact atlas slot. */
+    int slot;
+    if (incremental_mode == 1) {
+      /* Incremental: try to reuse existing slot from previous frame. */
+      int old_slot = imageLoad(indirection_tex, brick).r;
+      if (old_slot >= 0) {
+        slot = old_slot;
+      }
+      else {
+        /* Newly active: allocate from next_slot counter. */
+        slot = int(atomicAdd(brick_counter.next_slot, 1u));
+      }
+    }
+    else {
+      /* Full: sequential allocation via count. */
+      slot = int(atomicAdd(brick_counter.count, 1u));
+    }
+
+    imageStore(indirection_tex, brick, int4(slot, 0, 0, 0));
+
+    /* Record brick for active-brick-only dispatch in bake/grid_blend. */
+    if (incremental_mode == 1) {
+      /* Incremental: add to dirty bricks list via count. */
+      uint dirty_idx = atomicAdd(brick_counter.count, 1u);
+      active_bricks[dirty_idx].coord = int4(brick, slot);
+    }
+    else {
+      active_bricks[slot].coord = int4(brick, slot);
+    }
   }
   else if (acc_dist < 0.0f) {
     /* Fully inside: mark as -2. */

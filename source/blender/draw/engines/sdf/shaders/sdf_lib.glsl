@@ -857,6 +857,90 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
 }
 
 /**
+ * Compute color blend weight for a CSG combination.
+ * Returns h in [0,1]: h=0 keeps d1's color, h=1 uses d2's color.
+ * Usage: color = mix(color1, color2, csgColorWeight(d1, d2, op, bt, k, sd));
+ *
+ * Uses the smooth h-factor as a universal proxy for all blend types
+ * (smooth/chamfer/round). The actual distance functions differ, but
+ * the smooth h produces visually correct color transitions.
+ *
+ * For Push and Avoid, the intermediate subtraction is recomputed
+ * because the color weight depends on both the subtract and union stages.
+ */
+float csgColorWeight(float d1, float d2, int op, int bt, float k, float shell_dist)
+{
+  if (op == SDF_CSG_OP_UNION) {
+    if (k > 0.0f && bt > 0) {
+      return clamp(0.5f + 0.5f * (d1 - d2) / k, 0.0f, 1.0f);
+    }
+    return (d2 < d1) ? 1.0f : 0.0f;
+  }
+  else if (op == SDF_CSG_OP_SUBTRACT) {
+    if (k > 0.0f && bt > 0) {
+      return clamp(0.5f - 0.5f * (d1 + d2) / k, 0.0f, 1.0f);
+    }
+    return (d1 + d2 < 0.0f) ? 1.0f : 0.0f;
+  }
+  else if (op == SDF_CSG_OP_INTERSECT) {
+    if (k > 0.0f && bt > 0) {
+      return clamp(0.5f + 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
+    }
+    return (d2 > d1) ? 1.0f : 0.0f;
+  }
+  else if (op == SDF_CSG_OP_SHELL) {
+    /* Extrusion (positive) uses union semantics, inset (negative) uses subtraction. */
+    if (shell_dist < 0.0f) {
+      if (k > 0.0f && bt > 0) {
+        return clamp(0.5f - 0.5f * (d1 + d2) / k, 0.0f, 1.0f);
+      }
+      return (d1 + d2 < 0.0f) ? 1.0f : 0.0f;
+    }
+    if (k > 0.0f && bt > 0) {
+      return clamp(0.5f + 0.5f * (d1 - d2) / k, 0.0f, 1.0f);
+    }
+    return (d2 < d1) ? 1.0f : 0.0f;
+  }
+  else if (op == SDF_CSG_OP_PUSH) {
+    /* Push = subtract(d2 from d1) then min(subtracted, d2).
+     * Color: union weight between subtracted base and push object. */
+    float subtracted;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        subtracted = opSmoothSubtraction(d2, d1, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        subtracted = opChamferSubtraction(d2, d1, k);
+      }
+      else {
+        subtracted = opRoundSubtraction(d2, d1, k);
+      }
+      return clamp(0.5f + 0.5f * (subtracted - d2) / k, 0.0f, 1.0f);
+    }
+    return (d2 <= max(d1, -d2)) ? 1.0f : 0.0f;
+  }
+  else if (op == SDF_CSG_OP_AVOID) {
+    /* Avoid = subtract(d1 from d2) then min(d1, carved).
+     * Color: union weight between base and carved avoid object. */
+    float carved;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) {
+        carved = opSmoothSubtraction(d1, d2, k);
+      }
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        carved = opChamferSubtraction(d1, d2, k);
+      }
+      else {
+        carved = opRoundSubtraction(d1, d2, k);
+      }
+      return clamp(0.5f + 0.5f * (d1 - carved) / k, 0.0f, 1.0f);
+    }
+    return (max(d2, -d1) < d1) ? 1.0f : 0.0f;
+  }
+  return 0.0f;
+}
+
+/**
  * Evaluate the base primitive shape only.
  */
 float evalPrimitiveOnly(SDFPrimitiveData obj, float3 local_pos)

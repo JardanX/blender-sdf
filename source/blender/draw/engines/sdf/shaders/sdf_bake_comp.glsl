@@ -248,69 +248,9 @@ void main()
 
           float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
 
-          /* Color blending based on CSG operation type. */
-          if (op == SDF_CSG_OP_UNION || op == SDF_CSG_OP_SHELL) {
-            if (k > 0.0f && bt > 0) {
-              float h = clamp(0.5f + 0.5f * (grp_dist - dist) / k, 0.0f, 1.0f);
-              grp_color = mix(grp_color, sobj.color.rgb, h);
-            }
-            else {
-              if (dist < grp_dist) {
-                grp_color = sobj.color.rgb;
-              }
-            }
-          }
-          else if (op == SDF_CSG_OP_SUBTRACT) {
-            if (k > 0.0f && bt > 0) {
-              float h = clamp(0.5f - 0.5f * (grp_dist + dist) / k, 0.0f, 1.0f);
-              grp_color = mix(grp_color, sobj.color.rgb, h);
-            }
-            else {
-              if (grp_dist + dist < 0.0f) {
-                grp_color = sobj.color.rgb;
-              }
-            }
-          }
-          else if (op == SDF_CSG_OP_INTERSECT) {
-            if (k > 0.0f && bt > 0) {
-              float h = clamp(0.5f + 0.5f * (dist - grp_dist) / k, 0.0f, 1.0f);
-              grp_color = mix(grp_color, sobj.color.rgb, h);
-            }
-            else {
-              if (dist > grp_dist) {
-                grp_color = sobj.color.rgb;
-              }
-            }
-          }
-          else if (op == SDF_CSG_OP_PUSH) {
-            float sub_base = combineCSG(grp_dist, dist, SDF_CSG_OP_SUBTRACT, bt, k, 0.0f);
-            if (dist <= sub_base) {
-              grp_color = sobj.color.rgb;
-            }
-          }
-          else if (op == SDF_CSG_OP_AVOID) {
-            float carved;
-            if (k > 0.0f && bt > 0) {
-              if (bt == SDF_BLEND_TYPE_SMOOTH) {
-                carved = opSmoothSubtraction(grp_dist, dist, k);
-              }
-              else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-                carved = opChamferSubtraction(grp_dist, dist, k);
-              }
-              else if (bt == SDF_BLEND_TYPE_ROUND) {
-                carved = opRoundSubtraction(grp_dist, dist, k);
-              }
-              else {
-                carved = max(dist, -grp_dist);
-              }
-            }
-            else {
-              carved = max(dist, -grp_dist);
-            }
-            if (carved < grp_dist) {
-              grp_color = sobj.color.rgb;
-            }
-          }
+          /* Color blending via unified weight function. */
+          float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
+          grp_color = mix(grp_color, sobj.color.rgb, h);
 
           grp_dist = new_dist;
         }
@@ -332,50 +272,10 @@ void main()
         float new_dist = combineCSG(
             acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
 
-        /* Inter-group color blending. */
-        float gk = grp.blend;
-        int gbt = grp.blend_type;
-        int gop = grp.csg_operation;
-
-        if (gop == SDF_CSG_OP_UNION || gop == SDF_CSG_OP_SHELL) {
-          if (gk > 0.0f && gbt > 0) {
-            float h = clamp(0.5f + 0.5f * (acc_dist - grp_dist) / gk, 0.0f, 1.0f);
-            acc_color = mix(acc_color, grp_color, h);
-          }
-          else {
-            if (grp_dist < acc_dist) {
-              acc_color = grp_color;
-            }
-          }
-        }
-        else if (gop == SDF_CSG_OP_SUBTRACT) {
-          if (gk > 0.0f && gbt > 0) {
-            float h = clamp(0.5f - 0.5f * (acc_dist + grp_dist) / gk, 0.0f, 1.0f);
-            acc_color = mix(acc_color, grp_color, h);
-          }
-          else {
-            if (acc_dist + grp_dist < 0.0f) {
-              acc_color = grp_color;
-            }
-          }
-        }
-        else if (gop == SDF_CSG_OP_INTERSECT) {
-          if (gk > 0.0f && gbt > 0) {
-            float h = clamp(0.5f + 0.5f * (grp_dist - acc_dist) / gk, 0.0f, 1.0f);
-            acc_color = mix(acc_color, grp_color, h);
-          }
-          else {
-            if (grp_dist > acc_dist) {
-              acc_color = grp_color;
-            }
-          }
-        }
-        else {
-          /* Push/Avoid at group level: use group result color if closer. */
-          if (grp_dist < acc_dist) {
-            acc_color = grp_color;
-          }
-        }
+        /* Inter-group color blending via unified weight function. */
+        float h = csgColorWeight(
+            acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+        acc_color = mix(acc_color, grp_color, h);
 
         acc_dist = new_dist;
       }
@@ -400,69 +300,9 @@ void main()
 
         float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
 
-        /* Color blending based on CSG operation type. */
-        if (op == SDF_CSG_OP_UNION || op == SDF_CSG_OP_SHELL) {
-          if (k > 0.0f && bt > 0) {
-            float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-            acc_color = mix(acc_color, sobj.color.rgb, h);
-          }
-          else {
-            if (dist < acc_dist) {
-              acc_color = sobj.color.rgb;
-            }
-          }
-        }
-        else if (op == SDF_CSG_OP_SUBTRACT) {
-          if (k > 0.0f && bt > 0) {
-            float h = clamp(0.5f - 0.5f * (acc_dist + dist) / k, 0.0f, 1.0f);
-            acc_color = mix(acc_color, sobj.color.rgb, h);
-          }
-          else {
-            if (acc_dist + dist < 0.0f) {
-              acc_color = sobj.color.rgb;
-            }
-          }
-        }
-        else if (op == SDF_CSG_OP_INTERSECT) {
-          if (k > 0.0f && bt > 0) {
-            float h = clamp(0.5f + 0.5f * (dist - acc_dist) / k, 0.0f, 1.0f);
-            acc_color = mix(acc_color, sobj.color.rgb, h);
-          }
-          else {
-            if (dist > acc_dist) {
-              acc_color = sobj.color.rgb;
-            }
-          }
-        }
-        else if (op == SDF_CSG_OP_PUSH) {
-          float sub_base = combineCSG(acc_dist, dist, SDF_CSG_OP_SUBTRACT, bt, k, 0.0f);
-          if (dist <= sub_base) {
-            acc_color = sobj.color.rgb;
-          }
-        }
-        else if (op == SDF_CSG_OP_AVOID) {
-          float carved;
-          if (k > 0.0f && bt > 0) {
-            if (bt == SDF_BLEND_TYPE_SMOOTH) {
-              carved = opSmoothSubtraction(acc_dist, dist, k);
-            }
-            else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-              carved = opChamferSubtraction(acc_dist, dist, k);
-            }
-            else if (bt == SDF_BLEND_TYPE_ROUND) {
-              carved = opRoundSubtraction(acc_dist, dist, k);
-            }
-            else {
-              carved = max(dist, -acc_dist);
-            }
-          }
-          else {
-            carved = max(dist, -acc_dist);
-          }
-          if (carved < acc_dist) {
-            acc_color = sobj.color.rgb;
-          }
-        }
+        /* Color blending via unified weight function. */
+        float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
+        acc_color = mix(acc_color, sobj.color.rgb, h);
 
         acc_dist = new_dist;
       }

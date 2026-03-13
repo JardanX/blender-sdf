@@ -2527,8 +2527,6 @@ class VIEW3D_MT_sdf_add(Menu):
         layout.operator("object.sdf_add", text="SDF N-Gon", icon='SDF_NGON').type = 'NGON'
         layout.separator()
         layout.operator("object.mesh_to_sdf_grid", text="Mesh to SDF Grid", icon='MESH_GRID')
-        layout.separator()
-        layout.operator("object.sdf_group_add", text="SDF Group", icon='SDF_DATA')
 
 
 class VIEW3D_MT_volume_add(Menu):

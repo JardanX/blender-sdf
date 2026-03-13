@@ -112,7 +112,7 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
 IDTypeInfo IDType_ID_SF = {
     /*id_code*/ SDF::id_type,
     /*id_filter*/ FILTER_ID_SF,
-    /*dependencies_id_types*/ FILTER_ID_MA,
+    /*dependencies_id_types*/ FILTER_ID_MA | FILTER_ID_SG,
     /*main_listbase_index*/ INDEX_ID_SF,
     /*struct_size*/ sizeof(SDF),
     /*name*/ "SDF",

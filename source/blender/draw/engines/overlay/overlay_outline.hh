@@ -70,19 +70,24 @@ class Outline : Overlay {
    *   color_id: 0=transform, 1=selected, 3=active
    */
   Vector<uint32_t> sdf_outline_ids_;
+  /** Compact list of SDF object indices that are selected (for instancing). */
+  Vector<int32_t> sdf_selected_indices_;
   int sdf_selected_count_ = 0;
 
   gpu::Shader *sdf_outline_sh_ = nullptr;
-  gpu::Batch *sdf_fullscreen_batch_ = nullptr;
+  gpu::Batch *sdf_box_batch_ = nullptr;
   gpu::StorageBuf *sdf_outline_ssbo_ = nullptr;
+  gpu::StorageBuf *sdf_selected_ssbo_ = nullptr;
   int sdf_outline_ssbo_count_ = 0;
+  int sdf_selected_ssbo_count_ = 0;
 
   /* Cached binding locations for the SDF outline shader. */
   int sdf_map_slot_ = -1;
   int sdf_objects_slot_ = -1;
+  int sdf_selected_slot_ = -1;
   int sdf_modifiers_slot_ = -1;
   int sdf_voxel_size_loc_ = -1;
-  int sdf_object_count_loc_ = -1;
+  int sdf_viewport_inv_loc_ = -1;
 
  public:
   ~Outline()
@@ -90,8 +95,11 @@ class Outline : Overlay {
     if (sdf_outline_ssbo_) {
       GPU_storagebuf_free(sdf_outline_ssbo_);
     }
-    if (sdf_fullscreen_batch_) {
-      GPU_batch_discard(sdf_fullscreen_batch_);
+    if (sdf_selected_ssbo_) {
+      GPU_storagebuf_free(sdf_selected_ssbo_);
+    }
+    if (sdf_box_batch_) {
+      GPU_batch_discard(sdf_box_batch_);
     }
   }
 
@@ -102,6 +110,7 @@ class Outline : Overlay {
 
     flat_objects_.clear();
     sdf_outline_ids_.clear();
+    sdf_selected_indices_.clear();
     sdf_selected_count_ = 0;
 
     if (!enabled_) {
@@ -286,6 +295,9 @@ class Outline : Overlay {
     uint unique_id = uint(sdf_selected_count_) + 0x2000u;
     uint packed = (color_id << 14u) | (unique_id & 0x3FFFu);
     sdf_outline_ids_.append(packed);
+
+    /* Record this object's index for instanced AABB draw. */
+    sdf_selected_indices_.append(int32_t(sdf_outline_ids_.size() - 1));
   }
 
   /* Flat objects outline workaround need to generate passes for each redraw. */
@@ -363,13 +375,14 @@ class Outline : Overlay {
 
  private:
   /**
-   * Draw SDF outline pass (analytical per-object sphere-march).
-   * For each pixel, tests all selected SDF objects' AABBs against the camera
-   * ray. For objects whose AABB is hit, evaluates the actual SDF analytically
-   * (sphere-marching) to find the precise surface. Writes stable packed
-   * outline IDs into the prepass framebuffer for edge detection.
+   * Draw SDF outline pass — instanced AABB rasterization.
+   *
+   * Instead of a fullscreen pass that loops over all objects per pixel (O(N)),
+   * this draws one instanced box per selected object. Each fragment evaluates
+   * exactly one SDF, and the GPU depth test resolves overlaps. Scales to
+   * thousands of selected objects with near-zero overhead.
    */
-  void draw_sdf_outline_(Resources & /*res*/, View &view)
+  void draw_sdf_outline_(Resources &res, View &view)
   {
     if (sdf_selected_count_ == 0) {
       return;
@@ -385,9 +398,10 @@ class Outline : Overlay {
       if (sdf_outline_sh_) {
         sdf_map_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "outline_id_map_buf");
         sdf_objects_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "sdf_objects");
+        sdf_selected_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "selected_indices");
         sdf_modifiers_slot_ = GPU_shader_get_ssbo_binding(sdf_outline_sh_, "sdf_modifiers");
         sdf_voxel_size_loc_ = GPU_shader_get_uniform(sdf_outline_sh_, "voxel_size");
-        sdf_object_count_loc_ = GPU_shader_get_uniform(sdf_outline_sh_, "object_count");
+        sdf_viewport_inv_loc_ = GPU_shader_get_uniform(sdf_outline_sh_, "viewport_size_inv");
       }
     }
     if (!sdf_outline_sh_) {
@@ -395,23 +409,45 @@ class Outline : Overlay {
     }
 
     /* Use safe count: minimum of overlay-tracked and engine-tracked objects. */
-    const int count = min(int(sdf_outline_ids_.size()), sdf::sdf_object_count_get());
-    if (count == 0) {
+    const int id_count = min(int(sdf_outline_ids_.size()), sdf::sdf_object_count_get());
+    if (id_count == 0) {
       return;
     }
-    if (sdf_outline_ssbo_ != nullptr && sdf_outline_ssbo_count_ != count) {
+
+    /* Upload outline ID map SSBO. */
+    if (sdf_outline_ssbo_ != nullptr && sdf_outline_ssbo_count_ != id_count) {
       GPU_storagebuf_free(sdf_outline_ssbo_);
       sdf_outline_ssbo_ = nullptr;
     }
     if (sdf_outline_ssbo_ == nullptr) {
-      sdf_outline_ssbo_ = GPU_storagebuf_create_ex(count * sizeof(uint32_t),
+      sdf_outline_ssbo_ = GPU_storagebuf_create_ex(id_count * sizeof(uint32_t),
                                                     sdf_outline_ids_.data(),
                                                     GPU_USAGE_DYNAMIC,
                                                     "sdf_outline_id_map");
-      sdf_outline_ssbo_count_ = count;
+      sdf_outline_ssbo_count_ = id_count;
     }
     else {
       GPU_storagebuf_update(sdf_outline_ssbo_, sdf_outline_ids_.data());
+    }
+
+    /* Upload selected indices SSBO (compact list for instancing). */
+    const int sel_count = int(sdf_selected_indices_.size());
+    if (sel_count == 0) {
+      return;
+    }
+    if (sdf_selected_ssbo_ != nullptr && sdf_selected_ssbo_count_ != sel_count) {
+      GPU_storagebuf_free(sdf_selected_ssbo_);
+      sdf_selected_ssbo_ = nullptr;
+    }
+    if (sdf_selected_ssbo_ == nullptr) {
+      sdf_selected_ssbo_ = GPU_storagebuf_create_ex(sel_count * sizeof(int32_t),
+                                                     sdf_selected_indices_.data(),
+                                                     GPU_USAGE_DYNAMIC,
+                                                     "sdf_selected_indices");
+      sdf_selected_ssbo_count_ = sel_count;
+    }
+    else {
+      GPU_storagebuf_update(sdf_selected_ssbo_, sdf_selected_indices_.data());
     }
 
     /* Bind the prepass framebuffer (object_id_tx_ + tmp_depth_tx_). */
@@ -420,12 +456,17 @@ class Outline : Overlay {
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(true);
     GPU_blend(GPU_BLEND_NONE);
+    /* Cull front faces: render back faces so fragments are generated even when
+     * the camera is inside an AABB. The fragment shader writes gl_FragDepth to
+     * the actual SDF surface, so the rasterized face depth is irrelevant. */
+    GPU_face_culling(GPU_CULL_FRONT);
 
     GPU_shader_bind(sdf_outline_sh_);
 
-    /* Bind SSBOs: outline ID map, SDF objects, and modifiers. */
+    /* Bind SSBOs. */
     GPU_storagebuf_bind(sdf_outline_ssbo_, sdf_map_slot_);
     GPU_storagebuf_bind(objects_ssbo, sdf_objects_slot_);
+    GPU_storagebuf_bind(sdf_selected_ssbo_, sdf_selected_slot_);
     gpu::StorageBuf *mod_ssbo = sdf::sdf_modifiers_ssbo_get();
     if (mod_ssbo) {
       GPU_storagebuf_bind(mod_ssbo, sdf_modifiers_slot_);
@@ -438,19 +479,25 @@ class Outline : Overlay {
     int bpa;
     sdf::sdf_atlas_params_get(&vs, &origin, &extent, &grid_res, &bpa);
     GPU_shader_uniform_float_ex(sdf_outline_sh_, sdf_voxel_size_loc_, 1, 1, &vs);
-    GPU_shader_uniform_int_ex(sdf_outline_sh_, sdf_object_count_loc_, 1, 1, &count);
+
+    int2 render_size = int2(res.depth_tx.size());
+    float viewport_inv[2] = {1.0f / float(render_size.x), 1.0f / float(render_size.y)};
+    GPU_shader_uniform_float_ex(sdf_outline_sh_, sdf_viewport_inv_loc_, 2, 1, viewport_inv);
 
     /* Bind the view UBO for camera matrices. */
     view.matrices_ubo_get().push_update();
     GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
 
-    /* Draw fullscreen triangle. */
-    if (!sdf_fullscreen_batch_) {
-      sdf_fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
+    /* Draw instanced AABB boxes: 36 vertices (12 triangles) per instance,
+     * one instance per selected SDF object. */
+    if (!sdf_box_batch_) {
+      sdf_box_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 36);
     }
-    GPU_batch_set_shader(sdf_fullscreen_batch_, sdf_outline_sh_);
-    GPU_batch_draw(sdf_fullscreen_batch_);
+    GPU_batch_set_shader(sdf_box_batch_, sdf_outline_sh_);
+    GPU_batch_draw_advanced(sdf_box_batch_, 0, 36, 0, sel_count);
 
+    /* Restore default state (no face culling). */
+    GPU_face_culling(GPU_CULL_NONE);
     GPU_shader_unbind();
   }
 };
