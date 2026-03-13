@@ -59,14 +59,12 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
 
         # Blend amount — only show when not linear
         if grp.blend_type != 'LINEAR':
-            layout.use_property_split = True
-            layout.use_property_decorate = False
-            layout.prop(grp, "blend")
+            layout.label(text="Blend")
+            layout.prop(grp, "blend", text="")
 
         if grp.csg_operation == 'SHELL':
-            layout.use_property_split = True
-            layout.use_property_decorate = False
-            layout.prop(grp, "shell_distance")
+            layout.label(text="Distance")
+            layout.prop(grp, "shell_distance", text="")
 
 
 class DATA_PT_sdf_group_members(SDFGroupButtonsPanel, Panel):

@@ -290,9 +290,13 @@ class Outline : Overlay {
 
     sdf_selected_count_++;
 
-    /* Use IDs offset by 0x2000 to avoid collision with mesh resource IDs.
-     * The bottom 14 bits hold the unique object ID, top 2 bits hold the color. */
-    uint unique_id = uint(sdf_selected_count_) + 0x2000u;
+    /* Use shared outline IDs per selection-color category. All SDF objects
+     * with the same state (transform / selected / active) share one ID.
+     * This prevents z-fighting noise where overlapping SDF sphere-marches
+     * produce nearly-equal depths, causing the edge detector to see
+     * alternating IDs and draw artifacts across the entire overlap region.
+     * Offset by 0x2000 to avoid collision with mesh resource IDs. */
+    uint unique_id = 0x2001u + color_id;
     uint packed = (color_id << 14u) | (unique_id & 0x3FFFu);
     sdf_outline_ids_.append(packed);
 
