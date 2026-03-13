@@ -225,6 +225,10 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
 class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
     bl_label = "Operation"
 
+    @classmethod
+    def poll(cls, context):
+        return context.sdf is not None
+
     def draw(self, context):
         layout = self.layout
         sdf = context.sdf

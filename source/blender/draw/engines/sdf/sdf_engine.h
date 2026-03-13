@@ -68,4 +68,12 @@ gpu::StorageBuf *sdf_groups_ssbo_get();
 /** Returns the number of SDF groups in the current bake. */
 int sdf_group_count_get();
 
+/**
+ * Returns the depsgraph→sorted index mapping for the current frame.
+ * Maps depsgraph iteration order to the sorted order used in sdf_objects[].
+ * Returns nullptr if no mapping exists (no objects or no reordering needed).
+ * When non-null, the array has sdf_object_count_get() elements.
+ */
+const int *sdf_depsgraph_to_sorted_get(int *out_count);
+
 }  // namespace blender::draw::sdf

@@ -13,6 +13,10 @@ class SDFGroupButtonsPanel:
 
     @classmethod
     def poll(cls, context):
+        # Only show group panels when directly viewing a group (e.g. pinned),
+        # not when an SDF merely references a group via back-pointer.
+        if context.sdf is not None:
+            return False
         return getattr(context, 'sdf_group', None) is not None
 
 
@@ -22,10 +26,13 @@ class DATA_PT_context_sdf_group(SDFGroupButtonsPanel, Panel):
 
     def draw(self, context):
         layout = self.layout
-        space = context.space_data
+        sdf = context.sdf
         grp = context.sdf_group
 
-        if grp:
+        if sdf and grp:
+            layout.template_ID(sdf, "sdf_group")
+        elif grp:
+            space = context.space_data
             layout.template_ID(space, "pin_id")
 
 
