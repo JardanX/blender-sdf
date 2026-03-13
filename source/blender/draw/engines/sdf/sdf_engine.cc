@@ -19,9 +19,9 @@
 #include "BKE_idprop.hh"
 #include "BKE_main.hh"
 #include "BKE_object.hh"
+#include "BKE_object_types.hh"
 #include "BKE_sdf.hh"
 #include "BKE_sdf_group.hh"
-#include "BKE_object_types.hh"
 #include "BKE_studiolight.h"
 #include "BKE_volume.hh"
 #include "BKE_volume_render.hh"
@@ -86,11 +86,11 @@ using namespace draw;
  * produce the same fingerprint — they're the same shape at different scales.
  */
 static uint64_t sdf_shape_fingerprint(int sdf_type,
-                                       const float3 &effective_size,
-                                       float effective_bevel,
-                                       int ngon_sides = 0,
-                                       float torus_angle = (float)M_PI * 2.0f,
-                                       float ngon_star = 0.0f)
+                                      const float3 &effective_size,
+                                      float effective_bevel,
+                                      int ngon_sides = 0,
+                                      float torus_angle = (float)M_PI * 2.0f,
+                                      float ngon_star = 0.0f)
 {
   /* Normalize by max component to make scale-independent. */
   float max_dim = math::reduce_max(math::abs(effective_size));
@@ -108,7 +108,10 @@ static uint64_t sdf_shape_fingerprint(int sdf_type,
 
   /* FNV-1a 64-bit hash. */
   uint64_t h = 14695981039346656037ULL;
-  auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+  auto mix = [&](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ULL;
+  };
   mix(uint64_t(sdf_type));
   mix(uint64_t(sx));
   mix(uint64_t(sy));
@@ -144,7 +147,7 @@ static bool s_perf_active = false;
 /* ---- Static atlas state for cross-engine access (overlay selection) ---- */
 static gpu::Texture *s_compact_atlas = nullptr;
 static gpu::Texture *s_indirection = nullptr;
-static gpu::Texture *s_object_id_atlas = nullptr;
+
 static float s_voxel_size = 0.0f;
 static float3 s_atlas_origin = float3(0);
 static float3 s_atlas_extent = float3(0);
@@ -173,8 +176,6 @@ class Instance : public DrawEngine {
   gpu::Texture *indirection_tx_ = nullptr;
   /** Compact atlas (RGBA16F, sized for active bricks only). */
   gpu::Texture *compact_atlas_tx_ = nullptr;
-  /** Object ID atlas (R32I, same dimensions as compact atlas). */
-  gpu::Texture *object_id_tx_ = nullptr;
   /** Brick counter SSBO (1 uint + padding). */
   gpu::StorageBuf *brick_counter_ = nullptr;
   /** Active brick coordinates SSBO (written by classify, read by bake/grid_blend). */
@@ -231,7 +232,7 @@ class Instance : public DrawEngine {
   /** Processed grid objects ready for GPU dispatch. */
   struct GridObject {
     gpu::Texture *texture = nullptr; /* R32F 3D texture */
-    float4x4 world_to_texture;      /* Combined transform: world -> [0,1]^3 */
+    float4x4 world_to_texture;       /* Combined transform: world -> [0,1]^3 */
     float4 color;                    /* Object display color */
     float blend;                     /* Blend amount from modifier */
     int blend_type;                  /* Blend function type (eSDFBlendType) */
@@ -298,25 +299,24 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *bvh_ssbo_ = nullptr;
   int bvh_ssbo_count_ = 0;
 
-
   /** Shape table: unique SDF shapes identified by fingerprint. */
   struct ShapeInfo {
     uint64_t fingerprint;
     int sdf_type;
-    int ngon_sides = 6;     /* Number of polygon sides (for SDF_TYPE_NGON). */
-    float ngon_star = 0.0f;  /* Star factor (for SDF_TYPE_NGON). */
+    int ngon_sides = 6;                     /* Number of polygon sides (for SDF_TYPE_NGON). */
+    float ngon_star = 0.0f;                 /* Star factor (for SDF_TYPE_NGON). */
     float torus_angle = (float)M_PI * 2.0f; /* Angle aperture in radians (for SDF_TYPE_TORUS). */
-    float3 size_normalized; /* Aspect ratio (max = 1.0). */
-    float bevel_normalized; /* bevel / max_size. */
-    float world_scale;      /* Max effective size for first instance (representative). */
+    float3 size_normalized;                 /* Aspect ratio (max = 1.0). */
+    float bevel_normalized;                 /* bevel / max_size. */
+    float world_scale; /* Max effective size for first instance (representative). */
 
     /* Per-shape atlas params (filled by compute_shape_atlas_params / shape_classify_cpu). */
-    int3 grid_res = int3(0);        /* Per-axis brick grid resolution. */
+    int3 grid_res = int3(0);         /* Per-axis brick grid resolution. */
     float3 local_origin = float3(0); /* Local atlas origin. */
-    float local_voxel_size = 0.0f;  /* Voxel size in local space. */
-    int indir_offset = 0;           /* Offset into shape_indir_data_. */
-    int slot_offset = 0;            /* First compact atlas slot for this shape. */
-    int active_brick_count = 0;     /* Number of active bricks. */
+    float local_voxel_size = 0.0f;   /* Voxel size in local space. */
+    int indir_offset = 0;            /* Offset into shape_indir_data_. */
+    int slot_offset = 0;             /* First compact atlas slot for this shape. */
+    int active_brick_count = 0;      /* Number of active bricks. */
   };
   Vector<ShapeInfo> shapes_;
   /** Fingerprint → shape index mapping. */
@@ -324,15 +324,15 @@ class Instance : public DrawEngine {
 
   /** Instance table: per-object instance referencing a shape. */
   struct InstanceInfo {
-    int shape_id;        /* Index into shapes_. */
-    int object_id;       /* Index into objects_. */
+    int shape_id;  /* Index into shapes_. */
+    int object_id; /* Index into objects_. */
     float4x4 world_to_local;
     float4x4 local_to_world;
     float4 color;
     float blend;
-    int blend_type;      /* Blend function type (eSDFBlendType). */
-    int csg_operation;   /* CSG operation (eSDFCSGOperation). */
-    float world_scale;   /* max(effective_size) for this specific instance. */
+    int blend_type;    /* Blend function type (eSDFBlendType). */
+    int csg_operation; /* CSG operation (eSDFCSGOperation). */
+    float world_scale; /* max(effective_size) for this specific instance. */
   };
   Vector<InstanceInfo> instances_;
 
@@ -450,8 +450,8 @@ class Instance : public DrawEngine {
       for (int i = 0; i < SH_COUNT; i++) {
         infos[i] = GPU_shader_create_info_get(shader_info_names_[i]);
       }
-      shader_compile_batch_ = GPU_shader_batch_create_from_infos(
-          {infos, SH_COUNT}, CompilationPriority::High);
+      shader_compile_batch_ = GPU_shader_batch_create_from_infos({infos, SH_COUNT},
+                                                                 CompilationPriority::High);
     }
   }
 
@@ -502,9 +502,8 @@ class Instance : public DrawEngine {
             const float3 &lo = bounds->min;
             const float3 &hi = bounds->max;
             for (int c = 0; c < 8; c++) {
-              float3 corner = float3((c & 1) ? hi.x : lo.x,
-                                     (c & 2) ? hi.y : lo.y,
-                                     (c & 4) ? hi.z : lo.z);
+              float3 corner = float3(
+                  (c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z);
               float3 wc = math::transform_point(ob->object_to_world(), corner);
               scene_min_ = math::min(scene_min_, wc);
               scene_max_ = math::max(scene_max_, wc);
@@ -636,8 +635,8 @@ class Instance : public DrawEngine {
     /* Compute shape-specific local extent, then add blend/shell padding.
      * Each primitive has different actual extents from its size parameters. */
     float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
-                              fabsf(sdf_data->shell_distance) :
-                              0.0f;
+                             fabsf(sdf_data->shell_distance) :
+                             0.0f;
     float pad = sdf_data->blend + shell_expand;
     float3 local_extent;
     float3 sz = float3(gpu_obj.sdf_size);
@@ -689,9 +688,12 @@ class Instance : public DrawEngine {
           /* Mirror with offset expands bounds opposite to the mirror side by offset.
            * For simplicity, expand uniformly by offset. */
           float offset = fabsf(mod->params[0]);
-          if ((mod->flag & SDF_MOD_MIRROR_X) != 0) local_extent.x += offset;
-          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) local_extent.y += offset;
-          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) local_extent.z += offset;
+          if ((mod->flag & SDF_MOD_MIRROR_X) != 0)
+            local_extent.x += offset;
+          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0)
+            local_extent.y += offset;
+          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0)
+            local_extent.z += offset;
           break;
         }
         case SDF_MOD_ELONGATE:
@@ -732,7 +734,7 @@ class Instance : public DrawEngine {
                                    (corner & 2) ? local_extent.y : -local_extent.y,
                                    (corner & 4) ? local_extent.z : -local_extent.z);
       float3 world_corner = float3(rot_mat * float4(local_corner, 0.0f)) +
-                             float3(mat[3].x, mat[3].y, mat[3].z);
+                            float3(mat[3].x, mat[3].y, mat[3].z);
       world_min = math::min(world_min, world_corner);
       world_max = math::max(world_max, world_corner);
     }
@@ -770,7 +772,8 @@ class Instance : public DrawEngine {
     float effective_bevel = gpu_obj.bevel;
     int ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 0;
     float ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
-    float torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : ((float)M_PI * 2.0f);
+    float torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle :
+                                                                 ((float)M_PI * 2.0f);
     uint64_t fp = sdf_shape_fingerprint(
         sdf_data->sdf_type, effective_size, effective_bevel, ngon_sides, torus_angle, ngon_star);
 
@@ -791,7 +794,8 @@ class Instance : public DrawEngine {
       shape.sdf_type = sdf_data->sdf_type;
       shape.ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 6;
       shape.ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
-      shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle : ((float)M_PI * 2.0f);
+      shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle :
+                                                                   ((float)M_PI * 2.0f);
       shape.size_normalized = effective_size / max_dim;
       shape.bevel_normalized = effective_bevel / max_dim;
       shape.world_scale = max_dim;
@@ -845,7 +849,6 @@ class Instance : public DrawEngine {
       return;
     }
 
-
     /* Compute a lightweight hash from pending grid objects BEFORE doing the
      * expensive dense-float extraction. This lets us skip grid processing
      * entirely when nothing changed (saves 40ms+ per frame at fine voxel sizes).
@@ -859,30 +862,21 @@ class Instance : public DrawEngine {
 
       /* Hash object transform (covers move/rotate/scale). */
       for (int i = 0; i < 4; i++) {
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(mat[i][0]);
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(mat[i][1]);
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(mat[i][2]);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(mat[i][0]);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(mat[i][1]);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(mat[i][2]);
       }
       /* Hash bounds (changes when voxel_size or mesh changes). */
       const std::optional<Bounds<float3>> bounds = BKE_object_boundbox_get(ob);
       if (bounds) {
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(bounds->min.x);
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(bounds->max.x);
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(bounds->min.y);
-        grid_hash = grid_hash * 6364136223846793005ULL +
-                    float_as_uint(bounds->max.y);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(bounds->min.x);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(bounds->max.x);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(bounds->min.y);
+        grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(bounds->max.y);
       }
       /* Hash object color. */
-      grid_hash = grid_hash * 6364136223846793005ULL +
-                  float_as_uint(ob->color[0]);
-      grid_hash = grid_hash * 6364136223846793005ULL +
-                  float_as_uint(ob->color[1]);
+      grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(ob->color[0]);
+      grid_hash = grid_hash * 6364136223846793005ULL + float_as_uint(ob->color[1]);
       /* Hash session UID (detect object add/remove/replace). */
       grid_hash = grid_hash * 6364136223846793005ULL + uint64_t(ob->id.session_uid);
     }
@@ -921,8 +915,7 @@ class Instance : public DrawEngine {
     float3 padded_min = scene_min_ - float3(margin);
     float3 padded_max = scene_max_ + float3(margin);
     float max_extent = math::reduce_max(padded_max - padded_min);
-    float min_voxel = max_extent /
-                      (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
+    float min_voxel = max_extent / (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
     voxel_size_ = math::max(base_voxel, min_voxel);
     float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
 
@@ -948,10 +941,6 @@ class Instance : public DrawEngine {
         GPU_texture_free(compact_atlas_tx_);
         compact_atlas_tx_ = nullptr;
       }
-      if (object_id_tx_) {
-        GPU_texture_free(object_id_tx_);
-        object_id_tx_ = nullptr;
-      }
       atlas_capacity_ = 0;
       prev_active_brick_count_ = 0;
     }
@@ -962,6 +951,14 @@ class Instance : public DrawEngine {
      * copies, which may have stale group_order values). */
     {
       Main *bmain = DEG_get_bmain(draw_ctx_->depsgraph);
+
+      /* Clean up zombie group members (object was deleted but member struct
+       * was left behind by the remap system).  Without this, thousands of
+       * null-pointer entries accumulate and waste memory + iteration time. */
+      LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+        BKE_sdf_group_cleanup_null_members(group);
+      }
+
       groups_gpu_.clear();
       Map<SDFGroup *, int> group_index_map;
 
@@ -991,8 +988,7 @@ class Instance : public DrawEngine {
         int member_order = 0;
         LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
           if (member->object) {
-            object_membership_map.add_overwrite(member->object,
-                                                {g_idx, member_order});
+            object_membership_map.add_overwrite(member->object, {g_idx, member_order});
           }
           member_order++;
         }
@@ -1026,8 +1022,7 @@ class Instance : public DrawEngine {
           Vector<std::pair<int64_t, int>> sort_pairs(n);
           for (int i = 0; i < n; i++) {
             if (objects_[i].group_id >= 0) {
-              sort_pairs[i] = {int64_t(objects_[i].group_id) * 100000 +
-                                   objects_[i].group_order,
+              sort_pairs[i] = {int64_t(objects_[i].group_id) * 100000 + objects_[i].group_order,
                                i};
             }
             else {
@@ -1073,40 +1068,59 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Group-combined AABBs: every member of a group gets the union of ALL
-     * members' AABBs. CSG operations (subtract, intersect, shell, etc.) need
-     * every participating shape to produce correct distances. If a brick near
-     * the combined surface only finds the base shape but not the subtraction,
-     * the baked voxels contain raw base distances (all negative / inside),
-     * creating false solid surfaces inside subtraction cavities.
-     *
-     * By giving all group members the same combined AABB, any brick that sees
-     * ANY member will see ALL members as BVH candidates. This is slightly
-     * conservative (subtraction objects are candidates even far from their
-     * own surface) but guarantees correctness for all CSG configurations. */
-    {
-      const int num_groups = int(groups_gpu_.size());
-      for (int gi = 0; gi < num_groups; gi++) {
-        /* Compute union AABB of all members in this group. */
-        float3 group_min = float3(1e30f);
-        float3 group_max = float3(-1e30f);
-        for (const SDFObjectGPU &obj : objects_) {
-          if (obj.group_id == gi) {
-            group_min = math::min(group_min, float3(obj.bbox_min));
-            group_max = math::max(group_max, float3(obj.bbox_max));
-          }
-        }
-        if (group_min.x > 1e29f) {
-          continue; /* No members found for this group. */
-        }
-        /* Apply the combined AABB to every member. */
-        for (SDFObjectGPU &obj : objects_) {
-          if (obj.group_id == gi) {
-            obj.bbox_min = float4(group_min, 0.0f);
-            obj.bbox_max = float4(group_max, 0.0f);
-          }
+    /* Compute required AABB expansions for smooth blending.
+     * Since evaluation is sequential, a subsequent object with a large blend radius
+     * needs to evaluate earlier objects even if we are outside their strict geometry AABB.
+     * We propagate the maximum blend+shell distance backwards to guarantee that earlier
+     * objects are never culled prematurely in regions where they could blend.
+     * This avoids the O(N^2) blowup of a global candidate expansion, while fixing
+     * cut-off artifacts caused by tight AABBs during smooth union/subtraction. */
+    float running_scene_expand = 0.0f;
+
+    /* 1. Ungrouped objects (evaluated last, placed at the end of the sorted array). */
+    for (int i = int(objects_.size()) - 1; i >= 0; i--) {
+      SDFObjectGPU &obj = objects_[i];
+      if (obj.group_id != -1) {
+        break; /* Reached grouped objects. */
+      }
+
+      /* Expand AABB by the max blend radius of any subsequent operations. */
+      obj.bbox_min -= float4(running_scene_expand, running_scene_expand, running_scene_expand, 0.0f);
+      obj.bbox_max += float4(running_scene_expand, running_scene_expand, running_scene_expand, 0.0f);
+
+      /* Update running max with this object's blend requirements. */
+      float this_expand = obj.blend + fabsf(obj.shell_distance);
+      running_scene_expand = math::max(running_scene_expand, this_expand);
+    }
+
+    /* 2. Groups (evaluated in order from 0 to group_count - 1). */
+    for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
+      SDFGroupGPU &grp = groups_gpu_[g];
+      
+      float running_group_expand = 0.0f;
+      
+      int end_idx = grp.first_object + grp.object_count - 1;
+      int start_idx = grp.first_object;
+      
+      if (grp.object_count > 0 && start_idx >= 0 && end_idx < int(objects_.size())) {
+        for (int i = end_idx; i >= start_idx; i--) {
+          SDFObjectGPU &obj = objects_[i];
+          
+          /* Need to cover both subsequent operations WITHIN the group,
+           * and subsequent operations in the SCENE (after this group). */
+          float total_expand = math::max(running_scene_expand, running_group_expand);
+          
+          obj.bbox_min -= float4(total_expand, total_expand, total_expand, 0.0f);
+          obj.bbox_max += float4(total_expand, total_expand, total_expand, 0.0f);
+          
+          float this_expand = obj.blend + fabsf(obj.shell_distance);
+          running_group_expand = math::max(running_group_expand, this_expand);
         }
       }
+      
+      /* This group's blend expands all previous groups in the scene. */
+      float grp_expand = grp.blend + fabsf(grp.shell_distance);
+      running_scene_expand = math::max(running_scene_expand, grp_expand);
     }
 
     /* Compute scene hash for dirty tracking (analytic + grid + text combined). */
@@ -1139,12 +1153,9 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.x);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.y);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.z);
-      hash = hash * 6364136223846793005ULL +
-             float_as_uint(obj.inverse_matrix[0][0]);
-      hash = hash * 6364136223846793005ULL +
-             float_as_uint(obj.inverse_matrix[1][1]);
-      hash = hash * 6364136223846793005ULL +
-             float_as_uint(obj.inverse_matrix[2][2]);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.inverse_matrix[0][0]);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.inverse_matrix[1][1]);
+      hash = hash * 6364136223846793005ULL + float_as_uint(obj.inverse_matrix[2][2]);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.group_id);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.group_first);
       hash = hash * 6364136223846793005ULL + uint64_t(obj.group_order);
@@ -1256,8 +1267,7 @@ class Instance : public DrawEngine {
     ensure_shaders();
 
     /* Check if perf overlay is enabled. Only issue GL queries when active. */
-    perf_enabled_ = draw_ctx_->v3d &&
-                    (draw_ctx_->v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) &&
+    perf_enabled_ = draw_ctx_->v3d && (draw_ctx_->v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) &&
                     !(draw_ctx_->v3d->flag2 & V3D_HIDE_OVERLAYS);
     if (perf_enabled_) {
       perf_init();
@@ -1389,17 +1399,19 @@ class Instance : public DrawEngine {
         if (!grid_objects_.is_empty()) {
           augment_indirection_for_grids();
         }
-        /* Pre-size atlas using previous frame's count with headroom.
-         * The bake shader reads the actual count from brick_counter SSBO,
-         * so the atlas just needs to be large enough. Grow-only policy:
-         * never shrink the atlas capacity to avoid thrashing. */
+        /* Pre-size atlas using current classify count with headroom.
+         * Allow gradual shrink: if the scene needs fewer bricks, decay
+         * the capacity toward the actual need (halve the excess each bake). */
         {
           int estimated = math::max(active_brick_count_, prev_active_brick_count_);
           /* Add 50% headroom (minimum 64) to absorb count fluctuations. */
           int capacity = math::max(estimated + estimated / 2, 64);
-          /* Never shrink below previous allocation. */
           if (capacity > atlas_capacity_) {
             atlas_capacity_ = capacity;
+          }
+          else if (atlas_capacity_ > capacity * 2) {
+            /* Gradual shrink: halve excess to avoid thrashing. */
+            atlas_capacity_ = math::max(capacity, atlas_capacity_ / 2);
           }
           int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
           if (new_bpa < 1) {
@@ -1419,9 +1431,9 @@ class Instance : public DrawEngine {
         }
         if (!objects_.is_empty()) {
           dispatch_bake();
-          /* dispatch_bake does deferred readback: active_brick_count_ is now set. */
 
-          /* If actual count exceeds atlas capacity, resize and re-bake. */
+          /* If actual count (from classify readback) exceeds atlas capacity,
+           * resize and re-bake. */
           if (active_brick_count_ > atlas_capacity_) {
             atlas_capacity_ = active_brick_count_ + active_brick_count_ / 2;
             int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
@@ -1450,7 +1462,6 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_GRID);
         }
       }
-
     }
 
     /* Ray march (runs every frame, even when cached). */
@@ -1483,7 +1494,6 @@ class Instance : public DrawEngine {
     /* Update static atlas state for cross-engine access (overlay selection). */
     s_compact_atlas = compact_atlas_tx_;
     s_indirection = indirection_tx_;
-    s_object_id_atlas = object_id_tx_;
     s_voxel_size = voxel_size_;
     s_atlas_origin = atlas_origin_;
     s_atlas_extent = atlas_extent_;
@@ -1590,8 +1600,7 @@ class Instance : public DrawEngine {
           const SolidLight &light = sl->light[i];
           if (light.flag) {
             studio_light_dir_[i] = float4(light.vec[0], light.vec[1], light.vec[2], 0.0f);
-            studio_light_col_[i] = float4(
-                light.col[0], light.col[1], light.col[2], light.smooth);
+            studio_light_col_[i] = float4(light.col[0], light.col[1], light.col[2], light.smooth);
             studio_light_spec_[i] = float4(light.spec[0], light.spec[1], light.spec[2], 0.0f);
           }
           else {
@@ -1600,8 +1609,7 @@ class Instance : public DrawEngine {
             studio_light_spec_[i] = float4(0.0f);
           }
         }
-        studio_ambient_ = float3(
-            sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
+        studio_ambient_ = float3(sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
       }
       else {
         studio_light_dir_[0] = float4(math::normalize(float3(0.5f, 0.7f, 1.0f)), 0.0f);
@@ -1658,13 +1666,13 @@ class Instance : public DrawEngine {
           }
 
           matcap_tx_ = GPU_texture_create_2d_array("sdf_matcap",
-                                                    w,
-                                                    h,
-                                                    layers,
-                                                    1,
-                                                    gpu::TextureFormat::SFLOAT_16_16_16_16,
-                                                    GPU_TEXTURE_USAGE_SHADER_READ,
-                                                    buffer);
+                                                   w,
+                                                   h,
+                                                   layers,
+                                                   1,
+                                                   gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                   GPU_TEXTURE_USAGE_SHADER_READ,
+                                                   buffer);
           if (matcap_tx_) {
             GPU_texture_filter_mode(matcap_tx_, true);
           }
@@ -1676,13 +1684,13 @@ class Instance : public DrawEngine {
       if (matcap_tx_ == nullptr) {
         float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         matcap_tx_ = GPU_texture_create_2d_array("sdf_matcap_fallback",
-                                                  1,
-                                                  1,
-                                                  1,
-                                                  1,
-                                                  gpu::TextureFormat::SFLOAT_16_16_16_16,
-                                                  GPU_TEXTURE_USAGE_SHADER_READ,
-                                                  white);
+                                                 1,
+                                                 1,
+                                                 1,
+                                                 1,
+                                                 gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                 GPU_TEXTURE_USAGE_SHADER_READ,
+                                                 white);
       }
     }
   }
@@ -1747,10 +1755,6 @@ class Instance : public DrawEngine {
       /* Dimensions changed: must recreate. */
       GPU_texture_free(compact_atlas_tx_);
       compact_atlas_tx_ = nullptr;
-      if (object_id_tx_) {
-        GPU_texture_free(object_id_tx_);
-        object_id_tx_ = nullptr;
-      }
     }
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
@@ -1763,14 +1767,6 @@ class Instance : public DrawEngine {
                                               usage,
                                               nullptr);
     GPU_texture_filter_mode(compact_atlas_tx_, true);
-    object_id_tx_ = GPU_texture_create_3d("sdf_object_id_atlas",
-                                          atlas_dim,
-                                          atlas_dim,
-                                          atlas_dim,
-                                          1,
-                                          gpu::TextureFormat::SINT_32,
-                                          usage,
-                                          nullptr);
   }
 
   void upload_objects()
@@ -1890,11 +1886,10 @@ class Instance : public DrawEngine {
       }
       const size_t buf_size = math::max(count, 1) * sizeof(SDFShapeGPU);
       if (shape_ssbo_ == nullptr) {
-        shape_ssbo_ = GPU_storagebuf_create_ex(
-            buf_size,
-            gpu_shapes.is_empty() ? nullptr : gpu_shapes.data(),
-            GPU_USAGE_DYNAMIC,
-            "sdf_shapes_ssbo");
+        shape_ssbo_ = GPU_storagebuf_create_ex(buf_size,
+                                               gpu_shapes.is_empty() ? nullptr : gpu_shapes.data(),
+                                               GPU_USAGE_DYNAMIC,
+                                               "sdf_shapes_ssbo");
         shape_ssbo_count_ = count;
       }
       else {
@@ -1911,11 +1906,11 @@ class Instance : public DrawEngine {
       }
       const size_t buf_size = math::max(count, 1) * sizeof(SDFInstanceGPU);
       if (instance_ssbo_ == nullptr) {
-        instance_ssbo_ = GPU_storagebuf_create_ex(
-            buf_size,
-            gpu_instances.is_empty() ? nullptr : gpu_instances.data(),
-            GPU_USAGE_DYNAMIC,
-            "sdf_instances_ssbo");
+        instance_ssbo_ = GPU_storagebuf_create_ex(buf_size,
+                                                  gpu_instances.is_empty() ? nullptr :
+                                                                             gpu_instances.data(),
+                                                  GPU_USAGE_DYNAMIC,
+                                                  "sdf_instances_ssbo");
         instance_ssbo_count_ = count;
       }
       else {
@@ -2073,7 +2068,7 @@ class Instance : public DrawEngine {
             float left_area = surface_area(left_min[i - 1], left_max[i - 1]);
             float right_area = surface_area(running_min, running_max);
             float cost = 1.0f + (left_count[i - 1] * left_area + running_count * right_area) /
-                                     parent_area;
+                                    parent_area;
             if (cost < best_cost) {
               best_cost = cost;
               best_axis = axis;
@@ -2154,7 +2149,6 @@ class Instance : public DrawEngine {
     }
   }
 
-
   /* ---- Per-Shape Atlas Pipeline (instanced mode) ---- */
 
   /** Compute per-shape local atlas parameters.
@@ -2218,7 +2212,8 @@ class Instance : public DrawEngine {
       shape_indir_data_.resize(indir_start + grid_volume, -1);
 
       /* Classify: evaluate single SDF at each brick center. */
-      float3 sz = math::max(shape.size_normalized - float3(shape.bevel_normalized), float3(0.001f));
+      float3 sz = math::max(shape.size_normalized - float3(shape.bevel_normalized),
+                            float3(0.001f));
       float bev = shape.bevel_normalized;
 
       float brick_half_diag = float(SDF_BRICK_SIZE) * local_vs * 0.866025f;
@@ -2228,11 +2223,10 @@ class Instance : public DrawEngine {
       for (int bz = 0; bz < gr.z; bz++) {
         for (int by = 0; by < gr.y; by++) {
           for (int bx = 0; bx < gr.x; bx++) {
-            float3 brick_center = local_orig +
-                                  (float3(float(bx), float(by), float(bz)) *
-                                       float(SDF_BRICK_SIZE) +
-                                   float(SDF_BRICK_SIZE) * 0.5f) *
-                                      local_vs;
+            float3 brick_center = local_orig + (float3(float(bx), float(by), float(bz)) *
+                                                    float(SDF_BRICK_SIZE) +
+                                                float(SDF_BRICK_SIZE) * 0.5f) *
+                                                   local_vs;
 
             /* Evaluate SDF based on shape type. */
             float dist;
@@ -2259,9 +2253,8 @@ class Instance : public DrawEngine {
                 float2 k2 = float2(-cr, 2.0f * ch);
                 float2 ca = float2(q.x - math::min(q.x, (q.y < 0.0f) ? cr : 0.0f),
                                    math::abs(q.y) - ch);
-                float t_clamped = math::clamp(math::dot(k1 - q, k2) / math::dot(k2, k2),
-                                              0.0f,
-                                              1.0f);
+                float t_clamped = math::clamp(
+                    math::dot(k1 - q, k2) / math::dot(k2, k2), 0.0f, 1.0f);
                 float2 cb = q - k1 + k2 * t_clamped;
                 float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
                 dist = s * std::sqrt(math::min(math::dot(ca, ca), math::dot(cb, cb)));
@@ -2282,9 +2275,8 @@ class Instance : public DrawEngine {
                   float sc_x = sinf(half_rad);
                   float sc_y = cosf(half_rad);
                   float px = math::abs(p.x);
-                  float k = (sc_y * px > sc_x * p.y)
-                                ? (px * sc_y + p.y * sc_x)
-                                : math::length(float2(px, p.y));
+                  float k = (sc_y * px > sc_x * p.y) ? (px * sc_y + p.y * sc_x) :
+                                                       math::length(float2(px, p.y));
                   dist = std::sqrt(math::dot(float3(p.x, p.y, p.z), float3(p.x, p.y, p.z)) +
                                    major * major - 2.0f * major * k) -
                          minor;
@@ -2306,11 +2298,9 @@ class Instance : public DrawEngine {
                 float2 pp = float2(-p.y, p.x);
                 float bn = an * std::floor((std::atan2(pp.y, pp.x) + an) / an / 2.0f) * 2.0f;
                 float cs_x = std::cos(bn), cs_y = std::sin(bn);
-                float2 pp2 = float2(cs_x * pp.x + cs_y * pp.y,
-                                    -cs_y * pp.x + cs_x * pp.y);
+                float2 pp2 = float2(cs_x * pp.x + cs_y * pp.y, -cs_y * pp.x + cs_x * pp.y);
                 float d2d = math::length(
-                                float2(pp2.x - r_apothem,
-                                       pp2.y - math::clamp(pp2.y, -he, he))) *
+                                float2(pp2.x - r_apothem, pp2.y - math::clamp(pp2.y, -he, he))) *
                             ((pp2.x > r_apothem) ? 1.0f : -1.0f);
                 float dz = math::abs(p.z) - math::max(sz.z - bev, 0.001f);
                 dist = math::length(math::max(float2(d2d, dz), float2(0.0f))) +
@@ -2384,11 +2374,11 @@ class Instance : public DrawEngine {
     /* Upload the concatenated active bricks SSBO once for all shapes.
      * Each shape uses a brick_offset uniform to index into its range,
      * eliminating per-shape SSBO alloc/free overhead. */
-    gpu::StorageBuf *shape_ab_ssbo = GPU_storagebuf_create_ex(
-        shape_active_bricks_.size() * sizeof(ActiveBrick),
-        shape_active_bricks_.data(),
-        GPU_USAGE_DEVICE_ONLY,
-        "sdf_shape_active_bricks");
+    gpu::StorageBuf *shape_ab_ssbo = GPU_storagebuf_create_ex(shape_active_bricks_.size() *
+                                                                  sizeof(ActiveBrick),
+                                                              shape_active_bricks_.data(),
+                                                              GPU_USAGE_DEVICE_ONLY,
+                                                              "sdf_shape_active_bricks");
 
     GPU_shader_bind(shape_bake_sh_);
 
@@ -2451,7 +2441,6 @@ class Instance : public DrawEngine {
     GPU_shader_unbind();
     GPU_storagebuf_free(shape_ab_ssbo);
   }
-
 
   void dispatch_classify()
   {
@@ -2530,8 +2519,6 @@ class Instance : public DrawEngine {
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
     GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
-    GPU_shader_uniform_1f(classify_sh_, "max_blend", max_blend_);
-    GPU_shader_uniform_1f(classify_sh_, "max_shell_distance", max_shell_distance_);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(classify_sh_, "group_count", int(groups_gpu_.size()));
 
@@ -2545,14 +2532,11 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    /* Deferred readback: the bake shader reads brick_counter.count from the
-     * SSBO directly, avoiding the GPU→CPU pipeline stall in the common case.
-     * active_brick_count_ is updated after bake in dispatch_bake().
-     *
-     * Exception: when grid objects need augmenting, we must know the count
-     * now because augment functions assign sequential slots starting from
-     * active_brick_count_. In that case, do the synchronous readback. */
-    if (!grid_objects_.is_empty()) {
+    /* Always read actual brick count after classify. The memory barrier above
+     * already flushed the GPU pipeline, so the readback is effectively free.
+     * This allows dispatch_bake() to dispatch the exact number of workgroups
+     * instead of the worst-case grid_res^3 capacity (often 100-1000x fewer). */
+    {
       BrickCounter readback = {};
       GPU_storagebuf_read(brick_counter_, &readback);
       active_brick_count_ = int(readback.count);
@@ -2561,10 +2545,10 @@ class Instance : public DrawEngine {
 
   void dispatch_bake()
   {
-    /* Over-dispatch with capacity: the bake shader reads the actual active
-     * count from brick_counter SSBO and early-exits surplus workgroups.
-     * This avoids the GPU→CPU readback stall between classify and bake. */
-    int dispatch_count = active_bricks_capacity_;
+    /* Dispatch exact active brick count (read from brick_counter after classify).
+     * Previously dispatched grid_res^3 workgroups with early-exit, but the
+     * launch overhead for ~2M empty workgroups was a major bottleneck. */
+    int dispatch_count = active_brick_count_;
     if (dispatch_count <= 0) {
       return;
     }
@@ -2601,17 +2585,12 @@ class Instance : public DrawEngine {
 
     /* Bind atlas images. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
-    if (object_id_tx_) {
-      GPU_texture_image_bind(object_id_tx_, 1);
-    }
 
     /* Push constants. */
     GPU_shader_uniform_1i(bake_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(bake_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
-    GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
-    GPU_shader_uniform_1f(bake_sh_, "max_shell_distance", max_shell_distance_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
 
@@ -2624,28 +2603,15 @@ class Instance : public DrawEngine {
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
     GPU_texture_image_unbind(compact_atlas_tx_);
-    if (object_id_tx_) {
-      GPU_texture_image_unbind(object_id_tx_);
-    }
     GPU_shader_unbind();
-
-    /* Deferred readback: now that bake is dispatched and barrier issued,
-     * read the actual brick count for atlas sizing and perf stats.
-     * No stall here — the bake barrier already flushed the pipeline. */
-    BrickCounter readback = {};
-    GPU_storagebuf_read(brick_counter_, &readback);
-    active_brick_count_ = int(readback.count);
+    /* active_brick_count_ was already set by dispatch_classify() readback. */
   }
-
-
 
   void draw_march()
   {
     DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
 
-    if (draw_ctx_->is_depth() ||
-        (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER))
-    {
+    if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
       /* Depth-only: either a depth prepass, or rendered mode where Cycles
        * provides the color and we only contribute depth for the overlay grid. */
       GPU_framebuffer_bind(dfbl->depth_only_fb);
@@ -2688,11 +2654,6 @@ class Instance : public DrawEngine {
     }
 
     /* Bind object ID atlas for debug visualization. */
-    int objid_slot = GPU_shader_get_sampler_binding(march_sh_, "object_id_tx");
-    if (object_id_tx_) {
-      GPU_texture_bind(object_id_tx_, objid_slot);
-    }
-
     /* Bind instanced mode SSBOs. */
     if (shape_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "shapes");
@@ -2725,7 +2686,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
     GPU_shader_uniform_1i(march_sh_, "normal_quality", 1); /* 0=fast, 1=smooth */
-    GPU_shader_uniform_1i(march_sh_, "debug_mode", (debug_grid_ == 2) ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "use_instanced", use_instanced_ ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "instance_count", int(instances_.size()));
     GPU_shader_uniform_1i(march_sh_, "bvh_node_count", int(bvh_nodes_.size()));
@@ -2776,9 +2736,6 @@ class Instance : public DrawEngine {
     if (indirection_tx_) {
       GPU_texture_unbind(indirection_tx_);
     }
-    if (object_id_tx_) {
-      GPU_texture_unbind(object_id_tx_);
-    }
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
     }
@@ -2827,9 +2784,7 @@ class Instance : public DrawEngine {
     }
 
     /* Skip in depth-only or Cycles rendered mode (matches draw_march behavior). */
-    if (draw_ctx_->is_depth() ||
-        (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER))
-    {
+    if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
       return;
     }
 
@@ -2849,8 +2804,7 @@ class Instance : public DrawEngine {
     GPU_texture_filter_mode(march_color_tx_, true);
     GPU_texture_bind(march_color_tx_, color_slot);
 
-    float2 rcp = float2(1.0f / float(fxaa_viewport_size_.x),
-                        1.0f / float(fxaa_viewport_size_.y));
+    float2 rcp = float2(1.0f / float(fxaa_viewport_size_.x), 1.0f / float(fxaa_viewport_size_.y));
     GPU_shader_uniform_2fv(fxaa_sh_, "rcpFrame", rcp);
 
     if (fullscreen_batch_ == nullptr) {
@@ -2896,8 +2850,7 @@ class Instance : public DrawEngine {
     }
 
     GPUVertFormat format = {};
-    uint pos_attr = GPU_vertformat_attr_add(
-        &format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    uint pos_attr = GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
     uint col_attr = GPU_vertformat_attr_add(
         &format, "color", gpu::VertAttrType::SFLOAT_32_32_32_32);
 
@@ -2916,8 +2869,7 @@ class Instance : public DrawEngine {
     }
 
     /* Read back indirection texture to find active bricks. */
-    int32_t *data = static_cast<int32_t *>(
-        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+    int32_t *data = static_cast<int32_t *>(GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
     if (!data) {
       return;
     }
@@ -3154,15 +3106,12 @@ class Instance : public DrawEngine {
       /* Reconstruct rotation matrix from inverse_matrix.
        * inverse_matrix is the inverse of the rotation-only matrix.
        * For pure rotation: inverse = transpose, so rot = transpose(inv). */
-      float3 rot_col0 = float3(obj.inverse_matrix[0][0],
-                               obj.inverse_matrix[1][0],
-                               obj.inverse_matrix[2][0]);
-      float3 rot_col1 = float3(obj.inverse_matrix[0][1],
-                               obj.inverse_matrix[1][1],
-                               obj.inverse_matrix[2][1]);
-      float3 rot_col2 = float3(obj.inverse_matrix[0][2],
-                               obj.inverse_matrix[1][2],
-                               obj.inverse_matrix[2][2]);
+      float3 rot_col0 = float3(
+          obj.inverse_matrix[0][0], obj.inverse_matrix[1][0], obj.inverse_matrix[2][0]);
+      float3 rot_col1 = float3(
+          obj.inverse_matrix[0][1], obj.inverse_matrix[1][1], obj.inverse_matrix[2][1]);
+      float3 rot_col2 = float3(
+          obj.inverse_matrix[0][2], obj.inverse_matrix[1][2], obj.inverse_matrix[2][2]);
 
       float3 pos = float3(obj.position);
       float3 extent = float3(obj.sdf_size) + float3(obj.bevel + obj.blend);
@@ -3179,9 +3128,18 @@ class Instance : public DrawEngine {
       /* 12 edges of a box: bottom(4), top(4), vertical(4).
        * Corner indices: bottom = 0,1,3,2  top = 4,5,7,6 */
       const int edges[12][2] = {
-          {0, 1}, {1, 3}, {3, 2}, {2, 0}, /* bottom */
-          {4, 5}, {5, 7}, {7, 6}, {6, 4}, /* top */
-          {0, 4}, {1, 5}, {3, 7}, {2, 6}, /* vertical */
+          {0, 1},
+          {1, 3},
+          {3, 2},
+          {2, 0}, /* bottom */
+          {4, 5},
+          {5, 7},
+          {7, 6},
+          {6, 4}, /* top */
+          {0, 4},
+          {1, 5},
+          {3, 7},
+          {2, 6}, /* vertical */
       };
       for (int e = 0; e < 12; e++) {
         positions.append(corners[edges[e][0]]);
@@ -3191,8 +3149,7 @@ class Instance : public DrawEngine {
       }
     }
 
-    bvh_batch_ = create_colored_line_batch(
-        positions.data(), colors.data(), int(positions.size()));
+    bvh_batch_ = create_colored_line_batch(positions.data(), colors.data(), int(positions.size()));
   }
 
   void rebuild_grid_batch()
@@ -3224,8 +3181,7 @@ class Instance : public DrawEngine {
     }
 
     /* Rebuild batch if settings changed. */
-    if (grid_batch_ == nullptr || grid_batch_mode_ != debug_grid_ ||
-        grid_batch_res_ != grid_res_)
+    if (grid_batch_ == nullptr || grid_batch_mode_ != debug_grid_ || grid_batch_res_ != grid_res_)
     {
       rebuild_grid_batch();
     }
@@ -3426,8 +3382,8 @@ class Instance : public DrawEngine {
     grid_obj.world_to_texture = world_to_tex;
     grid_obj.color = color;
     grid_obj.blend = blend_val;
-    grid_obj.blend_type = 0;      /* Default to linear for grid objects. */
-    grid_obj.csg_operation = 0;   /* Default to union for grid objects. */
+    grid_obj.blend_type = 0;    /* Default to linear for grid objects. */
+    grid_obj.csg_operation = 0; /* Default to union for grid objects. */
     grid_obj.shell_distance = 0.0f;
 
     /* If the object has SDF data, use its blend_type and csg_operation. */
@@ -3469,8 +3425,7 @@ class Instance : public DrawEngine {
     float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
 
     /* Read current indirection (already written by classify or clear). */
-    int32_t *data = static_cast<int32_t *>(
-        GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+    int32_t *data = static_cast<int32_t *>(GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
 
     Vector<ActiveBrick> new_bricks;
     int next_slot = active_brick_count_;
@@ -3480,8 +3435,7 @@ class Instance : public DrawEngine {
       float3 gmin = float3(1e30f);
       float3 gmax = float3(-1e30f);
       for (int c = 0; c < 8; c++) {
-        float3 tc = float3(
-            (c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
+        float3 tc = float3((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
         float3 wc = math::transform_point(tex_to_world, tc);
         gmin = math::min(gmin, wc);
         gmax = math::max(gmax, wc);
@@ -3535,9 +3489,9 @@ class Instance : public DrawEngine {
         GPU_storagebuf_free(active_bricks_);
       }
       active_bricks_ = GPU_storagebuf_create_ex(active_brick_count_ * sizeof(ActiveBrick),
-                                                 all_bricks.data(),
-                                                 GPU_USAGE_DYNAMIC,
-                                                 "sdf_active_bricks");
+                                                all_bricks.data(),
+                                                GPU_USAGE_DYNAMIC,
+                                                "sdf_active_bricks");
       active_bricks_capacity_ = active_brick_count_;
       GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     }
@@ -3558,8 +3512,8 @@ class Instance : public DrawEngine {
 
   void dispatch_grid_blends()
   {
-    if (grid_blend_sh_ == nullptr || compact_atlas_tx_ == nullptr ||
-        active_brick_count_ <= 0 || active_bricks_ == nullptr)
+    if (grid_blend_sh_ == nullptr || compact_atlas_tx_ == nullptr || active_brick_count_ <= 0 ||
+        active_bricks_ == nullptr)
     {
       return;
     }
@@ -3713,8 +3667,7 @@ class Instance : public DrawEngine {
     }
     else if (perf_has_bake_data_) {
       /* Idle: show last bake cost so user can still see it. */
-      std::snprintf(
-          classify_str, sizeof(classify_str), "%.2f ms", perf_last_classify_ms_);
+      std::snprintf(classify_str, sizeof(classify_str), "%.2f ms", perf_last_classify_ms_);
       std::snprintf(bake_str, sizeof(bake_str), "%.2f ms", perf_last_bake_ms_);
       std::snprintf(grid_str, sizeof(grid_str), "%.2f ms", perf_last_grid_ms_);
     }
@@ -3773,7 +3726,7 @@ class Instance : public DrawEngine {
      * dangling access from overlay/selection code. */
     s_compact_atlas = nullptr;
     s_indirection = nullptr;
-    s_object_id_atlas = nullptr;
+
     s_object_ssbo = nullptr;
     s_modifier_ssbo = nullptr;
     s_group_ssbo = nullptr;
@@ -3791,9 +3744,7 @@ class Instance : public DrawEngine {
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
     }
-    if (object_id_tx_) {
-      GPU_texture_free(object_id_tx_);
-    }
+
     if (brick_counter_) {
       GPU_storagebuf_free(brick_counter_);
     }
@@ -3858,11 +3809,6 @@ gpu::Texture *sdf_atlas_get()
 gpu::Texture *sdf_indirection_get()
 {
   return s_indirection;
-}
-
-gpu::Texture *sdf_object_id_atlas_get()
-{
-  return s_object_id_atlas;
 }
 
 void sdf_atlas_params_get(
