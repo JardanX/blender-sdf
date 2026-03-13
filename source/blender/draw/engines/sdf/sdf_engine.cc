@@ -976,8 +976,8 @@ class Instance : public DrawEngine {
       if (grid_max.y > prev_grid_max.y) expanded_max.y = grid_max.y + padding;
       if (grid_max.z > prev_grid_max.z) expanded_max.z = grid_max.z + padding;
 
-      expanded_min = math::floor(expanded_min / chunk_size) * chunk_size;
-      expanded_max = math::ceil(expanded_max / chunk_size) * chunk_size;
+      expanded_min = math::round(expanded_min / chunk_size) * chunk_size;
+      expanded_max = math::round(expanded_max / chunk_size) * chunk_size;
 
       float3 ideal_size = grid_max - grid_min;
       float3 expanded_size = expanded_max - expanded_min;
@@ -1259,6 +1259,10 @@ class Instance : public DrawEngine {
             group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
         group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.first_object);
         group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.object_count);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.color.x);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.color.y);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.color.z);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.color.w);
       }
 
       incremental_bake_ = false;
@@ -1427,6 +1431,10 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
       hash = hash * 6364136223846793005ULL + uint64_t(grp.first_object);
       hash = hash * 6364136223846793005ULL + uint64_t(grp.object_count);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.x);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.y);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.z);
+      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.w);
     }
     /* Include surface margin so changes trigger rebake. */
     hash = hash * 6364136223846793005ULL + float_as_uint(surface_margin_);
