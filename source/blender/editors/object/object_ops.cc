@@ -108,6 +108,7 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_sdf_set_csg);
   WM_operatortype_append(OBJECT_OT_sdf_set_blend);
   WM_operatortype_append(OBJECT_OT_sdf_group_reorder_group);
+  WM_operatortype_append(OBJECT_OT_move_to_sdf_group);
   WM_operatortype_append(OBJECT_OT_add);
   WM_operatortype_append(OBJECT_OT_lattice_add_to_selected);
   WM_operatortype_append(OBJECT_OT_add_named);

@@ -13,6 +13,8 @@
 /* all types are needed here, in order to do memory operations */
 #include "DNA_ID.h"
 #include "DNA_key_types.h"
+#include "DNA_object_types.h"
+#include "DNA_sdf_types.h"
 
 #include "BLI_utildefines.h"
 
@@ -27,6 +29,7 @@
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_sdf_group.hh"
 #include "BKE_lib_override.hh"
 #include "BKE_lib_remap.hh"
 #include "BKE_library.hh"
@@ -320,6 +323,22 @@ static size_t id_delete(Main *bmain,
             id_remapper.add(&shape_key->id, nullptr);
           }
 
+          /* Forcefully also delete SDF data of deleted OB_SDF objects if the data block
+           * would become orphaned (last user).  Standalone SDF data blocks have no use
+           * outside of an object, similar to orphaned shapekeys. */
+          if (GS(id_iter->name) == ID_OB) {
+            Object *ob = (Object *)id_iter;
+            if (ob->type == OB_SDF && ob->data) {
+              ID *sdf_id = (ID *)ob->data;
+              if (sdf_id->us <= 1 && !ids_to_delete.contains(sdf_id)) {
+                BLI_remlink(&bmain->sdfs, sdf_id);
+                BKE_main_namemap_remove_id(*bmain, *sdf_id);
+                ids_to_delete.add(sdf_id);
+                id_remapper.add(sdf_id, nullptr);
+              }
+            }
+          }
+
           keep_looping = true;
         }
       }
@@ -352,6 +371,11 @@ static size_t id_delete(Main *bmain,
       id_remapper,
       (ID_REMAP_FORCE_INTERNAL_RUNTIME_POINTERS | ID_REMAP_SKIP_USER_CLEAR));
   cleanup_ids.clear();
+
+  /* Clean up SDFGroup members whose object was just deleted.  The remap above
+   * should have nullified the member->object pointers; this removes the zombie
+   * member structs so they don't accumulate. */
+  BKE_sdf_groups_cleanup_all_null_members(bmain);
 
   /* Now we can safely mark that ID as not being in Main database anymore. */
   /* NOTE: This needs to be done in a separate loop than above, otherwise some user-counts of

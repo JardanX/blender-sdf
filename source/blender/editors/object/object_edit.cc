@@ -35,6 +35,7 @@
 #include "DNA_object_force_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
 
 #include "BKE_anim_visualization.h"
 #include "BKE_armature.hh"
@@ -2442,6 +2443,29 @@ static void move_to_collection_menu_draw(const bContext *C, Menu *menu)
     layout.separator();
   }
   move_to_collection_menu_draw(menu, scene->master_collection, ICON_SCENE_DATA);
+
+  /* SDF Groups section (only for move, not link). */
+  bool is_move = ELEM(StringRefNull(menu->type->idname),
+                      "OBJECT_MT_move_to_collection",
+                      "OBJECT_MT_move_to_collection_recursive");
+  if (is_move) {
+    Main *bmain = CTX_data_main(C);
+    layout.separator();
+
+    wmOperatorType *ot_sdf = WM_operatortype_find("OBJECT_OT_move_to_sdf_group", false);
+
+    /* "New SDF Group" button. */
+    layout.operator_context_set(wm::OpCallContext::InvokeDefault);
+    PointerRNA sdf_ptr = layout.op(
+        ot_sdf, CTX_IFACE_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "New SDF Group"), ICON_ADD);
+    RNA_boolean_set(&sdf_ptr, "is_new", true);
+
+    /* List existing SDF groups. */
+    LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+      sdf_ptr = layout.op(ot_sdf, group->id.name + 2, ICON_SDF_GROUP);
+      RNA_string_set(&sdf_ptr, "group_name", group->id.name + 2);
+    }
+  }
 }
 
 void move_to_collection_menu_register()

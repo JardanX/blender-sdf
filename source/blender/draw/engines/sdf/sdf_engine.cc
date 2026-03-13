@@ -11,7 +11,10 @@
 #include <algorithm>
 
 #include "BLI_map.hh"
+#include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_set.hh"
 
@@ -981,6 +984,7 @@ class Instance : public DrawEngine {
         gpu_grp.shell_distance = group->shell_distance;
         gpu_grp.first_object = obj_offset;
         gpu_grp.object_count = group->totmember;
+        gpu_grp.color = float4(group->color[0], group->color[1], group->color[2], group->color[3]);
         groups_gpu_.append(gpu_grp);
         group_index_map.add(group, g_idx);
 
@@ -1591,6 +1595,19 @@ class Instance : public DrawEngine {
       if (sl == nullptr) {
         sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_STUDIO);
       }
+
+      /* Compute world-space shading rotation (matches Workbench behavior). */
+      float4x4 world_shading_rotation = float4x4::identity();
+      if (shading.flag & V3D_SHADING_WORLD_ORIENTATION) {
+        float4x4 V = blender::draw::View::default_get().viewmat();
+        float R[4][4];
+        axis_angle_to_mat4_single(R, 'Z', -shading.studiolight_rot_z);
+        mul_m4_m4m4(R, V.ptr(), R);
+        swap_v3_v3(R[2], R[1]);
+        negate_v3(R[2]);
+        world_shading_rotation = float4x4(R);
+      }
+
       if (sl != nullptr) {
         use_specular_ = ((shading.flag & V3D_SHADING_SPECULAR_HIGHLIGHT) &&
                          (sl->flag & STUDIOLIGHT_SPECULAR_HIGHLIGHT_PASS)) ?
@@ -1599,7 +1616,9 @@ class Instance : public DrawEngine {
         for (int i = 0; i < 4; i++) {
           const SolidLight &light = sl->light[i];
           if (light.flag) {
-            studio_light_dir_[i] = float4(light.vec[0], light.vec[1], light.vec[2], 0.0f);
+            float3 dir = math::transform_direction(world_shading_rotation,
+                                                   float3(light.vec));
+            studio_light_dir_[i] = float4(dir, 0.0f);
             studio_light_col_[i] = float4(light.col[0], light.col[1], light.col[2], light.smooth);
             studio_light_spec_[i] = float4(light.spec[0], light.spec[1], light.spec[2], 0.0f);
           }
@@ -1612,7 +1631,9 @@ class Instance : public DrawEngine {
         studio_ambient_ = float3(sl->light_ambient[0], sl->light_ambient[1], sl->light_ambient[2]);
       }
       else {
-        studio_light_dir_[0] = float4(math::normalize(float3(0.5f, 0.7f, 1.0f)), 0.0f);
+        float3 fallback_dir = math::transform_direction(
+            world_shading_rotation, math::normalize(float3(0.5f, 0.7f, 1.0f)));
+        studio_light_dir_[0] = float4(fallback_dir, 0.0f);
         studio_light_col_[0] = float4(0.8f, 0.8f, 0.8f, 0.0f);
         studio_light_spec_[0] = float4(1.0f, 1.0f, 1.0f, 0.0f);
         for (int i = 1; i < 4; i++) {

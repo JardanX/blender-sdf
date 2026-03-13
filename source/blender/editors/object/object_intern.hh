@@ -160,6 +160,7 @@ void OBJECT_OT_sdf_group_reorder(wmOperatorType *ot);
 void OBJECT_OT_sdf_set_csg(wmOperatorType *ot);
 void OBJECT_OT_sdf_set_blend(wmOperatorType *ot);
 void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot);
+void OBJECT_OT_move_to_sdf_group(wmOperatorType *ot);
 /**
  * Called by other space types too.
  */
