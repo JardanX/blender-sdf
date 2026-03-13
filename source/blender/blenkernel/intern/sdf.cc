@@ -56,6 +56,15 @@ static void sdf_copy_data(Main * /*bmain*/,
 static void sdf_free_data(ID *id)
 {
   SDF *sdf = (SDF *)id;
+
+  /* Clear group back-reference so the group's user count is properly
+   * decremented.  Without this, orphaned SDF data blocks keep the group
+   * alive with a stale user, preventing it from being purged. */
+  if (sdf->sdf_group) {
+    id_us_min(&sdf->sdf_group->id);
+    sdf->sdf_group = nullptr;
+  }
+
   BKE_animdata_free(&sdf->id, false);
   BLI_freelistN(&sdf->modifiers);
   MEM_SAFE_FREE(sdf->mat);

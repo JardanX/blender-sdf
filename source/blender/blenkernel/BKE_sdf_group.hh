@@ -38,3 +38,10 @@ void BKE_sdf_group_reindex_members(SDFGroup *group);
 
 /** Remove members whose object pointer is NULL (e.g., after object deletion). */
 void BKE_sdf_group_cleanup_null_members(SDFGroup *group);
+
+/** Remove null members from ALL SDFGroups in bmain (called after ID remap). */
+void BKE_sdf_groups_cleanup_all_null_members(Main *bmain);
+
+/** Remove all group members referencing the given object from all SDFGroups.
+ *  Called before object deletion to ensure clean removal. */
+void BKE_sdf_groups_remove_object(Main *bmain, Object *ob);

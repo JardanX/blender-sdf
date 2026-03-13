@@ -320,6 +320,9 @@ void main()
         continue; /* No members hit this brick. */
       }
 
+      /* Apply global tint multiplier to group color. */
+      grp_color *= grp.color.rgb;
+
       /* Combine group result with scene using group-level CSG. */
       if (g == 0) {
         acc_dist = grp_dist;

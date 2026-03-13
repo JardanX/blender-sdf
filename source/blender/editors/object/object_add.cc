@@ -2456,6 +2456,15 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
   }
 
   if (tagged_count > 0) {
+    /* Remove SDF objects from their groups BEFORE deletion.  This ensures
+     * group member cleanup and user-count management happen reliably,
+     * rather than relying on the remap postprocess chain. */
+    LISTBASE_FOREACH (Object *, del_ob, &bmain->objects) {
+      if ((del_ob->id.tag & ID_TAG_DOIT) && del_ob->type == OB_SDF) {
+        BKE_sdf_groups_remove_object(bmain, del_ob);
+      }
+    }
+
     BKE_id_multi_tagged_delete(bmain);
   }
 

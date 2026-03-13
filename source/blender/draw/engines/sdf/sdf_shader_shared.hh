@@ -55,7 +55,7 @@ struct SDFObjectGPU {
 };
 /* Total: 64 + 16*4 + 48 + 16*4 = 64+64+48+64 = 240 bytes, 16-byte aligned. */
 
-/** GPU-side SDF evaluation group. 32 bytes, 16-byte aligned. */
+/** GPU-side SDF evaluation group. 48 bytes, 16-byte aligned. */
 struct SDFGroupGPU {
   /** Group-level CSG operation (eSDFCSGOperation). */
   int csg_operation;
@@ -71,6 +71,8 @@ struct SDFGroupGPU {
   int object_count;
   float _pad0;
   float _pad1;
+  /** Group-level color tint. */
+  float4 color;
 };
 
 /** GPU-side SDF modifier. Flat data for SSBO upload. 48 bytes, 16-byte aligned. */

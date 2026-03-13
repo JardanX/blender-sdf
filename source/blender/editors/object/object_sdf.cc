@@ -26,7 +26,10 @@
 #include "BKE_sdf.hh"
 #include "BKE_sdf_group.hh"
 
+#include "BLT_translation.hh"
+
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -419,6 +422,129 @@ void OBJECT_OT_sdf_group_reorder(wmOperatorType *ot)
   RNA_def_int(ot->srna, "member_index", 0, 0, INT_MAX, "Member Index", "Index of member to move", 0, 100);
   RNA_def_int(ot->srna, "direction", -1, -1, 1, "Direction", "Move direction (-1=up, 1=down)", -1, 1);
   RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group");
+}
+
+/* ---- Move to SDF Group ---- */
+
+static wmOperatorStatus move_to_sdf_group_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const bool is_new = RNA_boolean_get(op->ptr, "is_new");
+
+  SDFGroup *target = nullptr;
+
+  if (is_new) {
+    char name[MAX_ID_NAME - 2];
+    RNA_string_get(op->ptr, "new_group_name", name);
+    target = BKE_sdf_group_add(bmain, name[0] ? name : "SDF Group");
+  }
+  else {
+    char group_name[MAX_ID_NAME - 2];
+    RNA_string_get(op->ptr, "group_name", group_name);
+    if (group_name[0] == '\0') {
+      BKE_report(op->reports, RPT_ERROR, "No SDF group selected");
+      return OPERATOR_CANCELLED;
+    }
+    ID *id = BKE_libblock_find_name(bmain, ID_SG, group_name);
+    if (!id) {
+      BKE_report(op->reports, RPT_ERROR, "SDF group not found");
+      return OPERATOR_CANCELLED;
+    }
+    target = (SDFGroup *)id;
+  }
+
+  int moved_count = 0;
+  CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+    if (ob->type == OB_SDF && ob->data) {
+      SDF *sdf = static_cast<SDF *>(ob->data);
+      /* Remove from previous group first. */
+      if (sdf->sdf_group && sdf->sdf_group != target) {
+        SDFGroup *old_group = sdf->sdf_group;
+        LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &old_group->members) {
+          if (member->object == ob) {
+            BKE_sdf_group_member_remove(old_group, member);
+            break;
+          }
+        }
+      }
+      /* Add to target if not already there. */
+      if (sdf->sdf_group != target) {
+        BKE_sdf_group_member_add(target, ob);
+        moved_count++;
+      }
+    }
+  }
+  CTX_DATA_END;
+
+  if (moved_count == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No SDF objects were moved");
+    return OPERATOR_CANCELLED;
+  }
+
+  DEG_id_tag_update(&target->id, ID_RECALC_GEOMETRY);
+  DEG_relations_tag_update(bmain);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER, nullptr);
+
+  BKE_reportf(
+      op->reports, RPT_INFO, "Moved %d object(s) to %s", moved_count, target->id.name + 2);
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus move_to_sdf_group_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent * /*event*/)
+{
+  if (!RNA_boolean_get(op->ptr, "is_new")) {
+    /* group_name is already set from menu, just execute. */
+    return move_to_sdf_group_exec(C, op);
+  }
+
+  /* is_new: show name dialog. */
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "new_group_name");
+  if (!RNA_property_is_set(op->ptr, prop)) {
+    RNA_property_string_set(op->ptr, prop, "SDF Group");
+    return WM_operator_props_dialog_popup(
+        C, op, 200, IFACE_("Move to New SDF Group"), IFACE_("Create"));
+  }
+
+  return move_to_sdf_group_exec(C, op);
+}
+
+void OBJECT_OT_move_to_sdf_group(wmOperatorType *ot)
+{
+  PropertyRNA *prop;
+
+  ot->name = "Move to SDF Group";
+  ot->description = "Move selected SDF objects to an SDF group";
+  ot->idname = "OBJECT_OT_move_to_sdf_group";
+
+  ot->exec = move_to_sdf_group_exec;
+  ot->invoke = move_to_sdf_group_invoke;
+  ot->poll = ED_operator_objectmode;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  prop = RNA_def_string(ot->srna,
+                        "group_name",
+                        nullptr,
+                        MAX_ID_NAME - 2,
+                        "Group Name",
+                        "Name of the target SDF group");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  prop = RNA_def_boolean(ot->srna, "is_new", false, "New", "Move objects to a new SDF group");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  prop = RNA_def_string(ot->srna,
+                        "new_group_name",
+                        nullptr,
+                        MAX_ID_NAME - 2,
+                        "Name",
+                        "Name of the newly created SDF group");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  ot->prop = prop;
 }
 
 /* ---- SDF Group Reorder (groups relative to each other) ---- */

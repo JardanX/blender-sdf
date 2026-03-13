@@ -30,6 +30,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
+#include "BKE_sdf_group.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
@@ -365,6 +366,9 @@ static void libblock_remap_data_postprocess_object_update(Main *bmain,
   /* Will only effectively process collections that have been tagged with
    * #COLLECTION_TAG_COLLECTION_OBJECT_DIRTY. See #collection_foreach_id callback. */
   BKE_collections_object_remove_invalids(bmain);
+
+  /* Remove SDFGroup members whose object was just deleted/remapped to nullptr. */
+  BKE_sdf_groups_cleanup_all_null_members(bmain);
 
   if (do_sync_collection) {
     BKE_main_collection_sync_remap(bmain);
