@@ -249,9 +249,12 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
 
         # Blend amount — only show when not linear
         if sdf.blend_type != 'LINEAR':
-            layout.use_property_split = True
-            layout.use_property_decorate = False
-            layout.prop(sdf, "blend")
+            layout.label(text="Blend")
+            layout.prop(sdf, "blend", text="")
+
+        if sdf.csg_operation == 'SHELL':
+            layout.label(text="Distance")
+            layout.prop(sdf, "shell_distance", text="")
 
 
 # -- Modifier Operators -------------------------------------------------------
