@@ -2,16 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/**
- * SDF classify compute shader.
- * One thread per brick. Evaluates SDF at brick center to determine if the
- * brick contains surface. Active bricks get a compact atlas slot via atomic
- * counter; void bricks are marked -1 (outside) or -2 (inside).
- *
- * Supports incremental mode (incremental_mode == 1) where only bricks within
- * a dirty region are reclassified. Bricks that were already active reuse their
- * existing atlas slot; newly active bricks allocate from brick_counter.next_slot.
- */
+/* SDF classify: one thread per brick, surface test → atlas slot allocation.
+ * Supports incremental mode (dirty region only, reuses existing slots). */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -22,7 +14,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 #define BRICK_SIZE 8
 #define MAX_CANDIDATES 128
 
-/** Evaluate the actual SDF primitive for an object, with modifiers. */
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
   SDFPrimitiveData prim_data;
@@ -43,40 +34,31 @@ void main()
   int3 brick;
 
   if (incremental_mode == 1) {
-    /* Incremental: dispatch covers dirty brick range only. */
     brick = dirty_brick_min + int3(gl_GlobalInvocationID);
     if (any(greaterThanEqual(brick, dirty_brick_max))) {
       return;
     }
-    /* Safety clamp to grid bounds. */
     if (any(lessThan(brick, int3(0))) || any(greaterThanEqual(brick, grid_resolution.xyz))) {
       return;
     }
   }
   else {
-    /* Full: dispatch covers entire grid. */
     brick = int3(gl_GlobalInvocationID);
     if (any(greaterThanEqual(brick, grid_resolution.xyz))) {
       return;
     }
   }
 
-  /* World-space center of this brick. */
   float3 brick_center = atlas_origin +
                          (float3(brick) * float(BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) *
                              voxel_size;
 
-  /* Per-brick AABB for object culling.
-   * Expand only by brick_half_diag (surface test threshold).
-   * Per-object AABBs already include their own blend + shell_distance padding,
-   * so no global expansion is needed — eliminates O(N^2) candidate blowup. */
+  /* Per-brick AABB for culling (object AABBs already include blend padding). */
   float expand = brick_half_diag;
   float3 brick_min = brick_center - float3(expand);
   float3 brick_max = brick_center + float3(expand);
 
-  /* Collect candidate objects from BVH, then evaluate in index order.
-   * Deterministic evaluation order ensures consistent blending when
-   * objects have different blend values. */
+  /* Collect candidates from BVH, evaluate in index order. */
   int candidates[MAX_CANDIDATES];
   int num_candidates = 0;
 
@@ -121,7 +103,6 @@ void main()
     }
   }
   else {
-    /* Fallback: linear scan collects all AABB-overlapping objects. */
     for (int i = 0; i < object_count; i++) {
       SDFObjectGPU obj = objects[i];
 
@@ -134,15 +115,11 @@ void main()
         candidates[num_candidates++] = i;
       }
     }
-    /* Already in index order, no sort needed. */
   }
 
-  /* Group-aware sequential evaluation (matches sdf_bake_comp.glsl).
-   * Grouped objects are evaluated sequentially within each group, then
-   * groups combine via group-level CSG. Ungrouped objects use legacy two-pass. */
+  /* Group-aware sequential evaluation. */
   float acc_dist = 1e10f;
 
-  /* Evaluate grouped objects. */
   for (int g = 0; g < group_count; g++) {
     SDFGroupGPU grp = groups[g];
     float grp_dist = 1e10f;
@@ -157,7 +134,6 @@ void main()
       float dist = evalSDFPrimitive(local_pos, obj);
 
       if (obj.group_first == 1) {
-        /* First object in group is always the base shape — CSG op ignored. */
         grp_dist = dist;
       }
       else {
@@ -171,7 +147,6 @@ void main()
     }
 
     if (g == 0) {
-      /* First group is always the base — group-level CSG op ignored. */
       acc_dist = grp_dist;
     }
     else {
@@ -180,9 +155,7 @@ void main()
     }
   }
 
-  /* Evaluate ungrouped objects (group_id == -1) sequentially.
-   * First ungrouped object is the base shape (CSG op ignored),
-   * subsequent objects apply their CSG in order (top-to-bottom). */
+  /* Ungrouped objects. */
   for (int c = 0; c < num_candidates; c++) {
     SDFObjectGPU obj = objects[candidates[c]];
     if (obj.group_id != -1) {
@@ -196,34 +169,25 @@ void main()
         acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
   }
 
-  /* Surface test: brick_half_diag is sufficient — the shell operation in
-   * combineCSG produces correct thin-wall distances via two-stage blend,
-   * so no global expansion needed. */
   float surface_threshold = brick_half_diag;
   if (abs(acc_dist) < surface_threshold) {
-    /* Active brick: allocate or reuse a compact atlas slot. */
     int slot;
     if (incremental_mode == 1) {
-      /* Incremental: try to reuse existing slot from previous frame. */
       int old_slot = imageLoad(indirection_tex, brick).r;
       if (old_slot >= 0) {
         slot = old_slot;
       }
       else {
-        /* Newly active: allocate from next_slot counter. */
         slot = int(atomicAdd(brick_counter.next_slot, 1u));
       }
     }
     else {
-      /* Full: sequential allocation via count. */
       slot = int(atomicAdd(brick_counter.count, 1u));
     }
 
     imageStore(indirection_tex, brick, int4(slot, 0, 0, 0));
 
-    /* Record brick for active-brick-only dispatch in bake/grid_blend. */
     if (incremental_mode == 1) {
-      /* Incremental: add to dirty bricks list via count. */
       uint dirty_idx = atomicAdd(brick_counter.count, 1u);
       active_bricks[dirty_idx].coord = int4(brick, slot);
     }
@@ -232,11 +196,9 @@ void main()
     }
   }
   else if (acc_dist < 0.0f) {
-    /* Fully inside: mark as -2. */
     imageStore(indirection_tex, brick, int4(-2, 0, 0, 0));
   }
   else {
-    /* Fully outside: mark as -1. */
     imageStore(indirection_tex, brick, int4(-1, 0, 0, 0));
   }
 }

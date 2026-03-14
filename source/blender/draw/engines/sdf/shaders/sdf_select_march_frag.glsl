@@ -2,18 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/**
- * SDF selection fragment shader — analytical per-object sphere-march.
- *
- * Instead of marching the baked voxel atlas (which has quantization and
- * staleness issues), this shader evaluates each SDF object analytically.
- * For every pixel, it tests all objects' AABBs against the camera ray,
- * then sphere-marches each candidate to find the exact surface. The
- * closest hit across all objects is written to the selection buffer.
- *
- * This approach matches the outline shader (sdf_outline_march_frag.glsl)
- * but outputs select::ID instead of outline IDs.
- */
+/* SDF selection: per-object analytical sphere-march → selection buffer. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -23,8 +12,6 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
 #include "sdf_lib.glsl"
 
 #define MAX_MARCH_STEPS 48
-
-/* ---- Evaluate a single SDF primitive with modifiers ---- */
 
 float evalSelectPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -40,8 +27,6 @@ float evalSelectPrimitive(float3 local_pos, SDFObjectGPU obj)
 
   return evalObjectSDF(prim_data, local_pos);
 }
-
-/* ---- Write a single hit to the selection buffer ---- */
 
 void writeSelectHit(uint sel_id, float ndc_depth)
 {
@@ -68,7 +53,7 @@ void main()
 {
   float2 uv = screen_uv;
 
-  /* ---- 1. Reconstruct camera ray ---- */
+  /* Reconstruct camera ray. */
   ViewMatrices vm = drw_view();
   float4x4 view_inv = vm.viewinv;
   float4x4 win_inv = vm.wininv;
@@ -85,18 +70,13 @@ void main()
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
   float3 inv_dir = 1.0f / ray_dir;
 
-  /* ---- 2. Group-aware per-object analytical sphere-march ----
-   * For grouped objects, evaluate the combined group SDF at each march step
-   * so CSG operations are respected (e.g., subtract carves away geometry).
-   * For each pixel, the closest hit across all objects is tracked.
-   * Selection cycling is supported: each individual object writes a hit. */
+  /* Group-aware per-object sphere-march. */
   float best_depth = 1.0f;
   bool any_hit = false;
 
   for (int i = 0; i < object_count; i++) {
     SDFObjectGPU obj = sdf_objects[i];
 
-    /* Ray-AABB intersection test. */
     float3 bmin = obj.bbox_min.xyz;
     float3 bmax = obj.bbox_max.xyz;
     float3 t0 = (bmin - ray_origin) * inv_dir;
@@ -111,13 +91,11 @@ void main()
     }
     t_enter = max(t_enter, 0.0f);
 
-    /* Adaptive threshold: sub-voxel precision, capped at 0.2% of object extent. */
     float3 obj_extent = bmax - bmin;
     float thr = 0.002f * max(obj_extent.x, max(obj_extent.y, obj_extent.z));
     thr = clamp(thr, 1e-5f, voxel_size * 0.25f);
     float min_step = thr * 0.5f;
 
-    /* Sphere-march this object's analytical SDF. */
     float t = t_enter;
     bool hit = false;
     float3 hit_pos;
@@ -127,13 +105,8 @@ void main()
       float3 lp = (obj.inverse_matrix * float4(wp - obj.position.xyz, 1.0f)).xyz;
       float d = evalSelectPrimitive(lp, obj);
 
-      /* For grouped objects, verify this hit against the combined group SDF.
-       * Without this, the base shape registers false hits at its raw surface
-       * even where subtract/intersect operations have carved it away, blocking
-       * selection of the objects that perform those CSG operations. */
+      /* Verify against combined group SDF for CSG correctness. */
       if (d < thr && obj.group_id >= 0) {
-        /* Evaluate group combined SDF at this world position.
-         * Iterate all objects filtering by group_id (members may not be contiguous). */
         int gid = obj.group_id;
         float grp_dist = 1e10f;
         for (int m = 0; m < object_count; m++) {
@@ -144,7 +117,6 @@ void main()
           float3 mlp = (mobj.inverse_matrix * float4(wp - mobj.position.xyz, 1.0f)).xyz;
           float md = evalSelectPrimitive(mlp, mobj);
           if (grp_dist >= 1e9f) {
-            /* First object in group is always the base shape — CSG op ignored. */
             grp_dist = md;
           }
           else {
@@ -152,9 +124,8 @@ void main()
                                   mobj.blend, mobj.shell_distance);
           }
         }
-        /* Only count as hit if the combined group surface is near. */
         if (grp_dist >= thr * 2.0f) {
-          d = grp_dist; /* Not a real surface here, continue marching. */
+          d = grp_dist;
         }
       }
 

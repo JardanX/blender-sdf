@@ -8,155 +8,95 @@
 #  include "GPU_shader_shared_utils.hh"
 #endif
 
-/** GPU-side SDF object data. Packed for SSBO upload. */
+/* GPU-side SDF object data */
 struct SDFObjectGPU {
-  /** Rotation-only inverse matrix (scale baked into sdf_size). */
-  float4x4 inverse_matrix;
-  /** World-space translation. */
+  float4x4 inverse_matrix; /* Rotation-only (scale baked into sdf_size) */
   float4 position;
-  /** SDF primitive size with object scale applied: (sx, sy, sz, 0). */
   float4 sdf_size;
-  /** World AABB min. */
   float4 bbox_min;
-  /** World AABB max. */
   float4 bbox_max;
-  /** Bevel radius (world-space). */
   float bevel;
-  /** Smooth blend radius. */
   float blend;
-  /** SDF primitive type (eSDFType: 0=box, 1=sphere, 2=cyl, 3=cone, 4=capsule, 5=torus, 6=ngon). */
   int sdf_type;
-  /** Blend function type (eSDFBlendType: 0=linear, 1=smooth, 2=chamfer, 3=round). */
   int blend_type;
-  /** CSG operation (eSDFCSGOperation: 0=union, 1=subtract, 2=intersect, 3=shell). */
   int csg_operation;
-  /** Shell/extrusion thickness (world-space, from DNA shell_distance). */
   float shell_distance;
-  /** Index of first modifier in the modifier SSBO. */
   int modifier_start;
-  /** Number of modifiers for this object. */
   int modifier_count;
-  /** Index into groups[] SSBO (-1 = ungrouped). */
-  int group_id;
-  /** 1 if first object in its group (CSG operation ignored). */
-  int group_first;
-  /** Order within SDF group (0-based, mirrors SDFGroupMember.order). -1 if ungrouped. */
+  int group_id;     /* -1 = ungrouped */
+  int group_first;  /* 1 = base shape in group */
   int group_order;
-  /** Original depsgraph index before sorting (used for selection/outline map lookup). */
   int original_index;
-  /** Object color RGBA. */
   float4 color;
-  /** Box per-corner bevel radii (normalized 0–1). */
   float4 box_corners;
-  /** Box edge chamfer: x=top, y=bottom, z=tapTop, w=tapBot. */
-  float4 box_edges;
-  /** Box/Ngon modes: x=corner_mode, y=edge_mode, z=ngon_sides (0 if box), w=0. */
-  int4 box_modes;
+  float4 box_edges;   /* x=top, y=bottom, z=tapTop, w=tapBot */
+  int4 box_modes;     /* x=corner_mode, y=edge_mode, z=ngon_sides, w=0 */
 };
-/* Total: 64 + 16*4 + 48 + 16*4 = 64+64+48+64 = 240 bytes, 16-byte aligned. */
 
-/** GPU-side SDF evaluation group. 48 bytes, 16-byte aligned. */
+/* GPU-side SDF group */
 struct SDFGroupGPU {
-  /** Group-level CSG operation (eSDFCSGOperation). */
   int csg_operation;
-  /** Group-level blend type (eSDFBlendType). */
   int blend_type;
-  /** Group-level blend amount. */
   float blend;
-  /** Group-level shell distance. */
   float shell_distance;
-  /** Index of first member in sorted objects[] array. */
   int first_object;
-  /** Number of members in this group. */
   int object_count;
   float _pad0;
   float _pad1;
-  /** Group-level color tint. */
   float4 color;
 };
 
-/** GPU-side SDF modifier. Flat data for SSBO upload. 48 bytes, 16-byte aligned. */
+/* GPU-side SDF modifier */
 struct SDFModifierGPU {
-  /** x=type, y=flags, z=0, w=0 */
-  int4 header;
-  /** Modifier-specific parameters 0..3. */
+  int4 header; /* x=type, y=flags */
   float4 params;
-  /** Modifier-specific parameters 4..7. */
   float4 params2;
 };
 
-/** Brick counter SSBO (used by classify pass). */
 struct BrickCounter {
   uint count;
-  /** Next available atlas slot for new brick allocation (incremental mode only). */
   uint next_slot;
   uint _pad1;
   uint _pad2;
 };
 
-/** Active brick coordinate entry (written by classify, read by bake/grid_blend). */
 struct ActiveBrick {
-  int4 coord; /* xyz = brick coordinate, w = compact atlas slot index */
+  int4 coord; /* xyz = brick coord, w = atlas slot */
 };
 
-/** BVH node for GPU-side object AABB tree traversal.
- * Interior node: left >= 0, right = right child index.
- * Leaf node:     left = -1, right = object index into objects[]. */
+/* BVH node: interior (left>=0) or leaf (left=-1, right=obj_idx) */
 struct BVHNodeGPU {
-  float4 min_and_left;  /* xyz = AABB min, w = intBitsToFloat(left_child or -1) */
-  float4 max_and_right; /* xyz = AABB max, w = intBitsToFloat(right_child or obj_idx) */
+  float4 min_and_left;  /* xyz=AABB min, w=left_child or -1 */
+  float4 max_and_right; /* xyz=AABB max, w=right_child or obj_idx */
 };
 
-/** GPU-side SDF shape descriptor (unique primitive geometry).
- * Each unique combination of (type, size, bevel) defines a shape.
- * Multiple instances can reference the same shape, sharing atlas data.
- * Used for instanced rendering. */
+/* Per-object shape descriptor for instanced mode */
 struct SDFShapeGPU {
-  /** SDF primitive size (unscaled, normalized: max component = 1.0). */
-  float4 size_normalized;
-  /** Bevel radius (normalized relative to max size component). */
-  float bevel_normalized;
-  /** SDF primitive type (eSDFType). */
+  float4 sdf_size;
+  float bevel;
   int sdf_type;
-  /** Slot offset in the shared compact atlas (first brick slot for this shape). */
   int slot_offset;
-  /** World-space scale factor to map normalized shape to world. */
   float world_scale;
-  /** Per-shape grid: xyz = grid_res per axis, w = offset into shape_indirection SSBO. */
-  int4 grid_params;
-  /** Local-space atlas: xyz = local origin, w = local_voxel_size. */
-  float4 local_params;
-  /** Atlas layout: x = global bricks_per_axis, y = active_brick_count, zw = 0. */
-  int4 atlas_params;
+  int4 grid_params;   /* xyz=grid_res, w=indirection offset */
+  float4 local_params; /* xyz=origin, w=voxel_size */
+  int4 atlas_params;   /* x=bricks_per_axis, y=active_bricks, z=object_id */
 };
-/* 16 + 16 + 16 + 16 + 16 = 80 bytes, 16-byte aligned. */
 
-/** GPU-side SDF instance (one per scene object).
- * References a shape and adds per-instance transform + appearance. */
+/* Per-instance data (transform + appearance) */
 struct SDFInstanceGPU {
-  /** World-to-local transform (maps world ray into shape's [-1,1]^3 space). */
   float4x4 world_to_local;
-  /** Local-to-world transform (maps shape-space positions to world). */
   float4x4 local_to_world;
-  /** Per-instance display color RGBA. */
   float4 color;
-  /** Smooth blend radius (world-space). */
   float blend;
-  /** Index into shapes[] array. */
   int shape_id;
-  /** Original object index in objects[] (for selection/debug). */
   int object_id;
-  /** Blend function type (eSDFBlendType). */
   int blend_type;
-  /** CSG operation (eSDFCSGOperation). */
   int csg_operation;
-  float _pad0;
-  float _pad1;
-  float _pad2;
+  float shell_distance;
+  int group_id;
+  int group_order;
 };
-/* 64 + 64 + 16 + 16 + 16 = 176 bytes, 16-byte aligned. */
 
-/** Push constants for the classify compute shader. */
 struct SDFClassifyParams {
   float4 atlas_origin;
   int4 grid_resolution;
@@ -166,7 +106,6 @@ struct SDFClassifyParams {
   int group_count;
 };
 
-/** Push constants for the bake compute shader. */
 struct SDFBakeParams {
   float4 atlas_origin;
   int4 grid_resolution;
@@ -176,7 +115,6 @@ struct SDFBakeParams {
   int group_count;
 };
 
-/** Push constants for the ray-march fragment shader. */
 struct SDFMarchParams {
   float4 atlas_origin;
   float4 atlas_extent;

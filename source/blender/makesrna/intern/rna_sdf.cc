@@ -47,7 +47,6 @@ static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   SDF *sdf = (SDF *)ptr->owner_id;
 
-  /* Clamp blend to shell_distance when in shell mode to prevent artifacts. */
   if (sdf->csg_operation == SDF_CSG_SHELL && sdf->shell_distance > 0.0f) {
     if (sdf->blend > sdf->shell_distance) {
       sdf->blend = sdf->shell_distance;
@@ -58,7 +57,6 @@ static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
-/** Reset size to shape-appropriate defaults when sdf_type changes. */
 static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   SDF *sdf = (SDF *)ptr->owner_id;

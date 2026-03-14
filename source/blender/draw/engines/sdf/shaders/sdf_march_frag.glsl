@@ -2,19 +2,10 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/**
- * SDF ray-march fragment shader (sparse brick version).
- *
- * Two modes controlled by `use_instanced`:
- * - World-space mode (use_instanced == 0): Two-level DDA through a single
- *   world-space atlas. Classic approach, supports smooth blending.
- * - Instanced mode (use_instanced != 0): BVH traversal over instance AABBs,
- *   per-shape local DDA. Enables O(unique_shapes) atlas memory for thousands
- *   of instances.
- *
- * Based on "Ray Tracing of Signed Distance Function Grids"
- * (Hansson-Soderlund, Evans, Akenine-Moller 2022).
- */
+/* SDF ray-march fragment shader.
+ * World-space mode: two-level DDA through single atlas.
+ * Per-object mode: BVH instance traversal with per-object DDA.
+ * Based on Hansson-Soderlund et al. 2022. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -26,34 +17,19 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 
-/** Max brick-level DDA steps (must cover grid diagonal). */
 #define MAX_BRICK_STEPS 256
-/** Max voxel-level DDA steps within one brick. */
 #define MAX_VOXEL_STEPS 24
-/** Max BVH traversal stack depth for instance traversal. */
 #define MAX_INST_STACK 32
 
-/* ---- Atlas lookup helpers ---- */
+/* Atlas lookup */
 
-/**
- * Convert a grid-space voxel coordinate to compact atlas coordinate.
- * \param brick: brick coordinate in the grid.
- * \param local_voxel: voxel offset within the brick [0..7].
- * \param slot: compact atlas slot index for this brick.
- * \param bpa: bricks per axis in the compact atlas.
- * \return texel coordinate in the compact atlas.
- */
 int3 gridToCompact(int3 brick, int3 local_voxel, int slot, int bpa)
 {
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
-  /* +2 for the 2-voxel overlap padding border. */
-  return slot_origin + local_voxel + int3(2);
+  return slot_origin + local_voxel + int3(2); /* +2 for overlap border */
 }
 
-/**
- * Fetch 8 corner SDF values for a voxel cell within a compact atlas brick.
- */
 void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out float s[8])
 {
   int3 base = gridToCompact(brick, local_cell, slot, bpa);
@@ -67,11 +43,8 @@ void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out flo
   s[7] = texelFetch(compact_atlas, base + int3(1, 1, 1), 0).r;
 }
 
-/* ---- Normal computation ---- */
+/* Normal computation */
 
-/**
- * Compute normal from trilinear gradient at the hit point (single voxel).
- */
 float3 computeNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
 {
   int3 cell = int3(floor(grid_pos_in_brick));
@@ -117,7 +90,6 @@ float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, in
    * Corner positions range from (dc-1) to (dc+1). */
   int3 cb = gridToCompact(brick, dc - int3(1), slot, bpa);
 
-  /* Fetch 3x3x3 neighborhood values. */
   float vals[27];
   for (int k = 0; k < 3; k++) {
     for (int j = 0; j < 3; j++) {
@@ -127,8 +99,6 @@ float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, in
     }
   }
 
-  /* Evaluate analytic trilinear gradient in each of 8 overlapping voxels,
-   * normalize each, then trilinearly blend. */
   float3 blended = float3(0.0f);
 
   for (int kk = 0; kk < 2; kk++) {
@@ -416,33 +386,97 @@ void dda_march(float3 ray_origin,
   }
 }
 
-/* ---- Instanced march: BVH over instances + per-shape DDA ---- */
+/* ---- Per-object sphere trace with pre-blended atlas data ---- */
 
-struct InstanceHit {
+#define MAX_BLEND_OBJECTS 16
+
+struct BlendHit {
   float world_t;
-  int instance_id;
-  int3 hit_brick;
-  int3 hit_cell;
-  int hit_slot;
-  float3 local_hit_pos;
-  int shape_id;
+  int driver_inst;
+  float3 hit_color;
+  float3 hit_normal;
 };
 
-/**
- * March ray against all instances using BVH traversal.
- * For each instance candidate, transforms ray to shape-local space and
- * runs DDA through the shape's per-shape atlas.
- *
- * Returns closest hit across all instances.
- */
-InstanceHit march_instanced(float3 ray_origin, float3 ray_dir)
+/* Trilinear sample from a per-object brick map at a world position.
+ * Atlas stores pre-blended CSG distance — no runtime blending needed. */
+float trilinearSampleObject(int inst_idx, float3 world_pos)
 {
-  InstanceHit best;
+  SDFInstanceGPU inst = instances[inst_idx];
+  SDFShapeGPU shape = shapes[inst.shape_id];
+
+  float3 local_pos = (inst.world_to_local * float4(world_pos, 1.0f)).xyz;
+
+  int3 grid_res = shape.grid_params.xyz;
+  int indir_offset = shape.grid_params.w;
+  float3 local_origin = shape.local_params.xyz;
+  float local_vs = shape.local_params.w;
+  int bpa = shape.atlas_params.x;
+
+  float bws = float(BRICK_SIZE) * local_vs;
+  float3 bp = (local_pos - local_origin) / bws;
+  int3 brick = int3(floor(bp));
+
+  if (any(lessThan(brick, int3(0))) || any(greaterThanEqual(brick, grid_res))) {
+    return 1e10f;
+  }
+
+  int flat_idx = brick.x + brick.y * grid_res.x + brick.z * grid_res.x * grid_res.y;
+  int slot_id = shape_indir[indir_offset + flat_idx];
+
+  if (slot_id < 0) {
+    return 1e10f;
+  }
+
+  float3 brick_origin = local_origin + float3(brick) * bws;
+  float3 vp = (local_pos - brick_origin) / local_vs;
+
+  int3 cell = clamp(int3(floor(vp)), int3(0), int3(BRICK_SIZE - 1));
+  float3 f = clamp(vp - float3(cell), float3(0.0f), float3(1.0f));
+
+  int3 sb = int3(slot_id % bpa, (slot_id / bpa) % bpa, slot_id / (bpa * bpa));
+  int3 base = sb * BRICK_STORAGE + cell + int3(2);
+
+  float s0 = texelFetch(compact_atlas, base + int3(0, 0, 0), 0).r;
+  float s1 = texelFetch(compact_atlas, base + int3(1, 0, 0), 0).r;
+  float s2 = texelFetch(compact_atlas, base + int3(0, 1, 0), 0).r;
+  float s3 = texelFetch(compact_atlas, base + int3(1, 1, 0), 0).r;
+  float s4 = texelFetch(compact_atlas, base + int3(0, 0, 1), 0).r;
+  float s5 = texelFetch(compact_atlas, base + int3(1, 0, 1), 0).r;
+  float s6 = texelFetch(compact_atlas, base + int3(0, 1, 1), 0).r;
+  float s7 = texelFetch(compact_atlas, base + int3(1, 1, 1), 0).r;
+
+  return mix(mix(mix(s0, s1, f.x), mix(s2, s3, f.x), f.y),
+             mix(mix(s4, s5, f.x), mix(s6, s7, f.x), f.y),
+             f.z);
+}
+
+/**
+ * Hybrid sphere-trace + DDA march through pre-blended per-object brick maps.
+ *
+ * Phase 1 — Sphere trace: trilinear sampling to skip empty space fast.
+ *   Cost per step is O(1) regardless of total object count.
+ *   Empty bricks return 1e10 → large skip. SDF distance → sphere trace step.
+ *
+ * Phase 2 — DDA + Marmitt: once within ~2 voxels of surface, switch to
+ *   brick-level DDA → voxel-level DDA → cubic polynomial intersection
+ *   for sub-voxel precision (Hansson-Soderlund et al. 2022).
+ */
+BlendHit march_blended(float3 ray_origin, float3 ray_dir)
+{
+  BlendHit best;
   best.world_t = -1.0f;
-  best.instance_id = -1;
+  best.driver_inst = -1;
+  best.hit_color = float3(0.5f);
+  best.hit_normal = float3(0.0f, 0.0f, 1.0f);
 
   float3 inv_dir = 1.0f / ray_dir;
-  float best_world_t = 1e30f;
+
+  /* BVH collect candidates. */
+  int cand_insts[MAX_BLEND_OBJECTS];
+  float cand_vs[MAX_BLEND_OBJECTS];
+  int num_cands = 0;
+  float combined_t_enter = 1e30f;
+  float combined_t_exit = -1e30f;
 
   int stack[MAX_INST_STACK];
   int sp = 0;
@@ -452,17 +486,10 @@ InstanceHit march_instanced(float3 ray_origin, float3 ray_dir)
     int node_idx = stack[--sp];
     BVHNodeGPU node = bvh_nodes[node_idx];
 
-    /* Ray-AABB test against node bounds. */
-    float node_t_near, node_t_far;
-    if (!ray_aabb_intersect(ray_origin, inv_dir,
-                            node.min_and_left.xyz, node.max_and_right.xyz,
-                            node_t_near, node_t_far))
+    float tn, tf;
+    if (!ray_aabb_intersect(
+            ray_origin, inv_dir, node.min_and_left.xyz, node.max_and_right.xyz, tn, tf))
     {
-      continue;
-    }
-
-    /* Early cull: if node entry is already behind our best hit, skip. */
-    if (node_t_near > best_world_t) {
       continue;
     }
 
@@ -470,108 +497,178 @@ InstanceHit march_instanced(float3 ray_origin, float3 ray_dir)
     int right = bvh_decode_int(node.max_and_right.w);
 
     if (left == -1) {
-      /* Leaf node: test this instance.
-       * BVH leaf right = object index = instance index
-       * (1:1 mapping between objects[] and instances[]). */
-      int inst_idx = right;
-      if (inst_idx < 0 || inst_idx >= instance_count) {
-        continue;
-      }
-
-      SDFInstanceGPU inst = instances[inst_idx];
-      SDFShapeGPU shape = shapes[inst.shape_id];
-
-      /* Check if this shape has been baked (atlas_params.y = active_brick_count). */
-      if (shape.atlas_params.y <= 0) {
-        continue;
-      }
-
-      /* Transform ray to shape's local space. */
-      float3 local_origin = (inst.world_to_local * float4(ray_origin, 1.0f)).xyz;
-      float3 local_dir_raw = (inst.world_to_local * float4(ray_dir, 0.0f)).xyz;
-      float local_dir_len = length(local_dir_raw);
-      if (local_dir_len < 1e-8f) {
-        continue;
-      }
-      float3 local_dir = local_dir_raw / local_dir_len;
-
-      /* Clip ray to shape's local atlas AABB. */
-      int3 shape_grid_res = shape.grid_params.xyz;
-      float3 shape_origin = shape.local_params.xyz;
-      float shape_vs = shape.local_params.w;
-      int3 shape_total_res = shape_grid_res * BRICK_SIZE;
-      float3 local_min = shape_origin;
-      float3 local_max = shape_origin + float3(shape_total_res) * shape_vs;
-
-      float3 local_inv_dir = 1.0f / local_dir;
-      float3 lt0 = (local_min - local_origin) * local_inv_dir;
-      float3 lt1 = (local_max - local_origin) * local_inv_dir;
-      float3 lt_lo = min(lt0, lt1);
-      float3 lt_hi = max(lt0, lt1);
-      float lt_enter = max(max(lt_lo.x, lt_lo.y), lt_lo.z);
-      float lt_exit = min(min(lt_hi.x, lt_hi.y), lt_hi.z);
-
-      if (lt_enter > lt_exit || lt_exit < 0.0f) {
-        continue;
-      }
-      lt_enter = max(lt_enter, 0.0f);
-
-      /* DDA through shape's local atlas. */
-      float local_hit_t;
-      int3 local_hit_brick, local_hit_cell;
-      int local_hit_slot;
-
-      dda_march(local_origin, local_dir, lt_enter, lt_exit,
-                shape_grid_res, shape_origin, shape_vs,
-                bricks_per_axis, shape.grid_params.w,
-                local_hit_t, local_hit_brick, local_hit_cell, local_hit_slot);
-
-      if (local_hit_t >= 0.0f) {
-        /* Convert local hit to world space. */
-        float3 local_hit = local_origin + local_dir * local_hit_t;
-        float3 world_hit = (inst.local_to_world * float4(local_hit, 1.0f)).xyz;
-        float wt = length(world_hit - ray_origin);
-
-        if (wt < best_world_t) {
-          best_world_t = wt;
-          best.world_t = wt;
-          best.instance_id = inst_idx;
-          best.hit_brick = local_hit_brick;
-          best.hit_cell = local_hit_cell;
-          best.hit_slot = local_hit_slot;
-          best.local_hit_pos = local_hit;
-          best.shape_id = inst.shape_id;
+      int idx = right;
+      if (idx >= 0 && idx < instance_count && num_cands < MAX_BLEND_OBJECTS) {
+        SDFShapeGPU sh = shapes[instances[idx].shape_id];
+        if (sh.atlas_params.y > 0) {
+          cand_insts[num_cands] = idx;
+          cand_vs[num_cands] = sh.local_params.w;
+          num_cands++;
+          combined_t_enter = min(combined_t_enter, max(tn, 0.0f));
+          combined_t_exit = max(combined_t_exit, tf);
         }
       }
     }
     else {
-      /* Interior node: push children.
-       * Push farther child first so closer child is popped first. */
-      float t_left_near, t_left_far, t_right_near, t_right_far;
+      if (sp < MAX_INST_STACK) {
+        stack[sp++] = right;
+      }
+      if (sp < MAX_INST_STACK) {
+        stack[sp++] = left;
+      }
+    }
+  }
 
-      bool hit_left = ray_aabb_intersect(ray_origin, inv_dir,
-          bvh_nodes[left].min_and_left.xyz, bvh_nodes[left].max_and_right.xyz,
-          t_left_near, t_left_far);
-      bool hit_right = ray_aabb_intersect(ray_origin, inv_dir,
-          bvh_nodes[right].min_and_left.xyz, bvh_nodes[right].max_and_right.xyz,
-          t_right_near, t_right_far);
+  if (num_cands == 0) {
+    return best;
+  }
 
-      if (hit_left && hit_right) {
-        if (t_left_near < t_right_near) {
-          if (sp < MAX_INST_STACK) { stack[sp++] = right; }
-          if (sp < MAX_INST_STACK) { stack[sp++] = left; }
-        }
-        else {
-          if (sp < MAX_INST_STACK) { stack[sp++] = left; }
-          if (sp < MAX_INST_STACK) { stack[sp++] = right; }
-        }
+  /* Sort by voxel size (finest first). */
+  for (int i = 0; i < num_cands - 1; i++) {
+    for (int j = i + 1; j < num_cands; j++) {
+      if (cand_vs[j] < cand_vs[i]) {
+        int ti = cand_insts[i]; cand_insts[i] = cand_insts[j]; cand_insts[j] = ti;
+        float tv = cand_vs[i]; cand_vs[i] = cand_vs[j]; cand_vs[j] = tv;
       }
-      else if (hit_left) {
-        if (sp < MAX_INST_STACK) { stack[sp++] = left; }
+    }
+  }
+
+  float finest_vs = cand_vs[0];
+  float dda_threshold = finest_vs * 2.0f;
+  float min_step = finest_vs * 0.5f;
+  float max_skip = finest_vs * 8.0f;
+  float t = combined_t_enter;
+
+  /* Phase 1: Sphere trace to approach the surface. */
+  int near_inst = -1;
+  for (int step = 0; step < 128; step++) {
+    float3 pos = ray_origin + ray_dir * t;
+
+    float d = 1e10f;
+    for (int ci = 0; ci < num_cands; ci++) {
+      float sd = trilinearSampleObject(cand_insts[ci], pos);
+      if (sd < 1e9f) {
+        d = sd;
+        near_inst = cand_insts[ci];
+        break;
       }
-      else if (hit_right) {
-        if (sp < MAX_INST_STACK) { stack[sp++] = right; }
-      }
+    }
+
+    /* Close enough for DDA handoff. */
+    if (d < 1e9f && abs(d) < dda_threshold) {
+      break;
+    }
+
+    if (d >= 1e9f) {
+      t += max_skip;
+    }
+    else {
+      t += max(abs(d), min_step);
+    }
+
+    if (t > combined_t_exit) {
+      return best;
+    }
+  }
+
+  /* Phase 2: DDA + Marmitt on each candidate's grid, take nearest hit.
+   * All grids contain the same pre-blended data — any grid covering
+   * the surface will find it. Try nearest instance first, then others. */
+  if (near_inst < 0) {
+    return best;
+  }
+
+  /* Reorder so near_inst is tried first (keep rest in voxel-size order). */
+  for (int ci = 0; ci < num_cands; ci++) {
+    if (cand_insts[ci] == near_inst && ci > 0) {
+      int ti = cand_insts[0]; cand_insts[0] = cand_insts[ci]; cand_insts[ci] = ti;
+      float tv = cand_vs[0]; cand_vs[0] = cand_vs[ci]; cand_vs[ci] = tv;
+      break;
+    }
+  }
+
+  float dda_backup = finest_vs * 3.0f;
+
+  for (int ci = 0; ci < num_cands; ci++) {
+    int inst_idx = cand_insts[ci];
+    SDFInstanceGPU inst = instances[inst_idx];
+    SDFShapeGPU shape = shapes[inst.shape_id];
+
+    int3 grid_res = shape.grid_params.xyz;
+    int indir_offset = shape.grid_params.w;
+    float3 local_origin = shape.local_params.xyz;
+    float local_vs = shape.local_params.w;
+    int bpa = shape.atlas_params.x;
+
+    float3 local_ray_origin = (inst.world_to_local * float4(ray_origin, 1.0f)).xyz;
+    float3 local_ray_dir = mat3(inst.world_to_local) * ray_dir;
+
+    float3 grid_min = local_origin;
+    float3 grid_max = local_origin + float3(grid_res * BRICK_SIZE) * local_vs;
+
+    float3 local_inv = 1.0f / local_ray_dir;
+    float3 t0 = (grid_min - local_ray_origin) * local_inv;
+    float3 t1 = (grid_max - local_ray_origin) * local_inv;
+    float3 t_lo = min(t0, t1);
+    float3 t_hi = max(t0, t1);
+    float t_grid_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+    float t_grid_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
+
+    float dda_t_enter = max(t - dda_backup, max(t_grid_enter, 0.0f));
+    float dda_t_exit = min(t_grid_exit, combined_t_exit);
+
+    if (dda_t_enter > dda_t_exit) {
+      continue;
+    }
+
+    /* Skip if already have a closer hit. */
+    if (best.world_t >= 0.0f && dda_t_enter > best.world_t) {
+      continue;
+    }
+
+    float hit_t;
+    int3 hit_brick, hit_cell;
+    int hit_slot;
+
+    dda_march(local_ray_origin, local_ray_dir, dda_t_enter, dda_t_exit,
+              grid_res, local_origin, local_vs, bpa, indir_offset,
+              hit_t, hit_brick, hit_cell, hit_slot);
+
+    if (hit_t < 0.0f) {
+      continue;
+    }
+    if (best.world_t >= 0.0f && hit_t >= best.world_t) {
+      continue;
+    }
+
+    best.world_t = hit_t;
+    best.driver_inst = inst_idx;
+
+    float3 hit_local = local_ray_origin + local_ray_dir * hit_t;
+    float3 brick_origin = local_origin + float3(hit_brick * BRICK_SIZE) * local_vs;
+    float3 pib = (hit_local - brick_origin) / local_vs;
+
+    int3 sb = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
+    float3 atlas_pos = float3(sb * BRICK_STORAGE) + pib + float3(2.0f);
+    int3 compact_size = int3(textureSize(compact_atlas, 0));
+    float3 atlas_uv = atlas_pos / float3(compact_size);
+    best.hit_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
+  }
+
+  /* World-space central differences for normals — consistent across grid boundaries.
+   * Uses the hit instance's pre-blended atlas for gradient computation. */
+  if (best.world_t >= 0.0f) {
+    float3 hit_world = ray_origin + ray_dir * best.world_t;
+    float eps = finest_vs * 0.5f;
+    float nx = trilinearSampleObject(best.driver_inst, hit_world + float3(eps, 0.0f, 0.0f))
+             - trilinearSampleObject(best.driver_inst, hit_world - float3(eps, 0.0f, 0.0f));
+    float ny = trilinearSampleObject(best.driver_inst, hit_world + float3(0.0f, eps, 0.0f))
+             - trilinearSampleObject(best.driver_inst, hit_world - float3(0.0f, eps, 0.0f));
+    float nz = trilinearSampleObject(best.driver_inst, hit_world + float3(0.0f, 0.0f, eps))
+             - trilinearSampleObject(best.driver_inst, hit_world - float3(0.0f, 0.0f, eps));
+    float3 n = float3(nx, ny, nz);
+    if (dot(n, n) > 1e-12f) {
+      best.hit_normal = normalize(n);
     }
   }
 
@@ -608,43 +705,20 @@ void main()
   float3 hit_color = float3(0.5f);
   float3 hit_normal = float3(0.0f, 0.0f, 1.0f);
   float3 hit_pos = float3(0.0f);
-  int hit_instance_id = -1;
 
   if (use_instanced != 0 && instance_count > 0 && bvh_node_count > 0) {
-    /* ---- Instanced mode: BVH over instances + per-shape DDA ---- */
-    InstanceHit ihit = march_instanced(ray_origin, ray_dir);
+    /* ---- Per-object mode: BVH + blended DDA ---- */
+    BlendHit bhit = march_blended(ray_origin, ray_dir);
 
-    if (ihit.world_t < 0.0f) {
+    if (bhit.world_t < 0.0f) {
       discard;
       return;
     }
 
-    hit_t = ihit.world_t;
+    hit_t = bhit.world_t;
     hit_pos = ray_origin + ray_dir * hit_t;
-    hit_instance_id = ihit.instance_id;
-
-    /* Get color from instance. */
-    SDFInstanceGPU inst = instances[ihit.instance_id];
-    hit_color = inst.color.rgb;
-
-    /* Compute normal in local space, transform to world. */
-    SDFShapeGPU shape = shapes[ihit.shape_id];
-    float shape_vs = shape.local_params.w;
-    float3 shape_origin = shape.local_params.xyz;
-    float3 brick_origin_local = shape_origin +
-                                 float3(ihit.hit_brick * BRICK_SIZE) * shape_vs;
-    float3 hit_in_brick = (ihit.local_hit_pos - brick_origin_local) / shape_vs;
-
-    float3 local_normal;
-    if (normal_quality == 0) {
-      local_normal = computeNormalCompact(hit_in_brick, ihit.hit_brick, ihit.hit_slot, bricks_per_axis);
-    }
-    else {
-      local_normal = computeDualVoxelNormal(hit_in_brick, ihit.hit_brick, ihit.hit_slot, bricks_per_axis);
-    }
-
-    /* Transform normal: N_world = normalize(transpose(world_to_local) * N_local). */
-    hit_normal = normalize(mat3(transpose(inst.world_to_local)) * local_normal);
+    hit_color = bhit.hit_color;
+    hit_normal = bhit.hit_normal;
   }
   else {
     /* ---- World-space mode: global two-level DDA ---- */
@@ -667,7 +741,7 @@ void main()
     }
     t_enter = max(t_enter, 0.0f);
 
-    /* DDA through world-space atlas (indir_offset = -1 → use texture sampler). */
+    /* DDA through world-space atlas (indir_offset = -1 -> use texture sampler). */
     dda_march(ray_origin, ray_dir, t_enter, t_exit,
               grid_res, atlas_origin, voxel_size, bricks_per_axis, -1,
               hit_t, hit_brick, hit_local_cell, hit_slot);
