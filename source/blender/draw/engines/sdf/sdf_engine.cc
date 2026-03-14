@@ -74,80 +74,22 @@ namespace blender::draw::sdf {
 
 using namespace draw;
 
-/* ---- Shape fingerprinting ---- */
+/* Shape fingerprinting removed — per-object mode uses one shape per object. */
 
-/**
- * Compute a 64-bit fingerprint for an SDF shape.
- * Two objects with the same fingerprint can share atlas data (instancing).
- *
- * The fingerprint captures normalized shape geometry:
- * - SDF type (box, sphere, capsule, torus)
- * - Aspect ratio (size normalized so max component = 1.0)
- * - Relative bevel (bevel / max_size)
- *
- * This means an object with size (2,1,1) at scale 1 and size (1,0.5,0.5) at scale 2
- * produce the same fingerprint — they're the same shape at different scales.
- */
-static uint64_t sdf_shape_fingerprint(int sdf_type,
-                                      const float3 &effective_size,
-                                      float effective_bevel,
-                                      int ngon_sides = 0,
-                                      float torus_angle = (float)M_PI * 2.0f,
-                                      float ngon_star = 0.0f)
-{
-  /* Normalize by max component to make scale-independent. */
-  float max_dim = math::reduce_max(math::abs(effective_size));
-  if (max_dim < 1e-8f) {
-    max_dim = 1.0f;
-  }
+/* Performance overlay state */
 
-  /* Quantize to avoid floating-point comparison issues.
-   * 10000x gives 0.01% precision — more than enough for visual identity. */
-  const int Q = 10000;
-  int sx = int(roundf(effective_size.x / max_dim * Q));
-  int sy = int(roundf(effective_size.y / max_dim * Q));
-  int sz = int(roundf(effective_size.z / max_dim * Q));
-  int sb = int(roundf(effective_bevel / max_dim * Q));
-
-  /* FNV-1a 64-bit hash. */
-  uint64_t h = 14695981039346656037ULL;
-  auto mix = [&](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ULL;
-  };
-  mix(uint64_t(sdf_type));
-  mix(uint64_t(sx));
-  mix(uint64_t(sy));
-  mix(uint64_t(sz));
-  mix(uint64_t(sb));
-  if (sdf_type == SDF_TYPE_NGON) {
-    mix(uint64_t(ngon_sides));
-    mix(uint64_t(int(roundf(ngon_star * Q))));
-  }
-  if (sdf_type == SDF_TYPE_TORUS) {
-    mix(uint64_t(int(roundf(torus_angle * Q))));
-  }
-  return h;
-}
-
-/* ---- Performance overlay static state ---- */
-
-/** Number of per-pass elapsed-time queries: classify, bake, grid blend, march, fxaa. */
 static constexpr int PERF_PASS_COUNT = 5;
 static constexpr int PERF_PASS_CLASSIFY = 0;
 static constexpr int PERF_PASS_BAKE = 1;
 static constexpr int PERF_PASS_GRID = 2;
 static constexpr int PERF_PASS_MARCH = 3;
 static constexpr int PERF_PASS_FXAA = 4;
-/** Number of FPS samples for smoothing. */
 static constexpr int PERF_FPS_SAMPLES = 8;
 
-/** Formatted performance text, shared with the overlay drawing code. */
 static char s_perf_text[SDF_PERF_BUF_SIZE] = "";
-/** Whether the performance data is valid for display. */
 static bool s_perf_active = false;
 
-/* ---- Static atlas state for cross-engine access (overlay selection) ---- */
+/* Static atlas state */
 static gpu::Texture *s_compact_atlas = nullptr;
 static gpu::Texture *s_indirection = nullptr;
 
@@ -161,79 +103,47 @@ static gpu::StorageBuf *s_object_ssbo = nullptr;
 static gpu::StorageBuf *s_modifier_ssbo = nullptr;
 static gpu::StorageBuf *s_group_ssbo = nullptr;
 static int s_group_count = 0;
-/** Maps depsgraph-order index → sorted-order index in sdf_objects[].
- * Used by the overlay outline code to translate its depsgraph-order indices
- * into valid indices for the sorted SSBO. */
+/* Depsgraph-order -> sorted-order index map. */
 static Vector<int> s_depsgraph_to_sorted;
 
 class Instance : public DrawEngine {
  private:
-  /** Collected SDF objects for this frame. */
   Vector<SDFObjectGPU> objects_;
-  /** Per-object SDFGroup pointer (for group_id resolution in end_sync). */
   Vector<SDFGroup *> object_group_ptrs_;
-  /** Per-object original Object pointer (for group_order resolution in end_sync). */
   Vector<Object *> object_ptrs_;
 
-  /** Scene AABB accumulated from all SDF objects. */
   float3 scene_min_ = float3(1e30f);
   float3 scene_max_ = float3(-1e30f);
 
-  /** Brick grid indirection texture (R32I, grid_res^3). */
   gpu::Texture *indirection_tx_ = nullptr;
-  /** Compact atlas (RGBA16F, sized for active bricks only). */
   gpu::Texture *compact_atlas_tx_ = nullptr;
-  /** Brick counter SSBO (1 uint + padding). */
   gpu::StorageBuf *brick_counter_ = nullptr;
-  /** Active brick coordinates SSBO (written by classify, read by bake/grid_blend). */
   gpu::StorageBuf *active_bricks_ = nullptr;
   int active_bricks_capacity_ = 0;
 
-  /** Atlas parameters. */
   float3 atlas_origin_ = float3(0.0f);
   float3 atlas_extent_ = float3(1.0f);
   float voxel_size_ = 1.0f / 256.0f;
 
-  /** Grid resolution in bricks per axis (per-axis, world-aligned). */
   int3 grid_res_ = int3(32);
-  /** Total voxel resolution from UI. */
   int sdf_resolution_ = 128;
-  /** Active brick count (set after bake via deferred readback). */
   int active_brick_count_ = 0;
-  /** Previous frame's active brick count (for atlas pre-sizing). */
   int prev_active_brick_count_ = 0;
-  /** Grow-only atlas capacity (active bricks that fit in current atlas). */
   int atlas_capacity_ = 0;
-  /** Bricks per axis in compact atlas layout. */
   int bricks_per_axis_ = 1;
-  /** Debug grid mode from UI. */
   int debug_grid_ = 0;
-  /** Whether FXAA post-processing is enabled (from UI toggle). */
   bool fxaa_enabled_ = true;
-  /** Surface margin multiplier (1.0 = default, from UI percentage). */
   float surface_margin_ = 1.0f;
-  /** Max blend radius across all objects (computed in classify, used in bake). */
   float max_blend_ = 0.0f;
-  /** Max shell distance across all shell objects (for candidate AABB expansion). */
   float max_shell_distance_ = 0.0f;
 
-  /** Dirty tracking: hash of object data for the current frame. */
   uint64_t scene_hash_ = 0;
-  /** Separate hash for grid objects (computed from lightweight data before
-   * the expensive dense-float extraction, so we can skip it when unchanged). */
   uint64_t grid_hash_ = 0;
   bool needs_bake_ = true;
-  /** Whether object/BVH SSBOs need re-upload (set when scene hash changes). */
   bool needs_upload_ = true;
-  /** True when running in a depth-only pass (gizmo picking, snapping).
-   * In depth mode the engine reuses the cached atlas from the last regular
-   * draw and only runs the ray-march for depth writes. */
   bool depth_mode_ = false;
 
-  /** Incremental rebake: per-object dirty detection.
-   * When only a few objects change, we reclassify and rebake only the affected
-   * brick region instead of the entire grid. Gives near-constant performance
-   * regardless of total scene object count. */
+  /* Incremental rebake state. */
   Vector<uint64_t> prev_object_hashes_;
   Vector<float4> prev_bbox_mins_;
   Vector<float4> prev_bbox_maxs_;
@@ -245,22 +155,16 @@ class Instance : public DrawEngine {
   float prev_max_blend_ = 0.0f;
   float prev_max_shell_distance_ = 0.0f;
   bool prev_had_grid_objects_ = false;
-  /** Whether this frame uses incremental rebake (dirty-region-only). */
   bool incremental_bake_ = false;
-  /** Brick-space dirty region bounds (inclusive min, exclusive max). */
   int3 dirty_brick_min_ = int3(0);
   int3 dirty_brick_max_ = int3(0);
-  /** Total atlas slots allocated across all frames (grows in incremental mode,
-   * reset on full rebake). Used to detect fragmentation and atlas overflow. */
   int total_allocated_slots_ = 0;
 
-  /** Mesh-to-SDF grid objects pending processing. */
   struct PendingGridObject {
     const Object *ob;
   };
   Vector<PendingGridObject> pending_grid_objects_;
 
-  /** Processed grid objects ready for GPU dispatch. */
   struct GridObject {
     gpu::Texture *texture = nullptr; /* R32F 3D texture */
     float4x4 world_to_texture;       /* Combined transform: world -> [0,1]^3 */
@@ -272,7 +176,6 @@ class Instance : public DrawEngine {
   };
   Vector<GridObject> grid_objects_;
 
-  /** Cached shaders — indexed by ShaderIndex for table-driven compilation. */
   enum ShaderIndex {
     SH_CLASSIFY = 0,
     SH_BAKE,
@@ -294,7 +197,6 @@ class Instance : public DrawEngine {
 
   gpu::Shader *shaders_[SH_COUNT] = {};
 
-  /* Convenience aliases (read-only refs into the shaders_ array). */
   gpu::Shader *&classify_sh_ = shaders_[SH_CLASSIFY];
   gpu::Shader *&bake_sh_ = shaders_[SH_BAKE];
   gpu::Shader *&shape_bake_sh_ = shaders_[SH_SHAPE_BAKE];
@@ -330,28 +232,27 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *bvh_ssbo_ = nullptr;
   int bvh_ssbo_count_ = 0;
 
-  /** Shape table: unique SDF shapes identified by fingerprint. */
+  /** Per-object shape entry: each SDF object has its own brick map. */
   struct ShapeInfo {
-    uint64_t fingerprint;
     int sdf_type;
     int ngon_sides = 6;                     /* Number of polygon sides (for SDF_TYPE_NGON). */
     float ngon_star = 0.0f;                 /* Star factor (for SDF_TYPE_NGON). */
     float torus_angle = (float)M_PI * 2.0f; /* Angle aperture in radians (for SDF_TYPE_TORUS). */
-    float3 size_normalized;                 /* Aspect ratio (max = 1.0). */
-    float bevel_normalized;                 /* bevel / max_size. */
-    float world_scale; /* Max effective size for first instance (representative). */
+    float3 sdf_size;                        /* World-scaled SDF size (scale baked in). */
+    float bevel;                            /* World-scaled bevel radius. */
+    float world_scale = 1.0f;              /* Always 1.0 in per-object mode. */
+    int object_id = -1;                    /* Index into sorted objects_ array. */
 
-    /* Per-shape atlas params (filled by compute_shape_atlas_params / shape_classify_cpu). */
+    /* Per-object atlas params (filled by compute_shape_atlas_params / shape_classify_cpu). */
     int3 grid_res = int3(0);         /* Per-axis brick grid resolution. */
-    float3 local_origin = float3(0); /* Local atlas origin. */
-    float local_voxel_size = 0.0f;   /* Voxel size in local space. */
+    float3 local_origin = float3(0); /* Local atlas origin (world-scaled local space). */
+    float local_voxel_size = 0.0f;   /* Voxel size in world-scaled local space. */
     int indir_offset = 0;            /* Offset into shape_indir_data_. */
     int slot_offset = 0;             /* First compact atlas slot for this shape. */
     int active_brick_count = 0;      /* Number of active bricks. */
+    float blend_expand = 0.0f;       /* Blend radius expansion for classify. */
   };
   Vector<ShapeInfo> shapes_;
-  /** Fingerprint → shape index mapping. */
-  Map<uint64_t, int> shape_fingerprint_map_;
 
   /** Instance table: per-object instance referencing a shape. */
   struct InstanceInfo {
@@ -361,9 +262,11 @@ class Instance : public DrawEngine {
     float4x4 local_to_world;
     float4 color;
     float blend;
-    int blend_type;    /* Blend function type (eSDFBlendType). */
-    int csg_operation; /* CSG operation (eSDFCSGOperation). */
-    float world_scale; /* max(effective_size) for this specific instance. */
+    int blend_type;      /* Blend function type (eSDFBlendType). */
+    int csg_operation;   /* CSG operation (eSDFCSGOperation). */
+    float shell_distance; /* Shell/extrusion thickness (world-space). */
+    int group_id;        /* Index into groups[] (-1 = ungrouped). */
+    int group_order;     /* Order within group (-1 if ungrouped). */
   };
   Vector<InstanceInfo> instances_;
 
@@ -388,10 +291,6 @@ class Instance : public DrawEngine {
 
   /** Total active bricks across all shapes (for instanced mode). */
   int total_shape_active_bricks_ = 0;
-
-  /** Previous frame's shape fingerprints for incremental instanced bake.
-   * If a shape's fingerprint matches the previous frame, skip its rebake. */
-  Set<uint64_t> prev_shape_fingerprints_;
 
   /** Fullscreen triangle batch (cached). */
   gpu::Batch *fullscreen_batch_ = nullptr;
@@ -503,7 +402,6 @@ class Instance : public DrawEngine {
     s_depsgraph_to_sorted.clear();
     pending_grid_objects_.clear();
     shapes_.clear();
-    shape_fingerprint_map_.clear();
     instances_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
@@ -799,76 +697,43 @@ class Instance : public DrawEngine {
     const int object_index = objects_.size();
     objects_.append(gpu_obj);
 
-    /* Build shape fingerprint and instance entry. */
+    /* Per-object shape entry: one shape per object (no fingerprint dedup).
+     * Each object gets its own brick map in the compact atlas. */
     float3 effective_size = float3(gpu_obj.sdf_size);
-    float effective_bevel = gpu_obj.bevel;
-    int ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 0;
-    float ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
-    float torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle :
+
+    ShapeInfo shape;
+    shape.sdf_type = sdf_data->sdf_type;
+    shape.ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 6;
+    shape.ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
+    shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle :
                                                                  ((float)M_PI * 2.0f);
-    uint64_t fp = sdf_shape_fingerprint(
-        sdf_data->sdf_type, effective_size, effective_bevel, ngon_sides, torus_angle, ngon_star);
+    shape.sdf_size = effective_size;
+    shape.bevel = gpu_obj.bevel;
+    shape.world_scale = 1.0f; /* Per-object mode: no normalization. */
+    shape.object_id = object_index; /* Will be updated after sorting in end_sync. */
 
-    int shape_id;
-    const int *existing = shape_fingerprint_map_.lookup_ptr(fp);
-    if (existing) {
-      shape_id = *existing;
-    }
-    else {
-      /* New unique shape. */
-      float max_dim = math::reduce_max(math::abs(effective_size));
-      if (max_dim < 1e-8f) {
-        max_dim = 1.0f;
-      }
+    int shape_id = shapes_.size();
+    shapes_.append(shape);
 
-      ShapeInfo shape;
-      shape.fingerprint = fp;
-      shape.sdf_type = sdf_data->sdf_type;
-      shape.ngon_sides = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_sides : 6;
-      shape.ngon_star = (sdf_data->sdf_type == SDF_TYPE_NGON) ? sdf_data->ngon_star : 0.0f;
-      shape.torus_angle = (sdf_data->sdf_type == SDF_TYPE_TORUS) ? sdf_data->torus_angle :
-                                                                   ((float)M_PI * 2.0f);
-      shape.size_normalized = effective_size / max_dim;
-      shape.bevel_normalized = effective_bevel / max_dim;
-      shape.world_scale = max_dim;
-
-      shape_id = shapes_.size();
-      shapes_.append(shape);
-      shape_fingerprint_map_.add(fp, shape_id);
-    }
-
-    /* Build local-space transforms.
-     * The shape atlas is in normalized space (max dimension = 1.0).
-     * world_to_local must include 1/max_dim scaling so ray coordinates
-     * match the atlas coordinate system.
-     * local_to_world is the inverse: scales from normalized back to world. */
-    float max_dim = math::reduce_max(math::abs(effective_size));
-    if (max_dim < 1e-8f) {
-      max_dim = 1.0f;
-    }
-
-    /* Build normalization scale matrix: maps Blender-unit local → normalized local. */
-    float inv_max = 1.0f / max_dim;
-    float4x4 norm_scale = float4x4::identity();
-    norm_scale[0][0] = inv_max;
-    norm_scale[1][1] = inv_max;
-    norm_scale[2][2] = inv_max;
-
-    float4x4 inv_norm_scale = float4x4::identity();
-    inv_norm_scale[0][0] = max_dim;
-    inv_norm_scale[1][1] = max_dim;
-    inv_norm_scale[2][2] = max_dim;
+    /* Build local-space transforms for per-object mode.
+     * world_to_local = rotation-only inverse + translation (no scale normalization).
+     * The object's local space preserves world scale (scale baked into sdf_size).
+     * local_to_world = rotation + translation (maps scaled local back to world). */
+    float4x4 rigid = rot_mat;
+    rigid[3] = mat[3]; /* Add world translation back. */
 
     InstanceInfo inst;
     inst.shape_id = shape_id;
     inst.object_id = object_index;
-    inst.world_to_local = norm_scale * math::invert(mat);
-    inst.local_to_world = mat * inv_norm_scale;
+    inst.world_to_local = math::invert(rigid);
+    inst.local_to_world = rigid;
     inst.color = gpu_obj.color;
     inst.blend = sdf_data->blend;
     inst.blend_type = sdf_data->blend_type;
     inst.csg_operation = sdf_data->csg_operation;
-    inst.world_scale = max_dim;
+    inst.shell_distance = sdf_data->shell_distance;
+    inst.group_id = -1;    /* Resolved in end_sync. */
+    inst.group_order = -1; /* Resolved in end_sync. */
 
     instances_.append(inst);
   }
@@ -1120,9 +985,12 @@ class Instance : public DrawEngine {
           /* Export depsgraph→sorted mapping for overlay outline code. */
           s_depsgraph_to_sorted = std::move(old_to_new);
 
-          /* Update instance object_ids to match new indices. */
+          /* Update instance and shape object_ids to match new sorted indices. */
           for (InstanceInfo &inst : instances_) {
             inst.object_id = s_depsgraph_to_sorted[inst.object_id];
+          }
+          for (ShapeInfo &shape : shapes_) {
+            shape.object_id = s_depsgraph_to_sorted[shape.object_id];
           }
         }
       }
@@ -1144,6 +1012,15 @@ class Instance : public DrawEngine {
         }
         groups_gpu_[gi].first_object = (first >= 0) ? first : 0;
         groups_gpu_[gi].object_count = count;
+      }
+
+      /* Resolve group_id and group_order on instances from their objects.
+       * Each instance references an object; copy group membership from there. */
+      for (InstanceInfo &inst : instances_) {
+        if (inst.object_id >= 0 && inst.object_id < int(objects_.size())) {
+          inst.group_id = objects_[inst.object_id].group_id;
+          inst.group_order = objects_[inst.object_id].group_order;
+        }
       }
     }
 
@@ -1436,11 +1313,7 @@ class Instance : public DrawEngine {
       hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.z);
       hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.w);
     }
-    /* Include surface margin so changes trigger rebake. */
     hash = hash * 6364136223846793005ULL + float_as_uint(surface_margin_);
-    /* Include chunk-snapped grid parameters instead of raw scene bounds.
-     * Small object movements within the same grid bounds only trigger
-     * rebake from object data changes, not grid reallocation. */
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.x);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.y);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.z);
@@ -1465,25 +1338,53 @@ class Instance : public DrawEngine {
       needs_bake_ = false;
     }
 
-    /* Decide instanced vs world-space mode.
-     * Instanced mode: per-shape local atlas + BVH instance traversal.
-     * Requires: no smooth blending, at least one shape, no grid objects. */
-    bool any_blend = false;
-    for (const InstanceInfo &inst : instances_) {
-      if (inst.blend > 0.0f) {
-        any_blend = true;
-        break;
-      }
-    }
-    /* TODO: instanced mode disabled until coordinate/bake pipeline is verified.
-     * Force world-space mode for now. */
-    use_instanced_ = false && !any_blend && !shapes_.is_empty() && grid_objects_.is_empty() &&
+    use_instanced_ = !shapes_.is_empty() && grid_objects_.is_empty() &&
                      pending_grid_objects_.is_empty();
 
-    /* Compute per-shape atlas parameters and CPU classify when in instanced mode. */
+    printf("[SDF DEBUG] end_sync: objects=%d shapes=%d instances=%d use_instanced=%d needs_bake=%d\n",
+           int(objects_.size()), int(shapes_.size()), int(instances_.size()),
+           use_instanced_ ? 1 : 0, needs_bake_ ? 1 : 0);
+
+    /* Compute per-object blend expansion: for each object, find the max blend
+     * radius among overlapping objects (those whose AABBs intersect).
+     * This ensures blend-bridge surfaces are covered by expanded bricks. */
     if (use_instanced_ && needs_bake_) {
+      for (int i = 0; i < int(shapes_.size()); i++) {
+        ShapeInfo &si = shapes_[i];
+        if (si.object_id < 0 || si.object_id >= int(objects_.size())) {
+          continue;
+        }
+        const SDFObjectGPU &oi = objects_[si.object_id];
+        float max_overlap_blend = 0.0f;
+        for (int j = 0; j < int(shapes_.size()); j++) {
+          if (j == i) {
+            continue;
+          }
+          const ShapeInfo &sj = shapes_[j];
+          if (sj.object_id < 0 || sj.object_id >= int(objects_.size())) {
+            continue;
+          }
+          const SDFObjectGPU &oj = objects_[sj.object_id];
+          /* Check AABB overlap (expanded by blend radius). */
+          float expand = math::max(oi.blend, oj.blend);
+          float3 amin = float3(oi.bbox_min) - float3(expand);
+          float3 amax = float3(oi.bbox_max) + float3(expand);
+          float3 bmin = float3(oj.bbox_min);
+          float3 bmax = float3(oj.bbox_max);
+          if (math::reduce_min(amax - bmin) >= 0.0f &&
+              math::reduce_min(bmax - amin) >= 0.0f)
+          {
+            max_overlap_blend = math::max(max_overlap_blend, oj.blend);
+          }
+        }
+        si.blend_expand = max_overlap_blend;
+      }
       compute_shape_atlas_params();
       shape_classify_cpu();
+
+      /* Compute bpa now so upload_shapes_instances() writes the correct value. */
+      int new_bpa = int(std::ceil(std::cbrt(double(total_shape_active_bricks_))));
+      bricks_per_axis_ = math::max(new_bpa, 1);
     }
   }
 
@@ -1509,11 +1410,9 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* sync_sdf_settings() moved to init() so end_sync() uses correct values. */
     sync_shading();
     ensure_shaders();
 
-    /* Check if perf overlay is enabled. Only issue GL queries when active. */
     perf_enabled_ = draw_ctx_->v3d && (draw_ctx_->v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) &&
                     !(draw_ctx_->v3d->flag2 & V3D_HIDE_OVERLAYS);
     if (perf_enabled_) {
@@ -1521,7 +1420,6 @@ class Instance : public DrawEngine {
       perf_begin_frame();
     }
 
-    /* Bail if critical shaders failed. */
     if (march_sh_ == nullptr) {
       return;
     }
@@ -1541,7 +1439,6 @@ class Instance : public DrawEngine {
       needs_upload_ = false;
     }
 
-    /* Reset per-frame pass activity flags and record bake status. */
     if (perf_enabled_) {
       for (int i = 0; i < PERF_PASS_COUNT; i++) {
         perf_pass_active_[i] = false;
@@ -1550,7 +1447,6 @@ class Instance : public DrawEngine {
     }
 
     if (needs_bake_) {
-      /* Invalidate debug batches: atlas/BVH geometry may have changed. */
       if (grid_batch_) {
         GPU_batch_discard(grid_batch_);
         grid_batch_ = nullptr;
@@ -1561,59 +1457,31 @@ class Instance : public DrawEngine {
       }
 
       if (use_instanced_) {
-        /* ---- Instanced pipeline: per-shape local atlas ---- */
+        /* Instanced pipeline. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_CLASSIFY);
         }
-        /* shape_classify_cpu() was already called in end_sync(). */
         upload_shape_indirection();
         if (perf_enabled_) {
           perf_end_pass(PERF_PASS_CLASSIFY);
         }
 
-        /* Size compact atlas from total shape bricks. */
         int new_bpa = int(std::ceil(std::cbrt(double(total_shape_active_bricks_))));
         if (new_bpa < 1) {
           new_bpa = 1;
         }
         bricks_per_axis_ = new_bpa;
 
-        /* Create world-space indirection texture (needed for non-instanced fallback
-         * paths like grid objects). Ensure it exists but don't classify into it. */
         ensure_indirection();
         int32_t clear_val = -1;
         GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
 
         ensure_compact_atlas();
 
-        /* Bake shapes (incremental: skip shapes whose fingerprints haven't changed). */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
-        if (!prev_shape_fingerprints_.is_empty()) {
-          /* Find shapes that are new or changed since last frame. */
-          Set<uint64_t> dirty_shapes;
-          for (const ShapeInfo &shape : shapes_) {
-            if (!prev_shape_fingerprints_.contains(shape.fingerprint)) {
-              dirty_shapes.add(shape.fingerprint);
-            }
-          }
-          if (dirty_shapes.is_empty()) {
-            /* All shapes existed before — only instance transforms changed.
-             * No rebake needed (atlas data is reusable). */
-          }
-          else {
-            dispatch_shape_bake_all(&dirty_shapes);
-          }
-        }
-        else {
-          dispatch_shape_bake_all();
-        }
-        /* Update previous shape fingerprints for next frame. */
-        prev_shape_fingerprints_.clear();
-        for (const ShapeInfo &shape : shapes_) {
-          prev_shape_fingerprints_.add(shape.fingerprint);
-        }
+        dispatch_shape_bake_all();
         if (perf_enabled_) {
           perf_end_pass(PERF_PASS_BAKE);
         }
@@ -1624,25 +1492,18 @@ class Instance : public DrawEngine {
         }
       }
       else if (incremental_bake_) {
-        /* ---- Incremental world-space pipeline ----
-         * Only reclassify and rebake bricks within the dirty region.
-         * Indirection and atlas are preserved from the previous frame;
-         * dirty bricks reuse their existing atlas slots when possible. */
-
-        /* Phase 1: Classify dirty region only. */
+        /* Incremental pipeline. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_CLASSIFY);
         }
         ensure_indirection();
         if (!objects_.is_empty()) {
-          /* Do NOT clear indirection — preserve cached brick data. */
           dispatch_classify();
         }
         if (perf_enabled_) {
           perf_end_pass(PERF_PASS_CLASSIFY);
         }
 
-        /* Phase 2: Bake dirty bricks only. Atlas NOT cleared. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
@@ -1653,17 +1514,13 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_BAKE);
         }
 
-        /* No grid blend in incremental mode (grid_objects_.is_empty()
-         * is a prerequisite for incremental). */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_GRID);
           perf_end_pass(PERF_PASS_GRID);
         }
       }
       else {
-        /* ---- Full world-space pipeline ---- */
-
-        /* Phase 1: Classify analytic SDFs (sparse brick allocation). */
+        /* Full pipeline. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_CLASSIFY);
         }
@@ -1683,18 +1540,13 @@ class Instance : public DrawEngine {
         if (!grid_objects_.is_empty()) {
           augment_indirection_for_grids();
         }
-        /* Pre-size atlas using current classify count with headroom.
-         * Allow gradual shrink: if the scene needs fewer bricks, decay
-         * the capacity toward the actual need (halve the excess each bake). */
         {
           int estimated = math::max(active_brick_count_, prev_active_brick_count_);
-          /* Add 50% headroom (minimum 64) to absorb count fluctuations. */
           int capacity = math::max(estimated + estimated / 2, 64);
           if (capacity > atlas_capacity_) {
             atlas_capacity_ = capacity;
           }
           else if (atlas_capacity_ > capacity * 2) {
-            /* Gradual shrink: halve excess to avoid thrashing. */
             atlas_capacity_ = math::max(capacity, atlas_capacity_ / 2);
           }
           int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
@@ -1706,18 +1558,14 @@ class Instance : public DrawEngine {
 
         ensure_compact_atlas();
 
-        /* Always clear atlas to 1e10 (background) before bake. */
         clear_compact_atlas();
 
-        /* Phase 2: Bake SDFs into atlas. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_BAKE);
         }
         if (!objects_.is_empty()) {
           dispatch_bake();
 
-          /* If actual count (from classify readback) exceeds atlas capacity,
-           * resize and re-bake. */
           if (active_brick_count_ > atlas_capacity_) {
             atlas_capacity_ = active_brick_count_ + active_brick_count_ / 2;
             int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
@@ -1735,7 +1583,6 @@ class Instance : public DrawEngine {
           perf_end_pass(PERF_PASS_BAKE);
         }
 
-        /* Blend grid objects into atlas. */
         if (perf_enabled_) {
           perf_begin_pass(PERF_PASS_GRID);
         }
@@ -1748,7 +1595,6 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Ray march (runs every frame, even when cached). */
     if (perf_enabled_) {
       perf_begin_pass(PERF_PASS_MARCH);
     }
@@ -1757,7 +1603,6 @@ class Instance : public DrawEngine {
       perf_end_pass(PERF_PASS_MARCH);
     }
 
-    /* FXAA post-process (runs every frame after march). */
     if (perf_enabled_) {
       perf_begin_pass(PERF_PASS_FXAA);
     }
@@ -1766,8 +1611,6 @@ class Instance : public DrawEngine {
       perf_end_pass(PERF_PASS_FXAA);
     }
 
-    /* Skip debug grid in Cycles rendered view — it draws on top of the
-     * path-traced image since the SDF draw engine only provides depth. */
     if (!draw_ctx_->v3d || draw_ctx_->v3d->shading.type != OB_RENDER) {
       draw_debug_grid();
       draw_debug_bvh();
@@ -1775,7 +1618,6 @@ class Instance : public DrawEngine {
 
     DRW_submission_end();
 
-    /* Update static atlas state for cross-engine access (overlay selection). */
     s_compact_atlas = compact_atlas_tx_;
     s_indirection = indirection_tx_;
     s_voxel_size = voxel_size_;
@@ -1798,8 +1640,6 @@ class Instance : public DrawEngine {
   }
 
  private:
-  /** Compute a 64-bit FNV-1a hash capturing all SDF-relevant properties of a
-   * single object. Used for per-object dirty detection in incremental rebake. */
   uint64_t compute_object_hash(int obj_idx) const
   {
     const SDFObjectGPU &obj = objects_[obj_idx];
@@ -1808,26 +1648,22 @@ class Instance : public DrawEngine {
       h ^= v;
       h *= 1099511628211ULL;
     };
-    /* Position and size. */
     mix(float_as_uint(obj.position.x));
     mix(float_as_uint(obj.position.y));
     mix(float_as_uint(obj.position.z));
     mix(float_as_uint(obj.sdf_size.x));
     mix(float_as_uint(obj.sdf_size.y));
     mix(float_as_uint(obj.sdf_size.z));
-    /* Shape parameters. */
     mix(float_as_uint(obj.bevel));
     mix(float_as_uint(obj.blend));
     mix(uint64_t(obj.blend_type));
     mix(uint64_t(obj.sdf_type));
     mix(uint64_t(obj.csg_operation));
     mix(float_as_uint(obj.shell_distance));
-    /* Color. */
     mix(float_as_uint(obj.color.x));
     mix(float_as_uint(obj.color.y));
     mix(float_as_uint(obj.color.z));
     mix(float_as_uint(obj.color.w));
-    /* Box/Ngon specifics. */
     mix(float_as_uint(obj.box_corners.x));
     mix(float_as_uint(obj.box_corners.y));
     mix(float_as_uint(obj.box_corners.z));
@@ -1839,15 +1675,12 @@ class Instance : public DrawEngine {
     mix(uint64_t(obj.box_modes.x));
     mix(uint64_t(obj.box_modes.y));
     mix(uint64_t(obj.box_modes.z));
-    /* Rotation (from inverse matrix diagonal). */
     mix(float_as_uint(obj.inverse_matrix[0][0]));
     mix(float_as_uint(obj.inverse_matrix[1][1]));
     mix(float_as_uint(obj.inverse_matrix[2][2]));
-    /* Group membership. */
     mix(uint64_t(uint32_t(obj.group_id + 1)));
     mix(uint64_t(obj.group_first));
     mix(uint64_t(uint32_t(obj.group_order + 1)));
-    /* Modifiers. */
     for (int m = obj.modifier_start; m < obj.modifier_start + obj.modifier_count; m++) {
       if (m >= 0 && m < int(modifiers_.size())) {
         const SDFModifierGPU &mod = modifiers_[m];
@@ -1875,9 +1708,6 @@ class Instance : public DrawEngine {
 
     const View3DShading &shading = v3d->shading;
 
-    /* Read resolution setting. Default to 256 if unset (0).
-     * Resolution = voxels per Blender unit (fixed density). Grid dimensions
-     * are computed in end_sync() from chunk-snapped scene bounds. */
     int new_res = int(shading.sdf_resolution);
     if (new_res == 0) {
       new_res = 128;
@@ -1899,7 +1729,6 @@ class Instance : public DrawEngine {
     debug_grid_ = int(shading.sdf_debug_grid);
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
-      /* FXAA toggled off — free offscreen target to reclaim VRAM. */
       if (march_color_tx_) {
         GPU_texture_free(march_color_tx_);
         march_color_tx_ = nullptr;
@@ -1912,7 +1741,6 @@ class Instance : public DrawEngine {
     }
     fxaa_enabled_ = new_fxaa;
 
-    /* Surface margin: percentage → multiplier. Treat 0 (unset) as 100%. */
     int margin_pct = int(shading.sdf_surface_margin);
     if (margin_pct <= 0) {
       margin_pct = 100;
@@ -1944,7 +1772,6 @@ class Instance : public DrawEngine {
         sl = BKE_studiolight_find_default(STUDIOLIGHT_TYPE_STUDIO);
       }
 
-      /* Compute world-space shading rotation (matches Workbench behavior). */
       float4x4 world_shading_rotation = float4x4::identity();
       if (shading.flag & V3D_SHADING_WORLD_ORIENTATION) {
         float4x4 V = blender::draw::View::default_get().viewmat();
@@ -2070,9 +1897,6 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Finalize the async batch started in init(). This blocks only if the
-     * subprocess hasn't finished yet — typically the sync phase (object_sync,
-     * end_sync) gives it enough time to complete in the background. */
     if (shader_compile_batch_ != 0) {
       Vector<gpu::Shader *> result = GPU_shader_batch_finalize(shader_compile_batch_);
       for (int i = 0; i < SH_COUNT; i++) {
@@ -2082,7 +1906,6 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Fallback: synchronous compilation (should not normally be reached). */
     for (int i = 0; i < SH_COUNT; i++) {
       if (shaders_[i] == nullptr) {
         shaders_[i] = GPU_shader_create_from_info_name(shader_info_names_[i]);
@@ -2107,7 +1930,6 @@ class Instance : public DrawEngine {
                                             nullptr);
   }
 
-  /** Ensure compact atlas and object ID atlas exist with correct dimensions. */
   void ensure_compact_atlas()
   {
     if (bricks_per_axis_ < 1) {
@@ -2115,13 +1937,11 @@ class Instance : public DrawEngine {
     }
     int atlas_dim = bricks_per_axis_ * SDF_BRICK_STORAGE;
 
-    /* Check if existing textures have correct dimensions. */
     if (compact_atlas_tx_ != nullptr) {
       int existing_dim = GPU_texture_width(compact_atlas_tx_);
       if (existing_dim == atlas_dim) {
         return;
       }
-      /* Dimensions changed: must recreate. */
       GPU_texture_free(compact_atlas_tx_);
       compact_atlas_tx_ = nullptr;
     }
@@ -2157,7 +1977,6 @@ class Instance : public DrawEngine {
       GPU_storagebuf_update(object_ssbo_, objects_.data());
     }
 
-    /* Upload modifier SSBO. Ensure at least 1 element for binding. */
     const int mod_count = math::max(int(modifiers_.size()), 1);
     const size_t mod_buf_size = mod_count * sizeof(SDFModifierGPU);
 
@@ -2184,7 +2003,6 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Upload group SSBO. Ensure at least 1 element for binding. */
     const int grp_count = math::max(int(groups_gpu_.size()), 1);
     const size_t grp_buf_size = grp_count * sizeof(SDFGroupGPU);
 
@@ -2212,24 +2030,28 @@ class Instance : public DrawEngine {
     }
   }
 
-  /** Upload shape/instance tables to GPU SSBOs. */
   void upload_shapes_instances()
   {
-    /* Build GPU shape array. */
+    printf("[SDF DEBUG] upload_shapes_instances: shapes=%d instances=%d\n",
+           int(shapes_.size()), int(instances_.size()));
     Vector<SDFShapeGPU> gpu_shapes(shapes_.size());
     for (int i = 0; i < shapes_.size(); i++) {
       SDFShapeGPU &gs = gpu_shapes[i];
-      gs.size_normalized = float4(shapes_[i].size_normalized, 0.0f);
-      gs.bevel_normalized = shapes_[i].bevel_normalized;
+      gs.sdf_size = float4(shapes_[i].sdf_size, 0.0f);
+      gs.bevel = shapes_[i].bevel;
       gs.sdf_type = shapes_[i].sdf_type;
       gs.slot_offset = shapes_[i].slot_offset;
       gs.world_scale = shapes_[i].world_scale;
       gs.grid_params = int4(shapes_[i].grid_res, shapes_[i].indir_offset);
       gs.local_params = float4(shapes_[i].local_origin, shapes_[i].local_voxel_size);
-      gs.atlas_params = int4(bricks_per_axis_, shapes_[i].active_brick_count, 0, 0);
+      gs.atlas_params = int4(bricks_per_axis_, shapes_[i].active_brick_count, shapes_[i].object_id,
+                             0);
+      printf("  gpu_shape[%d]: grid=(%d,%d,%d) indir_off=%d local_org=(%.2f,%.2f,%.2f) vs=%.4f bpa=%d active=%d obj=%d slot_off=%d\n",
+             i, gs.grid_params.x, gs.grid_params.y, gs.grid_params.z, gs.grid_params.w,
+             gs.local_params.x, gs.local_params.y, gs.local_params.z, gs.local_params.w,
+             gs.atlas_params.x, gs.atlas_params.y, gs.atlas_params.z, gs.slot_offset);
     }
 
-    /* Build GPU instance array. */
     Vector<SDFInstanceGPU> gpu_instances(instances_.size());
     for (int i = 0; i < instances_.size(); i++) {
       SDFInstanceGPU &gi = gpu_instances[i];
@@ -2241,12 +2063,13 @@ class Instance : public DrawEngine {
       gi.object_id = instances_[i].object_id;
       gi.blend_type = instances_[i].blend_type;
       gi.csg_operation = instances_[i].csg_operation;
-      gi._pad0 = 0.0f;
-      gi._pad1 = 0.0f;
-      gi._pad2 = 0.0f;
+      gi.shell_distance = instances_[i].shell_distance;
+      gi.group_id = instances_[i].group_id;
+      gi.group_order = instances_[i].group_order;
+      printf("  gpu_inst[%d]: shape_id=%d obj_id=%d blend=%.2f csg=%d group=%d order=%d\n",
+             i, gi.shape_id, gi.object_id, gi.blend, gi.csg_operation, gi.group_id, gi.group_order);
     }
 
-    /* Upload shapes SSBO (reuse when count matches). */
     {
       const int count = int(gpu_shapes.size());
       if (shape_ssbo_ != nullptr && shape_ssbo_count_ != count) {
@@ -2266,7 +2089,6 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Upload instances SSBO (reuse when count matches). */
     {
       const int count = int(gpu_instances.size());
       if (instance_ssbo_ != nullptr && instance_ssbo_count_ != count) {
@@ -2288,10 +2110,8 @@ class Instance : public DrawEngine {
     }
   }
 
-  /* ---- SAH BVH Builder ---- */
+  /* SAH BVH */
 
-  /** Build a top-down SAH BVH over object AABBs (8-bin partitioning).
-   * Produces a flat array of BVHNodeGPU nodes suitable for stack-based GPU traversal. */
   void build_bvh()
   {
     bvh_nodes_.clear();
@@ -2300,28 +2120,23 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Build array of object indices for partitioning. */
     Vector<int> indices(n);
     for (int i = 0; i < n; i++) {
       indices[i] = i;
     }
 
-    /* Precompute centroids for SAH binning. */
     Vector<float3> centroids(n);
     for (int i = 0; i < n; i++) {
       centroids[i] = (float3(objects_[i].bbox_min) + float3(objects_[i].bbox_max)) * 0.5f;
     }
 
-    /* Reserve reasonable space: 2*N-1 for a complete binary tree. */
     bvh_nodes_.reserve(2 * n);
 
     build_bvh_recursive(indices.data(), n, centroids);
   }
 
-  /** Recursively build BVH subtree. Returns the index of the root node for this subtree. */
   int build_bvh_recursive(int *indices, int count, const Vector<float3> &centroids)
   {
-    /* Compute AABB of all objects in this subset. */
     float3 node_min = float3(1e30f);
     float3 node_max = float3(-1e30f);
     for (int i = 0; i < count; i++) {
@@ -2331,19 +2146,16 @@ class Instance : public DrawEngine {
     }
 
     if (count == 1) {
-      /* Leaf node. */
       int node_idx = int(bvh_nodes_.size());
       BVHNodeGPU node = {};
       node.min_and_left = float4(node_min, 0.0f);
       node.max_and_right = float4(node_max, 0.0f);
-      /* Encode: left = -1 (leaf marker), right = object index. */
       reinterpret_cast<int &>(node.min_and_left.w) = -1;
       reinterpret_cast<int &>(node.max_and_right.w) = indices[0];
       bvh_nodes_.append(node);
       return node_idx;
     }
 
-    /* SAH 8-bin partitioning: find best split axis and position. */
     float3 centroid_min = float3(1e30f);
     float3 centroid_max = float3(-1e30f);
     for (int i = 0; i < count; i++) {
@@ -2353,11 +2165,10 @@ class Instance : public DrawEngine {
 
     float3 centroid_extent = centroid_max - centroid_min;
 
-    /* If all centroids are coincident, split in half. */
     if (math::reduce_max(centroid_extent) < 1e-6f) {
       int mid = count / 2;
       int node_idx = int(bvh_nodes_.size());
-      bvh_nodes_.append({}); /* Placeholder. */
+      bvh_nodes_.append({});
 
       int left = build_bvh_recursive(indices, mid, centroids);
       int right = build_bvh_recursive(indices + mid, count - mid, centroids);
@@ -2375,7 +2186,6 @@ class Instance : public DrawEngine {
     int best_axis = 0;
     int best_split = -1;
 
-    /* Surface area helper. */
     auto surface_area = [](float3 lo, float3 hi) -> float {
       float3 d = hi - lo;
       return 2.0f * (d.x * d.y + d.y * d.z + d.z * d.x);
@@ -2388,7 +2198,6 @@ class Instance : public DrawEngine {
         continue;
       }
 
-      /* Bin objects by centroid along this axis. */
       struct Bin {
         float3 lo = float3(1e30f);
         float3 hi = float3(-1e30f);
@@ -2405,7 +2214,6 @@ class Instance : public DrawEngine {
         bins[b].count++;
       }
 
-      /* Sweep from left to find cumulative AABB and count for each split. */
       float3 left_min[NUM_BINS - 1];
       float3 left_max[NUM_BINS - 1];
       int left_count[NUM_BINS - 1];
@@ -2423,7 +2231,6 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Sweep from right and evaluate SAH cost for each split position. */
       {
         float3 running_min = float3(1e30f);
         float3 running_max = float3(-1e30f);
@@ -2448,21 +2255,17 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Partition indices around the best split. */
     int mid;
     if (best_split < 0) {
-      /* No valid split found: fallback to equal split. */
       mid = count / 2;
     }
     else {
       float inv_extent = float(NUM_BINS) / centroid_extent[best_axis];
-      /* Partition in-place: objects with bin < best_split go left. */
       int left_end = 0;
       for (int i = 0; i < count; i++) {
         int b = int((centroids[indices[i]][best_axis] - centroid_min[best_axis]) * inv_extent);
         b = math::clamp(b, 0, NUM_BINS - 1);
         if (b < best_split) {
-          /* Swap to left partition. */
           int tmp = indices[left_end];
           indices[left_end] = indices[i];
           indices[i] = tmp;
@@ -2470,7 +2273,6 @@ class Instance : public DrawEngine {
         }
       }
       mid = left_end;
-      /* Safety: ensure non-empty partitions. */
       if (mid == 0) {
         mid = 1;
       }
@@ -2479,9 +2281,8 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Allocate node with placeholder, then recurse. */
     int node_idx = int(bvh_nodes_.size());
-    bvh_nodes_.append({}); /* Placeholder. */
+    bvh_nodes_.append({});
 
     int left = build_bvh_recursive(indices, mid, centroids);
     int right = build_bvh_recursive(indices + mid, count - mid, centroids);
@@ -2494,7 +2295,6 @@ class Instance : public DrawEngine {
     return node_idx;
   }
 
-  /** Upload BVH nodes to GPU SSBO. */
   void upload_bvh()
   {
     const int count = int(bvh_nodes_.size());
@@ -2518,34 +2318,109 @@ class Instance : public DrawEngine {
     }
   }
 
-  /* ---- Per-Shape Atlas Pipeline (instanced mode) ---- */
+  /* Per-Shape Atlas */
 
-  /** Compute per-shape local atlas parameters.
-   * For each unique shape, determines the local grid resolution and voxel size
-   * based on the shape's world_scale and the global resolution setting. */
   void compute_shape_atlas_params()
   {
-    float base_voxel = 1.0f / float(sdf_resolution_);
-
     for (ShapeInfo &shape : shapes_) {
-      /* Local voxel size: world voxel density scaled by shape's world size. */
-      float local_vs = base_voxel / math::max(shape.world_scale, 1e-6f);
+      float max_extent = math::reduce_max(math::abs(shape.sdf_size));
+      if (max_extent < 1e-6f) {
+        max_extent = 1.0f;
+      }
+      float local_vs = max_extent / (float(sdf_resolution_) * float(SDF_BRICK_SIZE));
 
-      /* Local extent per axis: size_normalized + bevel margin + overlap border.
-       * The shape's SDF spans [-size, +size] in local space (half-extents).
-       * Add bevel, brick_half_diag for classify margin, and 2 voxels for overlap. */
+      float modifier_expand = 0.0f;
+      if (shape.object_id >= 0 && shape.object_id < int(objects_.size())) {
+        const SDFObjectGPU &obj = objects_[shape.object_id];
+        for (int m = obj.modifier_start; m < obj.modifier_start + obj.modifier_count; m++) {
+          if (m >= 0 && m < int(modifiers_.size())) {
+            const SDFModifierGPU &mod = modifiers_[m];
+            switch (mod.header.x) {
+              case 3: /* SDF_MOD_TWIST */
+              case 4: /* SDF_MOD_BEND */
+                modifier_expand += 2.0f * local_vs * float(SDF_BRICK_SIZE);
+                break;
+              case 5: /* SDF_MOD_HOLLOW */
+              case 8: /* SDF_MOD_ONION */
+                modifier_expand += fabsf(mod.params.x);
+                break;
+              case 6: /* SDF_MOD_ROUND */
+                modifier_expand += mod.params.x;
+                break;
+              case 2: /* SDF_MOD_ELONGATE */
+                /* Elongate extends local bounds. */
+                break;
+              default:
+                break;
+            }
+          }
+        }
+      }
+
       float brick_half_diag = float(SDF_BRICK_SIZE) * local_vs * 0.866025f;
-      float margin = brick_half_diag + 2.0f * local_vs;
-      float3 half_extent = shape.size_normalized + float3(shape.bevel_normalized + margin);
+      float margin = brick_half_diag + 2.0f * local_vs + modifier_expand;
+      float blend_expand_val = shape.blend_expand + (shape.object_id >= 0 &&
+                                                             shape.object_id < int(objects_.size()) ?
+                                                         objects_[shape.object_id].blend :
+                                                         0.0f);
+      margin += blend_expand_val;
 
-      /* Grid resolution per axis. */
+      float3 half_extent = shape.sdf_size + float3(shape.bevel + margin);
+
+      if (shape.object_id >= 0 && shape.object_id < int(objects_.size())) {
+        const SDFObjectGPU &obj = objects_[shape.object_id];
+        for (int m = obj.modifier_start; m < obj.modifier_start + obj.modifier_count; m++) {
+          if (m >= 0 && m < int(modifiers_.size())) {
+            const SDFModifierGPU &mod = modifiers_[m];
+            switch (mod.header.x) {
+              case 2: /* SDF_MOD_ELONGATE */
+                half_extent += float3(mod.params.x, mod.params.y, mod.params.z);
+                break;
+              case 1: { /* SDF_MOD_MIRROR */
+                float offset = fabsf(mod.params.x);
+                if (mod.header.y & 1)
+                  half_extent.x += offset;
+                if (mod.header.y & 2)
+                  half_extent.y += offset;
+                if (mod.header.y & 4)
+                  half_extent.z += offset;
+                break;
+              }
+              case 9: { /* SDF_MOD_ARRAY */
+                float count = mod.params.x;
+                if (count > 0.5f) {
+                  if (mod.header.y == 0) { /* LINEAR */
+                    float3 offset = float3(mod.params.y, mod.params.z, mod.params.w);
+                    half_extent += math::abs(offset) * (count - 1.0f);
+                  }
+                  else if (mod.header.y == 1) { /* RADIAL */
+                    float radius = mod.params.y;
+                    half_extent.x += radius;
+                    half_extent.y += radius;
+                  }
+                }
+                break;
+              }
+              default:
+                break;
+            }
+          }
+        }
+      }
+
+      /* Auto-coarsen: if the grid would exceed SDF_MAX_SHAPE_GRID_RES,
+       * increase voxel size so the grid fits within the limit. */
+      float max_half = math::reduce_max(half_extent);
+      float min_vs = (2.0f * max_half) /
+                     (float(SDF_MAX_SHAPE_GRID_RES) * float(SDF_BRICK_SIZE));
+      local_vs = math::max(local_vs, min_vs);
+
       float chunk = float(SDF_BRICK_SIZE) * local_vs;
       int3 gr;
       gr.x = math::clamp(int(std::ceil(2.0f * half_extent.x / chunk)), 1, SDF_MAX_SHAPE_GRID_RES);
       gr.y = math::clamp(int(std::ceil(2.0f * half_extent.y / chunk)), 1, SDF_MAX_SHAPE_GRID_RES);
       gr.z = math::clamp(int(std::ceil(2.0f * half_extent.z / chunk)), 1, SDF_MAX_SHAPE_GRID_RES);
 
-      /* Snap local origin to brick boundaries (centered on shape origin). */
       float3 local_origin = -float3(gr) * float(SDF_BRICK_SIZE) * local_vs * 0.5f;
 
       shape.grid_res = gr;
@@ -2554,39 +2429,96 @@ class Instance : public DrawEngine {
     }
   }
 
-  /** CPU-side classify for all shapes.
-   * For each shape, evaluates sdBox at each brick center to determine active bricks.
-   * Builds the flat indirection array and active brick lists with global slot offsets. */
   void shape_classify_cpu()
   {
     shape_indir_data_.clear();
     shape_active_bricks_.clear();
     total_shape_active_bricks_ = 0;
 
+    /* Precompute overlap AABBs in each shape's local space.
+     * For interior bricks that normally wouldn't be active, we check if any
+     * overlapping object's AABB covers the brick — if so, the brick needs
+     * valid SDF data for blending at render time. */
+    struct OverlapAABB {
+      float3 local_min;
+      float3 local_max;
+    };
+    Vector<Vector<OverlapAABB>> shape_overlaps(shapes_.size());
+
+    for (int i = 0; i < int(shapes_.size()); i++) {
+      const ShapeInfo &si = shapes_[i];
+      if (si.object_id < 0 || si.object_id >= int(objects_.size())) {
+        continue;
+      }
+      if (i >= int(instances_.size())) {
+        continue;
+      }
+      const InstanceInfo &inst_i = instances_[i];
+      const SDFObjectGPU &oi = objects_[si.object_id];
+
+      for (int j = 0; j < int(shapes_.size()); j++) {
+        if (j == i) {
+          continue;
+        }
+        const ShapeInfo &sj = shapes_[j];
+        if (sj.object_id < 0 || sj.object_id >= int(objects_.size())) {
+          continue;
+        }
+        const SDFObjectGPU &oj = objects_[sj.object_id];
+
+        float expand = math::max(oi.blend, oj.blend);
+        float3 amin = float3(oi.bbox_min) - float3(expand);
+        float3 amax = float3(oi.bbox_max) + float3(expand);
+        float3 bmin = float3(oj.bbox_min);
+        float3 bmax = float3(oj.bbox_max);
+        if (math::reduce_min(amax - bmin) < 0.0f || math::reduce_min(bmax - amin) < 0.0f) {
+          continue;
+        }
+
+        /* Transform other object's blend-expanded AABB into this shape's local space. */
+        float3 wb_min = float3(oj.bbox_min) - float3(expand);
+        float3 wb_max = float3(oj.bbox_max) + float3(expand);
+
+        float3 local_aabb_min = float3(1e10f);
+        float3 local_aabb_max = float3(-1e10f);
+        for (int c = 0; c < 8; c++) {
+          float3 corner = float3((c & 1) ? wb_max.x : wb_min.x,
+                                 (c & 2) ? wb_max.y : wb_min.y,
+                                 (c & 4) ? wb_max.z : wb_min.z);
+          float3 lp = math::transform_point(inst_i.world_to_local, corner);
+          local_aabb_min = math::min(local_aabb_min, lp);
+          local_aabb_max = math::max(local_aabb_max, lp);
+        }
+
+        OverlapAABB ovlp;
+        ovlp.local_min = local_aabb_min;
+        ovlp.local_max = local_aabb_max;
+        shape_overlaps[i].append(ovlp);
+      }
+    }
+
     int global_indir_offset = 0;
     int global_slot_offset = 0;
 
+    int shape_idx = 0;
     for (ShapeInfo &shape : shapes_) {
       int3 gr = shape.grid_res;
       float local_vs = shape.local_voxel_size;
       float3 local_orig = shape.local_origin;
       int grid_volume = gr.x * gr.y * gr.z;
 
-      /* Record offset into flat indirection array. */
       shape.indir_offset = global_indir_offset;
       shape.slot_offset = global_slot_offset;
 
-      /* Allocate space in the flat indirection array. */
       int indir_start = int(shape_indir_data_.size());
       shape_indir_data_.resize(indir_start + grid_volume, -1);
 
-      /* Classify: evaluate single SDF at each brick center. */
-      float3 sz = math::max(shape.size_normalized - float3(shape.bevel_normalized),
-                            float3(0.001f));
-      float bev = shape.bevel_normalized;
+      float3 sz = math::max(shape.sdf_size - float3(shape.bevel), float3(0.001f));
+      float bev = shape.bevel;
 
       float brick_half_diag = float(SDF_BRICK_SIZE) * local_vs * 0.866025f;
       brick_half_diag *= surface_margin_;
+      brick_half_diag += shape.blend_expand;
 
       int shape_active = 0;
       for (int bz = 0; bz < gr.z; bz++) {
@@ -2597,7 +2529,6 @@ class Instance : public DrawEngine {
                                                 float(SDF_BRICK_SIZE) * 0.5f) *
                                                    local_vs;
 
-            /* Evaluate SDF based on shape type. */
             float dist;
             float3 p = brick_center;
             switch (shape.sdf_type) {
@@ -2615,8 +2546,8 @@ class Instance : public DrawEngine {
                 break;
               }
               case SDF_TYPE_CONE: {
-                float cr = math::max(shape.size_normalized.x - bev, 0.001f);
-                float ch = math::max(shape.size_normalized.y - bev, 0.001f);
+                float cr = math::max(shape.sdf_size.x - bev, 0.001f);
+                float ch = math::max(shape.sdf_size.y - bev, 0.001f);
                 float2 q = float2(math::length(float2(p.x, p.y)), p.z);
                 float2 k1 = float2(0.0f, ch);
                 float2 k2 = float2(-cr, 2.0f * ch);
@@ -2636,10 +2567,9 @@ class Instance : public DrawEngine {
                 break;
               }
               case SDF_TYPE_TORUS: {
-                float major = math::max(shape.size_normalized.x - bev, 0.001f);
-                float minor = math::max(shape.size_normalized.y - bev, 0.001f);
+                float major = math::max(shape.sdf_size.x - bev, 0.001f);
+                float minor = math::max(shape.sdf_size.y - bev, 0.001f);
                 if (shape.torus_angle < ((float)M_PI * 2.0f) - 0.001f) {
-                  /* Capped torus. */
                   float half_rad = shape.torus_angle * 0.5f;
                   float sc_x = sinf(half_rad);
                   float sc_y = cosf(half_rad);
@@ -2657,13 +2587,11 @@ class Instance : public DrawEngine {
                 break;
               }
               case SDF_TYPE_NGON: {
-                /* Simple regular polygon prism (no corner/edge/taper in instanced path). */
                 float R = math::max(sz.x - bev, 0.001f);
                 int sides = shape.ngon_sides;
                 float an = M_PI / float(sides);
                 float r_apothem = R * std::cos(an);
                 float he = R * std::sin(an);
-                /* Rotate 90 degrees: swap x,y. */
                 float2 pp = float2(-p.y, p.x);
                 float bn = an * std::floor((std::atan2(pp.y, pp.x) + an) / an / 2.0f) * 2.0f;
                 float cs_x = std::cos(bn), cs_y = std::sin(bn);
@@ -2686,8 +2614,25 @@ class Instance : public DrawEngine {
             }
             dist -= bev;
 
-            if (math::abs(dist) < brick_half_diag) {
-              /* Active brick: assign global slot. */
+            bool is_active = math::abs(dist) < brick_half_diag;
+
+            /* Interior brick: activate if covered by an overlapping object's AABB. */
+            if (!is_active && dist < -brick_half_diag) {
+              for (const OverlapAABB &ovlp : shape_overlaps[shape_idx]) {
+                if (brick_center.x >= ovlp.local_min.x &&
+                    brick_center.x <= ovlp.local_max.x &&
+                    brick_center.y >= ovlp.local_min.y &&
+                    brick_center.y <= ovlp.local_max.y &&
+                    brick_center.z >= ovlp.local_min.z &&
+                    brick_center.z <= ovlp.local_max.z)
+                {
+                  is_active = true;
+                  break;
+                }
+              }
+            }
+
+            if (is_active) {
               int slot = global_slot_offset + shape_active;
               int flat_idx = bx + by * gr.x + bz * gr.x * gr.y;
               shape_indir_data_[indir_start + flat_idx] = slot;
@@ -2704,15 +2649,26 @@ class Instance : public DrawEngine {
       shape.active_brick_count = shape_active;
       global_slot_offset += shape_active;
       global_indir_offset += grid_volume;
+      shape_idx++;
     }
 
     total_shape_active_bricks_ = global_slot_offset;
+    printf("[SDF DEBUG] shape_classify_cpu: total_active_bricks=%d shapes=%d\n",
+           total_shape_active_bricks_, int(shapes_.size()));
+    for (int i = 0; i < int(shapes_.size()); i++) {
+      const ShapeInfo &s = shapes_[i];
+      printf("  shape[%d]: grid=(%d,%d,%d) vs=%.4f active=%d obj_id=%d blend_expand=%.2f\n",
+             i, s.grid_res.x, s.grid_res.y, s.grid_res.z,
+             s.local_voxel_size, s.active_brick_count, s.object_id, s.blend_expand);
+    }
   }
 
-  /** Upload the flat shape indirection SSBO. */
   void upload_shape_indirection()
   {
+    printf("[SDF DEBUG] upload_shape_indirection: indir_data=%d active_bricks=%d\n",
+           int(shape_indir_data_.size()), int(shape_active_bricks_.size()));
     if (shape_indir_data_.is_empty()) {
+      printf("[SDF DEBUG] upload_shape_indirection: EMPTY — no indirection data\n");
       return;
     }
     const int count = int(shape_indir_data_.size());
@@ -2731,18 +2687,15 @@ class Instance : public DrawEngine {
     }
   }
 
-  /** Dispatch per-shape bake for all shapes in instanced mode. */
-  /** Dispatch bake for shapes, optionally skipping clean shapes.
-   * @param dirty_only If non-null, only bake shapes whose fingerprints are in this set. */
-  void dispatch_shape_bake_all(const Set<uint64_t> *dirty_only = nullptr)
+  void dispatch_shape_bake_all(const Set<int> *dirty_only = nullptr)
   {
+    printf("[SDF DEBUG] dispatch_shape_bake_all: total_active=%d shape_bake_sh=%p bpa=%d\n",
+           total_shape_active_bricks_, shape_bake_sh_, bricks_per_axis_);
     if (total_shape_active_bricks_ <= 0 || shape_bake_sh_ == nullptr) {
+      printf("[SDF DEBUG] dispatch_shape_bake_all: EARLY EXIT (no bricks or no shader)\n");
       return;
     }
 
-    /* Upload the concatenated active bricks SSBO once for all shapes.
-     * Each shape uses a brick_offset uniform to index into its range,
-     * eliminating per-shape SSBO alloc/free overhead. */
     gpu::StorageBuf *shape_ab_ssbo = GPU_storagebuf_create_ex(shape_active_bricks_.size() *
                                                                   sizeof(ActiveBrick),
                                                               shape_active_bricks_.data(),
@@ -2751,59 +2704,65 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(shape_bake_sh_);
 
-    /* Bind active bricks SSBO (shared across all shapes). */
     int ab_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "active_bricks");
     GPU_storagebuf_bind(shape_ab_ssbo, ab_slot);
 
-    /* Bind modifier SSBO (declared in shader info, may not be accessed). */
+    if (object_ssbo_) {
+      int obj_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "objects");
+      GPU_storagebuf_bind(object_ssbo_, obj_slot);
+    }
+
     if (modifier_ssbo_) {
       int mod_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "sdf_modifiers");
       GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
     }
 
-    /* Bind compact atlas as image. */
+    if (group_ssbo_) {
+      int grp_slot = GPU_shader_get_ssbo_binding(shape_bake_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, grp_slot);
+    }
+
     GPU_texture_image_bind(compact_atlas_tx_, 0);
 
-    /* Dispatch once per shape. Shapes write to non-overlapping atlas
-     * slots, so no barrier is needed between dispatches. */
+    GPU_shader_uniform_1i(shape_bake_sh_, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1i(shape_bake_sh_, "group_count", int(groups_gpu_.size()));
+
     int cur_brick_offset = 0;
-    for (const ShapeInfo &shape : shapes_) {
+    for (int si = 0; si < int(shapes_.size()); si++) {
+      const ShapeInfo &shape = shapes_[si];
       if (shape.active_brick_count <= 0) {
         continue;
       }
 
-      bool skip = dirty_only && !dirty_only->contains(shape.fingerprint);
+      bool skip = dirty_only && !dirty_only->contains(si);
 
       if (!skip) {
-        /* Push shape-specific constants. */
-        GPU_shader_uniform_3fv(shape_bake_sh_, "shape_size", shape.size_normalized);
-        GPU_shader_uniform_1f(shape_bake_sh_, "shape_bevel", shape.bevel_normalized);
-        GPU_shader_uniform_1i(shape_bake_sh_, "shape_type", shape.sdf_type);
-        GPU_shader_uniform_1i(shape_bake_sh_, "shape_sides", shape.ngon_sides);
-        GPU_shader_uniform_1f(shape_bake_sh_, "shape_star", shape.ngon_star);
-        {
-          float half_rad = shape.torus_angle * 0.5f;
-          float sc[2] = {sinf(half_rad), cosf(half_rad)};
-          GPU_shader_uniform_2fv(shape_bake_sh_, "shape_torus_sc", sc);
-        }
+        GPU_shader_uniform_1i(shape_bake_sh_, "object_index", shape.object_id);
         GPU_shader_uniform_3fv(shape_bake_sh_, "local_origin", shape.local_origin);
         GPU_shader_uniform_1f(shape_bake_sh_, "local_voxel_size", shape.local_voxel_size);
         GPU_shader_uniform_1i(shape_bake_sh_, "bricks_per_axis", bricks_per_axis_);
         GPU_shader_uniform_1i(shape_bake_sh_, "active_brick_count", shape.active_brick_count);
         GPU_shader_uniform_1i(shape_bake_sh_, "brick_offset", cur_brick_offset);
 
-        /* 2D dispatch to avoid 65535 limit. */
+        /* local_to_world for converting voxel positions to world space. */
+        float4x4 l2w = (si < int(instances_.size())) ?
+                            instances_[si].local_to_world :
+                            float4x4::identity();
+        GPU_shader_uniform_mat4(shape_bake_sh_, "local_to_world", l2w.ptr());
+
         uint bake_x = uint(math::min(shape.active_brick_count, 65535));
         uint bake_y = uint(divide_ceil_u(shape.active_brick_count, 65535));
         GPU_shader_uniform_1i(shape_bake_sh_, "dispatch_width", int(bake_x));
+        printf("[SDF DEBUG] bake shape[%d]: obj=%d active=%d offset=%d dispatch=(%u,%u) vs=%.4f org=(%.2f,%.2f,%.2f)\n",
+               si, shape.object_id, shape.active_brick_count, cur_brick_offset,
+               bake_x, bake_y, shape.local_voxel_size,
+               shape.local_origin.x, shape.local_origin.y, shape.local_origin.z);
         GPU_compute_dispatch(shape_bake_sh_, bake_x, bake_y, 1);
       }
 
-      /* Advance brick offset regardless of skip — offsets are computed for all shapes. */
       cur_brick_offset += shape.active_brick_count;
     }
 
-    /* Single barrier after all shapes are baked (before march reads atlas). */
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
 
     GPU_texture_image_unbind(compact_atlas_tx_);
@@ -2815,11 +2774,9 @@ class Instance : public DrawEngine {
   {
     const bool incremental = incremental_bake_;
 
-    /* Create / reset brick counter SSBO. */
     BrickCounter init_counter = {};
     init_counter.count = 0;
     if (incremental) {
-      /* Incremental: new slots start after all previously allocated slots. */
       init_counter.next_slot = uint(total_allocated_slots_);
     }
     else {
@@ -2836,9 +2793,6 @@ class Instance : public DrawEngine {
       GPU_storagebuf_update(brick_counter_, &init_counter);
     }
 
-    /* Ensure active bricks SSBO is large enough.
-     * Full mode: worst case = all bricks active.
-     * Incremental: worst case = dirty region volume. */
     int max_bricks;
     if (incremental) {
       int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
@@ -2861,7 +2815,6 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(classify_sh_);
 
-    /* Bind SSBOs. */
     int obj_slot = GPU_shader_get_ssbo_binding(classify_sh_, "objects");
     GPU_storagebuf_bind(object_ssbo_, obj_slot);
 
@@ -2871,49 +2824,38 @@ class Instance : public DrawEngine {
     int ab_slot = GPU_shader_get_ssbo_binding(classify_sh_, "active_bricks");
     GPU_storagebuf_bind(active_bricks_, ab_slot);
 
-    /* Bind BVH SSBO. */
     if (bvh_ssbo_) {
       int bvh_slot = GPU_shader_get_ssbo_binding(classify_sh_, "bvh_nodes");
       GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
     }
 
-    /* Bind modifier SSBO. */
     if (modifier_ssbo_) {
       int mod_slot = GPU_shader_get_ssbo_binding(classify_sh_, "sdf_modifiers");
       GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
     }
 
-    /* Bind group SSBO. */
     if (group_ssbo_) {
       int grp_slot = GPU_shader_get_ssbo_binding(classify_sh_, "groups");
       GPU_storagebuf_bind(group_ssbo_, grp_slot);
     }
 
-    /* Bind indirection texture as image. */
     GPU_texture_image_bind(indirection_tx_, 0);
 
-    /* Push constants. */
     GPU_shader_uniform_1i(classify_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(classify_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(classify_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", grid_res_);
 
-    /* Brick half-diagonal: conservative surface test distance.
-     * The shell operation in combineCSG produces correct thin-wall distances
-     * via two-stage blend, so no extra global expansion is needed.
-     * surface_margin_ (UI "Surface Margin" %) further widens the shell. */
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
     GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(classify_sh_, "group_count", int(groups_gpu_.size()));
 
-    /* Incremental mode uniforms. */
     GPU_shader_uniform_1i(classify_sh_, "incremental_mode", incremental ? 1 : 0);
     GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_min", dirty_brick_min_);
     GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", dirty_brick_max_);
 
-    /* Dispatch: one thread per brick, local group size is 4x4x4. */
     if (incremental) {
       int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
       if (dirty_size.x > 0 && dirty_size.y > 0 && dirty_size.z > 0) {
@@ -2934,19 +2876,15 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    /* Read back brick counter after classify. */
     {
       BrickCounter readback = {};
       GPU_storagebuf_read(brick_counter_, &readback);
       active_brick_count_ = int(readback.count);
 
       if (incremental) {
-        /* In incremental mode, count = dirty active bricks (for bake dispatch).
-         * next_slot = new total allocated slots (may have grown). */
         total_allocated_slots_ = int(readback.next_slot);
       }
       else {
-        /* In full mode, count = total active bricks = total allocated slots. */
         total_allocated_slots_ = active_brick_count_;
       }
     }
@@ -2954,9 +2892,6 @@ class Instance : public DrawEngine {
 
   void dispatch_bake()
   {
-    /* Dispatch exact active brick count (read from brick_counter after classify).
-     * Previously dispatched grid_res^3 workgroups with early-exit, but the
-     * launch overhead for ~2M empty workgroups was a major bottleneck. */
     int dispatch_count = active_brick_count_;
     if (dispatch_count <= 0) {
       return;
@@ -2964,7 +2899,6 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(bake_sh_);
 
-    /* Bind SSBOs. */
     int ssbo_slot = GPU_shader_get_ssbo_binding(bake_sh_, "objects");
     GPU_storagebuf_bind(object_ssbo_, ssbo_slot);
 
@@ -2976,7 +2910,6 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
     }
 
-    /* Bind brick counter SSBO (bake shader reads count from here). */
     int counter_slot = GPU_shader_get_ssbo_binding(bake_sh_, "brick_counter");
     GPU_storagebuf_bind(brick_counter_, counter_slot);
 
@@ -3062,8 +2995,7 @@ class Instance : public DrawEngine {
       GPU_texture_bind(indirection_tx_, indir_slot);
     }
 
-    /* Bind object ID atlas for debug visualization. */
-    /* Bind instanced mode SSBOs. */
+    /* Bind per-object mode SSBOs. */
     if (shape_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "shapes");
       GPU_storagebuf_bind(shape_ssbo_, slot);
@@ -3084,6 +3016,14 @@ class Instance : public DrawEngine {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "sdf_modifiers");
       GPU_storagebuf_bind(modifier_ssbo_, slot);
     }
+    if (object_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "objects");
+      GPU_storagebuf_bind(object_ssbo_, slot);
+    }
+    if (group_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, slot);
+    }
 
     /* Push constants. */
     GPU_shader_uniform_1f(march_sh_, "voxel_size", voxel_size_);
@@ -3098,6 +3038,18 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "use_instanced", use_instanced_ ? 1 : 0);
     GPU_shader_uniform_1i(march_sh_, "instance_count", int(instances_.size()));
     GPU_shader_uniform_1i(march_sh_, "bvh_node_count", int(bvh_nodes_.size()));
+    GPU_shader_uniform_1i(march_sh_, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1i(march_sh_, "group_count", int(groups_gpu_.size()));
+
+    static int draw_dbg_count = 0;
+    if (draw_dbg_count < 5) {
+      printf("[SDF DEBUG] draw_march: use_instanced=%d inst_count=%d bvh_nodes=%d objs=%d groups=%d bpa=%d\n",
+             use_instanced_ ? 1 : 0, int(instances_.size()), int(bvh_nodes_.size()),
+             int(objects_.size()), int(groups_gpu_.size()), bricks_per_axis_);
+      printf("  atlas=%p indir=%p shape_ssbo=%p inst_ssbo=%p bvh_ssbo=%p shape_indir_ssbo=%p\n",
+             compact_atlas_tx_, indirection_tx_, shape_ssbo_, instance_ssbo_, bvh_ssbo_, shape_indir_ssbo_);
+      draw_dbg_count++;
+    }
 
     GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
     GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
@@ -3273,11 +3225,15 @@ class Instance : public DrawEngine {
 
   void rebuild_grid_batch_active()
   {
+    if (use_instanced_) {
+      rebuild_grid_batch_per_object();
+      return;
+    }
+
     if (!indirection_tx_) {
       return;
     }
 
-    /* Read back indirection texture to find active bricks. */
     int32_t *data = static_cast<int32_t *>(GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
     if (!data) {
       return;
@@ -3286,7 +3242,6 @@ class Instance : public DrawEngine {
     int3 n = grid_res_;
     float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
 
-    /* Count active bricks. */
     int total = n.x * n.y * n.z;
     int active_count = 0;
     for (int i = 0; i < total; i++) {
@@ -3300,7 +3255,6 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* 12 edges per cube, 2 vertices per edge = 24 vertices per active brick. */
     Vector<float3> positions(active_count * 24);
     int vi = 0;
 
@@ -3315,7 +3269,6 @@ class Instance : public DrawEngine {
           float3 lo = atlas_origin_ + float3(float(x), float(y), float(z)) * brick_world;
           float3 hi = lo + float3(brick_world);
 
-          /* Bottom face edges. */
           positions[vi++] = float3(lo.x, lo.y, lo.z);
           positions[vi++] = float3(hi.x, lo.y, lo.z);
           positions[vi++] = float3(hi.x, lo.y, lo.z);
@@ -3325,7 +3278,6 @@ class Instance : public DrawEngine {
           positions[vi++] = float3(lo.x, hi.y, lo.z);
           positions[vi++] = float3(lo.x, lo.y, lo.z);
 
-          /* Top face edges. */
           positions[vi++] = float3(lo.x, lo.y, hi.z);
           positions[vi++] = float3(hi.x, lo.y, hi.z);
           positions[vi++] = float3(hi.x, lo.y, hi.z);
@@ -3335,7 +3287,6 @@ class Instance : public DrawEngine {
           positions[vi++] = float3(lo.x, hi.y, hi.z);
           positions[vi++] = float3(lo.x, lo.y, hi.z);
 
-          /* Vertical edges. */
           positions[vi++] = float3(lo.x, lo.y, lo.z);
           positions[vi++] = float3(lo.x, lo.y, hi.z);
           positions[vi++] = float3(hi.x, lo.y, lo.z);
@@ -3350,6 +3301,88 @@ class Instance : public DrawEngine {
 
     MEM_freeN(data);
     grid_batch_ = create_line_batch(positions.data(), vi);
+  }
+
+  /* Per-object grid debug: show each shape's brick grid in world space. */
+  void rebuild_grid_batch_per_object()
+  {
+    if (shapes_.is_empty() || shape_indir_data_.is_empty()) {
+      return;
+    }
+
+    Vector<float3> positions;
+    positions.reserve(total_shape_active_bricks_ * 24);
+
+    for (int si = 0; si < int(shapes_.size()); si++) {
+      const ShapeInfo &shape = shapes_[si];
+      int3 gr = shape.grid_res;
+      float vs = shape.local_voxel_size;
+      float3 org = shape.local_origin;
+      float bw = float(SDF_BRICK_SIZE) * vs;
+
+      /* Find instance with matching shape to get local_to_world transform. */
+      float4x4 l2w = float4x4::identity();
+      for (int ii = 0; ii < int(instances_.size()); ii++) {
+        if (instances_[ii].shape_id == si) {
+          l2w = instances_[ii].local_to_world;
+          break;
+        }
+      }
+
+      int indir_base = shape.indir_offset;
+      int grid_vol = gr.x * gr.y * gr.z;
+
+      for (int bz = 0; bz < gr.z; bz++) {
+        for (int by = 0; by < gr.y; by++) {
+          for (int bx = 0; bx < gr.x; bx++) {
+            int flat_idx = bx + by * gr.x + bz * gr.x * gr.y;
+            if (indir_base + flat_idx >= int(shape_indir_data_.size())) {
+              continue;
+            }
+            if (shape_indir_data_[indir_base + flat_idx] < 0) {
+              continue;
+            }
+
+            /* Local-space brick bounds. */
+            float3 lo_local = org + float3(float(bx), float(by), float(bz)) * bw;
+            float3 hi_local = lo_local + float3(bw);
+
+            /* Transform 8 corners to world space. */
+            float3 c[8] = {
+                math::transform_point(l2w, float3(lo_local.x, lo_local.y, lo_local.z)),
+                math::transform_point(l2w, float3(hi_local.x, lo_local.y, lo_local.z)),
+                math::transform_point(l2w, float3(hi_local.x, hi_local.y, lo_local.z)),
+                math::transform_point(l2w, float3(lo_local.x, hi_local.y, lo_local.z)),
+                math::transform_point(l2w, float3(lo_local.x, lo_local.y, hi_local.z)),
+                math::transform_point(l2w, float3(hi_local.x, lo_local.y, hi_local.z)),
+                math::transform_point(l2w, float3(hi_local.x, hi_local.y, hi_local.z)),
+                math::transform_point(l2w, float3(lo_local.x, hi_local.y, hi_local.z)),
+            };
+
+            /* 12 edges. */
+            positions.append(c[0]); positions.append(c[1]);
+            positions.append(c[1]); positions.append(c[2]);
+            positions.append(c[2]); positions.append(c[3]);
+            positions.append(c[3]); positions.append(c[0]);
+
+            positions.append(c[4]); positions.append(c[5]);
+            positions.append(c[5]); positions.append(c[6]);
+            positions.append(c[6]); positions.append(c[7]);
+            positions.append(c[7]); positions.append(c[4]);
+
+            positions.append(c[0]); positions.append(c[4]);
+            positions.append(c[1]); positions.append(c[5]);
+            positions.append(c[2]); positions.append(c[6]);
+            positions.append(c[3]); positions.append(c[7]);
+          }
+        }
+      }
+    }
+
+    if (positions.is_empty()) {
+      return;
+    }
+    grid_batch_ = create_line_batch(positions.data(), int(positions.size()));
   }
 
   /** Emit 12 wireframe edges (24 vertices) for an axis-aligned box. */

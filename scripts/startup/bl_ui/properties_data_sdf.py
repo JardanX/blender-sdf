@@ -7,7 +7,7 @@ from bpy.types import Panel, Menu, Operator
 from bpy.props import EnumProperty, IntProperty
 
 
-# -- Pie Menus ----------------------------------------------------------------
+# Pie Menus
 
 class SDF_MT_csg_pie(Menu):
     bl_idname = "SDF_MT_csg_pie"
@@ -71,7 +71,7 @@ class SDF_OT_blend_pie_call(Operator):
         return {'FINISHED'}
 
 
-# -- Properties Panels --------------------------------------------------------
+# Properties Panels
 
 class SDFButtonsPanel:
     bl_space_type = 'PROPERTIES'
@@ -107,7 +107,6 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        # Shape type — full-width icon-only buttons
         row = layout.row(align=True)
         row.scale_y = 1.6
         row.prop(sdf, "sdf_type", expand=True, icon_only=True)
@@ -119,7 +118,7 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         layout.prop(sdf, "color")
 
 
-# -- Shape Property Panel (box-specific) --------------------------------------
+# Shape Property Panel
 
 class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
     bl_label = "Property"
@@ -220,7 +219,7 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
 
 
 
-# -- Operation Panel ----------------------------------------------------------
+# Operation Panel
 
 class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
     bl_label = "Operation"
@@ -233,7 +232,6 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        # CSG operation — full-width icon-only buttons
         layout.label(text="CSG Operation")
         row = layout.row(align=True)
         row.scale_y = 1.4
@@ -241,13 +239,11 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
 
         layout.separator()
 
-        # Blend type — full-width icon-only buttons
         layout.label(text="Blend Type")
         row = layout.row(align=True)
         row.scale_y = 1.4
         row.prop(sdf, "blend_type", expand=True, icon_only=True)
 
-        # Blend amount — only show when not linear
         if sdf.blend_type != 'LINEAR':
             layout.label(text="Blend")
             layout.prop(sdf, "blend", text="")
@@ -257,7 +253,7 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
             layout.prop(sdf, "shell_distance", text="")
 
 
-# -- Modifier Operators -------------------------------------------------------
+# Modifier Operators
 
 class SDF_OT_modifier_add(Operator):
     """Add an SDF modifier"""
@@ -336,7 +332,7 @@ class SDF_OT_modifier_move(Operator):
         return {'FINISHED'}
 
 
-# -- Modifier Panel -----------------------------------------------------------
+# Modifier Panel
 
 class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
     bl_label = "Modifiers"
@@ -345,7 +341,6 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        # Add modifier dropdown
         row = layout.row()
         row.menu("SDF_MT_modifier_add", text="Add Modifier", icon='ADD')
 
@@ -354,7 +349,6 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
 
         for idx, mod in enumerate(sdf.modifiers):
             box = layout.box()
-            # Header row: icon, name, enabled, move up/down, remove
             row = box.row(align=True)
             row.prop(mod, "show_viewport", text="", icon='RESTRICT_VIEW_OFF' if mod.show_viewport else 'RESTRICT_VIEW_ON')
             row.prop(mod, "name", text="")
@@ -370,7 +364,6 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
             op = row.operator("sdf.modifier_remove", text="", icon='X')
             op.index = idx
 
-            # Type-specific parameters
             if not mod.show_viewport:
                 continue
 
@@ -386,7 +379,6 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 row.prop(mod, "use_mirror_z", toggle=True)
                 col.prop(mod, "offset_distance")
                 
-                # CSG Panel for Mirror
                 box_csg = box.box()
                 box_csg.label(text="Mirror Blending:")
                 
@@ -420,7 +412,6 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 elif mod.array_type == 'RADIAL':
                     col.prop(mod, "array_radius")
                 
-                # CSG Panel for Array
                 box_csg = box.box()
                 box_csg.label(text="Array Blending:")
                 
@@ -451,8 +442,6 @@ class SDF_MT_modifier_add(Menu):
         layout.operator("sdf.modifier_add", text="Bevel", icon='MOD_BEVEL').type = 'BEVEL'
         layout.operator("sdf.modifier_add", text="Array", icon='MOD_ARRAY').type = 'ARRAY'
 
-
-# -- Registration -------------------------------------------------------------
 
 classes = (
     SDF_MT_csg_pie,

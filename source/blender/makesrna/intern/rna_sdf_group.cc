@@ -37,7 +37,6 @@ static void rna_SDFGroup_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA 
 {
   DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
 
-  /* Tag all member objects so the draw engine picks up group changes immediately. */
   SDFGroup *group = (SDFGroup *)ptr->owner_id;
   LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
     if (member->object) {
@@ -112,7 +111,6 @@ static bool rna_SDFGroupMember_object_poll(PointerRNA * /*ptr*/, PointerRNA valu
 
 #else
 
-/* Reuse enum items from rna_sdf.cc via extern. */
 extern const EnumPropertyItem rna_enum_sdf_type_items[];
 
 static const EnumPropertyItem rna_enum_sdf_group_blend_type_items[] = {

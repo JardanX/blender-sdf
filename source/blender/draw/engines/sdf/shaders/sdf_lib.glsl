@@ -1352,3 +1352,4 @@ float3 trilinearGradient(float s[8], float3 p)
 }
 
 /** \} */
+

@@ -25,6 +25,7 @@ using SDFRuntimeHandle = blender::bke::SDFRuntime;
 typedef struct SDFRuntimeHandle SDFRuntimeHandle;
 #endif
 
+/* Primitive types */
 typedef enum eSDFType {
   SDF_TYPE_BOX = 0,
   SDF_TYPE_SPHERE = 1,
@@ -35,7 +36,7 @@ typedef enum eSDFType {
   SDF_TYPE_NGON = 6,
 } eSDFType;
 
-/** Box corner/edge blend mode. */
+/* Box corner/edge blend mode */
 typedef enum eSDFBoxMode {
   SDF_BOX_MODE_SMOOTH = 0,
   SDF_BOX_MODE_CHAMFER = 1,
@@ -57,7 +58,7 @@ typedef enum eSDFCSGOperation {
   SDF_CSG_AVOID = 5,
 } eSDFCSGOperation;
 
-/** SDF modifier types. */
+/* Modifier types */
 typedef enum eSDFModifierType {
   SDF_MOD_MIRROR = 0,
   SDF_MOD_TWIST = 1,
@@ -70,45 +71,37 @@ typedef enum eSDFModifierType {
   SDF_MOD_ARRAY = 8,
 } eSDFModifierType;
 
-/** Mirror axis flags. */
+/* Mirror axis flags */
 enum {
   SDF_MOD_MIRROR_X = (1 << 0),
   SDF_MOD_MIRROR_Y = (1 << 1),
   SDF_MOD_MIRROR_Z = (1 << 2),
 };
 
-/** Array modifier types. */
+/* Array modifier types */
 enum {
   SDF_MOD_ARRAY_LINEAR = 0,
   SDF_MOD_ARRAY_RADIAL = 1,
 };
 
-/** Single SDF modifier in the stack. */
 typedef struct SDFModifier {
   struct SDFModifier *next, *prev;
 
-  /** Modifier type (eSDFModifierType). */
-  int type;
-  /** Modifier-specific flags (e.g., mirror axes, array type). */
+  int type; /* eSDFModifierType */
   int flag;
 
-  /** Generic parameters — meaning depends on type:
-   *  Mirror:   params[0] = offset distance, params[1] = blend
-   *  Twist:    params[0] = strength (radians/unit)
-   *  Bend:     params[0] = strength, params[1] = axis (0=X,1=Y,2=Z)
-   *  Elongate: params[0..2] = elongation per axis
-   *  Hollow:   params[0] = wall thickness
-   *  Round:    params[0] = radius
-   *  Onion:    params[0] = layer thickness
-   *  Array:    params[0] = count, params[1..3] = offset, params[4] = blend (linear)
-   *            params[1] = radius, params[4] = blend (radial)
-   */
+  /* Per-type params layout:
+   * Mirror:   [0]=offset, [4]=blend
+   * Twist:    [0]=strength
+   * Bend:     [0]=strength, [1]=axis
+   * Elongate: [0..2]=per-axis stretch
+   * Hollow:   [0]=thickness
+   * Round:    [0]=radius
+   * Onion:    [0]=thickness
+   * Array:    [0]=count, [1..3]=offset/radius, [4]=blend */
   float params[8];
 
-  /** Display name. */
   char name[64];
-
-  /** Whether this modifier is enabled. */
   short show_viewport;
   char _pad[6];
 } SDFModifier;
@@ -116,86 +109,61 @@ typedef struct SDFModifier {
 typedef struct SDF {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(SDF)
-  /** See #ID_Type comment for why this is here. */
   static constexpr ID_Type id_type = ID_SF;
 #endif
 
   ID id;
-  /** Animation data (must be immediately after id for utilities to use it). */
-  struct AnimData *adt;
+  struct AnimData *adt; /* Must be immediately after id. */
 
-  /** SDF primitive type. */
-  int sdf_type;
+  int sdf_type; /* eSDFType */
   char _pad0[4];
 
-  /** Size in each axis. */
   float size[3];
-  /** Bevel radius. */
   float bevel;
-
-  /** Display color (RGBA). */
   float color[4];
 
-  /** Blend amount for CSG operations. */
+  /* CSG */
   float blend;
-  /** Blend type (eSDFBlendType). */
-  int blend_type;
-  /** CSG operation (eSDFCSGOperation). */
-  int csg_operation;
-  /** Shell/extrusion offset distance (used when csg_operation == SDF_CSG_SHELL). */
+  int blend_type;    /* eSDFBlendType */
+  int csg_operation; /* eSDFCSGOperation */
   float shell_distance;
 
-  /** Box-specific shape properties. */
-  /** Per-corner bevel radii (normalized 0–1, scaled by min(size.xy)). */
-  float box_corners[4];
-  /** Top/bottom edge chamfer (normalized 0–1). */
+  /* Box properties */
+  float box_corners[4]; /* Per-corner bevel (normalized 0–1) */
   float box_edge_top;
   float box_edge_bottom;
-  /** Taper factor (-1 to 1). */
   float box_taper;
-  /** Corner blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
-  int box_corner_mode;
-  /** Edge blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
-  int box_edge_mode;
+  int box_corner_mode; /* eSDFBoxMode */
+  int box_edge_mode;   /* eSDFBoxMode */
 
-  /** N-Gon-specific shape properties. */
-  /** Number of polygon sides (3–32). */
+  /* N-Gon properties */
   int ngon_sides;
-  /** Uniform corner bevel (normalized 0–1, Minkowski round). */
   float ngon_corner;
-  /** Top/bottom edge chamfer (normalized 0–1). */
   float ngon_edge_top;
   float ngon_edge_bottom;
-  /** Taper factor (-1 to 1). */
   float ngon_taper;
-  /** Edge blend mode (eSDFBoxMode: 0=smooth, 1=chamfer). */
-  int ngon_edge_mode;
-  /** N-Gon star factor (0 = regular polygon, 1 = maximum star). */
+  int ngon_edge_mode; /* eSDFBoxMode */
   float ngon_star;
 
-  /** Torus angle aperture (radians, 0-2*PI; 2*PI = full torus). */
-  float torus_angle;
+  /* Torus */
+  float torus_angle; /* Radians, 2*PI = full torus */
   char _pad4[4];
 
-  /** Back-pointer to owning SDFGroup (nullptr if ungrouped). */
+  /* Group */
   struct SDFGroup *sdf_group;
-  /** Order within group (mirrors SDFGroupMember.order). */
   int group_order;
   char _pad5[4];
 
-  /** Ordered modifier stack. */
+  /* Modifiers */
   ListBase modifiers; /* SDFModifier */
-  /** Number of modifiers. */
   int totmodifier;
   char _pad3[4];
 
-  /** Material slots. */
+  /* Materials */
   struct Material **mat;
-  /** Number of material slots. */
   short totcol;
   char _pad2[6];
 
-  /** Runtime data (keep last). */
-  SDFRuntimeHandle *runtime;
+  SDFRuntimeHandle *runtime; /* Keep last. */
 } SDF;
 

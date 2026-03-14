@@ -2,11 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/**
- * SDF bake compute shader (sparse brick version).
- * Each workgroup handles one brick. Local threads cover the 12x12 XY slice,
- * looping over Z to fill 12x12x12 voxels (8 inner + 2 overlap each side).
- */
+/* SDF bake: one workgroup per brick, 12x12 threads cover XY, loop Z. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -18,9 +14,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 #define BRICK_STORAGE 12
 #define MAX_CANDIDATES 128
 
-/* Compact per-object data cached in shared memory.
- * Only the fields needed for SDF evaluation — avoids re-reading the
- * full SDFObjectGPU struct from SSBO for every voxel. */
+/* Per-object data cached in shared memory. */
 struct SharedObj {
   float4x4 inverse_matrix;
   float4 position;
@@ -43,7 +37,6 @@ struct SharedObj {
   int4 box_modes;
 };
 
-/** Evaluate the actual SDF primitive (reads from shared memory cache). */
 float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
 {
   SDFPrimitiveData prim_data;
@@ -59,18 +52,13 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-/* Shared candidate list and object cache: BVH traversal done once per
- * workgroup by thread 0, object data loaded cooperatively by all threads.
- * Eliminates redundant SSBO reads across 144 threads x 12 Z iterations. */
+/* Shared candidate list and object cache (BVH traversal by thread 0). */
 shared int shared_candidates[MAX_CANDIDATES];
 shared int shared_num_candidates;
 shared SharedObj shared_objs[MAX_CANDIDATES];
 
 void main()
 {
-  /* Active-brick-only dispatch: one workgroup per active brick.
-   * 2D dispatch to avoid GL's 65535 workgroup limit per axis.
-   * Read active count from SSBO (avoids CPU readback stall between classify and bake). */
   int brick_idx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * dispatch_width;
   if (brick_idx >= int(brick_counter.count)) {
     return;
@@ -80,15 +68,11 @@ void main()
   int3 brick = brick_data.xyz;
   int slot = brick_data.w;
 
-  /* Compute slot origin in compact atlas. */
   int bpa = bricks_per_axis;
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
-  /* Per-brick AABB for object culling (includes 2-voxel overlap border).
-   * Expand only by brick_half_diag (same as classify shader).
-   * Per-object AABBs already include their own blend + shell_distance padding,
-   * so no global expansion is needed. */
+  /* Per-brick AABB for culling (object AABBs already include blend padding). */
   float bhd = float(BRICK_SIZE) * voxel_size * 0.866025f;
   float candidate_expand = bhd;
   float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
@@ -96,9 +80,7 @@ void main()
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
                       float3(candidate_expand);
 
-  /* Elect thread 0 to collect candidates for the entire workgroup.
-   * All threads in the brick share the same AABB, so the candidate list
-   * is identical — no need for each thread to traverse independently. */
+  /* Thread 0 collects candidates for the workgroup. */
   if (gl_LocalInvocationIndex == 0u) {
     shared_num_candidates = 0;
 
@@ -145,7 +127,6 @@ void main()
       }
     }
     else {
-      /* Fallback: linear scan collects all AABB-overlapping objects. */
       for (int i = 0; i < object_count; i++) {
         SDFObjectGPU obj = objects[i];
 
@@ -159,15 +140,11 @@ void main()
           shared_candidates[shared_num_candidates++] = i;
         }
       }
-      /* Already in index order, no sort needed. */
     }
   }
   barrier();
 
-  /* Cooperatively load candidate object data into shared memory.
-   * Each thread loads one object; if num_candidates > 144 (workgroup size),
-   * threads loop. This replaces 144 * 12 = 1728 redundant SSBO reads
-   * per brick with at most MAX_CANDIDATES reads total. */
+  /* Cooperatively load candidate objects into shared memory. */
   int num_candidates = shared_num_candidates;
   uint tid = gl_LocalInvocationIndex;
   for (int c = int(tid); c < num_candidates; c += 144) {
@@ -195,37 +172,24 @@ void main()
   }
   barrier();
 
-  /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
 
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
 
-    /* World-space position: brick_coord * 8 + (local - 2), times voxel_size.
-     * The -2 accounts for the 2-voxel overlap border.
-     * Values are stored at voxel CORNERS to match the DDA trilinear interpolation. */
+    /* World position: -2 offset for overlap border, stored at voxel corners. */
     float3 world_pos = atlas_origin +
                        float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
-    /* Group-aware sequential evaluation.
-     * Objects are sorted by group, then by order within group.
-     * Each group evaluates its members sequentially (first object = base,
-     * subsequent objects apply their per-object CSG). Groups then combine
-     * with each other via group-level CSG operations.
-     *
-     * Ungrouped objects (group_id == -1) fall back to the legacy two-pass
-     * approach for backward compatibility during migration. */
 
-    /* Evaluate grouped objects: iterate groups, accumulate within each,
-     * then combine group results with the scene. */
+    /* Group-aware sequential evaluation. */
     for (int g = 0; g < group_count; g++) {
       SDFGroupGPU grp = groups[g];
       float grp_dist = 1e10f;
       float3 grp_color = float3(0.0f);
 
-      /* Find candidates belonging to this group and evaluate sequentially. */
       for (int c = 0; c < num_candidates; c++) {
         SharedObj sobj = shared_objs[c];
         if (sobj.group_id != g) {
@@ -236,19 +200,16 @@ void main()
         float dist = evalSDFPrimitiveSh(local_pos, sobj);
 
         if (sobj.group_first == 1) {
-          /* First object in group is always the base shape — CSG op ignored. */
           grp_dist = dist;
           grp_color = sobj.color.rgb;
         }
         else {
-          /* Apply this object's CSG to running group accumulator. */
           float k = sobj.blend;
           int bt = sobj.blend_type;
           int op = sobj.csg_operation;
 
           float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
 
-          /* Color blending via unified weight function. */
           float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
           grp_color = mix(grp_color, sobj.color.rgb, h);
 
@@ -257,13 +218,11 @@ void main()
       }
 
       if (grp_dist >= 1e10f) {
-        continue; /* No members hit this brick. */
+        continue;
       }
 
-      /* Apply global tint multiplier to group color. */
       grp_color *= grp.color.rgb;
 
-      /* Combine group result with scene using group-level CSG. */
       if (g == 0) {
         acc_dist = grp_dist;
         acc_color = grp_color;
@@ -272,7 +231,6 @@ void main()
         float new_dist = combineCSG(
             acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
 
-        /* Inter-group color blending via unified weight function. */
         float h = csgColorWeight(
             acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
         acc_color = mix(acc_color, grp_color, h);
@@ -281,9 +239,7 @@ void main()
       }
     }
 
-    /* Evaluate ungrouped objects (group_id == -1) sequentially.
-     * First ungrouped object is the base shape (CSG op ignored),
-     * subsequent objects apply their CSG in order (top-to-bottom). */
+    /* Ungrouped objects. */
     for (int c = 0; c < num_candidates; c++) {
       SharedObj sobj = shared_objs[c];
       if (sobj.group_id != -1) {
@@ -300,7 +256,6 @@ void main()
 
         float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
 
-        /* Color blending via unified weight function. */
         float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
         acc_color = mix(acc_color, sobj.color.rgb, h);
 

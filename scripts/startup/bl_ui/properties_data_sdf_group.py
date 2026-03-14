@@ -13,8 +13,6 @@ class SDFGroupButtonsPanel:
 
     @classmethod
     def poll(cls, context):
-        # Only show group panels when directly viewing a group (e.g. pinned),
-        # not when an SDF merely references a group via back-pointer.
         if context.sdf is not None:
             return False
         return getattr(context, 'sdf_group', None) is not None
@@ -43,7 +41,6 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
         layout = self.layout
         grp = context.sdf_group
 
-        # CSG operation — full-width icon-only buttons
         layout.label(text="CSG Operation")
         row = layout.row(align=True)
         row.scale_y = 1.4
@@ -51,13 +48,11 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
 
         layout.separator()
 
-        # Blend type — full-width icon-only buttons
         layout.label(text="Blend Type")
         row = layout.row(align=True)
         row.scale_y = 1.4
         row.prop(grp, "blend_type", expand=True, icon_only=True)
 
-        # Blend amount — only show when not linear
         if grp.blend_type != 'LINEAR':
             layout.label(text="Blend")
             layout.prop(grp, "blend", text="")
@@ -112,8 +107,6 @@ class DATA_PT_sdf_group_display(SDFGroupButtonsPanel, Panel):
         grp = context.sdf_group
         layout.prop(grp, "color")
 
-
-# -- Registration -------------------------------------------------------------
 
 classes = (
     DATA_PT_context_sdf_group,

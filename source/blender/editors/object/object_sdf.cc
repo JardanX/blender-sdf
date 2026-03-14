@@ -82,9 +82,6 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
     SDF *sdf_data = static_cast<SDF *>(ob->data);
     sdf_data->sdf_type = type;
 
-    /* Set shape-appropriate default sizes.
-     * Capsule: radius 0.5, half-height 1.0 (stands up along Y).
-     * Torus:   major 0.8, minor 0.25 (flat ring in XZ plane). */
     switch (type) {
       case SDF_TYPE_CAPSULE:
         sdf_data->size[0] = 0.5f;
@@ -110,7 +107,6 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         break;
     }
 
-    /* Auto-group: prefer active object's group, fall back to last group. */
     Main *bmain = CTX_data_main(C);
     SDFGroup *group = nullptr;
     Object *active = CTX_data_active_object(C);
@@ -135,16 +131,11 @@ static wmOperatorStatus object_sdf_add_exec(bContext *C, wmOperator *op)
 
 void OBJECT_OT_sdf_add(wmOperatorType *ot)
 {
-  /* identifiers */
   ot->name = "Add SDF";
   ot->description = "Add an SDF object to the scene";
   ot->idname = "OBJECT_OT_sdf_add";
-
-  /* API callbacks */
   ot->exec = object_sdf_add_exec;
   ot->poll = ED_operator_objectmode;
-
-  /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   add_generic_props(ot, false);
@@ -157,18 +148,16 @@ void OBJECT_OT_sdf_add(wmOperatorType *ot)
                "SDF primitive type");
 }
 
-/* ---- SDF Group Operators ---- */
+/* SDF Group Operators */
 
 static wmOperatorStatus object_sdf_group_add_exec(bContext *C, wmOperator * /*op*/)
 {
   Main *bmain = CTX_data_main(C);
   SDFGroup *group = BKE_sdf_group_add(bmain, "SDF Group");
 
-  /* Assign selected SDF objects to the new group. */
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
       SDF *sdf = static_cast<SDF *>(ob->data);
-      /* Remove from previous group first. */
       if (sdf->sdf_group) {
         SDFGroup *old_group = sdf->sdf_group;
         LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &old_group->members) {
@@ -214,7 +203,6 @@ static wmOperatorStatus object_sdf_group_assign_exec(bContext *C, wmOperator *op
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
       SDF *sdf = static_cast<SDF *>(ob->data);
-      /* Remove from previous group. */
       if (sdf->sdf_group && sdf->sdf_group != target) {
         SDFGroup *old_group = sdf->sdf_group;
         LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &old_group->members) {
@@ -224,7 +212,6 @@ static wmOperatorStatus object_sdf_group_assign_exec(bContext *C, wmOperator *op
           }
         }
       }
-      /* Add to target if not already there. */
       if (sdf->sdf_group != target) {
         BKE_sdf_group_member_add(target, ob);
       }
@@ -252,7 +239,7 @@ void OBJECT_OT_sdf_group_assign(wmOperatorType *ot)
   RNA_def_int(ot->srna, "group_index", 0, 0, INT_MAX, "Group Index", "Index of target group", 0, 100);
 }
 
-/* ---- SDF CSG / Blend Cycle Operators (for outliner buttons) ---- */
+/* SDF CSG / Blend Cycle Operators */
 
 static wmOperatorStatus object_sdf_set_csg_exec(bContext *C, wmOperator *op)
 {
@@ -316,19 +303,11 @@ void OBJECT_OT_sdf_set_blend(wmOperatorType *ot)
   RNA_def_int(ot->srna, "blend_type", 0, 0, 10, "Blend Type", "", 0, 10);
 }
 
-/* ---- SDF Group Resolution Helper ---- */
-
-/**
- * Resolve SDFGroup from operator properties. Checks (in order):
- * 1. "group_name" string property (set by outliner buttons)
- * 2. Pinned SDFGroup in Properties editor
- * 3. Active object's sdf_group back-pointer
- */
+/* Resolve SDFGroup: operator prop -> pinned -> active object */
 static SDFGroup *sdf_group_from_operator(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
 
-  /* 1. Explicit group name (from outliner buttons). */
   char group_name[MAX_ID_NAME - 2];
   RNA_string_get(op->ptr, "group_name", group_name);
   if (group_name[0] != '\0') {
@@ -338,13 +317,11 @@ static SDFGroup *sdf_group_from_operator(bContext *C, wmOperator *op)
     }
   }
 
-  /* 2. Pinned SDFGroup in Properties editor. */
   SpaceProperties *sbuts = CTX_wm_space_properties(C);
   if (sbuts && sbuts->pinid && GS(sbuts->pinid->name) == ID_SG) {
     return (SDFGroup *)sbuts->pinid;
   }
 
-  /* 3. Active object's group. */
   Object *ob = CTX_data_active_object(C);
   if (ob && ob->type == OB_SDF && ob->data) {
     return static_cast<SDF *>(ob->data)->sdf_group;
@@ -431,7 +408,7 @@ void OBJECT_OT_sdf_group_reorder(wmOperatorType *ot)
   RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group");
 }
 
-/* ---- Move to SDF Group ---- */
+/* Move to SDF Group */
 
 static wmOperatorStatus move_to_sdf_group_exec(bContext *C, wmOperator *op)
 {
@@ -474,7 +451,6 @@ static wmOperatorStatus move_to_sdf_group_exec(bContext *C, wmOperator *op)
           }
         }
       }
-      /* Add to target if not already there. */
       if (sdf->sdf_group != target) {
         BKE_sdf_group_member_add(target, ob);
         moved_count++;
@@ -504,11 +480,9 @@ static wmOperatorStatus move_to_sdf_group_invoke(bContext *C,
                                                   const wmEvent * /*event*/)
 {
   if (!RNA_boolean_get(op->ptr, "is_new")) {
-    /* group_name is already set from menu, just execute. */
     return move_to_sdf_group_exec(C, op);
   }
 
-  /* is_new: show name dialog. */
   PropertyRNA *prop = RNA_struct_find_property(op->ptr, "new_group_name");
   if (!RNA_property_is_set(op->ptr, prop)) {
     RNA_property_string_set(op->ptr, prop, "SDF Group");
@@ -554,7 +528,7 @@ void OBJECT_OT_move_to_sdf_group(wmOperatorType *ot)
   ot->prop = prop;
 }
 
-/* ---- SDF Group Reorder (groups relative to each other) ---- */
+/* SDF Group Reorder */
 
 static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOperator *op)
 {
@@ -569,9 +543,7 @@ static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOpera
   }
   SDFGroup *group = (SDFGroup *)id;
 
-  /* Swap with neighbor in the Main listbase. */
   if (direction == -1) {
-    /* Move up: swap with previous. */
     SDFGroup *prev = (SDFGroup *)group->id.prev;
     if (prev) {
       BLI_remlink(&bmain->sdf_groups, group);
@@ -579,7 +551,6 @@ static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOpera
     }
   }
   else if (direction == 1) {
-    /* Move down: swap with next. */
     SDFGroup *next = (SDFGroup *)group->id.next;
     if (next) {
       BLI_remlink(&bmain->sdf_groups, group);
@@ -587,7 +558,6 @@ static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOpera
     }
   }
 
-  /* Reindex group_order for all groups. */
   int i = 0;
   LISTBASE_FOREACH (SDFGroup *, g, &bmain->sdf_groups) {
     g->group_order = i++;

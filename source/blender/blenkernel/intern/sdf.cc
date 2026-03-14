@@ -57,9 +57,6 @@ static void sdf_free_data(ID *id)
 {
   SDF *sdf = (SDF *)id;
 
-  /* Clear group back-reference so the group's user count is properly
-   * decremented.  Without this, orphaned SDF data blocks keep the group
-   * alive with a stale user, preventing it from being purged. */
   if (sdf->sdf_group) {
     id_us_min(&sdf->sdf_group->id);
     sdf->sdf_group = nullptr;
@@ -86,11 +83,7 @@ static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
 
   BLO_write_id_struct(writer, SDF, id_address, &sdf->id);
   BKE_id_blend_write(writer, &sdf->id);
-
-  /* Direct data */
   BLO_write_pointer_array(writer, sdf->totcol, sdf->mat);
-
-  /* Modifier stack */
   BLO_write_struct_list(writer, SDFModifier, &sdf->modifiers);
 }
 
@@ -98,10 +91,7 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
 {
   SDF *sdf = (SDF *)id;
 
-  /* Materials */
   BLO_read_pointer_array(reader, sdf->totcol, (void **)&sdf->mat);
-
-  /* Modifier stack */
   BLO_read_struct_list(reader, SDFModifier, &sdf->modifiers);
 
   sdf->runtime = new blender::bke::SDFRuntime();
@@ -144,10 +134,7 @@ SDF *BKE_sdf_add(Main *bmain, const char *name)
   return sdf;
 }
 
-void BKE_sdf_data_update(Depsgraph * /*depsgraph*/, Scene * /*scene*/, Object * /*ob*/)
-{
-  /* No-op for now — rendering is handled externally. */
-}
+void BKE_sdf_data_update(Depsgraph * /*depsgraph*/, Scene * /*scene*/, Object * /*ob*/) {}
 
 static const char *sdf_modifier_type_name(int type)
 {
@@ -181,18 +168,17 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
   mod->type = type;
   mod->show_viewport = 1;
 
-  /* Default parameters per type. */
   switch (type) {
     case SDF_MOD_MIRROR:
       mod->flag = SDF_MOD_MIRROR_X;
-      mod->params[0] = 0.0f; /* Offset distance */
+      mod->params[0] = 0.0f;
       break;
     case SDF_MOD_TWIST:
       mod->params[0] = 1.0f;
       break;
     case SDF_MOD_BEND:
       mod->params[0] = 1.0f;
-      mod->params[1] = 2.0f; /* Z axis */
+      mod->params[1] = 2.0f;
       break;
     case SDF_MOD_ELONGATE:
       mod->params[0] = 0.5f;
@@ -212,11 +198,11 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
       mod->params[0] = 0.1f;
       break;
     case SDF_MOD_ARRAY:
-      mod->flag = SDF_MOD_ARRAY_LINEAR; /* Default to linear array */
-      mod->params[0] = 3.0f; /* Count */
-      mod->params[1] = 1.0f; /* Offset X / Radius */
-      mod->params[2] = 0.0f; /* Offset Y */
-      mod->params[3] = 0.0f; /* Offset Z */
+      mod->flag = SDF_MOD_ARRAY_LINEAR;
+      mod->params[0] = 3.0f;
+      mod->params[1] = 1.0f;
+      mod->params[2] = 0.0f;
+      mod->params[3] = 0.0f;
       break;
     default:
       break;
@@ -238,7 +224,6 @@ void BKE_sdf_modifier_remove(SDF *sdf, SDFModifier *mod)
 void BKE_sdf_modifier_move(SDF *sdf, SDFModifier *mod, int direction)
 {
   if (direction == -1) {
-    /* Move up. */
     SDFModifier *prev = mod->prev;
     if (prev) {
       BLI_remlink(&sdf->modifiers, mod);
@@ -246,7 +231,6 @@ void BKE_sdf_modifier_move(SDF *sdf, SDFModifier *mod, int direction)
     }
   }
   else if (direction == 1) {
-    /* Move down. */
     SDFModifier *next = mod->next;
     if (next) {
       BLI_remlink(&sdf->modifiers, mod);

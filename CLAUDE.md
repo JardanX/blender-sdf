@@ -146,6 +146,7 @@ These are the exact registration points that caused crashes or broken functional
 
 ## Conventions
 
+- **Minimal comments only** — Comments must be short section titles (a few words max) describing *what* a code block does, not *how*. No verbose explanations, no redundant restating of code logic, no decorative comment blocks. Omit comments entirely when the code is self-explanatory. When modifying existing code, do not add comments unless the logic is genuinely non-obvious. This applies to all languages (C/C++, Python, GLSL).
 - **Removed features are commented, not deleted**, with `/* MATHOPS: Removed */` markers for easy grep
 - **Metaball DNA kept as tombstones** — `OB_MBALL=5` and `ID_MB` remain defined but deprecated for .blend compat
 - **`SDF_CHANGES.md` must be updated** after every significant change to SDF-related code
