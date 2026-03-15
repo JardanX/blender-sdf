@@ -96,34 +96,6 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Shape Bake Compute Shader (per-shape local-space bake)
- * \{ */
-
-GPU_SHADER_CREATE_INFO(sdf_shape_bake)
-DO_STATIC_COMPILATION()
-LOCAL_GROUP_SIZE(12, 12, 1)
-STORAGE_BUF(0, read, ActiveBrick, active_bricks[])
-STORAGE_BUF(1, read, SDFObjectGPU, objects[])
-STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
-STORAGE_BUF(5, read, SDFGroupGPU, groups[])
-IMAGE(0, SFLOAT_16_16_16_16, write, image3D, compact_atlas)
-PUSH_CONSTANT(int, object_index)
-PUSH_CONSTANT(float3, local_origin)
-PUSH_CONSTANT(float, local_voxel_size)
-PUSH_CONSTANT(int, bricks_per_axis)
-PUSH_CONSTANT(int, active_brick_count)
-PUSH_CONSTANT(int, brick_offset)
-PUSH_CONSTANT(int, dispatch_width)
-PUSH_CONSTANT(int, object_count)
-PUSH_CONSTANT(int, group_count)
-PUSH_CONSTANT(float4x4, local_to_world)
-TYPEDEF_SOURCE("sdf_shader_shared.hh")
-COMPUTE_SOURCE("sdf_shape_bake_comp.glsl")
-GPU_SHADER_CREATE_END()
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name SDF Ray-March Fragment Shader
  * \{ */
 
