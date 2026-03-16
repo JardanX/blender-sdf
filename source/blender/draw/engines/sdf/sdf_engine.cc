@@ -184,6 +184,7 @@ class Instance : public DrawEngine {
     SH_BAKE,
     SH_MARCH,
     SH_GRID_BLEND,
+    SH_GROUP_BLEND,
     SH_FXAA,
     SH_COUNT,
   };
@@ -194,6 +195,7 @@ class Instance : public DrawEngine {
       "sdf_bake",
       "sdf_march",
       "sdf_grid_blend",
+      "sdf_group_blend",
       "sdf_fxaa",
   };
 
@@ -204,6 +206,7 @@ class Instance : public DrawEngine {
   gpu::Shader *&bake_sh_ = shaders_[SH_BAKE];
   gpu::Shader *&march_sh_ = shaders_[SH_MARCH];
   gpu::Shader *&grid_blend_sh_ = shaders_[SH_GRID_BLEND];
+  gpu::Shader *&group_blend_sh_ = shaders_[SH_GROUP_BLEND];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
 
   /** Async shader compilation. */
@@ -228,6 +231,24 @@ class Instance : public DrawEngine {
   Vector<SDFGroupGPU> groups_gpu_;
   gpu::StorageBuf *group_ssbo_ = nullptr;
   int group_ssbo_count_ = 0;
+
+  /** Per-group sparse atlas state for hierarchical baking. */
+  struct GroupAtlasState {
+    gpu::Texture *indirection_tx = nullptr;
+    gpu::Texture *compact_atlas_tx = nullptr;
+    gpu::StorageBuf *brick_counter = nullptr;
+    gpu::StorageBuf *active_bricks = nullptr;
+    gpu::StorageBuf *object_ssbo = nullptr;
+    int active_bricks_capacity = 0;
+    int3 grid_offset = int3(0);
+    int3 grid_res = int3(0);
+    int bricks_per_axis = 1;
+    int active_brick_count = 0;
+    int atlas_capacity = 0;
+    float3 group_origin = float3(0);
+    float voxel_size = 0.0f;
+  };
+  Vector<GroupAtlasState> group_atlas_states_;
 
   /** BVH for object AABB culling on GPU. */
   Vector<BVHNodeGPU> bvh_nodes_;
@@ -1438,7 +1459,19 @@ class Instance : public DrawEngine {
           perf_begin_pass(PERF_PASS_BAKE);
         }
         if (!objects_.is_empty()) {
-          dispatch_bake();
+          bool has_groups = !groups_gpu_.is_empty() && group_blend_sh_ != nullptr;
+
+          if (has_groups) {
+            /* Per-group hierarchical bake then blend into main atlas. */
+            bake_per_group();
+
+            /* Ungrouped objects bake reading main atlas as starting point. */
+            dispatch_bake(/*skip_grouped_flag=*/1);
+          }
+          else {
+            /* No groups: original single-pass bake. */
+            dispatch_bake();
+          }
 
           if (active_brick_count_ > atlas_capacity_) {
             atlas_capacity_ = active_brick_count_ + active_brick_count_ / 2;
@@ -1449,7 +1482,13 @@ class Instance : public DrawEngine {
             bricks_per_axis_ = new_bpa;
             ensure_compact_atlas();
             clear_compact_atlas();
-            dispatch_bake();
+            if (has_groups) {
+              bake_per_group();
+              dispatch_bake(/*skip_grouped_flag=*/1);
+            }
+            else {
+              dispatch_bake();
+            }
           }
           prev_active_brick_count_ = active_brick_count_;
         }
@@ -1584,7 +1623,7 @@ class Instance : public DrawEngine {
 
     int new_res = int(shading.sdf_resolution);
     if (new_res == 0) {
-      new_res = 128;
+      new_res = 64;
     }
     new_res = math::clamp(new_res, 32, 128);
 
@@ -2295,7 +2334,7 @@ class Instance : public DrawEngine {
     }
   }
 
-  void dispatch_bake()
+  void dispatch_bake(int skip_grouped_flag = 0)
   {
     int dispatch_count = active_brick_count_;
     if (dispatch_count <= 0) {
@@ -2347,6 +2386,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1i(
         bake_sh_, "has_dirty_flags", (incremental_bake_ && !dirty_flags_.is_empty()) ? 1 : 0);
+    GPU_shader_uniform_1i(bake_sh_, "skip_grouped", skip_grouped_flag);
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
      * early-exit after reading brick_counter.count from SSBO. */
@@ -2359,6 +2399,422 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(compact_atlas_tx_);
     GPU_shader_unbind();
     /* active_brick_count_ was already set by dispatch_classify() readback. */
+  }
+
+  /* Per-group hierarchical baking. */
+
+  void free_group_atlas_states()
+  {
+    for (GroupAtlasState &gas : group_atlas_states_) {
+      if (gas.indirection_tx) {
+        GPU_texture_free(gas.indirection_tx);
+      }
+      if (gas.compact_atlas_tx) {
+        GPU_texture_free(gas.compact_atlas_tx);
+      }
+      if (gas.brick_counter) {
+        GPU_storagebuf_free(gas.brick_counter);
+      }
+      if (gas.active_bricks) {
+        GPU_storagebuf_free(gas.active_bricks);
+      }
+      if (gas.object_ssbo) {
+        GPU_storagebuf_free(gas.object_ssbo);
+      }
+    }
+    group_atlas_states_.clear();
+  }
+
+  void ensure_group_indirection(GroupAtlasState &gas)
+  {
+    if (gas.indirection_tx != nullptr) {
+      int3 existing_res = int3(GPU_texture_width(gas.indirection_tx),
+                               GPU_texture_height(gas.indirection_tx),
+                               GPU_texture_depth(gas.indirection_tx));
+      if (existing_res == gas.grid_res) {
+        return;
+      }
+      GPU_texture_free(gas.indirection_tx);
+      gas.indirection_tx = nullptr;
+    }
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    gas.indirection_tx = GPU_texture_create_3d("sdf_group_indir",
+                                               gas.grid_res.x,
+                                               gas.grid_res.y,
+                                               gas.grid_res.z,
+                                               1,
+                                               gpu::TextureFormat::SINT_32,
+                                               usage,
+                                               nullptr);
+  }
+
+  void ensure_group_compact_atlas(GroupAtlasState &gas)
+  {
+    if (gas.bricks_per_axis < 1) {
+      gas.bricks_per_axis = 1;
+    }
+    int atlas_dim = gas.bricks_per_axis * SDF_BRICK_STORAGE;
+
+    if (gas.compact_atlas_tx != nullptr) {
+      int existing_dim = GPU_texture_width(gas.compact_atlas_tx);
+      if (existing_dim == atlas_dim) {
+        return;
+      }
+      GPU_texture_free(gas.compact_atlas_tx);
+      gas.compact_atlas_tx = nullptr;
+    }
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    gas.compact_atlas_tx = GPU_texture_create_3d("sdf_group_atlas",
+                                                 atlas_dim,
+                                                 atlas_dim,
+                                                 atlas_dim,
+                                                 1,
+                                                 gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                 usage,
+                                                 nullptr);
+    GPU_texture_filter_mode(gas.compact_atlas_tx, true);
+  }
+
+  void dispatch_group_classify(int group_idx, GroupAtlasState &gas)
+  {
+    const SDFGroupGPU &grp = groups_gpu_[group_idx];
+    int member_count = grp.object_count;
+    if (member_count <= 0) {
+      return;
+    }
+
+    /* Build a temporary object SSBO with group members,
+     * setting group_id = -1 so inline group tracking is skipped. */
+    Vector<SDFObjectGPU> group_objects(member_count);
+    for (int i = 0; i < member_count; i++) {
+      group_objects[i] = objects_[grp.first_object + i];
+      group_objects[i].group_id = -1;
+      group_objects[i].group_first = 0;
+      group_objects[i].group_order = i;
+    }
+
+    size_t buf_size = member_count * sizeof(SDFObjectGPU);
+    if (gas.object_ssbo) {
+      GPU_storagebuf_free(gas.object_ssbo);
+    }
+    gas.object_ssbo = GPU_storagebuf_create_ex(
+        buf_size, group_objects.data(), GPU_USAGE_DYNAMIC, "sdf_group_objects");
+
+    /* Init brick counter. */
+    BrickCounter init_counter = {};
+    init_counter.count = 0;
+    init_counter.next_slot = 0;
+    init_counter._pad1 = 0;
+    init_counter._pad2 = 0;
+
+    if (gas.brick_counter == nullptr) {
+      gas.brick_counter = GPU_storagebuf_create_ex(
+          sizeof(BrickCounter), &init_counter, GPU_USAGE_DYNAMIC, "sdf_group_brick_counter");
+    }
+    else {
+      GPU_storagebuf_update(gas.brick_counter, &init_counter);
+    }
+
+    int max_bricks = gas.grid_res.x * gas.grid_res.y * gas.grid_res.z;
+    if (max_bricks < 1) {
+      max_bricks = 1;
+    }
+    if (gas.active_bricks == nullptr || gas.active_bricks_capacity < max_bricks) {
+      if (gas.active_bricks) {
+        GPU_storagebuf_free(gas.active_bricks);
+      }
+      gas.active_bricks = GPU_storagebuf_create_ex(
+          max_bricks * sizeof(ActiveBrick), nullptr, GPU_USAGE_DYNAMIC, "sdf_group_active_bricks");
+      gas.active_bricks_capacity = max_bricks;
+    }
+
+    GPU_shader_bind(classify_sh_);
+
+    int obj_slot = GPU_shader_get_ssbo_binding(classify_sh_, "objects");
+    GPU_storagebuf_bind(gas.object_ssbo, obj_slot);
+
+    int counter_slot = GPU_shader_get_ssbo_binding(classify_sh_, "brick_counter");
+    GPU_storagebuf_bind(gas.brick_counter, counter_slot);
+
+    int ab_slot = GPU_shader_get_ssbo_binding(classify_sh_, "active_bricks");
+    GPU_storagebuf_bind(gas.active_bricks, ab_slot);
+
+    /* No BVH for group classify — linear scan is fine for group members. */
+    if (bvh_ssbo_) {
+      int bvh_slot = GPU_shader_get_ssbo_binding(classify_sh_, "bvh_nodes");
+      GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
+    }
+
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(classify_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
+
+    if (group_ssbo_) {
+      int grp_slot = GPU_shader_get_ssbo_binding(classify_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, grp_slot);
+    }
+
+    if (dirty_flags_ssbo_) {
+      int df_slot = GPU_shader_get_ssbo_binding(classify_sh_, "dirty_flags");
+      GPU_storagebuf_bind(dirty_flags_ssbo_, df_slot);
+    }
+
+    GPU_texture_image_bind(gas.indirection_tx, 0);
+
+    GPU_shader_uniform_1i(classify_sh_, "object_count", member_count);
+    GPU_shader_uniform_1f(classify_sh_, "voxel_size", gas.voxel_size);
+    GPU_shader_uniform_3fv(classify_sh_, "atlas_origin", gas.group_origin);
+    GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", gas.grid_res);
+
+    float brick_half_diag = float(SDF_BRICK_SIZE) * gas.voxel_size * 0.866025f;
+    brick_half_diag *= surface_margin_;
+    GPU_shader_uniform_1f(classify_sh_, "brick_half_diag", brick_half_diag);
+    GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", 0);
+    GPU_shader_uniform_1i(classify_sh_, "group_count", 0);
+    GPU_shader_uniform_1i(classify_sh_, "incremental_mode", 0);
+    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_min", int3(0));
+    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", int3(0));
+    GPU_shader_uniform_1i(classify_sh_, "has_dirty_flags", 0);
+
+    GPU_compute_dispatch(classify_sh_,
+                         divide_ceil_u(gas.grid_res.x, 4),
+                         divide_ceil_u(gas.grid_res.y, 4),
+                         divide_ceil_u(gas.grid_res.z, 4));
+
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
+    GPU_texture_image_unbind(gas.indirection_tx);
+    GPU_shader_unbind();
+
+    /* Readback active brick count. */
+    BrickCounter readback = {};
+    GPU_storagebuf_read(gas.brick_counter, &readback);
+    gas.active_brick_count = int(readback.count);
+  }
+
+  void dispatch_group_bake(int group_idx, GroupAtlasState &gas)
+  {
+    if (gas.active_brick_count <= 0) {
+      return;
+    }
+
+    const SDFGroupGPU &grp = groups_gpu_[group_idx];
+
+    GPU_shader_bind(bake_sh_);
+
+    int ssbo_slot = GPU_shader_get_ssbo_binding(bake_sh_, "objects");
+    GPU_storagebuf_bind(gas.object_ssbo, ssbo_slot);
+
+    int ab_slot = GPU_shader_get_ssbo_binding(bake_sh_, "active_bricks");
+    GPU_storagebuf_bind(gas.active_bricks, ab_slot);
+
+    /* No BVH for group bake. */
+    if (bvh_ssbo_) {
+      int bvh_slot = GPU_shader_get_ssbo_binding(bake_sh_, "bvh_nodes");
+      GPU_storagebuf_bind(bvh_ssbo_, bvh_slot);
+    }
+
+    int counter_slot = GPU_shader_get_ssbo_binding(bake_sh_, "brick_counter");
+    GPU_storagebuf_bind(gas.brick_counter, counter_slot);
+
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(bake_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
+
+    if (group_ssbo_) {
+      int grp_slot = GPU_shader_get_ssbo_binding(bake_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, grp_slot);
+    }
+
+    if (dirty_flags_ssbo_) {
+      int df_slot = GPU_shader_get_ssbo_binding(bake_sh_, "dirty_flags");
+      GPU_storagebuf_bind(dirty_flags_ssbo_, df_slot);
+    }
+
+    GPU_texture_image_bind(gas.compact_atlas_tx, 0);
+
+    GPU_shader_uniform_1i(bake_sh_, "object_count", grp.object_count);
+    GPU_shader_uniform_1f(bake_sh_, "voxel_size", gas.voxel_size);
+    GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", gas.group_origin);
+    GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", gas.bricks_per_axis);
+    GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", 0);
+    GPU_shader_uniform_1i(bake_sh_, "group_count", 0);
+    GPU_shader_uniform_1i(bake_sh_, "has_dirty_flags", 0);
+    GPU_shader_uniform_1i(bake_sh_, "skip_grouped", 0);
+
+    int dispatch_count = gas.active_brick_count;
+    uint bake_x = uint(math::min(dispatch_count, 65535));
+    uint bake_y = uint(divide_ceil_u(dispatch_count, 65535));
+    GPU_shader_uniform_1i(bake_sh_, "dispatch_width", int(bake_x));
+    GPU_compute_dispatch(bake_sh_, bake_x, bake_y, 1);
+
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
+    GPU_texture_image_unbind(gas.compact_atlas_tx);
+    GPU_shader_unbind();
+  }
+
+  void dispatch_group_blend(int group_idx, GroupAtlasState &gas)
+  {
+    if (gas.active_brick_count <= 0 || active_brick_count_ <= 0) {
+      return;
+    }
+
+    const SDFGroupGPU &grp = groups_gpu_[group_idx];
+
+    GPU_shader_bind(group_blend_sh_);
+
+    int ab_slot = GPU_shader_get_ssbo_binding(group_blend_sh_, "active_bricks");
+    GPU_storagebuf_bind(active_bricks_, ab_slot);
+
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(group_blend_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
+
+    /* Bind group indirection as sampler. */
+    int gi_slot = GPU_shader_get_sampler_binding(group_blend_sh_, "group_indirection_tx");
+    GPU_texture_bind(gas.indirection_tx, gi_slot);
+
+    /* Bind group compact atlas as sampler. */
+    int ga_slot = GPU_shader_get_sampler_binding(group_blend_sh_, "group_compact_atlas_tx");
+    GPU_texture_bind(gas.compact_atlas_tx, ga_slot);
+
+    /* Bind main compact atlas as read_write image. */
+    GPU_texture_image_bind(compact_atlas_tx_, 0);
+
+    float chunk = float(SDF_BRICK_SIZE) * voxel_size_;
+    int3 brick_offset = int3(math::round((gas.group_origin - atlas_origin_) / chunk));
+
+    GPU_shader_uniform_1f(group_blend_sh_, "voxel_size", voxel_size_);
+    GPU_shader_uniform_3iv(group_blend_sh_, "group_brick_offset", brick_offset);
+    GPU_shader_uniform_3iv(group_blend_sh_, "group_grid_res", gas.grid_res);
+    GPU_shader_uniform_1i(group_blend_sh_, "main_bricks_per_axis", bricks_per_axis_);
+    GPU_shader_uniform_1i(group_blend_sh_, "group_bricks_per_axis", gas.bricks_per_axis);
+    GPU_shader_uniform_1i(group_blend_sh_, "main_active_brick_count", active_brick_count_);
+
+    int dispatch_count = active_brick_count_;
+    uint bx = uint(math::min(dispatch_count, 65535));
+    uint by = uint(divide_ceil_u(dispatch_count, 65535));
+    GPU_shader_uniform_1i(group_blend_sh_, "dispatch_width", int(bx));
+
+    GPU_shader_uniform_1i(group_blend_sh_, "group_csg_op", grp.csg_operation);
+    GPU_shader_uniform_1i(group_blend_sh_, "group_blend_type", grp.blend_type);
+    GPU_shader_uniform_1f(group_blend_sh_, "group_blend_k", grp.blend);
+    GPU_shader_uniform_1f(group_blend_sh_, "group_shell_dist", grp.shell_distance);
+    GPU_shader_uniform_4fv(group_blend_sh_, "group_tint", grp.color);
+
+    GPU_compute_dispatch(group_blend_sh_, bx, by, 1);
+
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_texture_image_unbind(compact_atlas_tx_);
+    GPU_texture_unbind(gas.indirection_tx);
+    GPU_texture_unbind(gas.compact_atlas_tx);
+    GPU_shader_unbind();
+  }
+
+  void bake_per_group()
+  {
+    const int num_groups = int(groups_gpu_.size());
+
+    /* Resize group atlas state vector (reuse existing states). */
+    while (int(group_atlas_states_.size()) > num_groups) {
+      GroupAtlasState &gas = group_atlas_states_.last();
+      if (gas.indirection_tx) {
+        GPU_texture_free(gas.indirection_tx);
+      }
+      if (gas.compact_atlas_tx) {
+        GPU_texture_free(gas.compact_atlas_tx);
+      }
+      if (gas.brick_counter) {
+        GPU_storagebuf_free(gas.brick_counter);
+      }
+      if (gas.active_bricks) {
+        GPU_storagebuf_free(gas.active_bricks);
+      }
+      if (gas.object_ssbo) {
+        GPU_storagebuf_free(gas.object_ssbo);
+      }
+      group_atlas_states_.remove_last();
+    }
+    while (int(group_atlas_states_.size()) < num_groups) {
+      group_atlas_states_.append(GroupAtlasState{});
+    }
+
+    for (int g = 0; g < num_groups; g++) {
+      const SDFGroupGPU &grp = groups_gpu_[g];
+      if (grp.object_count <= 0) {
+        continue;
+      }
+
+      GroupAtlasState &gas = group_atlas_states_[g];
+
+      gas.voxel_size = voxel_size_;
+      float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
+
+      /* Compute group AABB from member objects. */
+      float3 grp_min = float3(1e30f);
+      float3 grp_max = float3(-1e30f);
+      for (int i = grp.first_object; i < grp.first_object + grp.object_count; i++) {
+        grp_min = math::min(grp_min, float3(objects_[i].bbox_min));
+        grp_max = math::max(grp_max, float3(objects_[i].bbox_max));
+      }
+
+      /* Snap to chunk-aligned grid covering the group AABB with 1 brick padding. */
+      float3 padded_min = math::floor((grp_min - float3(chunk_size)) / chunk_size) * chunk_size;
+      float3 padded_max = math::ceil((grp_max + float3(chunk_size)) / chunk_size) * chunk_size;
+      int3 new_grid_res = int3(math::round((padded_max - padded_min) / chunk_size));
+      new_grid_res = math::clamp(new_grid_res, int3(1), int3(SDF_MAX_GRID_RES));
+
+      /* Check if grid changed and needs reallocation. */
+      if (gas.grid_res != new_grid_res) {
+        if (gas.indirection_tx) {
+          GPU_texture_free(gas.indirection_tx);
+          gas.indirection_tx = nullptr;
+        }
+        gas.grid_res = new_grid_res;
+        gas.atlas_capacity = 0;
+      }
+      gas.group_origin = padded_min;
+
+      /* Create/resize indirection. */
+      ensure_group_indirection(gas);
+
+      /* Clear indirection to -1. */
+      int32_t clear_val = -1;
+      GPU_texture_clear(gas.indirection_tx, GPU_DATA_INT, &clear_val);
+
+      /* Classify group. */
+      dispatch_group_classify(g, gas);
+
+      /* Size group compact atlas. */
+      {
+        int estimated = math::max(gas.active_brick_count, 1);
+        int capacity = estimated + estimated / 2;
+        if (capacity > gas.atlas_capacity) {
+          gas.atlas_capacity = capacity;
+        }
+        int new_bpa = int(std::ceil(std::cbrt(double(gas.atlas_capacity))));
+        if (new_bpa < 1) {
+          new_bpa = 1;
+        }
+        gas.bricks_per_axis = new_bpa;
+      }
+      ensure_group_compact_atlas(gas);
+
+      /* Clear group atlas to 1e10. */
+      {
+        float clear_f[4] = {1e10f, 0.0f, 0.0f, 0.0f};
+        GPU_texture_clear(gas.compact_atlas_tx, GPU_DATA_FLOAT, clear_f);
+        GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      }
+
+      /* Bake group. */
+      dispatch_group_bake(g, gas);
+
+      /* Blend group into main atlas. */
+      dispatch_group_blend(g, gas);
+    }
   }
 
   void draw_march()
@@ -3487,6 +3943,7 @@ class Instance : public DrawEngine {
 
     perf_cleanup();
     free_grid_objects();
+    free_group_atlas_states();
 
     /* Clear static pointers BEFORE freeing resources to prevent
      * dangling access from overlay/selection code. */

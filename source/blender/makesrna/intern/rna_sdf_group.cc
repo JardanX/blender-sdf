@@ -56,6 +56,11 @@ static SDFGroupMember *rna_SDFGroup_member_add(SDFGroup *group,
     return nullptr;
   }
 
+  if (group->totmember >= 1024) {
+    BKE_report(reports, RPT_ERROR, "Maximum of 1024 members per SDF group");
+    return nullptr;
+  }
+
   SDFGroupMember *member = BKE_sdf_group_member_add(group, ob);
 
   DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);

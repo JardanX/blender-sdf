@@ -69,6 +69,10 @@ class DATA_PT_sdf_group_members(SDFGroupButtonsPanel, Panel):
         layout = self.layout
         grp = context.sdf_group
 
+        row = layout.row()
+        row.label(text=f"{len(grp.members)} / 1024")
+        row.alignment = 'RIGHT'
+
         if not grp.members:
             layout.label(text="No members")
             return

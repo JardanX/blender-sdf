@@ -224,6 +224,10 @@ void main()
     for (int c = int(tid); c < shared_num_candidates; c += 144) {
       int i = shared_candidates[c];
       SDFObjectGPU obj = objects[i];
+      if (skip_grouped == 1 && obj.group_id >= 0) {
+        shared_center_dist[c] = -1e20f;
+        continue;
+      }
       float3 lp = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
       SDFPrimitiveData pd;
       pd.sdf_type = obj.sdf_type;
@@ -240,29 +244,31 @@ void main()
 
     if (tid == 0u) {
       float acc_center = 1e10f;
-      for (int g = 0; g < group_count; g++) {
-        float grp_center = 1e10f;
-        for (int c = 0; c < shared_num_candidates; c++) {
-          SDFObjectGPU obj = objects[shared_candidates[c]];
-          if (obj.group_id != g) continue;
-          float d = shared_center_dist[c];
-          if (obj.group_first == 1) {
-            grp_center = d;
-            continue;
+      if (skip_grouped == 0) {
+        for (int g = 0; g < group_count; g++) {
+          float grp_center = 1e10f;
+          for (int c = 0; c < shared_num_candidates; c++) {
+            SDFObjectGPU obj = objects[shared_candidates[c]];
+            if (obj.group_id != g) continue;
+            float d = shared_center_dist[c];
+            if (obj.group_first == 1) {
+              grp_center = d;
+              continue;
+            }
+            float threshold = obj.blend + two_R;
+            bool pruned = false;
+            if (obj.csg_operation == SDF_CSG_OP_UNION) pruned = (d - grp_center > threshold);
+            else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) pruned = (grp_center + d > threshold);
+            else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (grp_center - d > threshold);
+
+            if (pruned) shared_center_dist[c] = -1e20f;
+            else grp_center = combineCSG(grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
           }
-          float threshold = obj.blend + two_R;
-          bool pruned = false;
-          if (obj.csg_operation == SDF_CSG_OP_UNION) pruned = (d - grp_center > threshold);
-          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) pruned = (grp_center + d > threshold);
-          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (grp_center - d > threshold);
-          
-          if (pruned) shared_center_dist[c] = -1e20f;
-          else grp_center = combineCSG(grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
-        }
-        if (grp_center < 1e10f) {
-          SDFGroupGPU grp = groups[g];
-          if (g == 0) acc_center = grp_center;
-          else acc_center = combineCSG(acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+          if (grp_center < 1e10f) {
+            SDFGroupGPU grp = groups[g];
+            if (g == 0) acc_center = grp_center;
+            else acc_center = combineCSG(acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+          }
         }
       }
       for (int c = 0; c < shared_num_candidates; c++) {
@@ -272,12 +278,23 @@ void main()
         float threshold = obj.blend + two_R;
         bool pruned = false;
         if (acc_center < 1e9f) {
-          if (obj.csg_operation == SDF_CSG_OP_UNION) pruned = (d - acc_center > threshold);
-          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) pruned = (acc_center + d > threshold);
+          if (obj.csg_operation == SDF_CSG_OP_UNION || obj.csg_operation == SDF_CSG_OP_SHELL || obj.csg_operation == SDF_CSG_OP_PUSH) pruned = (d - acc_center > threshold);
+          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT || obj.csg_operation == SDF_CSG_OP_AVOID) pruned = (acc_center + d > threshold);
           else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (acc_center - d > threshold);
         }
-        if (pruned) shared_center_dist[c] = -1e20f;
-        else acc_center = combineCSG(acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        if (pruned) {
+          shared_center_dist[c] = -1e20f;
+        }
+        else {
+          if (acc_center >= 1e9f) {
+            if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_AVOID) {
+              acc_center = d;
+            }
+          }
+          else {
+            acc_center = combineCSG(acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+          }
+        }
       }
 
       int new_count = 0;
@@ -301,8 +318,18 @@ void main()
     float3 world_pos = atlas_origin +
                        float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
-    float acc_dist = 1e10f;
-    float3 acc_color = float3(0.0f);
+    float acc_dist;
+    float3 acc_color;
+    if (skip_grouped == 1) {
+      int3 atlas_coord_init = slot_origin + local_voxel;
+      float4 existing = imageLoad(compact_atlas, atlas_coord_init);
+      acc_dist = existing.r;
+      acc_color = existing.gba;
+    }
+    else {
+      acc_dist = 1e10f;
+      acc_color = float3(0.0f);
+    }
     float grp_dist = 1e10f;
     float3 grp_color = float3(0.0f);
     int prev_group = -2;
@@ -345,6 +372,11 @@ void main()
       for (int c = 0; c < batch_count; c++) {
         SharedObj sobj = shared_batch[c];
 
+        /* Skip grouped objects when baking ungrouped-only pass. */
+        if (skip_grouped == 1 && sobj.group_id >= 0) {
+          continue;
+        }
+
         /* Group transition: finalize previous group when entering a new one. */
         if (sobj.group_id != prev_group) {
           finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
@@ -368,10 +400,17 @@ void main()
             int bt = sobj.blend_type;
             int op = sobj.csg_operation;
 
-            float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
-            float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
-            grp_color = mix(grp_color, sobj.color.rgb, h);
-            grp_dist = new_dist;
+            if (grp_dist >= 1e9f) {
+              if (op != 1 && op != 2 && op != 5) {
+                grp_dist = dist;
+                grp_color = sobj.color.rgb;
+              }
+            } else {
+              float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
+              float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
+              grp_color = mix(grp_color, sobj.color.rgb, h);
+              grp_dist = new_dist;
+            }
           }
         }
         else {
@@ -379,10 +418,17 @@ void main()
           int bt = sobj.blend_type;
           int op = sobj.csg_operation;
 
-          float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
-          float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
-          acc_dist = new_dist;
+          if (acc_dist >= 1e9f) {
+            if (op != 1 && op != 2 && op != 5) {
+              acc_dist = dist;
+              acc_color = sobj.color.rgb;
+            }
+          } else {
+            float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
+            float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
+            acc_color = mix(acc_color, sobj.color.rgb, h);
+            acc_dist = new_dist;
+          }
         }
       }
       barrier();
