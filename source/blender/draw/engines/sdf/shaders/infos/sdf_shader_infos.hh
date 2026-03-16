@@ -74,7 +74,7 @@ STORAGE_BUF(3, read, BrickCounter, brick_counter)
 STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(5, read, SDFGroupGPU, groups[])
 STORAGE_BUF(6, read, int, dirty_flags[])
-IMAGE(0, SFLOAT_16_16_16_16, read_write, image3D, compact_atlas)
+IMAGE(0, SFLOAT_16_16_16_16, write, image3D, compact_atlas)
 
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(float, voxel_size)
@@ -84,7 +84,6 @@ PUSH_CONSTANT(int, dispatch_width)
 PUSH_CONSTANT(int, bvh_node_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(int, has_dirty_flags)
-PUSH_CONSTANT(int, skip_grouped)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_bake_comp.glsl")
 GPU_SHADER_CREATE_END()
@@ -115,36 +114,6 @@ PUSH_CONSTANT(int, active_brick_count)
 PUSH_CONSTANT(int, dispatch_width)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_grid_blend_comp.glsl")
-GPU_SHADER_CREATE_END()
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name SDF Group Blend Compute Shader
- * \{ */
-
-GPU_SHADER_CREATE_INFO(sdf_group_blend)
-DO_STATIC_COMPILATION()
-LOCAL_GROUP_SIZE(12, 12, 1)
-STORAGE_BUF(0, read, ActiveBrick, active_bricks[])
-STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
-SAMPLER(0, isampler3D, group_indirection_tx)
-SAMPLER(1, sampler3D, group_compact_atlas_tx)
-IMAGE(0, SFLOAT_16_16_16_16, read_write, image3D, compact_atlas)
-PUSH_CONSTANT(float, voxel_size)
-PUSH_CONSTANT(int3, group_brick_offset)
-PUSH_CONSTANT(int3, group_grid_res)
-PUSH_CONSTANT(int, main_bricks_per_axis)
-PUSH_CONSTANT(int, group_bricks_per_axis)
-PUSH_CONSTANT(int, main_active_brick_count)
-PUSH_CONSTANT(int, dispatch_width)
-PUSH_CONSTANT(int, group_csg_op)
-PUSH_CONSTANT(int, group_blend_type)
-PUSH_CONSTANT(float, group_blend_k)
-PUSH_CONSTANT(float, group_shell_dist)
-PUSH_CONSTANT(float4, group_tint)
-TYPEDEF_SOURCE("sdf_shader_shared.hh")
-COMPUTE_SOURCE("sdf_group_blend_comp.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */
