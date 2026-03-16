@@ -153,6 +153,38 @@ void main()
       continue;
     }
 
+    /* Pre-evaluation pruning based on true bbox distance. */
+    float3 true_min = obj.bbox_min.xyz;
+    float3 true_max = obj.bbox_max.xyz;
+    if (obj.blend_type != 0) {
+      true_min += float3(obj.blend);
+      true_max -= float3(obj.blend);
+    }
+    float3 d_box = max(true_min - brick_center, brick_center - true_max);
+    float true_dist = length(max(d_box, 0.0f)) + min(max(d_box.x, max(d_box.y, d_box.z)), 0.0f);
+    
+    float threshold = obj.blend + brick_half_diag * 2.0f;
+    bool pruned = false;
+    
+    if (obj.group_id >= 0) {
+      if (obj.group_first == 0 && grp_dist < 1e9f) {
+        if (obj.csg_operation == 0 || obj.csg_operation == 3 || obj.csg_operation == 4) pruned = (true_dist - grp_dist > threshold);
+        else if (obj.csg_operation == 1 || obj.csg_operation == 5) pruned = (grp_dist + true_dist > threshold);
+        else if (obj.csg_operation == 2) pruned = (grp_dist - true_dist > threshold);
+      }
+    }
+    else {
+      if (acc_dist < 1e9f) {
+        if (obj.csg_operation == 0 || obj.csg_operation == 3 || obj.csg_operation == 4) pruned = (true_dist - acc_dist > threshold);
+        else if (obj.csg_operation == 1 || obj.csg_operation == 5) pruned = (acc_dist + true_dist > threshold);
+        else if (obj.csg_operation == 2) pruned = (acc_dist - true_dist > threshold);
+      }
+    }
+
+    if (pruned) {
+      continue;
+    }
+
     float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
     float dist = evalSDFPrimitive(local_pos, obj);
 
@@ -161,13 +193,27 @@ void main()
         grp_dist = dist;
       }
       else {
-        grp_dist = combineCSG(
-            grp_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        if (grp_dist >= 1e9f) {
+          if (obj.csg_operation != 1 && obj.csg_operation != 2 && obj.csg_operation != 5) {
+            grp_dist = dist;
+          }
+        }
+        else {
+          grp_dist = combineCSG(
+              grp_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        }
       }
     }
     else {
-      acc_dist = combineCSG(
-          acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+      if (acc_dist >= 1e9f) {
+        if (obj.csg_operation != 1 && obj.csg_operation != 2 && obj.csg_operation != 5) {
+          acc_dist = dist;
+        }
+      }
+      else {
+        acc_dist = combineCSG(
+            acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+      }
     }
   }
 
