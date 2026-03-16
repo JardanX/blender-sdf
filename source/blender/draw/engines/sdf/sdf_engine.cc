@@ -139,8 +139,10 @@ class Instance : public DrawEngine {
 
   uint64_t scene_hash_ = 0;
   uint64_t grid_hash_ = 0;
+  uint64_t spatial_hash_ = 0;
   bool needs_bake_ = true;
   bool needs_upload_ = true;
+  bool needs_bvh_rebuild_ = true;
   bool depth_mode_ = false;
 
   /* Incremental rebake state. */
@@ -178,6 +180,7 @@ class Instance : public DrawEngine {
 
   enum ShaderIndex {
     SH_CLASSIFY = 0,
+    SH_AUGMENT_GRIDS,
     SH_BAKE,
     SH_MARCH,
     SH_GRID_BLEND,
@@ -187,6 +190,7 @@ class Instance : public DrawEngine {
 
   static constexpr const char *shader_info_names_[SH_COUNT] = {
       "sdf_classify",
+      "sdf_augment_grids",
       "sdf_bake",
       "sdf_march",
       "sdf_grid_blend",
@@ -196,6 +200,7 @@ class Instance : public DrawEngine {
   gpu::Shader *shaders_[SH_COUNT] = {};
 
   gpu::Shader *&classify_sh_ = shaders_[SH_CLASSIFY];
+  gpu::Shader *&augment_grids_sh_ = shaders_[SH_AUGMENT_GRIDS];
   gpu::Shader *&bake_sh_ = shaders_[SH_BAKE];
   gpu::Shader *&march_sh_ = shaders_[SH_MARCH];
   gpu::Shader *&grid_blend_sh_ = shaders_[SH_GRID_BLEND];
@@ -228,6 +233,11 @@ class Instance : public DrawEngine {
   Vector<BVHNodeGPU> bvh_nodes_;
   gpu::StorageBuf *bvh_ssbo_ = nullptr;
   int bvh_ssbo_count_ = 0;
+
+  /** Per-object dirty flags for incremental bake (1=changed, 0=clean). */
+  Vector<int> dirty_flags_;
+  gpu::StorageBuf *dirty_flags_ssbo_ = nullptr;
+  int dirty_flags_ssbo_count_ = 0;
 
   /** Fullscreen triangle batch (cached). */
   gpu::Batch *fullscreen_batch_ = nullptr;
@@ -694,7 +704,7 @@ class Instance : public DrawEngine {
      * Active-brick-only dispatch ensures bake cost is proportional to active bricks
      * (~5% of grid volume), not total grid_res^3. */
     float3 scene_size = scene_max_ - scene_min_;
-    float margin = math::max(math::reduce_max(scene_size) * 0.1f, 0.5f);
+    float margin = math::max(math::reduce_max(scene_size) * 0.5f, 2.0f);
 
     /* Fixed voxel density: resolution = voxels per BU.
      * Smooth auto-coarsen: if the padded scene extent would exceed
@@ -708,52 +718,96 @@ class Instance : public DrawEngine {
     float max_extent = math::reduce_max(padded_max - padded_min);
     float min_voxel = max_extent / (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
     voxel_size_ = math::max(base_voxel, min_voxel);
+
+    /* Surface-area cap: coarsen voxels so estimated active brick count
+     * stays within SDF_MAX_BRICKS. Without this, a 20 BU cube produces
+     * ~95k surface bricks at resolution 128 — the grid-volume cap (128^3)
+     * only limits total bricks, not the surface shell that actually gets baked. */
+    float3 sz = scene_max_ - scene_min_;
+    float est_surface = 2.0f * (sz.x * sz.y + sz.x * sz.z + sz.y * sz.z);
+    if (est_surface > 0.0f) {
+      float chunk = float(SDF_BRICK_SIZE) * voxel_size_;
+      float est_bricks = est_surface / (chunk * chunk);
+      if (est_bricks > float(SDF_MAX_BRICKS)) {
+        float needed_chunk = math::sqrt(est_surface / float(SDF_MAX_BRICKS));
+        voxel_size_ = math::max(voxel_size_, needed_chunk / float(SDF_BRICK_SIZE));
+      }
+    }
+
+    /* Voxel size deadband: absorb small fluctuations (±20%) to prevent
+     * constant full rebakes, but allow both increase AND decrease when
+     * the scene genuinely changed scale. Without this, quality permanently
+     * degrades after the grid coarsens for a large scene. */
+    if (prev_voxel_size_ > 0.0f) {
+      float ratio = voxel_size_ / prev_voxel_size_;
+      if (ratio > 0.8f && ratio < 1.25f) {
+        voxel_size_ = prev_voxel_size_;
+      }
+    }
+
     float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
 
     /* Snap to world-aligned chunk boundaries. */
     float3 grid_min = math::floor(padded_min / chunk_size) * chunk_size;
     float3 grid_max = math::ceil(padded_max / chunk_size) * chunk_size;
 
-    /* Hysteresis: prevent frequent grid reallocations (full rebakes) when moving objects.
-     * We try to keep the previous grid bounds if the new scene bounds fit inside, or
-     * we expand by chunks to absorb small movements. */
+    /* Hysteresis: prevent frequent grid reallocations when moving objects.
+     * Expands with padding for movement room, contracts when scene is
+     * significantly smaller than the grid (recovers quality). */
     if (prev_grid_res_.x > 0 && voxel_size_ == prev_voxel_size_) {
       float3 prev_grid_min = prev_atlas_origin_;
       float3 prev_grid_max = prev_atlas_origin_ + float3(prev_grid_res_) * chunk_size;
 
-      float3 expanded_min = prev_grid_min;
-      float3 expanded_max = prev_grid_max;
+      float padding = math::max(chunk_size * 8.0f, 1.0f);
 
-      /* Add 8 chunks (64 voxels) of padding in the direction of movement to avoid hitting the edge again immediately. */
-      float padding = chunk_size * 8.0f;
-      
-      if (grid_min.x < prev_grid_min.x) expanded_min.x = grid_min.x - padding;
-      if (grid_min.y < prev_grid_min.y) expanded_min.y = grid_min.y - padding;
-      if (grid_min.z < prev_grid_min.z) expanded_min.z = grid_min.z - padding;
-      
-      if (grid_max.x > prev_grid_max.x) expanded_max.x = grid_max.x + padding;
-      if (grid_max.y > prev_grid_max.y) expanded_max.y = grid_max.y + padding;
-      if (grid_max.z > prev_grid_max.z) expanded_max.z = grid_max.z + padding;
+      /* Check if scene still fits inside previous grid. */
+      bool fits = (grid_min.x >= prev_grid_min.x && grid_min.y >= prev_grid_min.y &&
+                   grid_min.z >= prev_grid_min.z && grid_max.x <= prev_grid_max.x &&
+                   grid_max.y <= prev_grid_max.y && grid_max.z <= prev_grid_max.z);
 
-      expanded_min = math::round(expanded_min / chunk_size) * chunk_size;
-      expanded_max = math::round(expanded_max / chunk_size) * chunk_size;
+      if (fits) {
+        /* Scene fits: check if grid is massively oversized (>3x per axis).
+         * If so, contract to reclaim quality. Otherwise keep stable. */
+        float3 ideal_size = grid_max - grid_min;
+        float3 prev_size = prev_grid_max - prev_grid_min;
+        bool oversized = (ideal_size.x < prev_size.x * 0.33f ||
+                          ideal_size.y < prev_size.y * 0.33f ||
+                          ideal_size.z < prev_size.z * 0.33f);
 
-      float3 ideal_size = grid_max - grid_min;
-      float3 expanded_size = expanded_max - expanded_min;
-      float ideal_vol = ideal_size.x * ideal_size.y * ideal_size.z;
-      float expanded_vol = expanded_size.x * expanded_size.y * expanded_size.z;
+        if (oversized) {
+          /* Contract: use ideal bounds + padding. */
+          grid_min = math::floor((padded_min - float3(padding)) / chunk_size) * chunk_size;
+          grid_max = math::ceil((padded_max + float3(padding)) / chunk_size) * chunk_size;
+        }
+        else {
+          /* Stable: keep previous grid bounds. */
+          grid_min = prev_grid_min;
+          grid_max = prev_grid_max;
+        }
+      }
+      else {
+        /* Scene doesn't fit: expand with padding. */
+        float3 expanded_min = prev_grid_min;
+        float3 expanded_max = prev_grid_max;
 
-      int3 expanded_res = int3(math::round((expanded_max - expanded_min) / chunk_size));
-      
-      /* Only use expanded bounds if they don't exceed max resolution,
-       * and we aren't wasting too much space (> 8x volume). */
-      if (expanded_res.x <= SDF_MAX_GRID_RES && 
-          expanded_res.y <= SDF_MAX_GRID_RES && 
-          expanded_res.z <= SDF_MAX_GRID_RES && 
-          ideal_vol > expanded_vol * 0.125f) 
-      {
-        grid_min = expanded_min;
-        grid_max = expanded_max;
+        if (grid_min.x < prev_grid_min.x) expanded_min.x = grid_min.x - padding;
+        if (grid_min.y < prev_grid_min.y) expanded_min.y = grid_min.y - padding;
+        if (grid_min.z < prev_grid_min.z) expanded_min.z = grid_min.z - padding;
+        if (grid_max.x > prev_grid_max.x) expanded_max.x = grid_max.x + padding;
+        if (grid_max.y > prev_grid_max.y) expanded_max.y = grid_max.y + padding;
+        if (grid_max.z > prev_grid_max.z) expanded_max.z = grid_max.z + padding;
+
+        expanded_min = math::round(expanded_min / chunk_size) * chunk_size;
+        expanded_max = math::round(expanded_max / chunk_size) * chunk_size;
+
+        int3 expanded_res = int3(math::round((expanded_max - expanded_min) / chunk_size));
+        if (expanded_res.x <= SDF_MAX_GRID_RES &&
+            expanded_res.y <= SDF_MAX_GRID_RES &&
+            expanded_res.z <= SDF_MAX_GRID_RES)
+        {
+          grid_min = expanded_min;
+          grid_max = expanded_max;
+        }
       }
     }
 
@@ -764,17 +818,33 @@ class Instance : public DrawEngine {
     atlas_origin_ = grid_min;
     atlas_extent_ = grid_max - grid_min;
 
-    /* Free textures only if grid dimensions actually changed. */
+    /* Lazy reallocation: only free textures when the new grid EXCEEDS the
+     * allocated size. Shrinking reuses existing textures (larger than needed
+     * but avoids the lag spike from GPU texture reallocation). */
     if (new_grid_res != grid_res_) {
-      grid_res_ = new_grid_res;
+      bool needs_realloc = false;
       if (indirection_tx_) {
-        GPU_texture_free(indirection_tx_);
-        indirection_tx_ = nullptr;
+        if (new_grid_res.x > grid_res_.x || new_grid_res.y > grid_res_.y ||
+            new_grid_res.z > grid_res_.z)
+        {
+          needs_realloc = true;
+        }
       }
-      if (compact_atlas_tx_) {
-        GPU_texture_free(compact_atlas_tx_);
-        compact_atlas_tx_ = nullptr;
+      else {
+        needs_realloc = true;
       }
+
+      if (needs_realloc) {
+        if (indirection_tx_) {
+          GPU_texture_free(indirection_tx_);
+          indirection_tx_ = nullptr;
+        }
+        if (compact_atlas_tx_) {
+          GPU_texture_free(compact_atlas_tx_);
+          compact_atlas_tx_ = nullptr;
+        }
+      }
+      grid_res_ = new_grid_res;
       atlas_capacity_ = 0;
       prev_active_brick_count_ = 0;
     }
@@ -902,94 +972,133 @@ class Instance : public DrawEngine {
 
     }
 
-    /* Compute required AABB expansions for smooth blending.
-     * Since evaluation is sequential, a subsequent object with a large blend radius
-     * needs to evaluate earlier objects even if we are outside their strict geometry AABB.
-     * We propagate the maximum blend+shell distance backwards to guarantee that earlier
-     * objects are never culled prematurely in regions where they could blend.
-     * This avoids the O(N^2) blowup of a global candidate expansion, while fixing
-     * cut-off artifacts caused by tight AABBs during smooth union/subtraction. */
-    float running_scene_expand = 0.0f;
-
-    /* 1. Ungrouped objects (evaluated last, placed at the end of the sorted array). */
-    for (int i = int(objects_.size()) - 1; i >= 0; i--) {
-      SDFObjectGPU &obj = objects_[i];
-      if (obj.group_id != -1) {
-        break; /* Reached grouped objects. */
-      }
-
-      float effective_expand = obj.blend + fabsf(obj.shell_distance);
-
-      /* Check subsequent ungrouped objects to see if their blend radius affects this object.
-       * We only expand this object's AABB by a subsequent object's blend radius if they
-       * could potentially overlap within that blend radius. */
-      for (int j = i + 1; j < int(objects_.size()); j++) {
-        const SDFObjectGPU &sub_obj = objects_[j];
-        float sub_blend = sub_obj.blend + fabsf(sub_obj.shell_distance);
-        if (sub_blend > effective_expand) {
-          /* Check if AABBs expanded by sub_blend would overlap. */
-          bool overlap = true;
-          for (int axis = 0; axis < 3; axis++) {
-            if (obj.bbox_max[axis] + sub_blend < sub_obj.bbox_min[axis] - sub_blend ||
-                obj.bbox_min[axis] - sub_blend > sub_obj.bbox_max[axis] + sub_blend) {
-              overlap = false;
-              break;
-            }
-          }
-          if (overlap) {
-            effective_expand = sub_blend;
-          }
-        }
-      }
-
-      /* Expand AABB by the calculated effective expand. */
-      obj.bbox_min -= float4(effective_expand, effective_expand, effective_expand, 0.0f);
-      obj.bbox_max += float4(effective_expand, effective_expand, effective_expand, 0.0f);
+    /* Compute tighter per-object blend-aware AABB expansions.
+     * We iterate backwards. Each object/group maintains its expanded AABB.
+     * An object's AABB is expanded by its own intrinsic blend radius,
+     * plus the intersection of its blend-expanded bounds with the bounds
+     * of any subsequent operation that blends with it.
+     * This avoids the O(N^2) volume blowup, keeping BVH culling efficient. */
+    Vector<float3> new_mins(objects_.size());
+    Vector<float3> new_maxs(objects_.size());
+    for (int i = 0; i < int(objects_.size()); i++) {
+      float exp = objects_[i].blend + fabsf(objects_[i].shell_distance);
+      new_mins[i] = float3(objects_[i].bbox_min) - float3(exp);
+      new_maxs[i] = float3(objects_[i].bbox_max) + float3(exp);
     }
 
-    /* 2. Groups (evaluated in order from 0 to group_count - 1). */
-    running_scene_expand = 0.0f;
-    for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
-      SDFGroupGPU &grp = groups_gpu_[g];
+    int ungrouped_start = int(objects_.size());
+    for (int i = 0; i < int(objects_.size()); i++) {
+      if (objects_[i].group_id == -1) {
+        ungrouped_start = i;
+        break;
+      }
+    }
 
-      float running_group_expand = 0.0f;
+    /* 1. Ungrouped objects (evaluated last). */
+    for (int i = int(objects_.size()) - 1; i >= ungrouped_start; i--) {
+      SDFObjectGPU &obj = objects_[i];
 
-      float grp_expand = grp.blend + fabsf(grp.shell_distance);
-      
-      /* Check subsequent groups and ungrouped objects to see if their blend affects this group. */
-      float effective_scene_expand = grp_expand;
-      
-      /* Check against subsequent groups. */
-      for (int sub_g = g + 1; sub_g < int(groups_gpu_.size()); sub_g++) {
-        const SDFGroupGPU &sub_grp = groups_gpu_[sub_g];
-        float sub_blend = sub_grp.blend + fabsf(sub_grp.shell_distance);
-        if (sub_blend > effective_scene_expand) {
-           effective_scene_expand = math::max(effective_scene_expand, sub_blend); /* Rough approx, or we could do AABB check for groups. To be safe, we can just do AABB check of the group. But groups don't have explicit AABBs stored here. We'll refine this. */
+      for (int j = i + 1; j < int(objects_.size()); j++) {
+        float sub_blend = objects_[j].blend + fabsf(objects_[j].shell_distance);
+        if (sub_blend > 0.0f) {
+          float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+          float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+          float3 sub_exp_min = new_mins[j];
+          float3 sub_exp_max = new_maxs[j];
+
+          float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+          float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+
+          if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+            new_mins[i] = math::min(new_mins[i], ix_min);
+            new_maxs[i] = math::max(new_maxs[i], ix_max);
+          }
         }
       }
+    }
 
-      int end_idx = grp.first_object + grp.object_count - 1;
+    /* Group bounding boxes. */
+    Vector<float3> group_mins(groups_gpu_.size(), float3(1e10f));
+    Vector<float3> group_maxs(groups_gpu_.size(), float3(-1e10f));
+
+    /* 2. Groups (evaluated in order from 0 to group_count - 1). */
+    for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
+      SDFGroupGPU &grp = groups_gpu_[g];
       int start_idx = grp.first_object;
+      int end_idx = grp.first_object + grp.object_count - 1;
 
       if (grp.object_count > 0 && start_idx >= 0 && end_idx < int(objects_.size())) {
         for (int i = end_idx; i >= start_idx; i--) {
           SDFObjectGPU &obj = objects_[i];
 
-          /* Need to cover both subsequent operations WITHIN the group,
-           * and subsequent operations in the SCENE (after this group),
-           * including this group's own scene-level blend. */
-          float total_expand = math::max(effective_scene_expand, running_group_expand);
+          /* Blend with subsequent objects IN THE SAME GROUP. */
+          for (int j = i + 1; j <= end_idx; j++) {
+            float sub_blend = objects_[j].blend + fabsf(objects_[j].shell_distance);
+            if (sub_blend > 0.0f) {
+              float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+              float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+              float3 sub_exp_min = new_mins[j];
+              float3 sub_exp_max = new_maxs[j];
 
-          obj.bbox_min -= float4(total_expand, total_expand, total_expand, 0.0f);
-          obj.bbox_max += float4(total_expand, total_expand, total_expand, 0.0f);
+              float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+              float3 ix_max = math::min(obj_exp_max, sub_exp_max);
 
-          float this_expand = obj.blend + fabsf(obj.shell_distance);
-          running_group_expand = math::max(running_group_expand, this_expand);
+              if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+                new_mins[i] = math::min(new_mins[i], ix_min);
+                new_maxs[i] = math::max(new_maxs[i], ix_max);
+              }
+            }
+          }
+
+          /* Blend with subsequent groups. */
+          for (int sub_g = g + 1; sub_g < int(groups_gpu_.size()); sub_g++) {
+            float sub_blend = groups_gpu_[sub_g].blend + fabsf(groups_gpu_[sub_g].shell_distance);
+            if (sub_blend > 0.0f) {
+              float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+              float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+              float3 sub_exp_min = group_mins[sub_g];
+              float3 sub_exp_max = group_maxs[sub_g];
+
+              float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+              float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+
+              if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+                new_mins[i] = math::min(new_mins[i], ix_min);
+                new_maxs[i] = math::max(new_maxs[i], ix_max);
+              }
+            }
+          }
+
+          /* Blend with ungrouped objects (evaluated after all groups). */
+          for (int j = ungrouped_start; j < int(objects_.size()); j++) {
+            float sub_blend = objects_[j].blend + fabsf(objects_[j].shell_distance);
+            if (sub_blend > 0.0f) {
+              float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+              float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+              float3 sub_exp_min = new_mins[j];
+              float3 sub_exp_max = new_maxs[j];
+
+              float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+              float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+
+              if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+                new_mins[i] = math::min(new_mins[i], ix_min);
+                new_maxs[i] = math::max(new_maxs[i], ix_max);
+              }
+            }
+          }
+
+          /* Update this group's bounding box. */
+          group_mins[g] = math::min(group_mins[g], new_mins[i]);
+          group_maxs[g] = math::max(group_maxs[g], new_maxs[i]);
         }
       }
+    }
 
-      /* This group's blend also expands all previous groups in the scene. */
-      running_scene_expand = math::max(running_scene_expand, grp_expand);
+    /* Finally, write the new AABBs back. */
+    for (int i = 0; i < int(objects_.size()); i++) {
+      objects_[i].bbox_min = float4(new_mins[i], 0.0f);
+      objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
     /* ---- Incremental rebake detection ----
@@ -1021,6 +1130,8 @@ class Instance : public DrawEngine {
       }
 
       incremental_bake_ = false;
+      dirty_flags_.reinitialize(n);
+      dirty_flags_.fill(0);
 
       /* Incremental is possible when the grid geometry and structure are stable
        * and only a subset of objects changed their intrinsic properties. */
@@ -1041,6 +1152,7 @@ class Instance : public DrawEngine {
         for (int i = 0; i < n; i++) {
           if (current_hashes[i] != prev_object_hashes_[i]) {
             dirty_indices.append(i);
+            dirty_flags_[i] = 1;
           }
         }
 
@@ -1050,10 +1162,8 @@ class Instance : public DrawEngine {
           float3 dirty_max = float3(-1e30f);
 
           for (int idx : dirty_indices) {
-            /* Current frame's expanded AABB. */
             dirty_min = math::min(dirty_min, float3(objects_[idx].bbox_min));
             dirty_max = math::max(dirty_max, float3(objects_[idx].bbox_max));
-            /* Previous frame's expanded AABB. */
             dirty_min = math::min(dirty_min, float3(prev_bbox_mins_[idx]));
             dirty_max = math::max(dirty_max, float3(prev_bbox_maxs_[idx]));
           }
@@ -1063,21 +1173,18 @@ class Instance : public DrawEngine {
           dirty_brick_min_ = int3(math::floor((dirty_min - atlas_origin_) / chunk));
           dirty_brick_max_ = int3(math::ceil((dirty_max - atlas_origin_) / chunk));
 
-          /* Clamp to grid bounds. */
           dirty_brick_min_ = math::clamp(dirty_brick_min_, int3(0), grid_res_);
           dirty_brick_max_ = math::clamp(dirty_brick_max_, int3(0), grid_res_);
 
           int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
           int dirty_volume = dirty_size.x * dirty_size.y * dirty_size.z;
-          int total_volume = grid_res_.x * grid_res_.y * grid_res_.z;
 
-          /* Only use incremental if dirty region < 50% of total grid. */
-          if (dirty_volume >= 0 && dirty_volume < total_volume / 2) {
-            /* Check atlas capacity: worst case all dirty bricks become newly active. */
+          /* Per-brick dirty flags let the shaders skip clean bricks even
+           * when the dirty AABB is large, so no volume threshold needed.
+           * Only check atlas capacity and fragmentation. */
+          if (dirty_volume >= 0) {
             int max_atlas_slots = bricks_per_axis_ * bricks_per_axis_ * bricks_per_axis_;
             if (total_allocated_slots_ + dirty_volume <= max_atlas_slots) {
-              /* Check fragmentation: if allocated slots > 3x the previous active count,
-               * force full rebake to compact the atlas. */
               if (total_allocated_slots_ <= prev_active_brick_count_ * 3 ||
                   prev_active_brick_count_ == 0 || dirty_volume == 0)
               {
@@ -1086,7 +1193,7 @@ class Instance : public DrawEngine {
                 if (G.debug & G_DEBUG_GPU) {
                   printf(
                       "[SDF] incremental rebake: %d dirty objects, dirty region "
-                      "[%d,%d,%d]-[%d,%d,%d] (%d bricks / %d total)\n",
+                      "[%d,%d,%d]-[%d,%d,%d] (%d bricks)\n",
                       int(dirty_indices.size()),
                       dirty_brick_min_.x,
                       dirty_brick_min_.y,
@@ -1094,8 +1201,7 @@ class Instance : public DrawEngine {
                       dirty_brick_max_.x,
                       dirty_brick_max_.y,
                       dirty_brick_max_.z,
-                      dirty_volume,
-                      total_volume);
+                      dirty_volume);
                 }
               }
             }
@@ -1103,14 +1209,32 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Store current state for next frame's incremental comparison. */
-      prev_object_hashes_ = std::move(current_hashes);
-      prev_bbox_mins_.resize(n);
-      prev_bbox_maxs_.resize(n);
+      /* Save non-expanded AABBs for next frame's comparison. */
+      Vector<float4> cur_mins(n);
+      Vector<float4> cur_maxs(n);
       for (int i = 0; i < n; i++) {
-        prev_bbox_mins_[i] = objects_[i].bbox_min;
-        prev_bbox_maxs_[i] = objects_[i].bbox_max;
+        cur_mins[i] = objects_[i].bbox_min;
+        cur_maxs[i] = objects_[i].bbox_max;
       }
+
+      /* Expand dirty objects' AABBs to cover old positions so the BVH
+       * routes bricks near the previous position to the moved object.
+       * Without this, bricks at the old position wouldn't detect the
+       * object moved away and would keep stale atlas data. */
+      if (incremental_bake_) {
+        for (int i = 0; i < n; i++) {
+          if (dirty_flags_[i]) {
+            objects_[i].bbox_min = float4(
+                math::min(float3(objects_[i].bbox_min), float3(prev_bbox_mins_[i])), 0);
+            objects_[i].bbox_max = float4(
+                math::max(float3(objects_[i].bbox_max), float3(prev_bbox_maxs_[i])), 0);
+          }
+        }
+      }
+
+      prev_object_hashes_ = std::move(current_hashes);
+      prev_bbox_mins_ = std::move(cur_mins);
+      prev_bbox_maxs_ = std::move(cur_maxs);
       prev_object_count_ = n;
       prev_atlas_origin_ = atlas_origin_;
       prev_grid_res_ = grid_res_;
@@ -1121,76 +1245,12 @@ class Instance : public DrawEngine {
       prev_had_grid_objects_ = !grid_objects_.is_empty();
     }
 
-    /* Compute scene hash for dirty tracking (analytic + grid + text combined). */
+    /* Scene hash: reuse per-object + group hashes already computed above. */
     uint64_t hash = uint64_t(objects_.size()) + grid_hash;
-    for (const SDFObjectGPU &obj : objects_) {
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.position.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.position.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.position.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.sdf_size.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.sdf_size.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.sdf_size.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.bevel);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.blend);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.blend_type);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.sdf_type);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.csg_operation);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.color.w);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.shell_distance);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_corners.w);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.box_edges.w);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.x);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.y);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.box_modes.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.inverse_matrix[0][0]);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.inverse_matrix[1][1]);
-      hash = hash * 6364136223846793005ULL + float_as_uint(obj.inverse_matrix[2][2]);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.group_id);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.group_first);
-      hash = hash * 6364136223846793005ULL + uint64_t(obj.group_order);
+    for (int i = 0; i < int(prev_object_hashes_.size()); i++) {
+      hash = hash * 6364136223846793005ULL + prev_object_hashes_[i];
     }
-    /* Include group data in hash. */
-    for (const SDFGroupGPU &grp : groups_gpu_) {
-      hash = hash * 6364136223846793005ULL + uint64_t(grp.csg_operation);
-      hash = hash * 6364136223846793005ULL + uint64_t(grp.blend_type);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.blend);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
-    }
-    /* Include modifier data in hash. */
-    for (const SDFModifierGPU &mod : modifiers_) {
-      hash = hash * 6364136223846793005ULL + uint64_t(mod.header.x);
-      hash = hash * 6364136223846793005ULL + uint64_t(mod.header.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params.w);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(mod.params2.w);
-    }
-    /* Include group data in hash. */
-    for (const SDFGroupGPU &grp : groups_gpu_) {
-      hash = hash * 6364136223846793005ULL + uint64_t(grp.csg_operation);
-      hash = hash * 6364136223846793005ULL + uint64_t(grp.blend_type);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.blend);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
-      hash = hash * 6364136223846793005ULL + uint64_t(grp.first_object);
-      hash = hash * 6364136223846793005ULL + uint64_t(grp.object_count);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.x);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.y);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.z);
-      hash = hash * 6364136223846793005ULL + float_as_uint(grp.color.w);
-    }
+    hash = hash * 6364136223846793005ULL + prev_group_structure_hash_;
     hash = hash * 6364136223846793005ULL + float_as_uint(surface_margin_);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.x);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.y);
@@ -1198,6 +1258,18 @@ class Instance : public DrawEngine {
     hash = hash * 6364136223846793005ULL + uint64_t(grid_res_.x);
     hash = hash * 6364136223846793005ULL + uint64_t(grid_res_.y);
     hash = hash * 6364136223846793005ULL + uint64_t(grid_res_.z);
+
+    /* Spatial hash: only positions, sizes, and object count.
+     * BVH topology depends on centroids, so only rebuild when these change. */
+    uint64_t sp_hash = uint64_t(objects_.size());
+    for (const SDFObjectGPU &obj : objects_) {
+      sp_hash = sp_hash * 6364136223846793005ULL + float_as_uint(obj.position.x);
+      sp_hash = sp_hash * 6364136223846793005ULL + float_as_uint(obj.position.y);
+      sp_hash = sp_hash * 6364136223846793005ULL + float_as_uint(obj.position.z);
+      sp_hash = sp_hash * 6364136223846793005ULL + float_as_uint(obj.sdf_size.x);
+      sp_hash = sp_hash * 6364136223846793005ULL + float_as_uint(obj.sdf_size.y);
+      sp_hash = sp_hash * 6364136223846793005ULL + float_as_uint(obj.sdf_size.z);
+    }
 
     if (hash != scene_hash_) {
       if (G.debug & G_DEBUG_GPU) {
@@ -1211,6 +1283,8 @@ class Instance : public DrawEngine {
       scene_hash_ = hash;
       needs_bake_ = true;
       needs_upload_ = true;
+      needs_bvh_rebuild_ = (sp_hash != spatial_hash_);
+      spatial_hash_ = sp_hash;
     }
     else {
       needs_bake_ = false;
@@ -1263,7 +1337,12 @@ class Instance : public DrawEngine {
 
     if (!objects_.is_empty() && needs_upload_) {
       upload_objects();
-      build_bvh();
+      if (needs_bvh_rebuild_) {
+        build_bvh();
+      }
+      else if (!bvh_nodes_.is_empty()) {
+        update_bvh_aabbs();
+      }
       upload_bvh();
       needs_upload_ = false;
     }
@@ -1822,6 +1901,33 @@ class Instance : public DrawEngine {
         GPU_storagebuf_update(group_ssbo_, groups_gpu_.data());
       }
     }
+
+    /* Dirty flags SSBO. */
+    const int df_count = math::max(int(dirty_flags_.size()), 1);
+    const size_t df_buf_size = df_count * sizeof(int);
+
+    if (dirty_flags_ssbo_ != nullptr && dirty_flags_ssbo_count_ != df_count) {
+      GPU_storagebuf_free(dirty_flags_ssbo_);
+      dirty_flags_ssbo_ = nullptr;
+    }
+
+    if (dirty_flags_ssbo_ == nullptr) {
+      if (dirty_flags_.is_empty()) {
+        int dummy = 0;
+        dirty_flags_ssbo_ = GPU_storagebuf_create_ex(
+            df_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_dirty_flags_ssbo");
+      }
+      else {
+        dirty_flags_ssbo_ = GPU_storagebuf_create_ex(
+            df_buf_size, dirty_flags_.data(), GPU_USAGE_DYNAMIC, "sdf_dirty_flags_ssbo");
+      }
+      dirty_flags_ssbo_count_ = df_count;
+    }
+    else {
+      if (!dirty_flags_.is_empty()) {
+        GPU_storagebuf_update(dirty_flags_ssbo_, dirty_flags_.data());
+      }
+    }
   }
 
   /* SAH BVH */
@@ -2009,6 +2115,35 @@ class Instance : public DrawEngine {
     return node_idx;
   }
 
+  void update_bvh_aabbs()
+  {
+    /* Update AABBs bottom-up without changing topology. */
+    const int n = int(bvh_nodes_.size());
+    for (int i = n - 1; i >= 0; i--) {
+      BVHNodeGPU &node = bvh_nodes_[i];
+      int left = reinterpret_cast<int &>(node.min_and_left.w);
+      int right = reinterpret_cast<int &>(node.max_and_right.w);
+
+      if (left == -1) {
+        /* Leaf: update from object bbox. */
+        int obj_idx = right;
+        if (obj_idx >= 0 && obj_idx < int(objects_.size())) {
+          node.min_and_left = float4(float3(objects_[obj_idx].bbox_min), node.min_and_left.w);
+          node.max_and_right = float4(float3(objects_[obj_idx].bbox_max), node.max_and_right.w);
+        }
+      }
+      else {
+        /* Interior: union of children. */
+        const BVHNodeGPU &l = bvh_nodes_[left];
+        const BVHNodeGPU &r = bvh_nodes_[right];
+        float3 lo = math::min(float3(l.min_and_left), float3(r.min_and_left));
+        float3 hi = math::max(float3(l.max_and_right), float3(r.max_and_right));
+        node.min_and_left = float4(lo, node.min_and_left.w);
+        node.max_and_right = float4(hi, node.max_and_right.w);
+      }
+    }
+  }
+
   void upload_bvh()
   {
     const int count = int(bvh_nodes_.size());
@@ -2101,6 +2236,11 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(group_ssbo_, grp_slot);
     }
 
+    if (dirty_flags_ssbo_) {
+      int df_slot = GPU_shader_get_ssbo_binding(classify_sh_, "dirty_flags");
+      GPU_storagebuf_bind(dirty_flags_ssbo_, df_slot);
+    }
+
     GPU_texture_image_bind(indirection_tx_, 0);
 
     GPU_shader_uniform_1i(classify_sh_, "object_count", int(objects_.size()));
@@ -2117,6 +2257,8 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(classify_sh_, "incremental_mode", incremental ? 1 : 0);
     GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_min", dirty_brick_min_);
     GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", dirty_brick_max_);
+    GPU_shader_uniform_1i(
+        classify_sh_, "has_dirty_flags", (incremental && !dirty_flags_.is_empty()) ? 1 : 0);
 
     if (incremental) {
       int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
@@ -2187,6 +2329,11 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(group_ssbo_, grp_slot);
     }
 
+    if (dirty_flags_ssbo_) {
+      int df_slot = GPU_shader_get_ssbo_binding(bake_sh_, "dirty_flags");
+      GPU_storagebuf_bind(dirty_flags_ssbo_, df_slot);
+    }
+
     /* Bind atlas images. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
 
@@ -2197,6 +2344,8 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
+    GPU_shader_uniform_1i(
+        bake_sh_, "has_dirty_flags", (incremental_bake_ && !dirty_flags_.is_empty()) ? 1 : 0);
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
      * early-exit after reading brick_counter.count from SSBO. */
@@ -2239,9 +2388,52 @@ class Instance : public DrawEngine {
     GPU_face_culling(GPU_CULL_NONE);
     GPU_stencil_test(GPU_STENCIL_NONE);
 
-    /* TODO: Scissor rect optimization disabled — needs correct AABB projection.
-     * Was clipping SDF rendering incorrectly. Re-enable once debugged. */
+    /* Scissor rect: project atlas AABB to screen to skip pixels outside the SDF scene. */
     bool scissor_set = false;
+    {
+      float3 aabb_min = atlas_origin_;
+      float3 aabb_max = atlas_origin_ + float3(grid_res_ * SDF_BRICK_SIZE) * voxel_size_;
+
+      View &scissor_view = View::default_get();
+      float4x4 vp_mat = scissor_view.winmat() * scissor_view.viewmat();
+
+      float2 screen_min(1e30f);
+      float2 screen_max(-1e30f);
+      bool any_behind = false;
+
+      for (int c = 0; c < 8; c++) {
+        float3 corner((c & 1) ? aabb_max.x : aabb_min.x,
+                       (c & 2) ? aabb_max.y : aabb_min.y,
+                       (c & 4) ? aabb_max.z : aabb_min.z);
+        float4 clip = vp_mat * float4(corner, 1.0f);
+        if (clip.w <= 0.0f) {
+          any_behind = true;
+          break;
+        }
+        float2 ndc = float2(clip.x, clip.y) / clip.w;
+        screen_min = math::min(screen_min, ndc);
+        screen_max = math::max(screen_max, ndc);
+      }
+
+      if (!any_behind) {
+        const int2 vp_size = int2(draw_ctx_->viewport_size_get());
+        int x0 = int(floorf((screen_min.x * 0.5f + 0.5f) * float(vp_size.x))) - 16;
+        int y0 = int(floorf((screen_min.y * 0.5f + 0.5f) * float(vp_size.y))) - 16;
+        int x1 = int(ceilf((screen_max.x * 0.5f + 0.5f) * float(vp_size.x))) + 16;
+        int y1 = int(ceilf((screen_max.y * 0.5f + 0.5f) * float(vp_size.y))) + 16;
+
+        x0 = math::max(x0, 0);
+        y0 = math::max(y0, 0);
+        x1 = math::min(x1, vp_size.x);
+        y1 = math::min(y1, vp_size.y);
+
+        if (x1 > x0 && y1 > y0 && (x1 - x0) < vp_size.x && (y1 - y0) < vp_size.y) {
+          GPU_scissor_test(true);
+          GPU_scissor(x0, y0, x1 - x0, y1 - y0);
+          scissor_set = true;
+        }
+      }
+    }
 
     GPU_shader_bind(march_sh_);
 
@@ -2283,7 +2475,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
-    GPU_shader_uniform_1i(march_sh_, "normal_quality", 1); /* 0=fast, 1=smooth */
     GPU_shader_uniform_1i(march_sh_, "use_instanced", 0);
     GPU_shader_uniform_1i(march_sh_, "instance_count", 0);
     GPU_shader_uniform_1i(march_sh_, "bvh_node_count", int(bvh_nodes_.size()));
@@ -3014,81 +3205,65 @@ class Instance : public DrawEngine {
 
   void augment_indirection_for_grids()
   {
-    /* Mark all bricks overlapping each grid object's world AABB as active.
-     * Uses simple sequential slot assignment. */
+    if (augment_grids_sh_ == nullptr || indirection_tx_ == nullptr || active_bricks_ == nullptr) {
+      return;
+    }
+
     float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
 
-    /* Read current indirection (already written by classify or clear). */
-    int32_t *data = static_cast<int32_t *>(GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
+    GPU_shader_bind(augment_grids_sh_);
 
-    Vector<ActiveBrick> new_bricks;
-    int next_slot = active_brick_count_;
+    int counter_slot = GPU_shader_get_ssbo_binding(augment_grids_sh_, "brick_counter");
+    GPU_storagebuf_bind(brick_counter_, counter_slot);
+
+    int ab_slot = GPU_shader_get_ssbo_binding(augment_grids_sh_, "active_bricks");
+    GPU_storagebuf_bind(active_bricks_, ab_slot);
+
+    GPU_texture_image_bind(indirection_tx_, 0);
+
+    GPU_shader_uniform_3iv(augment_grids_sh_, "grid_resolution", grid_res_);
 
     for (const GridObject &grid : grid_objects_) {
       float4x4 tex_to_world = math::invert(grid.world_to_texture);
       float3 gmin = float3(1e30f);
       float3 gmax = float3(-1e30f);
       for (int c = 0; c < 8; c++) {
-        float3 tc = float3((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
+        float3 tc = float3(
+            (c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
         float3 wc = math::transform_point(tex_to_world, tc);
         gmin = math::min(gmin, wc);
         gmax = math::max(gmax, wc);
       }
 
       int3 bmin = int3(math::floor((gmin - atlas_origin_) / brick_world));
-      int3 bmax = int3(math::floor((gmax - atlas_origin_) / brick_world));
+      int3 bmax = int3(math::ceil((gmax - atlas_origin_) / brick_world));
       bmin = math::max(bmin, int3(0));
-      bmax = math::min(bmax, grid_res_ - int3(1));
+      bmax = math::min(bmax, grid_res_);
 
-      for (int bz = bmin.z; bz <= bmax.z; bz++) {
-        for (int by = bmin.y; by <= bmax.y; by++) {
-          for (int bx = bmin.x; bx <= bmax.x; bx++) {
-            int idx = bx + by * grid_res_.x + bz * grid_res_.x * grid_res_.y;
-            if (data[idx] >= 0) {
-              continue; /* Already active from analytic classify. */
-            }
-            int slot = next_slot++;
-            data[idx] = slot;
-
-            ActiveBrick ab = {};
-            ab.coord = int4(bx, by, bz, slot);
-            new_bricks.append(ab);
-          }
-        }
+      int3 range = bmax - bmin;
+      if (range.x <= 0 || range.y <= 0 || range.z <= 0) {
+        continue;
       }
+
+      GPU_shader_uniform_3iv(augment_grids_sh_, "grid_brick_min", bmin);
+      GPU_shader_uniform_3iv(augment_grids_sh_, "grid_brick_max", bmax);
+
+      GPU_compute_dispatch(augment_grids_sh_,
+                           divide_ceil_u(range.x, 4),
+                           divide_ceil_u(range.y, 4),
+                           divide_ceil_u(range.z, 4));
+
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_SHADER_STORAGE);
     }
 
-    active_brick_count_ = next_slot;
+    GPU_texture_image_unbind(indirection_tx_);
+    GPU_shader_unbind();
 
-    /* Re-upload modified indirection. */
-    GPU_texture_update(indirection_tx_, GPU_DATA_INT, data);
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    MEM_freeN(data);
-
-    /* Append grid bricks to the active_bricks SSBO. */
-    if (!new_bricks.is_empty()) {
-      int classify_count = next_slot - int(new_bricks.size());
-
-      /* Read existing bricks from the SSBO. The read returns the full SSBO
-       * (active_bricks_capacity_ entries), so the buffer must be large enough. */
-      Vector<ActiveBrick> all_bricks(math::max(active_brick_count_, active_bricks_capacity_));
-      if (classify_count > 0 && active_bricks_) {
-        GPU_storagebuf_read(active_bricks_, all_bricks.data());
-      }
-      for (int i = 0; i < int(new_bricks.size()); i++) {
-        all_bricks[classify_count + i] = new_bricks[i];
-      }
-
-      if (active_bricks_) {
-        GPU_storagebuf_free(active_bricks_);
-      }
-      active_bricks_ = GPU_storagebuf_create_ex(active_brick_count_ * sizeof(ActiveBrick),
-                                                all_bricks.data(),
-                                                GPU_USAGE_DYNAMIC,
-                                                "sdf_active_bricks");
-      active_bricks_capacity_ = active_brick_count_;
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-    }
+    /* Read back only the 16-byte counter to get updated active_brick_count_. */
+    BrickCounter readback = {};
+    GPU_storagebuf_read(brick_counter_, &readback);
+    active_brick_count_ = int(readback.count);
+    total_allocated_slots_ = active_brick_count_;
   }
 
   void clear_compact_atlas()
@@ -3114,28 +3289,32 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(grid_blend_sh_);
 
+    /* Cache binding slots (avoids repeated string lookups). */
+    int ab_slot = GPU_shader_get_ssbo_binding(grid_blend_sh_, "active_bricks");
+    int grid_sampler_slot = GPU_shader_get_sampler_binding(grid_blend_sh_, "sdf_grid");
+
+    /* Bind resources that stay constant across all grids. */
+    GPU_storagebuf_bind(active_bricks_, ab_slot);
+    if (modifier_ssbo_) {
+      int mod_slot = GPU_shader_get_ssbo_binding(grid_blend_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
+    }
+    GPU_texture_image_bind(compact_atlas_tx_, 0);
+
+    /* Invariant push constants. */
+    GPU_shader_uniform_1f(grid_blend_sh_, "voxel_size", voxel_size_);
+    GPU_shader_uniform_3fv(grid_blend_sh_, "atlas_origin", atlas_origin_);
+    GPU_shader_uniform_1i(grid_blend_sh_, "bricks_per_axis", bricks_per_axis_);
+    GPU_shader_uniform_1i(grid_blend_sh_, "active_brick_count", active_brick_count_);
+
+    uint gb_x = uint(math::min(active_brick_count_, 65535));
+    uint gb_y = uint(divide_ceil_u(active_brick_count_, 65535));
+    GPU_shader_uniform_1i(grid_blend_sh_, "dispatch_width", int(gb_x));
+
     for (const GridObject &grid : grid_objects_) {
-      /* Bind active bricks SSBO. */
-      int ab_slot = GPU_shader_get_ssbo_binding(grid_blend_sh_, "active_bricks");
-      GPU_storagebuf_bind(active_bricks_, ab_slot);
+      GPU_texture_bind(grid.texture, grid_sampler_slot);
 
-      /* Bind modifier SSBO (declared in shader info, may not be accessed). */
-      if (modifier_ssbo_) {
-        int mod_slot = GPU_shader_get_ssbo_binding(grid_blend_sh_, "sdf_modifiers");
-        GPU_storagebuf_bind(modifier_ssbo_, mod_slot);
-      }
-
-      /* Bind compact atlas as read-write image. */
-      GPU_texture_image_bind(compact_atlas_tx_, 0);
-
-      /* Bind grid texture as sampler. */
-      int grid_slot = GPU_shader_get_sampler_binding(grid_blend_sh_, "sdf_grid");
-      GPU_texture_bind(grid.texture, grid_slot);
-
-      /* Push constants. */
-      GPU_shader_uniform_1f(grid_blend_sh_, "voxel_size", voxel_size_);
-      GPU_shader_uniform_3fv(grid_blend_sh_, "atlas_origin", atlas_origin_);
-      GPU_shader_uniform_1i(grid_blend_sh_, "bricks_per_axis", bricks_per_axis_);
+      /* Per-grid push constants only. */
       GPU_shader_uniform_mat4(
           grid_blend_sh_, "grid_world_to_texture", grid.world_to_texture.ptr());
       GPU_shader_uniform_4fv(grid_blend_sh_, "grid_color", grid.color);
@@ -3143,22 +3322,15 @@ class Instance : public DrawEngine {
       GPU_shader_uniform_1i(grid_blend_sh_, "grid_blend_type", grid.blend_type);
       GPU_shader_uniform_1i(grid_blend_sh_, "grid_csg_operation", grid.csg_operation);
       GPU_shader_uniform_1f(grid_blend_sh_, "grid_shell_distance", grid.shell_distance);
-      GPU_shader_uniform_1i(grid_blend_sh_, "active_brick_count", active_brick_count_);
 
-      /* Active-brick-only dispatch: one workgroup per active brick.
-       * Use 2D dispatch to avoid GL's 65535 workgroup limit per axis. */
-      uint gb_x = uint(math::min(active_brick_count_, 65535));
-      uint gb_y = uint(divide_ceil_u(active_brick_count_, 65535));
-      GPU_shader_uniform_1i(grid_blend_sh_, "dispatch_width", int(gb_x));
       GPU_compute_dispatch(grid_blend_sh_, gb_x, gb_y, 1);
 
-      /* Barrier between dispatches so next grid reads the updated atlas. */
       GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
 
       GPU_texture_unbind(grid.texture);
-      GPU_texture_image_unbind(compact_atlas_tx_);
     }
 
+    GPU_texture_image_unbind(compact_atlas_tx_);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_shader_unbind();
   }
@@ -3201,15 +3373,14 @@ class Instance : public DrawEngine {
   /** Begin timing for the given pass. Snapshots wall-clock time. */
   void perf_begin_pass(int pass)
   {
+    GPU_finish();
     perf_pass_start_[pass] = BLI_time_now_seconds();
     perf_pass_active_[pass] = true;
   }
 
-  /** End timing for the given pass.
-   * Flushes command queue and waits for GPU completion, then computes elapsed time. */
+  /** End timing for the given pass. GPU_finish ensures the pass completed. */
   void perf_end_pass(int pass)
   {
-    GPU_flush();
     GPU_finish();
     double elapsed_ms = (BLI_time_now_seconds() - perf_pass_start_[pass]) * 1000.0;
     switch (pass) {
@@ -3359,6 +3530,9 @@ class Instance : public DrawEngine {
     }
     if (bvh_ssbo_) {
       GPU_storagebuf_free(bvh_ssbo_);
+    }
+    if (dirty_flags_ssbo_) {
+      GPU_storagebuf_free(dirty_flags_ssbo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);

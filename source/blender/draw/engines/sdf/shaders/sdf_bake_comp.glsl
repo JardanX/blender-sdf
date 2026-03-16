@@ -13,6 +13,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
 #define MAX_CANDIDATES 128
+#define MAX_COLLECT 1024
 
 /* Per-object data cached in shared memory. */
 struct SharedObj {
@@ -52,10 +53,18 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-/* Shared candidate list and object cache (BVH traversal by thread 0). */
-shared int shared_candidates[MAX_CANDIDATES];
+/* Pre-pruning candidate list (larger buffer to avoid silent drops). */
+shared int shared_candidates[MAX_COLLECT];
 shared int shared_num_candidates;
+shared int shared_any_dirty;
+
+/* Post-pruning object cache (fits in shared memory at 128 entries). */
 shared SharedObj shared_objs[MAX_CANDIDATES];
+shared float3 shared_bb_min[MAX_CANDIDATES];
+shared float3 shared_bb_max[MAX_CANDIDATES];
+
+/* Lipschitz pruning: center distances for the larger pre-pruning buffer. */
+shared float shared_center_dist[MAX_COLLECT];
 
 void main()
 {
@@ -103,7 +112,7 @@ void main()
         int right = bvh_decode_int(node.max_and_right.w);
 
         if (left == -1) {
-          if (shared_num_candidates < MAX_CANDIDATES) {
+          if (shared_num_candidates < MAX_COLLECT) {
             shared_candidates[shared_num_candidates++] = right;
           }
         }
@@ -136,17 +145,192 @@ void main()
           continue;
         }
 
-        if (shared_num_candidates < MAX_CANDIDATES) {
+        if (shared_num_candidates < MAX_COLLECT) {
           shared_candidates[shared_num_candidates++] = i;
         }
       }
     }
+
+    /* Per-brick dirty check. */
+    shared_any_dirty = 0;
+    if (has_dirty_flags == 1) {
+      for (int c = 0; c < shared_num_candidates; c++) {
+        if (dirty_flags[shared_candidates[c]] != 0) {
+          shared_any_dirty = 1;
+          break;
+        }
+      }
+    }
+    else {
+      shared_any_dirty = 1;
+    }
+
   }
   barrier();
 
-  /* Cooperatively load candidate objects into shared memory. */
+  if (shared_any_dirty == 0) {
+    return;
+  }
+
+  /* Lipschitz pruning: cooperatively evaluate all candidates at brick center,
+   * then thread 0 prunes those provably outside blend influence.
+   * |f1(p) - f2(p)| >= k + 2R => operator reduces to one operand.
+   * (Barbier et al., Eurographics 2025). */
   int num_candidates = shared_num_candidates;
   uint tid = gl_LocalInvocationIndex;
+
+  if (num_candidates > 1) {
+    float3 brick_center = atlas_origin +
+                          (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
+    float two_R = 2.0f * float(BRICK_STORAGE) * voxel_size * 0.866025f;
+
+    /* All threads cooperatively evaluate candidates at brick center. */
+    for (int c = int(tid); c < num_candidates; c += 144) {
+      int i = shared_candidates[c];
+      SDFObjectGPU obj = objects[i];
+      float3 lp = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
+      SDFPrimitiveData pd;
+      pd.sdf_type = obj.sdf_type;
+      pd.size = obj.sdf_size.xyz;
+      pd.bevel = obj.bevel;
+      pd.box_corners = obj.box_corners;
+      pd.box_edges = obj.box_edges;
+      pd.box_modes = obj.box_modes;
+      pd.modifier_start = obj.modifier_start;
+      pd.modifier_count = obj.modifier_count;
+      shared_center_dist[c] = evalObjectSDF(pd, lp);
+    }
+    barrier();
+
+    /* Thread 0: sequential Lipschitz pruning from shared memory. */
+    if (tid == 0u) {
+      float acc_center = 1e10f;
+
+      for (int g = 0; g < group_count; g++) {
+        float grp_center = 1e10f;
+        for (int c = 0; c < num_candidates; c++) {
+          SDFObjectGPU obj = objects[shared_candidates[c]];
+          if (obj.group_id != g) {
+            continue;
+          }
+          float d = shared_center_dist[c];
+          if (obj.group_first == 1) {
+            grp_center = d;
+            continue;
+          }
+          float threshold = obj.blend + two_R;
+          bool pruned = false;
+          if (obj.csg_operation == SDF_CSG_OP_UNION) {
+            pruned = (d - grp_center > threshold);
+          }
+          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
+            pruned = (grp_center + d > threshold);
+          }
+          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) {
+            pruned = (grp_center - d > threshold);
+          }
+          if (pruned) {
+            shared_center_dist[c] = -1e20f;
+          }
+          else {
+            grp_center = combineCSG(
+                grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+          }
+        }
+        if (grp_center >= 1e10f) {
+          continue;
+        }
+        SDFGroupGPU grp = groups[g];
+        if (g == 0) {
+          acc_center = grp_center;
+        }
+        else {
+          acc_center = combineCSG(
+              acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend,
+              grp.shell_distance);
+        }
+      }
+
+      for (int c = 0; c < num_candidates; c++) {
+        SDFObjectGPU obj = objects[shared_candidates[c]];
+        if (obj.group_id != -1) {
+          continue;
+        }
+        float d = shared_center_dist[c];
+        float threshold = obj.blend + two_R;
+        bool pruned = false;
+        if (acc_center < 1e9f) {
+          if (obj.csg_operation == SDF_CSG_OP_UNION) {
+            pruned = (d - acc_center > threshold);
+          }
+          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
+            pruned = (acc_center + d > threshold);
+          }
+          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) {
+            pruned = (acc_center - d > threshold);
+          }
+        }
+        if (pruned) {
+          shared_center_dist[c] = -1e20f;
+        }
+        else {
+          acc_center = combineCSG(
+              acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        }
+      }
+
+      /* Compact: remove pruned candidates, keep center distances in sync. */
+      int new_count = 0;
+      for (int c = 0; c < num_candidates; c++) {
+        if (shared_center_dist[c] > -1e19f) {
+          shared_candidates[new_count] = shared_candidates[c];
+          shared_center_dist[new_count] = shared_center_dist[c];
+          new_count++;
+        }
+      }
+
+      /* Priority truncation: if still > MAX_CANDIDATES, find the distance
+       * threshold that keeps exactly MAX_CANDIDATES entries, then drop the
+       * rest while preserving original object-index order (critical for CSG). */
+      if (new_count > MAX_CANDIDATES) {
+        /* Find the MAX_CANDIDATES-th smallest |distance| as the cut threshold.
+         * Use a single pass: track the k-th smallest by repeated scan. */
+        int to_drop = new_count - MAX_CANDIDATES;
+        for (int d = 0; d < to_drop; d++) {
+          /* Find the candidate with the largest |center_dist| and mark it. */
+          float worst_d = -1.0f;
+          int worst_c = -1;
+          for (int c = 0; c < new_count; c++) {
+            if (shared_center_dist[c] > -1e19f) {
+              float ad = abs(shared_center_dist[c]);
+              if (ad > worst_d) {
+                worst_d = ad;
+                worst_c = c;
+              }
+            }
+          }
+          if (worst_c >= 0) {
+            shared_center_dist[worst_c] = -1e20f;
+          }
+        }
+        /* Re-compact, preserving original order. */
+        int final_count = 0;
+        for (int c = 0; c < new_count; c++) {
+          if (shared_center_dist[c] > -1e19f) {
+            shared_candidates[final_count] = shared_candidates[c];
+            final_count++;
+          }
+        }
+        new_count = final_count;
+      }
+
+      shared_num_candidates = new_count;
+    }
+    barrier();
+    num_candidates = shared_num_candidates;
+  }
+
+  /* Cooperatively load candidate objects into shared memory. */
   for (int c = int(tid); c < num_candidates; c += 144) {
     int i = shared_candidates[c];
     SDFObjectGPU obj = objects[i];
@@ -169,6 +353,9 @@ void main()
     shared_objs[c].box_corners = obj.box_corners;
     shared_objs[c].box_edges = obj.box_edges;
     shared_objs[c].box_modes = obj.box_modes;
+
+    shared_bb_min[c] = obj.bbox_min.xyz;
+    shared_bb_max[c] = obj.bbox_max.xyz;
   }
   barrier();
 
@@ -184,7 +371,9 @@ void main()
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
 
-    /* Group-aware sequential evaluation. */
+    /* Group-aware sequential evaluation with per-voxel AABB culling.
+     * Object AABBs (already expanded by blend) are read from SSBO — coalesced across workgroup.
+     * Skips the expensive matrix multiply + SDF eval for objects far from this voxel. */
     for (int g = 0; g < group_count; g++) {
       SDFGroupGPU grp = groups[g];
       float grp_dist = 1e10f;
@@ -193,6 +382,17 @@ void main()
       for (int c = 0; c < num_candidates; c++) {
         SharedObj sobj = shared_objs[c];
         if (sobj.group_id != g) {
+          continue;
+        }
+
+        /* Per-voxel AABB cull (bbox cached in shared memory). */
+        if (any(greaterThan(world_pos, shared_bb_max[c])) ||
+            any(lessThan(world_pos, shared_bb_min[c])))
+        {
+          if (sobj.group_first == 1) {
+            grp_dist = 1e10f;
+            grp_color = sobj.color.rgb;
+          }
           continue;
         }
 
@@ -239,10 +439,16 @@ void main()
       }
     }
 
-    /* Ungrouped objects. */
+    /* Ungrouped objects with per-voxel AABB culling. */
     for (int c = 0; c < num_candidates; c++) {
       SharedObj sobj = shared_objs[c];
       if (sobj.group_id != -1) {
+        continue;
+      }
+
+      if (any(greaterThan(world_pos, shared_bb_max[c])) ||
+          any(lessThan(world_pos, shared_bb_min[c])))
+      {
         continue;
       }
 

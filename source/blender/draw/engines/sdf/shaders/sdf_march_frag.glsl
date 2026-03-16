@@ -45,22 +45,6 @@ void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out flo
 
 /* Normal computation */
 
-float3 computeNormalCompact(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
-{
-  int3 cell = int3(floor(grid_pos_in_brick));
-  cell = clamp(cell, int3(0), int3(BRICK_SIZE - 1));
-
-  float3 frac_pos = grid_pos_in_brick - float3(cell);
-  frac_pos = clamp(frac_pos, float3(0.0f), float3(1.0f));
-
-  float s[8];
-  fetchCornersCompact(brick, cell, slot, bpa, s);
-
-  float3 grad = trilinearGradient(s, frac_pos);
-  float len = length(grad);
-  return len > 1e-8f ? grad / len : float3(0.0f, 0.0f, 1.0f);
-}
-
 /**
  * Compute smooth normal via dual voxel interpolation.
  * (Section 3.2, Hansson-Soderlund et al. JCGT 2022)
@@ -213,10 +197,7 @@ void dda_march(float3 ray_origin,
       break;
     }
 
-    float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
-    t_brick_exit = min(t_brick_exit, t_exit);
-
-    /* Read indirection: from texture (world-space) or SSBO (instanced). */
+    /* Read indirection first — skip t_brick_exit for empty bricks. */
     int slot;
     if (indir_offset < 0) {
       slot = texelFetch(indirection_tx, brick_cell, 0).r;
@@ -227,7 +208,18 @@ void dda_march(float3 ray_origin,
       slot = shape_indir[indir_offset + flat_idx];
     }
 
+    if (slot == -2) {
+      out_hit_t = t_current;
+      out_hit_brick = brick_cell;
+      out_hit_cell = int3(0);
+      out_hit_slot = -2;
+      return;
+    }
+
     if (slot >= 0) {
+      float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
+      t_brick_exit = min(t_brick_exit, t_exit);
+
       /* Active brick: voxel-level DDA. */
       float3 brick_origin = atlas_orig + float3(brick_cell * BRICK_SIZE) * vs;
       float3 V = (ray_origin - brick_origin) * inv_voxel;
@@ -753,24 +745,26 @@ void main()
 
     hit_pos = ray_origin + ray_dir * hit_t;
 
-    /* Read blended color from atlas. */
-    float inv_voxel = 1.0f / voxel_size;
-    float3 brick_origin = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
-    float3 local_pos = (hit_pos - brick_origin) * inv_voxel;
-
-    int bpa = bricks_per_axis;
-    int3 slot_block = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
-    float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(2.0f);
-    int3 compact_size = int3(textureSize(compact_atlas, 0));
-    float3 atlas_uv = atlas_pos / float3(compact_size);
-    hit_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
-
-    /* Compute normal. */
-    float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
-    if (normal_quality == 0) {
-      hit_normal = computeNormalCompact(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
+    if (hit_slot == -2) {
+      /* Interior brick: no atlas data. Use default color and face normal. */
+      hit_color = float3(0.5f);
+      hit_normal = -ray_dir;
     }
     else {
+      /* Read blended color from atlas. */
+      float inv_voxel = 1.0f / voxel_size;
+      float3 brick_origin = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
+      float3 local_pos = (hit_pos - brick_origin) * inv_voxel;
+
+      int bpa = bricks_per_axis;
+      int3 slot_block = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
+      float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(2.0f);
+      int3 compact_size = int3(textureSize(compact_atlas, 0));
+      float3 atlas_uv = atlas_pos / float3(compact_size);
+      hit_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
+
+      /* Compute normal. */
+      float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
       hit_normal = computeDualVoxelNormal(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
     }
   }
