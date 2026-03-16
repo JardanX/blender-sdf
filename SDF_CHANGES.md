@@ -2338,3 +2338,78 @@ For a scene with 100+ small objects smooth-unioned (k=2.0) with a large SDF:
 - Typically reduces ~100 candidates to ~5-15 active per brick near the surface
 - Each pruned candidate saves 1728 SDF evaluations (12³ voxels per brick)
 - Cost: ~100 center evaluations by thread 0 (cheap vs 1728×N_pruned saved across 144 threads)
+
+---
+
+## Streaming Bake & Grid Stability Overhaul
+
+Replaced the hard-limited bake pipeline (MAX_CANDIDATES=128) with a streaming
+architecture that has no hard limits on candidate count, and fixed several grid
+management issues that caused freezes and permanent quality degradation.
+
+### Problems Solved
+
+1. **Blending artifacts at brick boundaries** — With 100+ SDFs blending, the
+   MAX_CANDIDATES=128 hard cap silently dropped objects. Different bricks dropped
+   different objects, creating rectangular block-shaped discontinuities.
+2. **Lipschitz pruning overhead** — The pruning step itself (cooperative center eval +
+   thread-0 sequential pruning) was expensive and only needed because of the hard cap.
+3. **Grid resize freezes** — Moving objects outside hysteresis padding caused full
+   rebakes (200ms+ frames).
+4. **Quality permanently degrades** — After moving objects far away and back, voxel
+   resolution stayed coarse due to symmetric deadband blocking recovery.
+
+### Bake Shader — Streaming Evaluation (`sdf_bake_comp.glsl`)
+
+Complete rewrite. Instead of caching all candidates in shared memory (requiring a
+hard limit), candidates are streamed through shared memory in batches of 64:
+
+- **Z-outer loop**: Each voxel layer is fully evaluated before the next. Per-voxel
+  accumulators (acc_dist, grp_dist, etc.) are registers that persist across batches.
+- **Batch-inner loop**: Each batch cooperatively loads 64 candidates into shared
+  memory, all threads evaluate against them, then the next batch overwrites.
+- **Single-pass group evaluation**: Candidates are already sorted by (group_id,
+  group_order). Group transitions are tracked per-voxel via `prev_group` register.
+  No separate per-group loop — O(candidates) instead of O(groups × candidates).
+- **Overflow fallback**: BVH candidate indices are collected into a 2048-slot shared
+  buffer. If exceeded, the shader falls back to iterating all objects in sorted order
+  (no BVH filtering). Per-voxel AABB culling still skips non-overlapping objects.
+- **No Lipschitz pruning**: Removed entirely. With no candidate limit, there's nothing
+  to prune down to.
+
+| Old | New |
+|-----|-----|
+| MAX_CANDIDATES = 128 (hard cap, causes artifacts) | No limit (streaming) |
+| MAX_COLLECT = 1024 (silent drop) | CANDIDATE_BUF_SIZE = 2048 + overflow fallback |
+| Lipschitz pruning (2 barriers + thread-0 sequential) | Removed |
+| Candidate-outer, Z-inner (needs all candidates cached) | Z-outer, batch-inner (only BATCH_SIZE cached) |
+| Two-pass group evaluation: per-group + ungrouped | Single-pass ordered evaluation |
+
+### Classify Shader — Linear Scan (`sdf_classify_comp.glsl`)
+
+Rewritten to iterate all objects in sorted order with AABB culling. No candidate
+buffer, no BVH dependency, zero hard limits.
+
+- Single-pass group-aware evaluation (same pattern as bake shader)
+- Group transitions tracked before AABB cull so group boundaries are correct
+  even when the base shape is culled for a brick
+- Dirty check as a separate lightweight pass (AABB test + dirty flag only)
+
+### Grid Stability (`sdf_engine.cc`)
+
+- **Asymmetric deadband**: Refinement passes through at > 10% improvement (ratio < 0.9),
+  coarsening suppressed up to 25% (ratio < 1.25). Previously symmetric ±20% blocked
+  quality recovery after temporary scene expansion.
+- **Proportional hysteresis padding**: `max(chunk_size * 8, scene_extent * 0.25, 1.0)`
+  instead of `max(chunk_size * 8, 1.0)`. Larger scenes get proportionally more movement
+  room before triggering grid expansion.
+- **Aggressive contraction**: Grid contracts when ideal size < 50% of current per axis
+  (was 33%). Reclaims quality faster when the scene shrinks.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Complete rewrite: streaming batch evaluation (BATCH_SIZE=64), overflow fallback, single-pass group tracking, removed MAX_CANDIDATES/Lipschitz |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Rewrite: linear scan through sorted objects, no candidate buffer, single-pass group evaluation |
+| `draw/engines/sdf/sdf_engine.cc` | Asymmetric voxel deadband (0.9–1.25), proportional hysteresis padding, 50% contraction threshold |

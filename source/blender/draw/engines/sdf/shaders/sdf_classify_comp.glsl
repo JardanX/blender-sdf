@@ -2,7 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* SDF classify: one thread per brick, surface test → atlas slot allocation.
+/* SDF classify: one thread per brick, surface test -> atlas slot allocation.
+ * Linear scan through sorted objects — no candidate buffer, no hard limits.
  * Supports incremental mode (dirty region only, reuses existing slots). */
 
 #include "infos/sdf_shader_infos.hh"
@@ -12,7 +13,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 #include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
-#define MAX_CANDIDATES 512
 
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -53,16 +53,41 @@ void main()
                          (float3(brick) * float(BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) *
                              voxel_size;
 
-  /* Per-brick AABB for culling (object AABBs already include blend padding). */
   float expand = brick_half_diag;
   float3 brick_min = brick_center - float3(expand);
   float3 brick_max = brick_center + float3(expand);
 
-  /* Collect candidates from BVH, evaluate in index order. */
-  int candidates[MAX_CANDIDATES];
-  int num_candidates = 0;
+  /* Incremental dirty check: skip bricks where no overlapping object changed. */
+  if (incremental_mode == 1 && has_dirty_flags == 1) {
+    bool any_dirty = false;
+    for (int i = 0; i < object_count && !any_dirty; i++) {
+      SDFObjectGPU obj = objects[i];
+      if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
+          any(lessThan(brick_max, obj.bbox_min.xyz)))
+      {
+        continue;
+      }
+      if (dirty_flags[i] != 0) {
+        any_dirty = true;
+      }
+    }
+    if (!any_dirty) {
+      return;
+    }
+  }
 
-  if (bvh_node_count > 0) {
+  /* BVH Traversal to build object presence bitmask.
+   * Eliminates the need to evaluate AABBs or SDFs for culled objects,
+   * while naturally preserving the required topological sort order. */
+  #define MAX_MASK_WORDS 64 /* Supports up to 2048 objects. */
+  uint mask[MAX_MASK_WORDS];
+  for (int i = 0; i < MAX_MASK_WORDS; i++) {
+    mask[i] = 0u;
+  }
+
+  bool use_bvh = (bvh_node_count > 0 && object_count <= MAX_MASK_WORDS * 32);
+
+  if (use_bvh) {
     int stack[BVH_MAX_STACK];
     int sp = 0;
     stack[sp++] = 0;
@@ -79,8 +104,8 @@ void main()
       int right = bvh_decode_int(node.max_and_right.w);
 
       if (left == -1) {
-        if (num_candidates < MAX_CANDIDATES) {
-          candidates[num_candidates++] = right;
+        if (right < MAX_MASK_WORDS * 32) {
+          mask[right >> 5] |= (1u << (right & 31));
         }
       }
       else {
@@ -90,73 +115,48 @@ void main()
         }
       }
     }
-
-    /* Sort candidates by object index (insertion sort, small N). */
-    for (int i = 1; i < num_candidates; i++) {
-      int key = candidates[i];
-      int j = i - 1;
-      while (j >= 0 && candidates[j] > key) {
-        candidates[j + 1] = candidates[j];
-        j--;
-      }
-      candidates[j + 1] = key;
-    }
-  }
-  else {
-    for (int i = 0; i < object_count; i++) {
-      SDFObjectGPU obj = objects[i];
-
-      if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
-          any(lessThan(brick_max, obj.bbox_min.xyz))) {
-        continue;
-      }
-
-      if (num_candidates < MAX_CANDIDATES) {
-        candidates[num_candidates++] = i;
-      }
-    }
   }
 
-  /* Per-brick dirty check: skip bricks where no candidate changed. */
-  if (incremental_mode == 1 && has_dirty_flags == 1) {
-    bool any_dirty = false;
-    for (int c = 0; c < num_candidates; c++) {
-      if (dirty_flags[candidates[c]] != 0) {
-        any_dirty = true;
-        break;
-      }
-    }
-    if (!any_dirty) {
-      return;
-    }
-  }
-
-  /* Group-aware evaluation with per-center AABB culling. */
+  /* Single-pass group-aware evaluation over all objects in sorted order. */
   float acc_dist = 1e10f;
+  int prev_group = -2;
+  float grp_dist = 1e10f;
 
-  for (int g = 0; g < group_count; g++) {
-    SDFGroupGPU grp = groups[g];
-    float grp_dist = 1e10f;
+  for (int i = 0; i < object_count; i++) {
+    /* If BVH is active, skip objects not found in the BVH traversal. */
+    if (use_bvh && (mask[i >> 5] & (1u << (i & 31))) == 0u) {
+      continue;
+    }
 
-    for (int c = 0; c < num_candidates; c++) {
-      SDFObjectGPU obj = objects[candidates[c]];
-      if (obj.group_id != g) {
-        continue;
+    SDFObjectGPU obj = objects[i];
+
+    /* Group transition (before AABB cull so group boundaries are tracked). */
+    if (obj.group_id != prev_group) {
+      if (prev_group >= 0 && grp_dist < 1e10f) {
+        SDFGroupGPU grp = groups[prev_group];
+        acc_dist = combineCSG(
+            acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
       }
-
-      /* Per-center AABB cull (bbox includes blend + modifier expansion). */
-      if (any(greaterThan(brick_center, obj.bbox_max.xyz)) ||
-          any(lessThan(brick_center, obj.bbox_min.xyz)))
-      {
-        if (obj.group_first == 1) {
-          grp_dist = 1e10f;
-        }
-        continue;
+      prev_group = obj.group_id;
+      if (prev_group >= 0) {
+        grp_dist = 1e10f;
       }
+    }
 
-      float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
-      float dist = evalSDFPrimitive(local_pos, obj);
+    /* Per-brick AABB cull. */
+    if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
+        any(lessThan(brick_max, obj.bbox_min.xyz)))
+    {
+      if (obj.group_id >= 0 && obj.group_first == 1) {
+        grp_dist = 1e10f;
+      }
+      continue;
+    }
 
+    float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
+    float dist = evalSDFPrimitive(local_pos, obj);
+
+    if (obj.group_id >= 0) {
       if (obj.group_first == 1) {
         grp_dist = dist;
       }
@@ -165,38 +165,17 @@ void main()
             grp_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
       }
     }
-
-    if (grp_dist >= 1e10f) {
-      continue;
-    }
-
-    if (g == 0) {
-      acc_dist = grp_dist;
-    }
     else {
       acc_dist = combineCSG(
-          acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+          acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
     }
   }
 
-  /* Ungrouped objects with per-center AABB culling. */
-  for (int c = 0; c < num_candidates; c++) {
-    SDFObjectGPU obj = objects[candidates[c]];
-    if (obj.group_id != -1) {
-      continue;
-    }
-
-    if (any(greaterThan(brick_center, obj.bbox_max.xyz)) ||
-        any(lessThan(brick_center, obj.bbox_min.xyz)))
-    {
-      continue;
-    }
-
-    float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
-    float dist = evalSDFPrimitive(local_pos, obj);
-
+  /* Finalize last group. */
+  if (prev_group >= 0 && grp_dist < 1e10f) {
+    SDFGroupGPU grp = groups[prev_group];
     acc_dist = combineCSG(
-        acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
   }
 
   float surface_threshold = brick_half_diag;
