@@ -2263,3 +2263,78 @@ The new approach draws one instanced box per selected SDF object. Each fragment 
 | `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_outline_inst_iface` (flat int obj_index). Shader info now uses own vertex/fragment sources instead of `gpu_fullscreen`. Added `selected_indices[]` SSBO (slot 2) and `viewport_size_inv` push constant. Removed `object_count` push constant |
 | `draw/engines/overlay/overlay_outline.hh` | Builds `sdf_selected_indices_` compact list during `sdf_object_sync()`. `draw_sdf_outline_()` uploads selected indices SSBO, sets front-face culling (renders back faces for camera-inside AABB correctness), and draws instanced boxes via `GPU_batch_draw_advanced()` instead of fullscreen triangle |
 | `draw/CMakeLists.txt` | Registered `sdf_outline_march_vert.glsl` |
+
+---
+
+## SDF Engine Performance Optimization Pass
+
+Comprehensive performance optimization targeting GPU→CPU sync stalls, ray march efficiency, bake pipeline, and CPU-side overhead.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | GPU compute shader replacing CPU-side `augment_indirection_for_grids()`. One thread per brick in grid AABB, atomically allocates slots for inactive bricks, eliminates massive indirection texture + active_bricks SSBO readbacks |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | **A2**: Removed `GPU_flush()` + `GPU_finish()` from `perf_end_pass()` — wall-clock timing only, no GPU pipeline drain per pass |
+| `draw/engines/sdf/sdf_engine.cc` | **B1**: Re-enabled scissor rect in `draw_march()` — projects atlas AABB to screen space via view-projection matrix, applies GPU_scissor with 16px padding. Skips when any AABB corner is behind camera. Reduces fragment invocations by up to 90%+ for small SDF scenes |
+| `draw/engines/sdf/sdf_engine.cc` | **B4**: Dynamic `normal_quality` — uses fast normals (8 texelFetch) during bake frames (interaction), smooth dual-voxel normals (27 texelFetch) when idle |
+| `draw/engines/sdf/sdf_engine.cc` | **A1**: Replaced CPU `augment_indirection_for_grids()` with GPU compute dispatch. Old code read entire 3D indirection texture (up to 8MB at 128³) + full active_bricks SSBO to CPU, modified, re-uploaded. New code runs compute shader on GPU, only reads back 16-byte BrickCounter for active_brick_count |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_augment_grids` shader create info (4x4x4 workgroup, indirection image, brick_counter + active_bricks SSBOs, grid AABB push constants) |
+| `draw/CMakeLists.txt` | Registered `sdf_augment_grids_comp.glsl` |
+| `draw/engines/sdf/sdf_engine.cc` | **C1**: Optimized `dispatch_grid_blends()` — hoisted invariant push constants, SSBO/image binds, and binding slot lookups outside per-grid loop. Only per-grid-varying uniforms (transform, color, blend params) set inside loop |
+| `draw/engines/sdf/sdf_engine.cc` | **C3**: BVH caching — added `spatial_hash_` (positions + sizes only) and `needs_bvh_rebuild_` flag. SAH BVH construction skipped when only non-spatial properties change (color, blend, bevel). Added `update_bvh_aabbs()` for bottom-up AABB refresh without topology rebuild |
+| `draw/engines/sdf/sdf_engine.cc` | **D1**: Scene hash optimization — replaced O(N×25) redundant per-object hash with reuse of existing `compute_object_hash()` results + `group_struct_hash`. Cut scene hash from ~70 multiplies/object to 1 combine/object |
+| `draw/engines/sdf/sdf_engine.cc` | Added `SH_AUGMENT_GRIDS` to shader enum, `augment_grids_sh_` reference alias |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | **B8**: Reordered brick-level DDA to check indirection slot BEFORE computing `t_brick_exit` — avoids unnecessary min3 computation for empty bricks |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | **B2**: Added interior brick early termination — `slot == -2` bricks (fully inside surface) return immediate hit at entry point instead of being skipped. Handled in main() with default color and camera-facing normal |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | **Per-voxel AABB culling**: Before evaluating SDF (matrix multiply + primitive + modifiers), checks if the voxel world position is inside the object's expanded AABB (read from SSBO, coalesced). Skips the entire SDF eval when outside. For 100+ blended objects, reduces per-voxel evals from ~100 to ~5-20 (only geometrically nearby objects). Group-first objects set grp_dist=1e10 instead of evaluating |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | **Per-center AABB culling**: Before evaluating SDF at brick center, checks if brick_center is inside the object's expanded AABB. Tighter than the brick-level BVH culling (point vs box). Same group-first handling as bake |
+
+---
+
+## Per-Brick Dirty Tracking + Shared Memory AABB Cache
+
+Eliminates redundant bake work during incremental updates. Previously, moving one large SDF object with 100+ small neighbors caused either a full rebake (dirty region > 50% of grid) or rebaked every brick in the dirty AABB even if only one object affected it. Now bricks are skipped entirely when none of their candidate objects changed.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Added `dirty_flags_` vector + `dirty_flags_ssbo_` SSBO (per-object 0/1). Computed alongside dirty_indices in incremental detection. Uploaded and bound to classify/bake shaders at slot 6. Removed 50% dirty-volume threshold — per-brick dirty checks make large dirty regions efficient. Dirty objects' AABBs expanded to cover old+new positions so BVH routes bricks at old position to the moved object. Non-expanded AABBs saved for next-frame comparison |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `STORAGE_BUF(6, read, int, dirty_flags[])` and `PUSH_CONSTANT(int, has_dirty_flags)` to both `sdf_classify` and `sdf_bake` shader infos |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | After BVH candidate collection, checks if any candidate has `dirty_flags != 0`. If none dirty and in incremental mode, returns early — keeps existing indirection slot unchanged, brick not added to active_bricks list |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Thread 0 checks dirty flags after candidate collection, stores result in `shared_any_dirty`. All 144 threads skip the brick if no candidate is dirty. Added `shared_bb_min/shared_bb_max[MAX_CANDIDATES]` arrays — per-candidate bounding boxes loaded cooperatively into shared memory during candidate load phase, replacing per-voxel global SSBO reads (saves 2 × candidates × 1728 global memory reads per brick) |
+
+---
+
+## Lipschitz Pruning — Per-Brick Candidate Pre-Cull
+
+Implements the core pruning algorithm from "Lipschitz Pruning: Hierarchical Simplification of Primitive-Based SDFs" (Barbier et al., Eurographics 2025). For a brick (spatial region with radius R), evaluates all candidates at the brick center and prunes those provably outside the blend influence radius using the 1-Lipschitz property of SDFs: if |f₁(p) - f₂(p)| ≥ k + 2R, the operator reduces to one operand for all points in the region.
+
+### Pruning Rules (per CSG operation)
+
+| CSG Op | Prune candidate when |
+|--------|---------------------|
+| UNION | `d - acc > k + 2R` (candidate too far from accumulated surface) |
+| SUBTRACT | `acc + d > k + 2R` (subtraction target too far) |
+| INTERSECT | `acc - d > k + 2R` (intersection constraint too far) |
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | After BVH candidate collection and dirty check, thread 0 evaluates ALL candidates' SDF at the brick center (matrix multiply + primitive eval per candidate). Then simulates the sequential CSG evaluation at center, applying Lipschitz pruning: for each candidate, checks if \|accumulated - distance\| exceeds the blend radius k plus twice the brick circumradius 2R. Pruned candidates are removed from the candidate list before the cooperative shared memory load. Handles groups (per-group accumulator, then inter-group combination) and ungrouped objects. Group-first objects are never pruned. This is especially effective for high-smin scenes where AABB-based culling fails (AABBs expanded by k become huge) but Lipschitz pruning uses actual evaluated distances |
+
+### Expected Impact
+
+For a scene with 100+ small objects smooth-unioned (k=2.0) with a large SDF:
+- Brick circumradius R ≈ 0.054 (at voxel_size=1/128), so threshold = k + 2R ≈ 2.108
+- Objects with center distance > 2.108 from the accumulated surface are pruned
+- Typically reduces ~100 candidates to ~5-15 active per brick near the surface
+- Each pruned candidate saves 1728 SDF evaluations (12³ voxels per brick)
+- Cost: ~100 center evaluations by thread 0 (cheap vs 1728×N_pruned saved across 144 threads)

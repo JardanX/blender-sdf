@@ -12,7 +12,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_classify)
 #include "sdf_lib.glsl"
 
 #define BRICK_SIZE 8
-#define MAX_CANDIDATES 128
+#define MAX_CANDIDATES 512
 
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -117,7 +117,21 @@ void main()
     }
   }
 
-  /* Group-aware sequential evaluation. */
+  /* Per-brick dirty check: skip bricks where no candidate changed. */
+  if (incremental_mode == 1 && has_dirty_flags == 1) {
+    bool any_dirty = false;
+    for (int c = 0; c < num_candidates; c++) {
+      if (dirty_flags[candidates[c]] != 0) {
+        any_dirty = true;
+        break;
+      }
+    }
+    if (!any_dirty) {
+      return;
+    }
+  }
+
+  /* Group-aware evaluation with per-center AABB culling. */
   float acc_dist = 1e10f;
 
   for (int g = 0; g < group_count; g++) {
@@ -127,6 +141,16 @@ void main()
     for (int c = 0; c < num_candidates; c++) {
       SDFObjectGPU obj = objects[candidates[c]];
       if (obj.group_id != g) {
+        continue;
+      }
+
+      /* Per-center AABB cull (bbox includes blend + modifier expansion). */
+      if (any(greaterThan(brick_center, obj.bbox_max.xyz)) ||
+          any(lessThan(brick_center, obj.bbox_min.xyz)))
+      {
+        if (obj.group_first == 1) {
+          grp_dist = 1e10f;
+        }
         continue;
       }
 
@@ -155,10 +179,16 @@ void main()
     }
   }
 
-  /* Ungrouped objects. */
+  /* Ungrouped objects with per-center AABB culling. */
   for (int c = 0; c < num_candidates; c++) {
     SDFObjectGPU obj = objects[candidates[c]];
     if (obj.group_id != -1) {
+      continue;
+    }
+
+    if (any(greaterThan(brick_center, obj.bbox_max.xyz)) ||
+        any(lessThan(brick_center, obj.bbox_min.xyz)))
+    {
       continue;
     }
 
