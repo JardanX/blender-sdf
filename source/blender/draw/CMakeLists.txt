@@ -346,7 +346,6 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_augment_grids_comp.glsl
   engines/sdf/shaders/sdf_bake_comp.glsl
   engines/sdf/shaders/sdf_grid_blend_comp.glsl
-  engines/sdf/shaders/sdf_group_blend_comp.glsl
   engines/sdf/shaders/sdf_march_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
