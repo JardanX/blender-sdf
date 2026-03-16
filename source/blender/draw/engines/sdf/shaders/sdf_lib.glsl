@@ -24,8 +24,10 @@
 /** \name BVH Traversal Helpers
  * \{ */
 
-/** Maximum BVH traversal stack depth (supports ~4 billion nodes). */
-#define BVH_MAX_STACK 32
+/** BVH traversal stack depth. 64 handles SAH trees up to ~1M leaves.
+ * An 8-bin SAH tree with N leaves has worst-case depth ≈ 7*log(N),
+ * and DFS stack usage ≈ depth + 2. */
+#define BVH_MAX_STACK 64
 
 /** Decode an integer packed via intBitsToFloat in a BVH node field. */
 int bvh_decode_int(float encoded)

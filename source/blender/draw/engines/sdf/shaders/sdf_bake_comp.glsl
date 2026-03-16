@@ -2,7 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* SDF bake: one workgroup per brick, 12x12 threads cover XY, loop Z. */
+/* SDF bake: one workgroup per brick, 12x12 threads cover XY, loop Z.
+ * Streaming evaluation: candidates processed in batches through shared memory.
+ * No hard limit on candidate count — overflow falls back to linear scan. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -12,10 +14,13 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
-#define MAX_CANDIDATES 128
-#define MAX_COLLECT 1024
 
-/* Per-object data cached in shared memory. */
+/* Streaming batch size (shared memory budget, not a correctness limit). */
+#define BATCH_SIZE 64
+
+/* BVH candidate index buffer. If exceeded, falls back to linear scan. */
+#define CANDIDATE_BUF_SIZE 2048
+
 struct SharedObj {
   float4x4 inverse_matrix;
   float4 position;
@@ -53,18 +58,39 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-/* Pre-pruning candidate list (larger buffer to avoid silent drops). */
-shared int shared_candidates[MAX_COLLECT];
+/* Finalize a completed group into the scene accumulator. */
+void finalizeGroup(int group_id,
+                   float grp_dist,
+                   float3 grp_color,
+                   inout float acc_dist,
+                   inout float3 acc_color)
+{
+  if (group_id < 0 || grp_dist >= 1e10f) {
+    return;
+  }
+  SDFGroupGPU grp = groups[group_id];
+  float3 tinted = grp_color * grp.color.rgb;
+  float new_dist = combineCSG(
+      acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+  float h = csgColorWeight(
+      acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+  acc_color = mix(acc_color, tinted, h);
+  acc_dist = new_dist;
+}
+
+/* BVH candidate indices. */
+shared int shared_candidates[CANDIDATE_BUF_SIZE];
 shared int shared_num_candidates;
 shared int shared_any_dirty;
+shared int shared_overflow;
 
-/* Post-pruning object cache (fits in shared memory at 128 entries). */
-shared SharedObj shared_objs[MAX_CANDIDATES];
-shared float3 shared_bb_min[MAX_CANDIDATES];
-shared float3 shared_bb_max[MAX_CANDIDATES];
+/* Lipschitz pruning cache. */
+shared float shared_center_dist[CANDIDATE_BUF_SIZE];
 
-/* Lipschitz pruning: center distances for the larger pre-pruning buffer. */
-shared float shared_center_dist[MAX_COLLECT];
+/* Streaming batch cache. */
+shared SharedObj shared_batch[BATCH_SIZE];
+shared float3 shared_batch_bb_min[BATCH_SIZE];
+shared float3 shared_batch_bb_max[BATCH_SIZE];
 
 void main()
 {
@@ -81,7 +107,7 @@ void main()
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
-  /* Per-brick AABB for culling (object AABBs already include blend padding). */
+  /* Per-brick AABB for BVH culling. */
   float bhd = float(BRICK_SIZE) * voxel_size * 0.866025f;
   float candidate_expand = bhd;
   float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
@@ -89,9 +115,12 @@ void main()
   float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
                       float3(candidate_expand);
 
-  /* Thread 0 collects candidates for the workgroup. */
-  if (gl_LocalInvocationIndex == 0u) {
+  uint tid = gl_LocalInvocationIndex;
+
+  /* Thread 0: collect candidates via BVH traversal. */
+  if (tid == 0u) {
     shared_num_candidates = 0;
+    shared_overflow = 0;
 
     if (bvh_node_count > 0) {
       int stack[BVH_MAX_STACK];
@@ -112,8 +141,11 @@ void main()
         int right = bvh_decode_int(node.max_and_right.w);
 
         if (left == -1) {
-          if (shared_num_candidates < MAX_COLLECT) {
+          if (shared_num_candidates < CANDIDATE_BUF_SIZE) {
             shared_candidates[shared_num_candidates++] = right;
+          }
+          else {
+            shared_overflow = 1;
           }
         }
         else {
@@ -121,18 +153,23 @@ void main()
             stack[sp++] = left;
             stack[sp++] = right;
           }
+          else {
+            shared_overflow = 1;
+          }
         }
       }
 
-      /* Sort candidates by object index (insertion sort, small N). */
-      for (int i = 1; i < shared_num_candidates; i++) {
-        int key = shared_candidates[i];
-        int j = i - 1;
-        while (j >= 0 && shared_candidates[j] > key) {
-          shared_candidates[j + 1] = shared_candidates[j];
-          j--;
+      /* Sort candidates by object index for correct CSG evaluation order. */
+      if (shared_overflow == 0) {
+        for (int i = 1; i < shared_num_candidates; i++) {
+          int key = shared_candidates[i];
+          int j = i - 1;
+          while (j >= 0 && shared_candidates[j] > key) {
+            shared_candidates[j + 1] = shared_candidates[j];
+            j--;
+          }
+          shared_candidates[j + 1] = key;
         }
-        shared_candidates[j + 1] = key;
       }
     }
     else {
@@ -145,15 +182,21 @@ void main()
           continue;
         }
 
-        if (shared_num_candidates < MAX_COLLECT) {
+        if (shared_num_candidates < CANDIDATE_BUF_SIZE) {
           shared_candidates[shared_num_candidates++] = i;
+        }
+        else {
+          shared_overflow = 1;
         }
       }
     }
 
     /* Per-brick dirty check. */
     shared_any_dirty = 0;
-    if (has_dirty_flags == 1) {
+    if (shared_overflow == 1) {
+      shared_any_dirty = 1;
+    }
+    else if (has_dirty_flags == 1) {
       for (int c = 0; c < shared_num_candidates; c++) {
         if (dirty_flags[shared_candidates[c]] != 0) {
           shared_any_dirty = 1;
@@ -164,7 +207,6 @@ void main()
     else {
       shared_any_dirty = 1;
     }
-
   }
   barrier();
 
@@ -172,20 +214,14 @@ void main()
     return;
   }
 
-  /* Lipschitz pruning: cooperatively evaluate all candidates at brick center,
-   * then thread 0 prunes those provably outside blend influence.
-   * |f1(p) - f2(p)| >= k + 2R => operator reduces to one operand.
-   * (Barbier et al., Eurographics 2025). */
-  int num_candidates = shared_num_candidates;
-  uint tid = gl_LocalInvocationIndex;
-
-  if (num_candidates > 1) {
+  /* Lipschitz pruning: cooperatively evaluate candidates at brick center,
+   * then thread 0 prunes those provably outside blend influence. */
+  if (shared_overflow == 0 && shared_num_candidates > 1) {
     float3 brick_center = atlas_origin +
                           (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
     float two_R = 2.0f * float(BRICK_STORAGE) * voxel_size * 0.866025f;
 
-    /* All threads cooperatively evaluate candidates at brick center. */
-    for (int c = int(tid); c < num_candidates; c += 144) {
+    for (int c = int(tid); c < shared_num_candidates; c += 144) {
       int i = shared_candidates[c];
       SDFObjectGPU obj = objects[i];
       float3 lp = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
@@ -202,17 +238,13 @@ void main()
     }
     barrier();
 
-    /* Thread 0: sequential Lipschitz pruning from shared memory. */
     if (tid == 0u) {
       float acc_center = 1e10f;
-
       for (int g = 0; g < group_count; g++) {
         float grp_center = 1e10f;
-        for (int c = 0; c < num_candidates; c++) {
+        for (int c = 0; c < shared_num_candidates; c++) {
           SDFObjectGPU obj = objects[shared_candidates[c]];
-          if (obj.group_id != g) {
-            continue;
-          }
+          if (obj.group_id != g) continue;
           float d = shared_center_dist[c];
           if (obj.group_first == 1) {
             grp_center = d;
@@ -220,254 +252,144 @@ void main()
           }
           float threshold = obj.blend + two_R;
           bool pruned = false;
-          if (obj.csg_operation == SDF_CSG_OP_UNION) {
-            pruned = (d - grp_center > threshold);
-          }
-          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
-            pruned = (grp_center + d > threshold);
-          }
-          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) {
-            pruned = (grp_center - d > threshold);
-          }
-          if (pruned) {
-            shared_center_dist[c] = -1e20f;
-          }
-          else {
-            grp_center = combineCSG(
-                grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
-          }
+          if (obj.csg_operation == SDF_CSG_OP_UNION) pruned = (d - grp_center > threshold);
+          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) pruned = (grp_center + d > threshold);
+          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (grp_center - d > threshold);
+          
+          if (pruned) shared_center_dist[c] = -1e20f;
+          else grp_center = combineCSG(grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
         }
-        if (grp_center >= 1e10f) {
-          continue;
-        }
-        SDFGroupGPU grp = groups[g];
-        if (g == 0) {
-          acc_center = grp_center;
-        }
-        else {
-          acc_center = combineCSG(
-              acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend,
-              grp.shell_distance);
+        if (grp_center < 1e10f) {
+          SDFGroupGPU grp = groups[g];
+          if (g == 0) acc_center = grp_center;
+          else acc_center = combineCSG(acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
         }
       }
-
-      for (int c = 0; c < num_candidates; c++) {
+      for (int c = 0; c < shared_num_candidates; c++) {
         SDFObjectGPU obj = objects[shared_candidates[c]];
-        if (obj.group_id != -1) {
-          continue;
-        }
+        if (obj.group_id != -1) continue;
         float d = shared_center_dist[c];
         float threshold = obj.blend + two_R;
         bool pruned = false;
         if (acc_center < 1e9f) {
-          if (obj.csg_operation == SDF_CSG_OP_UNION) {
-            pruned = (d - acc_center > threshold);
-          }
-          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
-            pruned = (acc_center + d > threshold);
-          }
-          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) {
-            pruned = (acc_center - d > threshold);
-          }
+          if (obj.csg_operation == SDF_CSG_OP_UNION) pruned = (d - acc_center > threshold);
+          else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) pruned = (acc_center + d > threshold);
+          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (acc_center - d > threshold);
         }
-        if (pruned) {
-          shared_center_dist[c] = -1e20f;
-        }
-        else {
-          acc_center = combineCSG(
-              acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
-        }
+        if (pruned) shared_center_dist[c] = -1e20f;
+        else acc_center = combineCSG(acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
       }
 
-      /* Compact: remove pruned candidates, keep center distances in sync. */
       int new_count = 0;
-      for (int c = 0; c < num_candidates; c++) {
+      for (int c = 0; c < shared_num_candidates; c++) {
         if (shared_center_dist[c] > -1e19f) {
-          shared_candidates[new_count] = shared_candidates[c];
-          shared_center_dist[new_count] = shared_center_dist[c];
-          new_count++;
+          shared_candidates[new_count++] = shared_candidates[c];
         }
       }
-
-      /* Priority truncation: if still > MAX_CANDIDATES, find the distance
-       * threshold that keeps exactly MAX_CANDIDATES entries, then drop the
-       * rest while preserving original object-index order (critical for CSG). */
-      if (new_count > MAX_CANDIDATES) {
-        /* Find the MAX_CANDIDATES-th smallest |distance| as the cut threshold.
-         * Use a single pass: track the k-th smallest by repeated scan. */
-        int to_drop = new_count - MAX_CANDIDATES;
-        for (int d = 0; d < to_drop; d++) {
-          /* Find the candidate with the largest |center_dist| and mark it. */
-          float worst_d = -1.0f;
-          int worst_c = -1;
-          for (int c = 0; c < new_count; c++) {
-            if (shared_center_dist[c] > -1e19f) {
-              float ad = abs(shared_center_dist[c]);
-              if (ad > worst_d) {
-                worst_d = ad;
-                worst_c = c;
-              }
-            }
-          }
-          if (worst_c >= 0) {
-            shared_center_dist[worst_c] = -1e20f;
-          }
-        }
-        /* Re-compact, preserving original order. */
-        int final_count = 0;
-        for (int c = 0; c < new_count; c++) {
-          if (shared_center_dist[c] > -1e19f) {
-            shared_candidates[final_count] = shared_candidates[c];
-            final_count++;
-          }
-        }
-        new_count = final_count;
-      }
-
       shared_num_candidates = new_count;
     }
     barrier();
-    num_candidates = shared_num_candidates;
   }
 
-  /* Cooperatively load candidate objects into shared memory. */
-  for (int c = int(tid); c < num_candidates; c += 144) {
-    int i = shared_candidates[c];
-    SDFObjectGPU obj = objects[i];
-    shared_objs[c].inverse_matrix = obj.inverse_matrix;
-    shared_objs[c].position = obj.position;
-    shared_objs[c].sdf_size = obj.sdf_size;
-    shared_objs[c].color = obj.color;
-    shared_objs[c].bevel = obj.bevel;
-    shared_objs[c].blend = obj.blend;
-    shared_objs[c].sdf_type = obj.sdf_type;
-    shared_objs[c].blend_type = obj.blend_type;
-    shared_objs[c].csg_operation = obj.csg_operation;
-    shared_objs[c].shell_distance = obj.shell_distance;
-
-    shared_objs[c].modifier_start = obj.modifier_start;
-    shared_objs[c].modifier_count = obj.modifier_count;
-    shared_objs[c].group_id = obj.group_id;
-    shared_objs[c].group_first = obj.group_first;
-    shared_objs[c].group_order = obj.group_order;
-    shared_objs[c].box_corners = obj.box_corners;
-    shared_objs[c].box_edges = obj.box_edges;
-    shared_objs[c].box_modes = obj.box_modes;
-
-    shared_bb_min[c] = obj.bbox_min.xyz;
-    shared_bb_max[c] = obj.bbox_max.xyz;
-  }
-  barrier();
-
+  /* Overflow: iterate all objects in sorted order (no BVH filtering). */
+  int total_count = (shared_overflow == 1) ? object_count : shared_num_candidates;
   int2 local_xy = int2(gl_LocalInvocationID.xy);
 
+  /* Z-outer: each voxel layer is fully evaluated before the next. */
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
-
-    /* World position: -2 offset for overlap border, stored at voxel corners. */
     float3 world_pos = atlas_origin +
                        float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
+    float grp_dist = 1e10f;
+    float3 grp_color = float3(0.0f);
+    int prev_group = -2;
 
-    /* Group-aware sequential evaluation with per-voxel AABB culling.
-     * Object AABBs (already expanded by blend) are read from SSBO — coalesced across workgroup.
-     * Skips the expensive matrix multiply + SDF eval for objects far from this voxel. */
-    for (int g = 0; g < group_count; g++) {
-      SDFGroupGPU grp = groups[g];
-      float grp_dist = 1e10f;
-      float3 grp_color = float3(0.0f);
+    /* Stream candidates in batches through shared memory. */
+    for (int batch_start = 0; batch_start < total_count; batch_start += BATCH_SIZE) {
+      int batch_count = min(BATCH_SIZE, total_count - batch_start);
 
-      for (int c = 0; c < num_candidates; c++) {
-        SharedObj sobj = shared_objs[c];
-        if (sobj.group_id != g) {
-          continue;
-        }
+      /* Cooperative load. */
+      for (int c = int(tid); c < batch_count; c += 144) {
+        int i = (shared_overflow == 1) ? (batch_start + c) :
+                                         shared_candidates[batch_start + c];
+        SDFObjectGPU obj = objects[i];
+        shared_batch[c].inverse_matrix = obj.inverse_matrix;
+        shared_batch[c].position = obj.position;
+        shared_batch[c].sdf_size = obj.sdf_size;
+        shared_batch[c].color = obj.color;
+        shared_batch[c].bevel = obj.bevel;
+        shared_batch[c].blend = obj.blend;
+        shared_batch[c].sdf_type = obj.sdf_type;
+        shared_batch[c].blend_type = obj.blend_type;
+        shared_batch[c].csg_operation = obj.csg_operation;
+        shared_batch[c].shell_distance = obj.shell_distance;
 
-        /* Per-voxel AABB cull (bbox cached in shared memory). */
-        if (any(greaterThan(world_pos, shared_bb_max[c])) ||
-            any(lessThan(world_pos, shared_bb_min[c])))
-        {
-          if (sobj.group_first == 1) {
+        shared_batch[c].modifier_start = obj.modifier_start;
+        shared_batch[c].modifier_count = obj.modifier_count;
+        shared_batch[c].group_id = obj.group_id;
+        shared_batch[c].group_first = obj.group_first;
+        shared_batch[c].group_order = obj.group_order;
+        shared_batch[c].box_corners = obj.box_corners;
+        shared_batch[c].box_edges = obj.box_edges;
+        shared_batch[c].box_modes = obj.box_modes;
+
+        shared_batch_bb_min[c] = obj.bbox_min.xyz;
+        shared_batch_bb_max[c] = obj.bbox_max.xyz;
+      }
+      barrier();
+
+        /* Evaluate batch with single-pass group tracking. */
+      for (int c = 0; c < batch_count; c++) {
+        SharedObj sobj = shared_batch[c];
+
+        /* Group transition: finalize previous group when entering a new one. */
+        if (sobj.group_id != prev_group) {
+          finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
+          prev_group = sobj.group_id;
+          if (prev_group >= 0) {
             grp_dist = 1e10f;
-            grp_color = sobj.color.rgb;
+            grp_color = float3(0.0f);
           }
-          continue;
         }
 
         float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
         float dist = evalSDFPrimitiveSh(local_pos, sobj);
 
-        if (sobj.group_first == 1) {
-          grp_dist = dist;
-          grp_color = sobj.color.rgb;
+        if (sobj.group_id >= 0) {
+          if (sobj.group_first == 1) {
+            grp_dist = dist;
+            grp_color = sobj.color.rgb;
+          }
+          else {
+            float k = sobj.blend;
+            int bt = sobj.blend_type;
+            int op = sobj.csg_operation;
+
+            float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
+            float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
+            grp_color = mix(grp_color, sobj.color.rgb, h);
+            grp_dist = new_dist;
+          }
         }
         else {
           float k = sobj.blend;
           int bt = sobj.blend_type;
           int op = sobj.csg_operation;
 
-          float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
-
-          float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
-          grp_color = mix(grp_color, sobj.color.rgb, h);
-
-          grp_dist = new_dist;
+          float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
+          float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
+          acc_color = mix(acc_color, sobj.color.rgb, h);
+          acc_dist = new_dist;
         }
       }
-
-      if (grp_dist >= 1e10f) {
-        continue;
-      }
-
-      grp_color *= grp.color.rgb;
-
-      if (g == 0) {
-        acc_dist = grp_dist;
-        acc_color = grp_color;
-      }
-      else {
-        float new_dist = combineCSG(
-            acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
-
-        float h = csgColorWeight(
-            acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
-        acc_color = mix(acc_color, grp_color, h);
-
-        acc_dist = new_dist;
-      }
+      barrier();
     }
 
-    /* Ungrouped objects with per-voxel AABB culling. */
-    for (int c = 0; c < num_candidates; c++) {
-      SharedObj sobj = shared_objs[c];
-      if (sobj.group_id != -1) {
-        continue;
-      }
-
-      if (any(greaterThan(world_pos, shared_bb_max[c])) ||
-          any(lessThan(world_pos, shared_bb_min[c])))
-      {
-        continue;
-      }
-
-      float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
-      float dist = evalSDFPrimitiveSh(local_pos, sobj);
-
-      {
-        float k = sobj.blend;
-        int bt = sobj.blend_type;
-        int op = sobj.csg_operation;
-
-        float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
-
-        float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
-        acc_color = mix(acc_color, sobj.color.rgb, h);
-
-        acc_dist = new_dist;
-      }
-    }
+    /* Finalize last group. */
+    finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
 
     int3 atlas_coord = slot_origin + local_voxel;
     imageStore(compact_atlas, atlas_coord, float4(acc_dist, acc_color));

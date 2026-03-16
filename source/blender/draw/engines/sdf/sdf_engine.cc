@@ -734,13 +734,13 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Voxel size deadband: absorb small fluctuations (±20%) to prevent
-     * constant full rebakes, but allow both increase AND decrease when
-     * the scene genuinely changed scale. Without this, quality permanently
-     * degrades after the grid coarsens for a large scene. */
+    /* Asymmetric deadband: suppress small coarsening (< 25%) to avoid
+     * constant rebakes when the scene fluctuates, but allow refinement
+     * more readily (> 10% improvement passes through) so quality recovers
+     * when the scene shrinks back. */
     if (prev_voxel_size_ > 0.0f) {
       float ratio = voxel_size_ / prev_voxel_size_;
-      if (ratio > 0.8f && ratio < 1.25f) {
+      if (ratio > 0.9f && ratio < 1.25f) {
         voxel_size_ = prev_voxel_size_;
       }
     }
@@ -758,7 +758,8 @@ class Instance : public DrawEngine {
       float3 prev_grid_min = prev_atlas_origin_;
       float3 prev_grid_max = prev_atlas_origin_ + float3(prev_grid_res_) * chunk_size;
 
-      float padding = math::max(chunk_size * 8.0f, 1.0f);
+      float padding = math::max(chunk_size * 8.0f,
+                                math::max(math::reduce_max(scene_size) * 0.25f, 1.0f));
 
       /* Check if scene still fits inside previous grid. */
       bool fits = (grid_min.x >= prev_grid_min.x && grid_min.y >= prev_grid_min.y &&
@@ -770,9 +771,9 @@ class Instance : public DrawEngine {
          * If so, contract to reclaim quality. Otherwise keep stable. */
         float3 ideal_size = grid_max - grid_min;
         float3 prev_size = prev_grid_max - prev_grid_min;
-        bool oversized = (ideal_size.x < prev_size.x * 0.33f ||
-                          ideal_size.y < prev_size.y * 0.33f ||
-                          ideal_size.z < prev_size.z * 0.33f);
+        bool oversized = (ideal_size.x < prev_size.x * 0.5f ||
+                          ideal_size.y < prev_size.y * 0.5f ||
+                          ideal_size.z < prev_size.z * 0.5f);
 
         if (oversized) {
           /* Contract: use ideal bounds + padding. */
