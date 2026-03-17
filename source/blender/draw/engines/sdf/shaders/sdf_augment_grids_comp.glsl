@@ -25,6 +25,9 @@ void main()
   }
 
   uint slot = atomicAdd(brick_counter.count, 1u);
+  if (int(slot) >= max_active_bricks) {
+    return;
+  }
   imageStore(indirection_tex, brick, int4(int(slot), 0, 0, 0));
   active_bricks[slot].coord = int4(brick, int(slot));
 }

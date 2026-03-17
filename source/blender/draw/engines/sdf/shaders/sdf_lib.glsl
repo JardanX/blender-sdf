@@ -518,8 +518,9 @@ float sround(float x, float k)
  * Domain modifiers warp the sampling space.
  * Applied in reverse order so visual stack order is top-to-bottom.
  */
-float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
+float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv_mat)
 {
+  float scale = 1.0f;
   for (int i = mod_start + mod_count - 1; i >= mod_start; i--) {
     SDFModifierGPU smod = sdf_modifiers[i];
     int mtype = smod.header.x;
@@ -527,15 +528,24 @@ float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
 
     if (mtype == SDF_MOD_MIRROR) {
       float offset = smod.params.x;
-      float blend = smod.params.y;
+      float3 origin = smod.params.yzw;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-        p.x = sabs(p.x, blend) - offset;
+        float3 N = float3(inv_mat[0]);
+        float d = dot(p - origin, N);
+        p -= 2.0f * min(d, 0.0f) * N;
+        p -= offset * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-        p.y = sabs(p.y, blend) - offset;
+        float3 N = float3(inv_mat[1]);
+        float d = dot(p - origin, N);
+        p -= 2.0f * min(d, 0.0f) * N;
+        p -= offset * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-        p.z = sabs(p.z, blend) - offset;
+        float3 N = float3(inv_mat[2]);
+        float d = dot(p - origin, N);
+        p -= 2.0f * min(d, 0.0f) * N;
+        p -= offset * N;
       }
     }
     else if (mtype == SDF_MOD_TWIST) {
@@ -547,10 +557,32 @@ float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
     }
     else if (mtype == SDF_MOD_BEND) {
       float k = smod.params.x;
-      float angle = k * p.x;
-      float c = cos(angle);
-      float s = sin(angle);
-      p = float3(s * p.y + c * p.x, c * p.y - s * p.x, p.z);
+      int axis = int(smod.params.y);
+      if (abs(k) > 0.0001f) {
+        float R = 1.0f / k;
+        float sg = sign(R);
+        float absR = abs(R);
+        float r;
+        if (axis == 1) {
+          float2 rel = float2(p.y, p.z + R);
+          r = length(rel);
+          p.y = atan(rel.x * sg, rel.y * sg) / k;
+          p.z = sg * r - R;
+        }
+        else if (axis == 2) {
+          float2 rel = float2(p.z, p.x + R);
+          r = length(rel);
+          p.z = atan(rel.x * sg, rel.y * sg) / k;
+          p.x = sg * r - R;
+        }
+        else {
+          float2 rel = float2(p.x, p.y + R);
+          r = length(rel);
+          p.x = atan(rel.x * sg, rel.y * sg) / k;
+          p.y = sg * r - R;
+        }
+        scale *= min(1.0f, absR / max(r, 0.0001f));
+      }
     }
     else if (mtype == SDF_MOD_ELONGATE) {
       float3 h = smod.params.xyz;
@@ -584,7 +616,7 @@ float3 applyDomainModifiers(float3 p, int mod_start, int mod_count)
       }
     }
   }
-  return p;
+  return float4(p, scale);
 }
 
 /**
@@ -660,6 +692,7 @@ struct SDFPrimitiveData {
   int4 box_modes;
   int modifier_start;
   int modifier_count;
+  float4x4 inverse_matrix;
 };
 
 /* ---- CSG dispatch ---- */
@@ -671,6 +704,11 @@ struct SDFPrimitiveData {
 #define SDF_CSG_OP_SHELL 3
 #define SDF_CSG_OP_PUSH 4
 #define SDF_CSG_OP_AVOID 5
+
+/** Shell mode IDs (must match eSDFShellMode in DNA_sdf_types.h). */
+#define SDF_SHELL_MODE_NORMAL 0
+#define SDF_SHELL_MODE_PUSH 1
+#define SDF_SHELL_MODE_AVOID 2
 
 /** Blend type IDs (must match eSDFBlendType in DNA_sdf_types.h). */
 #define SDF_BLEND_TYPE_LINEAR 0
@@ -688,7 +726,7 @@ struct SDFPrimitiveData {
  * \param shell_dist: shell expansion thickness (only used when op == SHELL).
  * \return combined distance.
  */
-float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
+float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist, int shell_mode)
 {
   if (op == SDF_CSG_OP_UNION) {
     if (k > 0.0f && bt > 0) {
@@ -773,87 +811,90 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
     return min(d1, carved);
   }
   else if (op == SDF_CSG_OP_SHELL) {
-  /* SDF_CSG_OP_SHELL (extrusion): two-stage blend matching MathOPS algorithm.
-   * Finds the intersection between two SDF fields and extrudes/insets a thin
-   * wall of thickness |shell_dist| with correct blending at both stages.
-   *
-   * Stage 1 (shape blend) uses the full k for smooth transitions.
-   * Stage 2 (limit blend) clamps k to shell thickness so the blend region
-   * doesn't extend beyond the wall, which causes surface distortion.
-   *
-   * Positive shell_dist (extrusion): union shape into base, intersect with limit.
-   * Negative shell_dist (inset): subtract shape from base, union with limit. */
     float h = abs(shell_dist);
     float lk = min(k, h);
 
-    if (shell_dist < 0.0f) {
-      float d_sub;
+    if (shell_mode == SDF_SHELL_MODE_PUSH) {
+      /* Standalone shell field around d2, then push into d1. */
+      float d_shell = abs(d2) - h;
+      float subtracted;
       if (k > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) {
-          d_sub = opSmoothSubtraction(d2, d1, k);
+          subtracted = opSmoothSubtraction(d_shell, d1, k);
         }
         else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-          d_sub = opChamferSubtraction(d2, d1, k);
-        }
-        else if (bt == SDF_BLEND_TYPE_ROUND) {
-          d_sub = opRoundSubtraction(d2, d1, k);
+          subtracted = opChamferSubtraction(d_shell, d1, k);
         }
         else {
-          d_sub = max(d1, -d2);
+          subtracted = opRoundSubtraction(d_shell, d1, k);
         }
       }
       else {
-        d_sub = max(d1, -d2);
+        subtracted = max(d1, -d_shell);
       }
+      return min(subtracted, d_shell);
+    }
 
+    /* Normal shell and Avoid: compute the two-stage shell result. */
+    float d_shell;
+    if (shell_dist < 0.0f) {
+      float d_sub;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_sub = opSmoothSubtraction(d2, d1, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_sub = opChamferSubtraction(d2, d1, k);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_sub = opRoundSubtraction(d2, d1, k);
+        else d_sub = max(d1, -d2);
+      }
+      else { d_sub = max(d1, -d2); }
       float lim = d1 + h;
       if (lk > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) {
-          return opSmoothUnion(d_sub, lim, lk);
-        }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-          return opChamferUnion(d_sub, lim, lk);
-        }
-        else if (bt == SDF_BLEND_TYPE_ROUND) {
-          return opRoundUnion(d_sub, lim, lk);
-        }
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothUnion(d_sub, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferUnion(d_sub, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundUnion(d_sub, lim, lk);
+        else d_shell = min(d_sub, lim);
       }
-      return min(d_sub, lim);
+      else { d_shell = min(d_sub, lim); }
     }
     else {
       float d_union;
       if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_union = opSmoothUnion(d1, d2, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_union = opChamferUnion(d1, d2, k);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_union = opRoundUnion(d1, d2, k);
+        else d_union = min(d1, d2);
+      }
+      else { d_union = min(d1, d2); }
+      float lim = d1 - h;
+      if (lk > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothIntersection(d_union, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferIntersection(d_union, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundIntersection(d_union, lim, lk);
+        else d_shell = max(d_union, lim);
+      }
+      else { d_shell = max(d_union, lim); }
+    }
+
+    if (shell_mode == SDF_SHELL_MODE_AVOID) {
+      /* Full shell computed, now carve it by d1. */
+      float carved;
+      if (k > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) {
-          d_union = opSmoothUnion(d1, d2, k);
+          carved = opSmoothSubtraction(d1, d_shell, k);
         }
         else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-          d_union = opChamferUnion(d1, d2, k);
-        }
-        else if (bt == SDF_BLEND_TYPE_ROUND) {
-          d_union = opRoundUnion(d1, d2, k);
+          carved = opChamferSubtraction(d1, d_shell, k);
         }
         else {
-          d_union = min(d1, d2);
+          carved = opRoundSubtraction(d1, d_shell, k);
         }
       }
       else {
-        d_union = min(d1, d2);
+        carved = max(d_shell, -d1);
       }
-
-      float lim = d1 - h;
-      if (lk > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) {
-          return opSmoothIntersection(d_union, lim, lk);
-        }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-          return opChamferIntersection(d_union, lim, lk);
-        }
-        else if (bt == SDF_BLEND_TYPE_ROUND) {
-          return opRoundIntersection(d_union, lim, lk);
-        }
-      }
-      return max(d_union, lim);
+      return min(d1, carved);
     }
+
+    return d_shell;
   }
   return d1; /* Fallback for unknown ops. */
 }
@@ -870,7 +911,7 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist)
  * For Push and Avoid, the intermediate subtraction is recomputed
  * because the color weight depends on both the subtract and union stages.
  */
-float csgColorWeight(float d1, float d2, int op, int bt, float k, float shell_dist)
+float csgColorWeight(float d1, float d2, int op, int bt, float k, float shell_dist, int shell_mode)
 {
   if (op == SDF_CSG_OP_UNION) {
     if (k > 0.0f && bt > 0) {
@@ -891,7 +932,70 @@ float csgColorWeight(float d1, float d2, int op, int bt, float k, float shell_di
     return (d2 > d1) ? 1.0f : 0.0f;
   }
   else if (op == SDF_CSG_OP_SHELL) {
-    /* Extrusion (positive) uses union semantics, inset (negative) uses subtraction. */
+    float h = abs(shell_dist);
+
+    if (shell_mode == SDF_SHELL_MODE_PUSH) {
+      float d_shell = abs(d2) - h;
+      float subtracted;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) subtracted = opSmoothSubtraction(d_shell, d1, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) subtracted = opChamferSubtraction(d_shell, d1, k);
+        else subtracted = opRoundSubtraction(d_shell, d1, k);
+        return clamp(0.5f + 0.5f * (subtracted - d_shell) / k, 0.0f, 1.0f);
+      }
+      return (d_shell <= max(d1, -d_shell)) ? 1.0f : 0.0f;
+    }
+    else if (shell_mode == SDF_SHELL_MODE_AVOID) {
+      /* Avoid uses full shell result. Compute it, then avoid color weight. */
+      float lk = min(k, h);
+      float d_shell;
+      if (shell_dist < 0.0f) {
+        float d_sub;
+        if (k > 0.0f && bt > 0) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) d_sub = opSmoothSubtraction(d2, d1, k);
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) d_sub = opChamferSubtraction(d2, d1, k);
+          else if (bt == SDF_BLEND_TYPE_ROUND) d_sub = opRoundSubtraction(d2, d1, k);
+          else d_sub = max(d1, -d2);
+        }
+        else { d_sub = max(d1, -d2); }
+        float lim = d1 + h;
+        if (lk > 0.0f && bt > 0) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothUnion(d_sub, lim, lk);
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferUnion(d_sub, lim, lk);
+          else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundUnion(d_sub, lim, lk);
+          else d_shell = min(d_sub, lim);
+        }
+        else { d_shell = min(d_sub, lim); }
+      }
+      else {
+        float d_union;
+        if (k > 0.0f && bt > 0) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) d_union = opSmoothUnion(d1, d2, k);
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) d_union = opChamferUnion(d1, d2, k);
+          else if (bt == SDF_BLEND_TYPE_ROUND) d_union = opRoundUnion(d1, d2, k);
+          else d_union = min(d1, d2);
+        }
+        else { d_union = min(d1, d2); }
+        float lim = d1 - h;
+        if (lk > 0.0f && bt > 0) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothIntersection(d_union, lim, lk);
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferIntersection(d_union, lim, lk);
+          else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundIntersection(d_union, lim, lk);
+          else d_shell = max(d_union, lim);
+        }
+        else { d_shell = max(d_union, lim); }
+      }
+      float carved;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) carved = opSmoothSubtraction(d1, d_shell, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) carved = opChamferSubtraction(d1, d_shell, k);
+        else carved = opRoundSubtraction(d1, d_shell, k);
+        return clamp(0.5f + 0.5f * (d1 - carved) / k, 0.0f, 1.0f);
+      }
+      return (max(d_shell, -d1) < d1) ? 1.0f : 0.0f;
+    }
+
+    /* Normal shell color. */
     if (shell_dist < 0.0f) {
       if (k > 0.0f && bt > 0) {
         return clamp(0.5f - 0.5f * (d1 + d2) / k, 0.0f, 1.0f);
@@ -904,8 +1008,6 @@ float csgColorWeight(float d1, float d2, int op, int bt, float k, float shell_di
     return (d2 < d1) ? 1.0f : 0.0f;
   }
   else if (op == SDF_CSG_OP_PUSH) {
-    /* Push = subtract(d2 from d1) then min(subtracted, d2).
-     * Color: union weight between subtracted base and push object. */
     float subtracted;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
@@ -922,8 +1024,6 @@ float csgColorWeight(float d1, float d2, int op, int bt, float k, float shell_di
     return (d2 <= max(d1, -d2)) ? 1.0f : 0.0f;
   }
   else if (op == SDF_CSG_OP_AVOID) {
-    /* Avoid = subtract(d1 from d2) then min(d1, carved).
-     * Color: union weight between base and carved avoid object. */
     float carved;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
@@ -1066,15 +1166,19 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
   }
 
   if (fork_idx == -1) {
-    p = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count);
-    float d = evalPrimitiveOnly(obj, p);
+    float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
+    p = dm.xyz;
+    float d = evalPrimitiveOnly(obj, p) * dm.w;
     return applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
   }
 
   /* Forking path: apply domain modifiers UP TO the forking modifier. */
+  float top_scale = 1.0f;
   int top_count = (obj.modifier_start + obj.modifier_count) - (fork_idx + 1);
   if (top_count > 0) {
-    p = applyDomainModifiers(p, fork_idx + 1, top_count);
+    float4 dm = applyDomainModifiers(p, fork_idx + 1, top_count, obj.inverse_matrix);
+    p = dm.xyz;
+    top_scale = dm.w;
   }
 
   SDFModifierGPU fork_mod = sdf_modifiers[fork_idx];
@@ -1093,25 +1197,51 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
     if ((mflags & SDF_MOD_MIRROR_Y) != 0) mirrors *= 2;
     if ((mflags & SDF_MOD_MIRROR_Z) != 0) mirrors *= 2;
 
+    float3 mirror_origin = fork_mod.params.yzw;
+    float offset = fork_mod.params.x;
+    float3 N_x = float3(obj.inverse_matrix[0]);
+    float3 N_y = float3(obj.inverse_matrix[1]);
+    float3 N_z = float3(obj.inverse_matrix[2]);
+
     bool first = true;
     for (int i = 0; i < 8; i++) {
       if (i >= mirrors) break;
       float3 cell_p = p;
       int flip_idx = i;
-      if ((mflags & SDF_MOD_MIRROR_X) != 0) { if ((flip_idx & 1) != 0) cell_p.x = -cell_p.x; flip_idx >>= 1; }
-      if ((mflags & SDF_MOD_MIRROR_Y) != 0) { if ((flip_idx & 1) != 0) cell_p.y = -cell_p.y; flip_idx >>= 1; }
-      if ((mflags & SDF_MOD_MIRROR_Z) != 0) { if ((flip_idx & 1) != 0) cell_p.z = -cell_p.z; }
+      if ((mflags & SDF_MOD_MIRROR_X) != 0) {
+        if ((flip_idx & 1) != 0) {
+          float d = dot(cell_p - mirror_origin, N_x);
+          cell_p -= 2.0f * d * N_x;
+        }
+        flip_idx >>= 1;
+        cell_p -= offset * N_x;
+      }
+      if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
+        if ((flip_idx & 1) != 0) {
+          float d = dot(cell_p - mirror_origin, N_y);
+          cell_p -= 2.0f * d * N_y;
+        }
+        flip_idx >>= 1;
+        cell_p -= offset * N_y;
+      }
+      if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
+        if ((flip_idx & 1) != 0) {
+          float d = dot(cell_p - mirror_origin, N_z);
+          cell_p -= 2.0f * d * N_z;
+        }
+        cell_p -= offset * N_z;
+      }
 
-      float offset = fork_mod.params.x;
-      if ((mflags & SDF_MOD_MIRROR_X) != 0) cell_p.x -= offset;
-      if ((mflags & SDF_MOD_MIRROR_Y) != 0) cell_p.y -= offset;
-      if ((mflags & SDF_MOD_MIRROR_Z) != 0) cell_p.z -= offset;
+      float bot_scale = top_scale;
+      if (bottom_count > 0) {
+        float4 dm = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count, obj.inverse_matrix);
+        cell_p = dm.xyz;
+        bot_scale *= dm.w;
+      }
+      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
-      if (bottom_count > 0) cell_p = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count);
-      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p), obj.modifier_start, obj.modifier_count);
-      
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f);
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0);
     }
   }
   else if (mtype == SDF_MOD_ARRAY) {
@@ -1153,11 +1283,16 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
         cell_p.y = r * sin(final_a);
       }
 
-      if (bottom_count > 0) cell_p = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count);
-      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p), obj.modifier_start, obj.modifier_count);
-      
+      float bot_scale = top_scale;
+      if (bottom_count > 0) {
+        float4 dm = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count, obj.inverse_matrix);
+        cell_p = dm.xyz;
+        bot_scale *= dm.w;
+      }
+      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
+
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f);
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0);
     }
   }
 
@@ -1302,7 +1437,7 @@ float solveCubicMarmittNR(float c[4], float tfar)
     if (fa * fb <= 0.0f) {
       /* Sign change found: Newton-Raphson from midpoint. */
       float t = (bounds[i] + bounds[i + 1]) * 0.5f;
-      for (int j = 0; j < 6; j++) {
+      for (int j = 0; j < 10; j++) {
         float f = evalCubic(c, t);
         float fp = evalCubicDeriv(c, t);
         if (abs(fp) < 1e-12f) {

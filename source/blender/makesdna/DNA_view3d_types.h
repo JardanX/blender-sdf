@@ -205,7 +205,7 @@ typedef struct View3DShading {
   int render_pass;
   char aov_name[64];
 
-  /** SDF draw engine: total voxel resolution (64, 128, 256, 512). Grid res = this / 8. */
+  /** SDF draw engine: quality level 1-4 (512, 1024, 2048, 4096 voxels). */
   int sdf_resolution;
   /** SDF draw engine: debug grid mode (0=Off, 1=3D Voxel Grid). */
   short sdf_debug_grid;

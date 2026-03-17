@@ -228,9 +228,7 @@ void BKE_sdf_groups_after_lib_link(Main *bmain)
     sdf->group_order = 0;
   }
 
-  int group_idx = 0;
   LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
-    group->group_order = group_idx++;
 
     int member_order = 0;
     LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {

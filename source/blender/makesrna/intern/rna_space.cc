@@ -4743,24 +4743,23 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
                           "rna_SpaceView3D_shading_use_compositor_update");
 
   /* SDF draw engine settings. */
-  static const EnumPropertyItem sdf_resolution_items[] = {
-      {32, "RES_32", 0, "32", "32 voxel resolution (4 bricks per axis)"},
-      {64, "RES_64", 0, "64", "64 voxel resolution (8 bricks per axis)"},
-      {128, "RES_128", 0, "128", "128 voxel resolution (16 bricks per axis)"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
-  prop = RNA_def_property(srna, "sdf_resolution", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "sdf_resolution");
-  RNA_def_property_enum_items(prop, sdf_resolution_items);
+  prop = RNA_def_property(srna, "sdf_resolution", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_resolution");
+  RNA_def_property_range(prop, 1, 4);
+  RNA_def_property_ui_range(prop, 1, 4, 1, -1);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
-      prop, "SDF Resolution", "Total voxel resolution for the SDF brick atlas");
+      prop, "Levels Resolution", "Voxel quality level (1=512, 2=1024, 3=2048, 4=4096)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
   static const EnumPropertyItem sdf_debug_grid_items[] = {
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},
+      {2,
+       "SCENE_BOUNDS",
+       0,
+       "Scene Bounds",
+       "Scene AABB, padded AABB, and atlas grid bounds"},
       {3,
        "BVH_BOUNDS",
        0,

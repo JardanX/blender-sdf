@@ -112,7 +112,7 @@ class RENDER_PT_proximity_raymarcher(Panel):
         if shading is None:
             layout.label(text="No 3D Viewport found.")
             return
-        layout.prop(shading, "sdf_resolution", text="Resolution")
+        layout.prop(shading, "sdf_resolution", text="Levels Resolution")
         layout.prop(shading, "sdf_surface_margin", text="Surface Margin")
         layout.prop(shading, "sdf_debug_grid", text="Debug View")
 

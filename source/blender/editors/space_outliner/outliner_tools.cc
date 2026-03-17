@@ -48,6 +48,7 @@
 #include "BKE_fcurve.hh"
 #include "BKE_global.hh"
 #include "BKE_grease_pencil.hh"
+#include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
@@ -956,6 +957,11 @@ static void object_deselect_fn(bContext *C,
 static void outliner_object_delete_fn(bContext *C, ReportList *reports, Scene *scene, Object *ob)
 {
   if (ob) {
+    if (ob->type == OB_EMPTY && ob->id.properties &&
+        IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal"))
+    {
+      return;
+    }
     Main *bmain = CTX_data_main(C);
     if (ob->id.tag & ID_TAG_INDIRECT) {
       BKE_reportf(
@@ -972,6 +978,18 @@ static void outliner_object_delete_fn(bContext *C, ReportList *reports, Scene *s
                   ob->id.name + 2,
                   scene->id.name + 2);
       return;
+    }
+
+    /* Delete mirror empties for SDF objects. */
+    if (ob->type == OB_SDF && ob->data) {
+      SDF *sdf = static_cast<SDF *>(ob->data);
+      LISTBASE_FOREACH (SDFModifier *, mod, &sdf->modifiers) {
+        if (mod->type == SDF_MOD_MIRROR && mod->mirror_ob) {
+          Object *mirror = mod->mirror_ob;
+          mod->mirror_ob = nullptr;
+          BKE_id_delete(bmain, mirror);
+        }
+      }
     }
 
     /* Check also library later. */

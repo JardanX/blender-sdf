@@ -41,6 +41,7 @@ float evalOutlinePrimitive(float3 local_pos, SDFObjectGPU obj)
   prim_data.box_modes = obj.box_modes;
   prim_data.modifier_start = obj.modifier_start;
   prim_data.modifier_count = obj.modifier_count;
+  prim_data.inverse_matrix = obj.inverse_matrix;
 
   return evalObjectSDF(prim_data, local_pos);
 }

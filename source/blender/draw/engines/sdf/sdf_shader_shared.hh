@@ -21,12 +21,16 @@ struct SDFObjectGPU {
   int blend_type;
   int csg_operation;
   float shell_distance;
+  int shell_mode;
   int modifier_start;
   int modifier_count;
   int group_id;     /* -1 = ungrouped */
   int group_first;  /* 1 = base shape in group */
   int group_order;
   int original_index;
+  int _pad0;
+  int _pad1;
+  int _pad2;
   float4 color;
   float4 box_corners;
   float4 box_edges;   /* x=top, y=bottom, z=tapTop, w=tapBot */
@@ -39,10 +43,10 @@ struct SDFGroupGPU {
   int blend_type;
   float blend;
   float shell_distance;
+  int shell_mode;
   int first_object;
   int object_count;
   float _pad0;
-  float _pad1;
   float4 color;
 };
 
@@ -93,8 +97,12 @@ struct SDFInstanceGPU {
   int blend_type;
   int csg_operation;
   float shell_distance;
+  int shell_mode;
   int group_id;
   int group_order;
+  int _inst_pad0;
+  int _inst_pad1;
+  int _inst_pad2;
 };
 
 struct SDFClassifyParams {

@@ -4419,9 +4419,23 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
         LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
           if (sl->spacetype == SPACE_VIEW3D) {
             View3D *v3d = (View3D *)sl;
-            if (v3d->shading.sdf_resolution == 0 ||
-                v3d->shading.sdf_resolution > 128) {
-              v3d->shading.sdf_resolution = 128;
+            if (v3d->shading.sdf_resolution >= 32) {
+              /* Convert old resolution value to the new 1..4 slider levels */
+              if (v3d->shading.sdf_resolution <= 512) {
+                v3d->shading.sdf_resolution = 1;
+              }
+              else if (v3d->shading.sdf_resolution <= 1024) {
+                v3d->shading.sdf_resolution = 2;
+              }
+              else if (v3d->shading.sdf_resolution <= 2048) {
+                v3d->shading.sdf_resolution = 3;
+              }
+              else {
+                v3d->shading.sdf_resolution = 4;
+              }
+            }
+            else if (v3d->shading.sdf_resolution == 0 || v3d->shading.sdf_resolution > 4) {
+              v3d->shading.sdf_resolution = 2;
             }
             if (v3d->shading.sdf_surface_margin == 0) {
               v3d->shading.sdf_surface_margin = 100;

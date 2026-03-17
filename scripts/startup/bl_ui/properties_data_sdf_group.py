@@ -48,6 +48,10 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
 
         layout.separator()
 
+        if grp.csg_operation == 'SHELL':
+            layout.label(text="Shell Mode")
+            layout.prop(grp, "shell_mode", text="")
+
         layout.label(text="Blend Type")
         row = layout.row(align=True)
         row.scale_y = 1.4

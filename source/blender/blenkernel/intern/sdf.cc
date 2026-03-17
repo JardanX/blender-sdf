@@ -57,11 +57,6 @@ static void sdf_free_data(ID *id)
 {
   SDF *sdf = (SDF *)id;
 
-  if (sdf->sdf_group) {
-    id_us_min(&sdf->sdf_group->id);
-    sdf->sdf_group = nullptr;
-  }
-
   BKE_animdata_free(&sdf->id, false);
   BLI_freelistN(&sdf->modifiers);
   MEM_SAFE_FREE(sdf->mat);
@@ -75,6 +70,10 @@ static void sdf_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->mat[i], IDWALK_CB_USER);
   }
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->sdf_group, IDWALK_CB_USER);
+
+  LISTBASE_FOREACH (SDFModifier *, mod, &sdf->modifiers) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mod->mirror_ob, IDWALK_CB_NOP);
+  }
 }
 
 static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
@@ -178,7 +177,7 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
       break;
     case SDF_MOD_BEND:
       mod->params[0] = 1.0f;
-      mod->params[1] = 2.0f;
+      mod->params[1] = 0.0f;
       break;
     case SDF_MOD_ELONGATE:
       mod->params[0] = 0.5f;

@@ -121,6 +121,13 @@ static const EnumPropertyItem rna_enum_sdf_group_blend_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_group_shell_mode_items[] = {
+    {SDF_SHELL_NORMAL, "NORMAL", 0, "Normal", "Standard shell operation"},
+    {SDF_SHELL_PUSH, "PUSH", 0, "Shell Push", "Shell combined with push"},
+    {SDF_SHELL_AVOID, "AVOID", 0, "Shell Avoid", "Shell combined with avoid"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_group_csg_items[] = {
     {SDF_CSG_UNION, "UNION", ICON_SDF_CSG_UNION, "Union", "Boolean union"},
     {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
@@ -230,6 +237,12 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
   RNA_def_property_ui_text(
       prop, "Shell Distance", "Offset distance for shell/extrusion operation");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  /* Shell Mode */
+  prop = RNA_def_property(srna, "shell_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_group_shell_mode_items);
+  RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
   RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
 
   /* Color */

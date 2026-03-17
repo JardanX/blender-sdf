@@ -29,10 +29,12 @@ void main()
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
   int3 slot_origin = slot_block * BRICK_STORAGE;
 
-  int2 local_xy = int2(gl_LocalInvocationID.xy);
-
-  for (int lz = 0; lz < BRICK_STORAGE; lz++) {
-    int3 local_voxel = int3(local_xy, lz);
+  for (int v = int(gl_LocalInvocationIndex); v < BRICK_STORAGE * BRICK_STORAGE * BRICK_STORAGE;
+       v += 64)
+  {
+    int3 local_voxel = int3(v % BRICK_STORAGE,
+                            (v / BRICK_STORAGE) % BRICK_STORAGE,
+                            v / (BRICK_STORAGE * BRICK_STORAGE));
 
     float3 world_pos = atlas_origin +
                        float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
@@ -62,10 +64,10 @@ void main()
     }
     else {
       float new_dist = combineCSG(
-          acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance);
+          acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance, grid_shell_mode);
 
       float h = csgColorWeight(
-          acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance);
+          acc_dist, grid_dist, grid_csg_operation, grid_blend_type, k, grid_shell_distance, grid_shell_mode);
       acc_color = mix(acc_color, grid_color.rgb, h);
       acc_dist = new_dist;
     }

@@ -46,6 +46,8 @@ typedef struct SDFGroup {
   int blend_type;    /* eSDFBlendType */
   float blend;
   float shell_distance;
+  int shell_mode; /* eSDFShellMode */
+  char _pad0[4];
 
   float color[4];
 
