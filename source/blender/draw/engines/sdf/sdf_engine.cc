@@ -114,6 +114,8 @@ class Instance : public DrawEngine {
 
   float3 scene_min_ = float3(1e30f);
   float3 scene_max_ = float3(-1e30f);
+  float3 padded_min_ = float3(0);
+  float3 padded_max_ = float3(0);
 
   gpu::Texture *indirection_tx_ = nullptr;
   gpu::Texture *compact_atlas_tx_ = nullptr;
@@ -175,6 +177,7 @@ class Instance : public DrawEngine {
     int blend_type;                  /* Blend function type (eSDFBlendType) */
     int csg_operation;               /* CSG operation (eSDFCSGOperation) */
     float shell_distance;            /* Shell/extrusion thickness */
+    int shell_mode;                  /* Shell sub-mode (eSDFShellMode) */
   };
   Vector<GridObject> grid_objects_;
 
@@ -249,6 +252,9 @@ class Instance : public DrawEngine {
 
   /** Debug BVH wireframe batch (GPU_PRIM_LINES, per-vertex color). */
   gpu::Batch *bvh_batch_ = nullptr;
+
+  /** Debug scene bounds wireframe batch (GPU_PRIM_LINES, per-vertex color). */
+  gpu::Batch *scene_bounds_batch_ = nullptr;
 
   const DRWContext *draw_ctx_ = nullptr;
 
@@ -448,6 +454,7 @@ class Instance : public DrawEngine {
     gpu_obj.blend_type = sdf_data->blend_type;
     gpu_obj.csg_operation = sdf_data->csg_operation;
     gpu_obj.shell_distance = sdf_data->shell_distance;
+    gpu_obj.shell_mode = sdf_data->shell_mode;
 
     /* Group membership: store pointer for resolution in end_sync.
      * group_id is set to -1 here and resolved after groups_gpu_ is built. */
@@ -501,7 +508,21 @@ class Instance : public DrawEngine {
       }
       SDFModifierGPU gpu_mod = {};
       gpu_mod.header = int4(mod->type, mod->flag, 0, 0);
-      gpu_mod.params = float4(mod->params[0], mod->params[1], mod->params[2], mod->params[3]);
+      if (mod->type == SDF_MOD_MIRROR) {
+        float3 world_origin;
+        if (mod->mirror_ob != nullptr) {
+          const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
+          world_origin = float3(mirror_mat[3]) - float3(mat[3]);
+        }
+        else {
+          world_origin = float3(mod->params[1], mod->params[2], mod->params[3]);
+        }
+        float3 local_origin = float3(inv_rot * float4(world_origin, 0.0f));
+        gpu_mod.params = float4(mod->params[0], local_origin.x, local_origin.y, local_origin.z);
+      }
+      else {
+        gpu_mod.params = float4(mod->params[0], mod->params[1], mod->params[2], mod->params[3]);
+      }
       gpu_mod.params2 = float4(mod->params[4], mod->params[5], mod->params[6], mod->params[7]);
       modifiers_.append(gpu_mod);
       gpu_obj.modifier_count++;
@@ -560,15 +581,31 @@ class Instance : public DrawEngine {
       }
       switch (mod->type) {
         case SDF_MOD_MIRROR: {
-          /* Mirror with offset expands bounds opposite to the mirror side by offset.
-           * For simplicity, expand uniformly by offset. */
           float offset = fabsf(mod->params[0]);
-          if ((mod->flag & SDF_MOD_MIRROR_X) != 0)
-            local_extent.x += offset;
-          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0)
-            local_extent.y += offset;
-          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0)
-            local_extent.z += offset;
+          float3 world_org;
+          if (mod->mirror_ob != nullptr) {
+            const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
+            world_org = float3(mirror_mat[3]) - float3(mat[3]);
+          }
+          else {
+            world_org = float3(mod->params[1], mod->params[2], mod->params[3]);
+          }
+          float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
+          if ((mod->flag & SDF_MOD_MIRROR_X) != 0) {
+            float3 N = float3(inv_rot[0]);
+            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+            local_extent += math::abs(N) * disp;
+          }
+          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) {
+            float3 N = float3(inv_rot[1]);
+            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+            local_extent += math::abs(N) * disp;
+          }
+          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) {
+            float3 N = float3(inv_rot[2]);
+            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+            local_extent += math::abs(N) * disp;
+          }
           break;
         }
         case SDF_MOD_ELONGATE:
@@ -581,6 +618,78 @@ class Instance : public DrawEngine {
         case SDF_MOD_ROUND:
           local_extent += float3(mod->params[0]);
           break;
+        case SDF_MOD_TWIST: {
+          float xy = math::sqrt(local_extent.x * local_extent.x +
+                                local_extent.y * local_extent.y);
+          local_extent.x = xy;
+          local_extent.y = xy;
+          break;
+        }
+        case SDF_MOD_BEND: {
+          float k = mod->params[0];
+          int axis = (int)mod->params[1];
+          if (fabsf(k) > 0.0001f) {
+            float R = 1.0f / k;
+            float3 new_ext = float3(0.0f);
+            for (int c = 0; c < 8; c++) {
+              float cx = (c & 1) ? local_extent.x : -local_extent.x;
+              float cy = (c & 2) ? local_extent.y : -local_extent.y;
+              float cz = (c & 4) ? local_extent.z : -local_extent.z;
+              float drive, curve, free_val;
+              if (axis == 1) {
+                drive = cy;
+                curve = cz;
+                free_val = cx;
+              }
+              else if (axis == 2) {
+                drive = cz;
+                curve = cx;
+                free_val = cy;
+              }
+              else {
+                drive = cx;
+                curve = cy;
+                free_val = cz;
+              }
+              float theta = k * drive;
+              float bd = (R + curve) * sinf(theta);
+              float bc = -R + (R + curve) * cosf(theta);
+              float3 bent;
+              if (axis == 1) {
+                bent = float3(fabsf(free_val), fabsf(bd), fabsf(bc));
+              }
+              else if (axis == 2) {
+                bent = float3(fabsf(bc), fabsf(free_val), fabsf(bd));
+              }
+              else {
+                bent = float3(fabsf(bd), fabsf(bc), fabsf(free_val));
+              }
+              new_ext = math::max(new_ext, bent);
+            }
+            /* Also check arc apex when bend exceeds 90 degrees. */
+            float drive_ext = (axis == 0) ? local_extent.x :
+                              (axis == 1) ? local_extent.y :
+                                            local_extent.z;
+            float curve_ext = (axis == 0) ? local_extent.y :
+                              (axis == 1) ? local_extent.z :
+                                            local_extent.x;
+            float max_angle = fabsf(k) * drive_ext;
+            if (max_angle > float(M_PI_2)) {
+              float outer_r = fabsf(R) + curve_ext;
+              if (axis == 0) {
+                new_ext.x = math::max(new_ext.x, outer_r);
+              }
+              else if (axis == 1) {
+                new_ext.y = math::max(new_ext.y, outer_r);
+              }
+              else {
+                new_ext.z = math::max(new_ext.z, outer_r);
+              }
+            }
+            local_extent = new_ext;
+          }
+          break;
+        }
         case SDF_MOD_ARRAY: {
           float count = mod->params[0];
           if (count > 0.5f) {
@@ -698,119 +807,32 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Compute atlas parameters. Resolution = voxels per Blender unit (fixed density).
-     * voxel_size is constant for a given resolution setting. The grid adapts to
-     * scene size with per-axis brick counts, snapped to world-aligned chunks.
-     * Active-brick-only dispatch ensures bake cost is proportional to active bricks
-     * (~5% of grid volume), not total grid_res^3. */
+    /* Voxel size defines the resolution. To maintain consistent visual quality
+     * with older versions, we calculate voxel_size using a fixed legacy margin 
+     * (max(scene_size * 0.5, 2.0)). This prevents the object resolution from 
+     * randomly jumping when the user adds/removes objects. */
     float3 scene_size = scene_max_ - scene_min_;
-    float margin = math::max(math::reduce_max(scene_size) * 0.5f, 2.0f);
+    float legacy_margin = math::max(math::reduce_max(scene_size) * 0.5f, 2.0f);
+    float legacy_max_extent = math::reduce_max(scene_size) + 2.0f * legacy_margin;
+    voxel_size_ = legacy_max_extent / float(sdf_resolution_);
 
-    /* Fixed voxel density: resolution = voxels per BU.
-     * Smooth auto-coarsen: if the padded scene extent would exceed
-     * SDF_MAX_GRID_RES bricks, grow voxel_size by the exact amount needed.
-     * Using max(base, extent-based) gives a perfectly linear ramp —
-     * no snapping at all.  The -2 absorbs worst-case floor/ceil snap
-     * overhead (one extra brick per side), guaranteeing the grid fits. */
-    float base_voxel = 1.0f / float(sdf_resolution_);
-    float3 padded_min = scene_min_ - float3(margin);
-    float3 padded_max = scene_max_ + float3(margin);
+    /* But we tightly bound the actual grid to the physical SDF limits!
+     * This eliminates hundreds of millions of empty padding bricks from the
+     * indirection grid, massively speeding up classify. */
+    float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
+    float tight_margin = max_blend_ + max_shell_distance_ + brick_world;
+    float3 padded_min = scene_min_ - float3(tight_margin);
+    float3 padded_max = scene_max_ + float3(tight_margin);
+    padded_min_ = padded_min;
+    padded_max_ = padded_max;
     float max_extent = math::reduce_max(padded_max - padded_min);
-    float min_voxel = max_extent / (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
-    voxel_size_ = math::max(base_voxel, min_voxel);
-
-    /* Surface-area cap: coarsen voxels so estimated active brick count
-     * stays within SDF_MAX_BRICKS. Without this, a 20 BU cube produces
-     * ~95k surface bricks at resolution 128 — the grid-volume cap (128^3)
-     * only limits total bricks, not the surface shell that actually gets baked. */
-    float3 sz = scene_max_ - scene_min_;
-    float est_surface = 2.0f * (sz.x * sz.y + sz.x * sz.z + sz.y * sz.z);
-    if (est_surface > 0.0f) {
-      float chunk = float(SDF_BRICK_SIZE) * voxel_size_;
-      float est_bricks = est_surface / (chunk * chunk);
-      if (est_bricks > float(SDF_MAX_BRICKS)) {
-        float needed_chunk = math::sqrt(est_surface / float(SDF_MAX_BRICKS));
-        voxel_size_ = math::max(voxel_size_, needed_chunk / float(SDF_BRICK_SIZE));
-      }
-    }
-
-    /* Asymmetric deadband: suppress small coarsening (< 25%) to avoid
-     * constant rebakes when the scene fluctuates, but allow refinement
-     * more readily (> 10% improvement passes through) so quality recovers
-     * when the scene shrinks back. */
-    if (prev_voxel_size_ > 0.0f) {
-      float ratio = voxel_size_ / prev_voxel_size_;
-      if (ratio > 0.9f && ratio < 1.25f) {
-        voxel_size_ = prev_voxel_size_;
-      }
-    }
+    voxel_size_ = max_extent / float(sdf_resolution_);
 
     float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
 
     /* Snap to world-aligned chunk boundaries. */
     float3 grid_min = math::floor(padded_min / chunk_size) * chunk_size;
     float3 grid_max = math::ceil(padded_max / chunk_size) * chunk_size;
-
-    /* Hysteresis: prevent frequent grid reallocations when moving objects.
-     * Expands with padding for movement room, contracts when scene is
-     * significantly smaller than the grid (recovers quality). */
-    if (prev_grid_res_.x > 0 && voxel_size_ == prev_voxel_size_) {
-      float3 prev_grid_min = prev_atlas_origin_;
-      float3 prev_grid_max = prev_atlas_origin_ + float3(prev_grid_res_) * chunk_size;
-
-      float padding = math::max(chunk_size * 8.0f,
-                                math::max(math::reduce_max(scene_size) * 0.25f, 1.0f));
-
-      /* Check if scene still fits inside previous grid. */
-      bool fits = (grid_min.x >= prev_grid_min.x && grid_min.y >= prev_grid_min.y &&
-                   grid_min.z >= prev_grid_min.z && grid_max.x <= prev_grid_max.x &&
-                   grid_max.y <= prev_grid_max.y && grid_max.z <= prev_grid_max.z);
-
-      if (fits) {
-        /* Scene fits: check if grid is massively oversized (>3x per axis).
-         * If so, contract to reclaim quality. Otherwise keep stable. */
-        float3 ideal_size = grid_max - grid_min;
-        float3 prev_size = prev_grid_max - prev_grid_min;
-        bool oversized = (ideal_size.x < prev_size.x * 0.5f ||
-                          ideal_size.y < prev_size.y * 0.5f ||
-                          ideal_size.z < prev_size.z * 0.5f);
-
-        if (oversized) {
-          /* Contract: use ideal bounds + padding. */
-          grid_min = math::floor((padded_min - float3(padding)) / chunk_size) * chunk_size;
-          grid_max = math::ceil((padded_max + float3(padding)) / chunk_size) * chunk_size;
-        }
-        else {
-          /* Stable: keep previous grid bounds. */
-          grid_min = prev_grid_min;
-          grid_max = prev_grid_max;
-        }
-      }
-      else {
-        /* Scene doesn't fit: expand with padding. */
-        float3 expanded_min = prev_grid_min;
-        float3 expanded_max = prev_grid_max;
-
-        if (grid_min.x < prev_grid_min.x) expanded_min.x = grid_min.x - padding;
-        if (grid_min.y < prev_grid_min.y) expanded_min.y = grid_min.y - padding;
-        if (grid_min.z < prev_grid_min.z) expanded_min.z = grid_min.z - padding;
-        if (grid_max.x > prev_grid_max.x) expanded_max.x = grid_max.x + padding;
-        if (grid_max.y > prev_grid_max.y) expanded_max.y = grid_max.y + padding;
-        if (grid_max.z > prev_grid_max.z) expanded_max.z = grid_max.z + padding;
-
-        expanded_min = math::round(expanded_min / chunk_size) * chunk_size;
-        expanded_max = math::round(expanded_max / chunk_size) * chunk_size;
-
-        int3 expanded_res = int3(math::round((expanded_max - expanded_min) / chunk_size));
-        if (expanded_res.x <= SDF_MAX_GRID_RES &&
-            expanded_res.y <= SDF_MAX_GRID_RES &&
-            expanded_res.z <= SDF_MAX_GRID_RES)
-        {
-          grid_min = expanded_min;
-          grid_max = expanded_max;
-        }
-      }
-    }
 
     /* Per-axis grid resolution in bricks. */
     int3 new_grid_res = int3(math::round((grid_max - grid_min) / chunk_size));
@@ -884,6 +906,7 @@ class Instance : public DrawEngine {
         gpu_grp.blend_type = group->blend_type;
         gpu_grp.blend = group->blend;
         gpu_grp.shell_distance = group->shell_distance;
+        gpu_grp.shell_mode = group->shell_mode;
         gpu_grp.first_object = obj_offset;
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(group->color[0], group->color[1], group->color[2], group->color[3]);
@@ -982,7 +1005,8 @@ class Instance : public DrawEngine {
     Vector<float3> new_mins(objects_.size());
     Vector<float3> new_maxs(objects_.size());
     for (int i = 0; i < int(objects_.size()); i++) {
-      float exp = objects_[i].blend + fabsf(objects_[i].shell_distance);
+      float blend_radius = (objects_[i].blend_type == 0 /* SDF_BLEND_LINEAR */) ? 0.0f : objects_[i].blend;
+      float exp = blend_radius + fabsf(objects_[i].shell_distance);
       new_mins[i] = float3(objects_[i].bbox_min) - float3(exp);
       new_maxs[i] = float3(objects_[i].bbox_max) + float3(exp);
     }
@@ -1034,7 +1058,8 @@ class Instance : public DrawEngine {
 
           /* Blend with subsequent objects IN THE SAME GROUP. */
           for (int j = i + 1; j <= end_idx; j++) {
-            float sub_blend = objects_[j].blend + fabsf(objects_[j].shell_distance);
+            float sub_blend_radius = (objects_[j].blend_type == 0 /* SDF_BLEND_LINEAR */) ? 0.0f : objects_[j].blend;
+          float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
             if (sub_blend > 0.0f) {
               float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
               float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
@@ -1072,7 +1097,8 @@ class Instance : public DrawEngine {
 
           /* Blend with ungrouped objects (evaluated after all groups). */
           for (int j = ungrouped_start; j < int(objects_.size()); j++) {
-            float sub_blend = objects_[j].blend + fabsf(objects_[j].shell_distance);
+            float sub_blend_radius = (objects_[j].blend_type == 0 /* SDF_BLEND_LINEAR */) ? 0.0f : objects_[j].blend;
+          float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
             if (sub_blend > 0.0f) {
               float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
               float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
@@ -1122,6 +1148,7 @@ class Instance : public DrawEngine {
         group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.blend);
         group_struct_hash =
             group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.shell_distance);
+        group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.shell_mode);
         group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.first_object);
         group_struct_hash = group_struct_hash * 6364136223846793005ULL + uint64_t(grp.object_count);
         group_struct_hash = group_struct_hash * 6364136223846793005ULL + float_as_uint(grp.color.x);
@@ -1364,6 +1391,10 @@ class Instance : public DrawEngine {
         GPU_batch_discard(bvh_batch_);
         bvh_batch_ = nullptr;
       }
+      if (scene_bounds_batch_) {
+        GPU_batch_discard(scene_bounds_batch_);
+        scene_bounds_batch_ = nullptr;
+      }
 
       if (incremental_bake_) {
         /* Incremental pipeline. */
@@ -1487,6 +1518,7 @@ class Instance : public DrawEngine {
 
     if (!draw_ctx_->v3d || draw_ctx_->v3d->shading.type != OB_RENDER) {
       draw_debug_grid();
+      draw_debug_scene_bounds();
       draw_debug_bvh();
     }
 
@@ -1534,6 +1566,7 @@ class Instance : public DrawEngine {
     mix(uint64_t(obj.sdf_type));
     mix(uint64_t(obj.csg_operation));
     mix(float_as_uint(obj.shell_distance));
+    mix(uint64_t(obj.shell_mode));
     mix(float_as_uint(obj.color.x));
     mix(float_as_uint(obj.color.y));
     mix(float_as_uint(obj.color.z));
@@ -1582,11 +1615,11 @@ class Instance : public DrawEngine {
 
     const View3DShading &shading = v3d->shading;
 
-    int new_res = int(shading.sdf_resolution);
-    if (new_res == 0) {
-      new_res = 128;
+    int new_level = int(shading.sdf_resolution);
+    if (new_level < 1 || new_level > 4) {
+      new_level = 2; /* Default level 2 is 1024 */
     }
-    new_res = math::clamp(new_res, 32, 128);
+    int new_res = 256 << new_level;
 
     if (new_res != sdf_resolution_) {
       if (G.debug & G_DEBUG_GPU) {
@@ -2202,6 +2235,7 @@ class Instance : public DrawEngine {
         max_bricks = 1;
       }
     }
+    max_bricks = math::min(max_bricks, SDF_MAX_BRICKS);
     if (active_bricks_ == nullptr || active_bricks_capacity_ < max_bricks) {
       if (active_bricks_) {
         GPU_storagebuf_free(active_bricks_);
@@ -2260,6 +2294,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", dirty_brick_max_);
     GPU_shader_uniform_1i(
         classify_sh_, "has_dirty_flags", (incremental && !dirty_flags_.is_empty()) ? 1 : 0);
+    GPU_shader_uniform_1i(classify_sh_, "max_active_bricks", max_bricks);
 
     if (incremental) {
       int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
@@ -2347,6 +2382,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1i(
         bake_sh_, "has_dirty_flags", (incremental_bake_ && !dirty_flags_.is_empty()) ? 1 : 0);
+    GPU_shader_uniform_1f(bake_sh_, "max_blend", max_blend_);
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
      * early-exit after reading brick_counter.count from SSBO. */
@@ -2665,14 +2701,22 @@ class Instance : public DrawEngine {
       return;
     }
 
+    /* Texture may be larger than grid_res_ due to lazy reallocation.
+     * Use actual texture dimensions for the stride. */
     int3 n = grid_res_;
+    int tex_w = GPU_texture_width(indirection_tx_);
+    int tex_h = GPU_texture_height(indirection_tx_);
     float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
 
-    int total = n.x * n.y * n.z;
     int active_count = 0;
-    for (int i = 0; i < total; i++) {
-      if (data[i] >= 0) {
-        active_count++;
+    for (int z = 0; z < n.z; z++) {
+      for (int y = 0; y < n.y; y++) {
+        for (int x = 0; x < n.x; x++) {
+          int idx = x + y * tex_w + z * tex_w * tex_h;
+          if (data[idx] >= 0) {
+            active_count++;
+          }
+        }
       }
     }
 
@@ -2687,7 +2731,7 @@ class Instance : public DrawEngine {
     for (int z = 0; z < n.z; z++) {
       for (int y = 0; y < n.y; y++) {
         for (int x = 0; x < n.x; x++) {
-          int idx = x + y * n.x + z * n.x * n.y;
+          int idx = x + y * tex_w + z * tex_w * tex_h;
           if (data[idx] < 0) {
             continue;
           }
@@ -2948,12 +2992,19 @@ class Instance : public DrawEngine {
       GPU_batch_discard(bvh_batch_);
       bvh_batch_ = nullptr;
     }
+    if (scene_bounds_batch_) {
+      GPU_batch_discard(scene_bounds_batch_);
+      scene_bounds_batch_ = nullptr;
+    }
 
     grid_batch_mode_ = debug_grid_;
     grid_batch_res_ = grid_res_;
 
     if (debug_grid_ == 1) {
       rebuild_grid_batch_active();
+    }
+    else if (debug_grid_ == 2) {
+      rebuild_scene_bounds_batch();
     }
     else if (debug_grid_ == 3) {
       rebuild_bvh_batch();
@@ -3005,6 +3056,65 @@ class Instance : public DrawEngine {
     GPU_batch_draw(grid_batch_);
 
     /* Restore state. */
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
+    GPU_line_width(1.0f);
+    GPU_shader_unbind();
+  }
+
+  void rebuild_scene_bounds_batch()
+  {
+    Vector<float3> positions;
+    Vector<float4> colors;
+
+    /* Scene AABB (green). */
+    float4 scene_col(0.2f, 0.9f, 0.2f, 0.8f);
+    emit_box_edges(positions, colors, scene_min_, scene_max_, scene_col);
+
+    /* Padded AABB (yellow). */
+    float4 padded_col(0.9f, 0.9f, 0.2f, 0.6f);
+    emit_box_edges(positions, colors, padded_min_, padded_max_, padded_col);
+
+    /* Atlas grid bounds (cyan). */
+    float4 atlas_col(0.2f, 0.8f, 0.9f, 0.6f);
+    float3 atlas_max = atlas_origin_ + atlas_extent_;
+    emit_box_edges(positions, colors, atlas_origin_, atlas_max, atlas_col);
+
+    scene_bounds_batch_ = create_colored_line_batch(
+        positions.data(), colors.data(), int(positions.size()));
+  }
+
+  void draw_debug_scene_bounds()
+  {
+    if (debug_grid_ != 2) {
+      return;
+    }
+
+    if (scene_bounds_batch_ == nullptr || grid_batch_mode_ != debug_grid_ ||
+        grid_batch_res_ != grid_res_)
+    {
+      rebuild_grid_batch();
+    }
+    if (scene_bounds_batch_ == nullptr) {
+      return;
+    }
+
+    gpu::Shader *shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_FLAT_COLOR);
+    GPU_shader_bind(shader);
+
+    View &view = View::default_get();
+    float4x4 mvp = view.persmat();
+    GPU_shader_uniform_mat4(shader, "ModelViewProjectionMatrix", mvp.ptr());
+
+    GPU_blend(GPU_BLEND_ALPHA);
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(false);
+    GPU_line_width(2.0f);
+
+    GPU_batch_set_shader(scene_bounds_batch_, shader);
+    GPU_batch_draw(scene_bounds_batch_);
+
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(true);
     GPU_blend(GPU_BLEND_NONE);
@@ -3171,6 +3281,7 @@ class Instance : public DrawEngine {
     grid_obj.blend_type = 0;    /* Default to linear for grid objects. */
     grid_obj.csg_operation = 0; /* Default to union for grid objects. */
     grid_obj.shell_distance = 0.0f;
+    grid_obj.shell_mode = 0;
 
     /* If the object has SDF data, use its blend_type and csg_operation. */
     if (ob->type == OB_SDF && ob->data) {
@@ -3178,6 +3289,7 @@ class Instance : public DrawEngine {
       grid_obj.blend_type = sdf_data->blend_type;
       grid_obj.csg_operation = sdf_data->csg_operation;
       grid_obj.shell_distance = sdf_data->shell_distance;
+      grid_obj.shell_mode = sdf_data->shell_mode;
     }
 
     grid_objects_.append(grid_obj);
@@ -3223,6 +3335,7 @@ class Instance : public DrawEngine {
     GPU_texture_image_bind(indirection_tx_, 0);
 
     GPU_shader_uniform_3iv(augment_grids_sh_, "grid_resolution", grid_res_);
+    GPU_shader_uniform_1i(augment_grids_sh_, "max_active_bricks", active_bricks_capacity_);
 
     for (const GridObject &grid : grid_objects_) {
       float4x4 tex_to_world = math::invert(grid.world_to_texture);
@@ -3323,6 +3436,7 @@ class Instance : public DrawEngine {
       GPU_shader_uniform_1i(grid_blend_sh_, "grid_blend_type", grid.blend_type);
       GPU_shader_uniform_1i(grid_blend_sh_, "grid_csg_operation", grid.csg_operation);
       GPU_shader_uniform_1f(grid_blend_sh_, "grid_shell_distance", grid.shell_distance);
+      GPU_shader_uniform_1i(grid_blend_sh_, "grid_shell_mode", grid.shell_mode);
 
       GPU_compute_dispatch(grid_blend_sh_, gb_x, gb_y, 1);
 
@@ -3543,6 +3657,9 @@ class Instance : public DrawEngine {
     }
     if (bvh_batch_) {
       GPU_batch_discard(bvh_batch_);
+    }
+    if (scene_bounds_batch_) {
+      GPU_batch_discard(scene_bounds_batch_);
     }
   }
 };

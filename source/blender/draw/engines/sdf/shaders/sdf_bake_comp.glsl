@@ -2,9 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* SDF bake: one workgroup per brick, 12x12 threads cover XY, loop Z.
- * Streaming evaluation: candidates processed in batches through shared memory.
- * No hard limit on candidate count — overflow falls back to linear scan. */
+/* SDF bake: one workgroup per brick.
+ * Coarse-to-fine evaluation: 4^3 coarse samples first, refine only near surface.
+ * Warp-aligned workgroup (8x8=64 threads), reduced shared memory for occupancy. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -14,49 +14,17 @@ COMPUTE_SHADER_CREATE_INFO(sdf_bake)
 
 #define BRICK_SIZE 8
 #define BRICK_STORAGE 12
-
-/* Streaming batch size (shared memory budget, not a correctness limit). */
-#define BATCH_SIZE 64
+#define WG_SIZE 64
+#define TOTAL_VOXELS (BRICK_STORAGE * BRICK_STORAGE * BRICK_STORAGE)
 
 /* BVH candidate index buffer. If exceeded, falls back to linear scan. */
-#define CANDIDATE_BUF_SIZE 2048
+#define CANDIDATE_BUF_SIZE 512
 
-struct SharedObj {
-  float4x4 inverse_matrix;
-  float4 position;
-  float4 sdf_size;
-  float4 color;
-  float bevel;
-  float blend;
-  int sdf_type;
-  int blend_type;
-  int csg_operation;
-  float shell_distance;
-
-  int modifier_start;
-  int modifier_count;
-  int group_id;
-  int group_first;
-  int group_order;
-  float4 box_corners;
-  float4 box_edges;
-  int4 box_modes;
-};
-
-float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
-{
-  SDFPrimitiveData prim_data;
-  prim_data.sdf_type = obj.sdf_type;
-  prim_data.size = obj.sdf_size.xyz;
-  prim_data.bevel = obj.bevel;
-  prim_data.box_corners = obj.box_corners;
-  prim_data.box_edges = obj.box_edges;
-  prim_data.box_modes = obj.box_modes;
-  prim_data.modifier_start = obj.modifier_start;
-  prim_data.modifier_count = obj.modifier_count;
-
-  return evalObjectSDF(prim_data, local_pos);
-}
+/* Coarse-to-fine constants. */
+#define COARSE_RES 4
+#define COARSE_SPACING 3
+#define COARSE_OFFSET 1
+#define COARSE_TOTAL (COARSE_RES * COARSE_RES * COARSE_RES)
 
 /* Finalize a completed group into the scene accumulator. */
 void finalizeGroup(int group_id,
@@ -71,26 +39,167 @@ void finalizeGroup(int group_id,
   SDFGroupGPU grp = groups[group_id];
   float3 tinted = grp_color * grp.color.rgb;
   float new_dist = combineCSG(
-      acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+      acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode);
   float h = csgColorWeight(
-      acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+      acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode);
   acc_color = mix(acc_color, tinted, h);
   acc_dist = new_dist;
 }
 
-/* BVH candidate indices. */
+/* BVH candidate indices + Lipschitz pruning cache. */
 shared int shared_candidates[CANDIDATE_BUF_SIZE];
 shared int shared_num_candidates;
 shared int shared_any_dirty;
 shared int shared_overflow;
-
-/* Lipschitz pruning cache. */
 shared float shared_center_dist[CANDIDATE_BUF_SIZE];
 
-/* Streaming batch cache. */
-shared SharedObj shared_batch[BATCH_SIZE];
-shared float3 shared_batch_bb_min[BATCH_SIZE];
-shared float3 shared_batch_bb_max[BATCH_SIZE];
+/* Coarse evaluation results. */
+shared float shared_coarse_dist[COARSE_TOTAL];
+shared float shared_coarse_r[COARSE_TOTAL];
+shared float shared_coarse_g[COARSE_TOTAL];
+shared float shared_coarse_b[COARSE_TOTAL];
+
+/* Full candidate evaluation at a single world position. */
+void evaluateScene(float3 world_pos,
+                   int total_count,
+                   out float out_dist,
+                   out float3 out_color)
+{
+  float acc_dist = 1e10f;
+  float3 acc_color = float3(0.0f);
+  float grp_dist = 1e10f;
+  float3 grp_color = float3(0.0f);
+  int prev_group = -2;
+
+  for (int c = 0; c < total_count; c++) {
+    int i = (shared_overflow == 1) ? c : shared_candidates[c];
+    SDFObjectGPU sobj = objects[i];
+
+    /* Group transition. */
+    if (sobj.group_id != prev_group) {
+      finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
+      prev_group = sobj.group_id;
+      if (prev_group >= 0) {
+        grp_dist = 1e10f;
+        grp_color = float3(0.0f);
+      }
+    }
+
+    /* Per-voxel AABB skip (ungrouped unions only). */
+    if (sobj.group_id < 0 && sobj.csg_operation == SDF_CSG_OP_UNION) {
+      float expand = max(sobj.blend, 0.0f) + max(sobj.shell_distance, 0.0f);
+      if (any(greaterThan(world_pos, sobj.bbox_max.xyz + expand)) ||
+          any(lessThan(world_pos, sobj.bbox_min.xyz - expand)))
+      {
+        continue;
+      }
+    }
+
+    float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
+
+    SDFPrimitiveData pd;
+    pd.sdf_type = sobj.sdf_type;
+    pd.size = sobj.sdf_size.xyz;
+    pd.bevel = sobj.bevel;
+    pd.box_corners = sobj.box_corners;
+    pd.box_edges = sobj.box_edges;
+    pd.box_modes = sobj.box_modes;
+    pd.modifier_start = sobj.modifier_start;
+    pd.modifier_count = sobj.modifier_count;
+    pd.inverse_matrix = sobj.inverse_matrix;
+    float dist = evalObjectSDF(pd, local_pos);
+
+    if (sobj.group_id >= 0) {
+      if (sobj.group_first == 1) {
+        grp_dist = dist;
+        grp_color = sobj.color.rgb;
+      }
+      else {
+        float new_dist = combineCSG(
+            grp_dist, dist, sobj.csg_operation, sobj.blend_type, sobj.blend, sobj.shell_distance, sobj.shell_mode);
+        float h = csgColorWeight(
+            grp_dist, dist, sobj.csg_operation, sobj.blend_type, sobj.blend, sobj.shell_distance, sobj.shell_mode);
+        grp_color = mix(grp_color, sobj.color.rgb, h);
+        grp_dist = new_dist;
+      }
+    }
+    else {
+      float new_dist = combineCSG(
+          acc_dist, dist, sobj.csg_operation, sobj.blend_type, sobj.blend, sobj.shell_distance, sobj.shell_mode);
+      float h = csgColorWeight(
+          acc_dist, dist, sobj.csg_operation, sobj.blend_type, sobj.blend, sobj.shell_distance, sobj.shell_mode);
+      acc_color = mix(acc_color, sobj.color.rgb, h);
+      acc_dist = new_dist;
+    }
+  }
+
+  finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
+  out_dist = acc_dist;
+  out_color = acc_color;
+}
+
+/* Trilinear interpolation from the 4^3 coarse grid. */
+void interpCoarse(int3 local_voxel, out float out_dist, out float3 out_color)
+{
+  float3 coarse_coord = (float3(local_voxel) - float(COARSE_OFFSET)) / float(COARSE_SPACING);
+  coarse_coord = clamp(coarse_coord, float3(0.0f), float3(float(COARSE_RES - 1)));
+
+  int3 c0 = int3(floor(coarse_coord));
+  int3 c1 = min(c0 + 1, int3(COARSE_RES - 1));
+  float3 f = coarse_coord - float3(c0);
+
+#define CIDX(x, y, z) ((z) * COARSE_RES * COARSE_RES + (y) * COARSE_RES + (x))
+  float d000 = shared_coarse_dist[CIDX(c0.x, c0.y, c0.z)];
+  float d100 = shared_coarse_dist[CIDX(c1.x, c0.y, c0.z)];
+  float d010 = shared_coarse_dist[CIDX(c0.x, c1.y, c0.z)];
+  float d110 = shared_coarse_dist[CIDX(c1.x, c1.y, c0.z)];
+  float d001 = shared_coarse_dist[CIDX(c0.x, c0.y, c1.z)];
+  float d101 = shared_coarse_dist[CIDX(c1.x, c0.y, c1.z)];
+  float d011 = shared_coarse_dist[CIDX(c0.x, c1.y, c1.z)];
+  float d111 = shared_coarse_dist[CIDX(c1.x, c1.y, c1.z)];
+
+  out_dist = mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+                 mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y),
+                 f.z);
+
+  float r000 = shared_coarse_r[CIDX(c0.x, c0.y, c0.z)];
+  float r100 = shared_coarse_r[CIDX(c1.x, c0.y, c0.z)];
+  float r010 = shared_coarse_r[CIDX(c0.x, c1.y, c0.z)];
+  float r110 = shared_coarse_r[CIDX(c1.x, c1.y, c0.z)];
+  float r001 = shared_coarse_r[CIDX(c0.x, c0.y, c1.z)];
+  float r101 = shared_coarse_r[CIDX(c1.x, c0.y, c1.z)];
+  float r011 = shared_coarse_r[CIDX(c0.x, c1.y, c1.z)];
+  float r111 = shared_coarse_r[CIDX(c1.x, c1.y, c1.z)];
+
+  float g000 = shared_coarse_g[CIDX(c0.x, c0.y, c0.z)];
+  float g100 = shared_coarse_g[CIDX(c1.x, c0.y, c0.z)];
+  float g010 = shared_coarse_g[CIDX(c0.x, c1.y, c0.z)];
+  float g110 = shared_coarse_g[CIDX(c1.x, c1.y, c0.z)];
+  float g001 = shared_coarse_g[CIDX(c0.x, c0.y, c1.z)];
+  float g101 = shared_coarse_g[CIDX(c1.x, c0.y, c1.z)];
+  float g011 = shared_coarse_g[CIDX(c0.x, c1.y, c1.z)];
+  float g111 = shared_coarse_g[CIDX(c1.x, c1.y, c1.z)];
+
+  float b000 = shared_coarse_b[CIDX(c0.x, c0.y, c0.z)];
+  float b100 = shared_coarse_b[CIDX(c1.x, c0.y, c0.z)];
+  float b010 = shared_coarse_b[CIDX(c0.x, c1.y, c0.z)];
+  float b110 = shared_coarse_b[CIDX(c1.x, c1.y, c0.z)];
+  float b001 = shared_coarse_b[CIDX(c0.x, c0.y, c1.z)];
+  float b101 = shared_coarse_b[CIDX(c1.x, c0.y, c1.z)];
+  float b011 = shared_coarse_b[CIDX(c0.x, c1.y, c1.z)];
+  float b111 = shared_coarse_b[CIDX(c1.x, c1.y, c1.z)];
+
+  out_color.r = mix(mix(mix(r000, r100, f.x), mix(r010, r110, f.x), f.y),
+                    mix(mix(r001, r101, f.x), mix(r011, r111, f.x), f.y),
+                    f.z);
+  out_color.g = mix(mix(mix(g000, g100, f.x), mix(g010, g110, f.x), f.y),
+                    mix(mix(g001, g101, f.x), mix(g011, g111, f.x), f.y),
+                    f.z);
+  out_color.b = mix(mix(mix(b000, b100, f.x), mix(b010, b110, f.x), f.y),
+                    mix(mix(b001, b101, f.x), mix(b011, b111, f.x), f.y),
+                    f.z);
+#undef CIDX
+}
 
 void main()
 {
@@ -221,7 +330,7 @@ void main()
                           (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
     float two_R = 2.0f * float(BRICK_STORAGE) * voxel_size * 0.866025f;
 
-    for (int c = int(tid); c < shared_num_candidates; c += 144) {
+    for (int c = int(tid); c < shared_num_candidates; c += WG_SIZE) {
       int i = shared_candidates[c];
       SDFObjectGPU obj = objects[i];
       float3 lp = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
@@ -234,6 +343,7 @@ void main()
       pd.box_modes = obj.box_modes;
       pd.modifier_start = obj.modifier_start;
       pd.modifier_count = obj.modifier_count;
+      pd.inverse_matrix = obj.inverse_matrix;
       shared_center_dist[c] = evalObjectSDF(pd, lp);
     }
     barrier();
@@ -250,19 +360,19 @@ void main()
             grp_center = d;
             continue;
           }
-          float threshold = obj.blend + two_R;
+          float threshold = (obj.blend_type != SDF_BLEND_TYPE_LINEAR ? obj.blend : 0.0f) + two_R;
           bool pruned = false;
           if (obj.csg_operation == SDF_CSG_OP_UNION) pruned = (d - grp_center > threshold);
           else if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) pruned = (grp_center + d > threshold);
           else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (grp_center - d > threshold);
-          
+
           if (pruned) shared_center_dist[c] = -1e20f;
-          else grp_center = combineCSG(grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+          else grp_center = combineCSG(grp_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode);
         }
         if (grp_center < 1e10f) {
           SDFGroupGPU grp = groups[g];
           if (g == 0) acc_center = grp_center;
-          else acc_center = combineCSG(acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+          else acc_center = combineCSG(acc_center, grp_center, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode);
         }
       }
       for (int c = 0; c < shared_num_candidates; c++) {
@@ -277,7 +387,7 @@ void main()
           else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) pruned = (acc_center - d > threshold);
         }
         if (pruned) shared_center_dist[c] = -1e20f;
-        else acc_center = combineCSG(acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+        else acc_center = combineCSG(acc_center, d, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode);
       }
 
       int new_count = 0;
@@ -291,107 +401,67 @@ void main()
     barrier();
   }
 
-  /* Overflow: iterate all objects in sorted order (no BVH filtering). */
   int total_count = (shared_overflow == 1) ? object_count : shared_num_candidates;
-  int2 local_xy = int2(gl_LocalInvocationID.xy);
 
-  /* Z-outer: each voxel layer is fully evaluated before the next. */
-  for (int lz = 0; lz < BRICK_STORAGE; lz++) {
-    int3 local_voxel = int3(local_xy, lz);
+  /* Refinement threshold: voxels within this distance of surface get full eval. */
+  float refine_threshold = max(4.0f, max_blend / voxel_size + 2.0f) * voxel_size;
+
+  /* Phase 1: Coarse evaluation at 4^3 sample points (64 threads, 1 each). */
+  if (int(tid) < COARSE_TOTAL) {
+    int cx = int(tid) % COARSE_RES;
+    int cy = (int(tid) / COARSE_RES) % COARSE_RES;
+    int cz = int(tid) / (COARSE_RES * COARSE_RES);
+    int3 coarse_voxel = int3(COARSE_OFFSET + cx * COARSE_SPACING,
+                              COARSE_OFFSET + cy * COARSE_SPACING,
+                              COARSE_OFFSET + cz * COARSE_SPACING);
     float3 world_pos = atlas_origin +
-                       float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
+                       float3(brick * BRICK_SIZE + coarse_voxel - int3(2)) * voxel_size;
 
-    float acc_dist = 1e10f;
-    float3 acc_color = float3(0.0f);
-    float grp_dist = 1e10f;
-    float3 grp_color = float3(0.0f);
-    int prev_group = -2;
+    float dist;
+    float3 color;
+    evaluateScene(world_pos, total_count, dist, color);
 
-    /* Stream candidates in batches through shared memory. */
-    for (int batch_start = 0; batch_start < total_count; batch_start += BATCH_SIZE) {
-      int batch_count = min(BATCH_SIZE, total_count - batch_start);
+    shared_coarse_dist[tid] = dist;
+    shared_coarse_r[tid] = color.r;
+    shared_coarse_g[tid] = color.g;
+    shared_coarse_b[tid] = color.b;
+  }
+  barrier();
 
-      /* Cooperative load. */
-      for (int c = int(tid); c < batch_count; c += 144) {
-        int i = (shared_overflow == 1) ? (batch_start + c) :
-                                         shared_candidates[batch_start + c];
-        SDFObjectGPU obj = objects[i];
-        shared_batch[c].inverse_matrix = obj.inverse_matrix;
-        shared_batch[c].position = obj.position;
-        shared_batch[c].sdf_size = obj.sdf_size;
-        shared_batch[c].color = obj.color;
-        shared_batch[c].bevel = obj.bevel;
-        shared_batch[c].blend = obj.blend;
-        shared_batch[c].sdf_type = obj.sdf_type;
-        shared_batch[c].blend_type = obj.blend_type;
-        shared_batch[c].csg_operation = obj.csg_operation;
-        shared_batch[c].shell_distance = obj.shell_distance;
+  /* Check if any coarse sample is near surface. If none are,
+   * the entire brick can use interpolated values (fast path). */
+  bool any_near_surface = false;
+  for (int ci = int(tid); ci < COARSE_TOTAL; ci += WG_SIZE) {
+    if (abs(shared_coarse_dist[ci]) < refine_threshold) {
+      any_near_surface = true;
+    }
+  }
 
-        shared_batch[c].modifier_start = obj.modifier_start;
-        shared_batch[c].modifier_count = obj.modifier_count;
-        shared_batch[c].group_id = obj.group_id;
-        shared_batch[c].group_first = obj.group_first;
-        shared_batch[c].group_order = obj.group_order;
-        shared_batch[c].box_corners = obj.box_corners;
-        shared_batch[c].box_edges = obj.box_edges;
-        shared_batch[c].box_modes = obj.box_modes;
+  /* Phase 2: Fine evaluation with coarse-to-fine refinement. */
+  for (int v = int(tid); v < TOTAL_VOXELS; v += WG_SIZE) {
+    int lx = v % BRICK_STORAGE;
+    int ly = (v / BRICK_STORAGE) % BRICK_STORAGE;
+    int lz = v / (BRICK_STORAGE * BRICK_STORAGE);
+    int3 local_voxel = int3(lx, ly, lz);
 
-        shared_batch_bb_min[c] = obj.bbox_min.xyz;
-        shared_batch_bb_max[c] = obj.bbox_max.xyz;
-      }
-      barrier();
+    float interp_dist;
+    float3 interp_color;
+    interpCoarse(local_voxel, interp_dist, interp_color);
 
-        /* Evaluate batch with single-pass group tracking. */
-      for (int c = 0; c < batch_count; c++) {
-        SharedObj sobj = shared_batch[c];
+    float final_dist;
+    float3 final_color;
 
-        /* Group transition: finalize previous group when entering a new one. */
-        if (sobj.group_id != prev_group) {
-          finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
-          prev_group = sobj.group_id;
-          if (prev_group >= 0) {
-            grp_dist = 1e10f;
-            grp_color = float3(0.0f);
-          }
-        }
-
-        float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
-        float dist = evalSDFPrimitiveSh(local_pos, sobj);
-
-        if (sobj.group_id >= 0) {
-          if (sobj.group_first == 1) {
-            grp_dist = dist;
-            grp_color = sobj.color.rgb;
-          }
-          else {
-            float k = sobj.blend;
-            int bt = sobj.blend_type;
-            int op = sobj.csg_operation;
-
-            float new_dist = combineCSG(grp_dist, dist, op, bt, k, sobj.shell_distance);
-            float h = csgColorWeight(grp_dist, dist, op, bt, k, sobj.shell_distance);
-            grp_color = mix(grp_color, sobj.color.rgb, h);
-            grp_dist = new_dist;
-          }
-        }
-        else {
-          float k = sobj.blend;
-          int bt = sobj.blend_type;
-          int op = sobj.csg_operation;
-
-          float new_dist = combineCSG(acc_dist, dist, op, bt, k, sobj.shell_distance);
-          float h = csgColorWeight(acc_dist, dist, op, bt, k, sobj.shell_distance);
-          acc_color = mix(acc_color, sobj.color.rgb, h);
-          acc_dist = new_dist;
-        }
-      }
-      barrier();
+    if (any_near_surface && abs(interp_dist) < refine_threshold) {
+      float3 world_pos = atlas_origin +
+                         float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
+      evaluateScene(world_pos, total_count, final_dist, final_color);
+    }
+    else {
+      final_dist = interp_dist;
+      final_color = interp_color;
     }
 
-    /* Finalize last group. */
-    finalizeGroup(prev_group, grp_dist, grp_color, acc_dist, acc_color);
-
     int3 atlas_coord = slot_origin + local_voxel;
-    imageStore(compact_atlas, atlas_coord, float4(acc_dist, acc_color));
+    imageStore(compact_atlas, atlas_coord, float4(final_dist, final_color));
   }
 }

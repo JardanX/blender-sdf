@@ -20,6 +20,7 @@
     .blend_type = 1, /* SDF_BLEND_SMOOTH */ \
     .blend = 0.1f, \
     .shell_distance = 0.2f, \
+    .shell_mode = 0, \
     .color = {1.0f, 1.0f, 1.0f, 1.0f}, \
     .totmember = 0, \
     .group_order = 0, \

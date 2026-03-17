@@ -34,9 +34,13 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
 #  include "BLI_listbase.h"
 #  include "BLI_string.h"
 
+#  include "BKE_global.hh"
 #  include "BKE_main.hh"
 #  include "BKE_report.hh"
 #  include "BKE_sdf.hh"
+#  include "BKE_sdf_group.hh"
+
+#  include "DNA_object_types.h"
 
 #  include "DEG_depsgraph.hh"
 
@@ -47,7 +51,9 @@ static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   SDF *sdf = (SDF *)ptr->owner_id;
 
-  if (sdf->csg_operation == SDF_CSG_SHELL && sdf->shell_distance > 0.0f) {
+  if (sdf->csg_operation == SDF_CSG_SHELL && sdf->shell_mode == SDF_SHELL_NORMAL &&
+      sdf->shell_distance > 0.0f)
+  {
     if (sdf->blend > sdf->shell_distance) {
       sdf->blend = sdf->shell_distance;
     }
@@ -182,6 +188,73 @@ static void rna_SDFModifier_blend_type_set(PointerRNA *ptr, int value)
   mod->params[6] = (float)value;
 }
 
+static int rna_SDFModifier_bend_axis_get(PointerRNA *ptr)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  return (int)mod->params[1];
+}
+
+static void rna_SDFModifier_bend_axis_set(PointerRNA *ptr, int value)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  mod->params[1] = (float)value;
+}
+
+static void rna_SDF_sdf_group_set(PointerRNA *ptr,
+                                   PointerRNA value,
+                                   ReportList * /*reports*/)
+{
+  SDF *sdf = (SDF *)ptr->owner_id;
+  SDFGroup *new_group = (SDFGroup *)value.data;
+  SDFGroup *old_group = sdf->sdf_group;
+
+  if (old_group == new_group) {
+    return;
+  }
+
+  Main *bmain = G_MAIN;
+  Object *ob = nullptr;
+
+  /* Find the Object that owns this SDF. */
+  if (old_group) {
+    LISTBASE_FOREACH (SDFGroupMember *, member, &old_group->members) {
+      if (member->object && member->object->type == OB_SDF &&
+          member->object->data == (void *)sdf)
+      {
+        ob = member->object;
+        break;
+      }
+    }
+  }
+  if (!ob) {
+    LISTBASE_FOREACH (Object *, obj, &bmain->objects) {
+      if (obj->type == OB_SDF && obj->data == (void *)sdf) {
+        ob = obj;
+        break;
+      }
+    }
+  }
+
+  if (old_group && ob) {
+    LISTBASE_FOREACH (SDFGroupMember *, member, &old_group->members) {
+      if (member->object == ob) {
+        BKE_sdf_group_member_remove(old_group, member);
+        break;
+      }
+    }
+  }
+
+  if (new_group && ob) {
+    BKE_sdf_group_member_add(new_group, ob);
+  }
+  else {
+    sdf->sdf_group = new_group;
+    if (new_group) {
+      id_us_plus(&new_group->id);
+    }
+  }
+}
+
 #else
 
 static const EnumPropertyItem rna_enum_sdf_blend_type_items[] = {
@@ -210,6 +283,13 @@ static const EnumPropertyItem rna_enum_sdf_csg_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_shell_mode_items[] = {
+    {SDF_SHELL_NORMAL, "NORMAL", 0, "Normal", "Standard shell operation"},
+    {SDF_SHELL_PUSH, "PUSH", 0, "Shell Push", "Shell combined with push"},
+    {SDF_SHELL_AVOID, "AVOID", 0, "Shell Avoid", "Shell combined with avoid"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_box_mode_items[] = {
     {SDF_BOX_MODE_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth rounding"},
     {SDF_BOX_MODE_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer (45-degree cut)"},
@@ -226,6 +306,13 @@ static const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
     {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
     {SDF_MOD_ARRAY, "ARRAY", ICON_MOD_ARRAY, "Array", "Duplicate geometry"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_sdf_bend_axis_items[] = {
+    {0, "X", 0, "X", "Bend along X axis"},
+    {1, "Y", 0, "Y", "Bend along Y axis"},
+    {2, "Z", 0, "Z", "Bend along Z axis"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -285,6 +372,15 @@ static void rna_def_sdf_modifier(BlenderRNA *brna)
   RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
   RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
   RNA_def_property_ui_text(prop, "Mirror Offset", "Offset distance for mirror plane");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Mirror object */
+  prop = RNA_def_property(srna, "mirror_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "mirror_ob");
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_flag(prop, PROP_ID_SELF_CHECK);
+  RNA_def_property_ui_text(prop, "Mirror Object", "Object to use as mirror origin");
   RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
 
   /* Mirror blend */
@@ -358,6 +454,14 @@ static void rna_def_sdf_modifier(BlenderRNA *brna)
   RNA_def_property_range(prop, -100.0f, 100.0f);
   RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
   RNA_def_property_ui_text(prop, "Strength", "Deformation strength");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Bend axis */
+  prop = RNA_def_property(srna, "bend_axis", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_bend_axis_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_SDFModifier_bend_axis_get", "rna_SDFModifier_bend_axis_set", nullptr);
+  RNA_def_property_ui_text(prop, "Axis", "Axis along which the bend varies");
   RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
 
   /* Thickness (Hollow, Onion) */
@@ -483,6 +587,12 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
   RNA_def_property_ui_text(
       prop, "Shell Distance", "Offset distance for shell/extrusion operation");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Shell Mode */
+  prop = RNA_def_property(srna, "shell_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_shell_mode_items);
+  RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Box Corner Bevels */
@@ -622,6 +732,8 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_pointer_sdna(prop, nullptr, "sdf_group");
   RNA_def_property_struct_type(prop, "SDFGroup");
   RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_SDF_sdf_group_set", nullptr, nullptr);
   RNA_def_property_ui_text(prop, "SDF Group", "Group this SDF belongs to");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 

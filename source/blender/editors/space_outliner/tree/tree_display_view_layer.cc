@@ -15,6 +15,7 @@
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
+#include "BKE_idprop.hh"
 #include "BKE_layer.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
@@ -180,6 +181,11 @@ void TreeDisplayViewLayer::add_view_layer(Scene &scene, ListBase &tree, TreeElem
       if (base->object->type == OB_SDF) {
         continue;
       }
+      if (base->object->type == OB_EMPTY && base->object->id.properties &&
+          IDP_GetPropertyFromGroup(base->object->id.properties, "sdf_mirror_internal"))
+      {
+        continue;
+      }
       TreeElement *te_object = add_element(
           &tree, reinterpret_cast<ID *>(base->object), nullptr, parent, TSE_SOME_ID, 0);
       te_object->directdata = base;
@@ -246,8 +252,12 @@ void TreeDisplayViewLayer::add_layer_collection_objects(ListBase &tree,
 {
   BKE_view_layer_synced_ensure(scene_, view_layer_);
   for (CollectionObject *cob : List<CollectionObject>(lc.collection->gobject)) {
-    /* SDF objects are shown under their SDF Group, not in the collection tree. */
     if (cob->ob->type == OB_SDF) {
+      continue;
+    }
+    if (cob->ob->type == OB_EMPTY && cob->ob->id.properties &&
+        IDP_GetPropertyFromGroup(cob->ob->id.properties, "sdf_mirror_internal"))
+    {
       continue;
     }
     Base *base = BKE_view_layer_base_find(view_layer_, cob->ob);

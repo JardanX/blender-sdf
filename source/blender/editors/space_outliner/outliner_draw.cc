@@ -3557,6 +3557,11 @@ static void outliner_draw_tree_element(uiBlock *block,
           display_name = sdf_prefixed_name;
         }
       }
+      else if (tselem->type == TSE_SOME_ID && te->idcode == ID_SG) {
+        SDFGroup *grp = (SDFGroup *)tselem->id;
+        BLI_snprintf(sdf_prefixed_name, sizeof(sdf_prefixed_name), "%s (%d)", te->name, grp->totmember);
+        display_name = sdf_prefixed_name;
+      }
 
       UI_fontstyle_draw_simple(
           fstyle, startx + offsx, *starty + 5 * ufac, display_name, text_color);

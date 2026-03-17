@@ -5,6 +5,7 @@
 import bpy
 from bpy.types import Panel, Menu, Operator
 from bpy.props import EnumProperty, IntProperty
+from mathutils import Matrix
 
 
 # Pie Menus
@@ -232,25 +233,32 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        layout.label(text="CSG Operation")
-        row = layout.row(align=True)
-        row.scale_y = 1.4
-        row.prop(sdf, "csg_operation", expand=True, icon_only=True)
+        if not (sdf.sdf_group and sdf.group_order == 0):
+            layout.label(text="CSG Operation")
+            row = layout.row(align=True)
+            row.scale_y = 1.4
+            row.prop(sdf, "csg_operation", expand=True, icon_only=True)
+
+            layout.separator()
+
+            if sdf.csg_operation == 'SHELL':
+                layout.label(text="Shell Mode")
+                layout.prop(sdf, "shell_mode", text="")
+
+            layout.label(text="Blend Type")
+            row = layout.row(align=True)
+            row.scale_y = 1.4
+            row.prop(sdf, "blend_type", expand=True, icon_only=True)
+
+            if sdf.blend_type != 'LINEAR':
+                layout.label(text="Blend")
+                layout.prop(sdf, "blend", text="")
+
+            if sdf.csg_operation == 'SHELL':
+                layout.label(text="Distance")
+                layout.prop(sdf, "shell_distance", text="")
 
         layout.separator()
-
-        layout.label(text="Blend Type")
-        row = layout.row(align=True)
-        row.scale_y = 1.4
-        row.prop(sdf, "blend_type", expand=True, icon_only=True)
-
-        if sdf.blend_type != 'LINEAR':
-            layout.label(text="Blend")
-            layout.prop(sdf, "blend", text="")
-
-        if sdf.csg_operation == 'SHELL':
-            layout.label(text="Distance")
-            layout.prop(sdf, "shell_distance", text="")
 
 
 # Modifier Operators
@@ -284,7 +292,20 @@ class SDF_OT_modifier_add(Operator):
         sdf = getattr(context, 'sdf', None)
         if sdf is None:
             return {'CANCELLED'}
-        sdf.modifiers.new(type=self.type)
+        mod = sdf.modifiers.new(type=self.type)
+
+        if self.type == 'MIRROR' and context.object:
+            ob = context.object
+            empty = bpy.data.objects.new(f"{ob.name}_Mirror", None)
+            empty.empty_display_type = 'PLAIN_AXES'
+            empty.empty_display_size = 0.5
+            empty.show_in_front = True
+            empty["sdf_mirror_internal"] = True
+            context.collection.objects.link(empty)
+            empty.location = ob.location
+            empty.parent = ob
+            mod.mirror_object = empty
+
         return {'FINISHED'}
 
 
@@ -305,7 +326,15 @@ class SDF_OT_modifier_remove(Operator):
         if sdf is None:
             return {'CANCELLED'}
         if self.index < len(sdf.modifiers):
-            sdf.modifiers.remove(sdf.modifiers[self.index])
+            mod = sdf.modifiers[self.index]
+            if mod.type == 'MIRROR' and mod.mirror_object:
+                mirror_ob = mod.mirror_object
+                mod.mirror_object = None
+                try:
+                    bpy.data.objects.remove(mirror_ob)
+                except RuntimeError:
+                    pass
+            sdf.modifiers.remove(mod)
         return {'FINISHED'}
 
 
@@ -378,14 +407,15 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 row.prop(mod, "use_mirror_y", toggle=True)
                 row.prop(mod, "use_mirror_z", toggle=True)
                 col.prop(mod, "offset_distance")
-                
+                col.prop(mod, "mirror_object")
+
                 box_csg = box.box()
                 box_csg.label(text="Mirror Blending:")
-                
+
                 row = box_csg.row(align=True)
                 row.scale_y = 1.2
                 row.prop(mod, "blend_type", expand=True, icon_only=True)
-                
+
                 sub = box_csg.row()
                 sub.enabled = (mod.blend_type != 'LINEAR')
                 sub.prop(mod, "mirror_blend", text="Radius")
@@ -394,6 +424,7 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                 col.prop(mod, "strength", text="Strength")
             elif mod.type == 'BEND':
                 col.prop(mod, "strength", text="Strength")
+                col.prop(mod, "bend_axis", text="Axis")
             elif mod.type == 'ELONGATE':
                 col.prop(mod, "elongation")
             elif mod.type == 'HOLLOW':
