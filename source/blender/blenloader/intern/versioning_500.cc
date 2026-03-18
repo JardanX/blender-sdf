@@ -4440,6 +4440,12 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
             if (v3d->shading.sdf_surface_margin == 0) {
               v3d->shading.sdf_surface_margin = 100;
             }
+            if (v3d->shading.sdf_max_steps == 0) {
+              v3d->shading.sdf_max_steps = 128;
+            }
+            if (v3d->shading.sdf_ray_epsilon == 0.0f) {
+              v3d->shading.sdf_ray_epsilon = 0.001f;
+            }
           }
         }
       }

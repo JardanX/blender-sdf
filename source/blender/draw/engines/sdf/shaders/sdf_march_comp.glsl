@@ -9,18 +9,26 @@ COMPUTE_SHADER_CREATE_INFO(sdf_march_comp)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-#define MAX_MARCH_STEPS 256
-#define EPSILON 0.001f
 #define kFltMax 1e30f
-#define kMaxShapesPerRay 64
-#define kAabbTreeStackSize 128
+#define kAabbTreeStackSize 64
 #define kTileSize 8
-
-layout(local_size_x = kTileSize, local_size_y = kTileSize) in;
+#define kMaxBitfieldBits 1024
+#define kBitfieldWords (kMaxBitfieldBits / 32)
 
 shared float tile_heat[kTileSize * kTileSize];
 
-/* Evaluate a single object's SDF in local space */
+/* Per-invocation BVH filter */
+uint g_bvh_bits[kBitfieldWords];
+int g_numNearShapes;
+
+bool is_shape_near(int idx)
+{
+  if (idx >= kMaxBitfieldBits) {
+    return true;
+  }
+  return (g_bvh_bits[idx >> 5] & (1u << (uint(idx) & 31u))) != 0u;
+}
+
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
   SDFPrimitiveData prim_data;
@@ -37,7 +45,6 @@ float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-/* Evaluate single object distance from world position */
 float evalObjectDist(float3 world_pos, int idx)
 {
   SDFObjectGPU obj = objects[idx];
@@ -45,44 +52,7 @@ float evalObjectDist(float3 world_pos, int idx)
   return evalPrimitive(lp, obj);
 }
 
-/* ---------------------------------------------------------------------- */
-/* BVH Traversal (Exact C++ port of Unity implementation)                 */
-
-bool aabb_intersects(float3 a_min, float3 a_max, float3 b_min, float3 b_max)
-{
-  return all(lessThanEqual(a_min, b_max)) && all(greaterThanEqual(a_max, b_min));
-}
-
-float aabb_ray_cast(float3 aabb_min, float3 aabb_max, float3 ray_from, float3 ray_to)
-{
-  float tMin = -kFltMax;
-  float tMax = +kFltMax;
-
-  float3 d = ray_to - ray_from;
-  float3 absD = abs(d);
-
-  if (any(lessThan(absD, float3(EPSILON)))) {
-    if (any(lessThan(ray_from, aabb_min)) || any(lessThan(aabb_max, ray_from))) {
-      return -kFltMax;
-    }
-  }
-  else {
-    float3 invD = 1.0f / d;
-    float3 t1 = (aabb_min - ray_from) * invD;
-    float3 t2 = (aabb_max - ray_from) * invD;
-    float3 minComps = min(t1, t2);
-    float3 maxComps = max(t1, t2);
-
-    tMin = max(max(minComps.x, minComps.y), minComps.z);
-    tMax = min(min(maxComps.x, maxComps.y), maxComps.z);
-  }
-
-  if (tMin > tMax || tMin < 0.0f) {
-    return -kFltMax;
-  }
-
-  return tMin;
-}
+/* BVH helpers */
 
 float3 find_ortho(float3 v)
 {
@@ -92,13 +62,12 @@ float3 find_ortho(float3 v)
   return float3(0.0f, v.z, -v.y);
 }
 
-/* Evaluates only objects within aiNearShape */
-float evalSceneBVH(float3 world_pos, out float3 out_color, int aiNearShape[kMaxShapesPerRay], int numNearShapes)
+/* Scene evaluation with BVH bitfield filter */
+float evalSceneBVH(float3 world_pos, out float3 out_color)
 {
   float scene_dist = 1e10f;
   out_color = float3(0.5f);
 
-  /* Per-group evaluation */
   for (int g = 0; g < group_count; g++) {
     SDFGroupGPU grp = groups[g];
     float grp_dist = 1e10f;
@@ -106,15 +75,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, int aiNearShape[kMaxS
     bool grp_has_hit = false;
 
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      /* Only evaluate if in aiNearShape */
-      bool in_bvh = false;
-      for (int k = 0; k < numNearShapes; k++) {
-        if (aiNearShape[k] == m) {
-          in_bvh = true;
-          break;
-        }
-      }
-      if (!in_bvh) continue;
+      if (!is_shape_near(m)) continue;
 
       SDFObjectGPU obj = objects[m];
       float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
@@ -137,11 +98,8 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, int aiNearShape[kMaxS
       }
     }
 
-    if (!grp_has_hit) {
-      continue;
-    }
+    if (!grp_has_hit) continue;
 
-    /* Combine group result into scene */
     if (scene_dist >= 1e9f) {
       scene_dist = grp_dist;
       out_color = grp_color;
@@ -158,22 +116,12 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, int aiNearShape[kMaxS
     }
   }
 
-  /* Ungrouped objects (group_id == -1) */
+  /* Ungrouped objects */
   for (int i = 0; i < object_count; i++) {
-    /* Only evaluate if in aiNearShape */
-    bool in_bvh = false;
-    for (int k = 0; k < numNearShapes; k++) {
-      if (aiNearShape[k] == i) {
-        in_bvh = true;
-        break;
-      }
-    }
-    if (!in_bvh) continue;
+    if (!is_shape_near(i)) continue;
 
     SDFObjectGPU obj = objects[i];
-    if (obj.group_id >= 0) {
-      continue;
-    }
+    if (obj.group_id >= 0) continue;
 
     float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
@@ -197,7 +145,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, int aiNearShape[kMaxS
   return scene_dist;
 }
 
-/* Evaluate full scene without BVH */
+/* Full scene evaluation (no BVH filter) */
 float evalSceneFull(float3 world_pos, out float3 out_color)
 {
   float scene_dist = 1e10f;
@@ -280,10 +228,10 @@ float evalSceneDistFull(float3 world_pos)
   return evalSceneFull(world_pos, dummy_color);
 }
 
-float evalSceneDistBVH(float3 world_pos, int aiNearShape[kMaxShapesPerRay], int numNearShapes)
+float evalSceneDistBVH(float3 world_pos)
 {
   float3 dummy_color;
-  return evalSceneBVH(world_pos, dummy_color, aiNearShape, numNearShapes);
+  return evalSceneBVH(world_pos, dummy_color);
 }
 
 float3 heat_color(float t)
@@ -317,11 +265,48 @@ void main()
   float3 ray_origin = world_near.xyz;
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
   float3 inv_dir = 1.0f / ray_dir;
-  float max_dist = 1000.0f;
-  float3 ray_to = ray_origin + ray_dir * max_dist;
 
-  int aiNearShape[kMaxShapesPerRay];
-  int numNearShapes = 0;
+  float max_dist = 1000.0f;
+
+  /* Scene AABB ray clipping (uniform, no per-pixel loop) */
+  float3 s_min = scene_aabb_min;
+  float3 s_max = scene_aabb_max;
+  bool scene_aabb_valid = all(lessThan(s_min, s_max));
+  float t_enter, t_exit;
+
+  if (scene_aabb_valid) {
+    float3 t0 = (s_min - ray_origin) * inv_dir;
+    float3 t1 = (s_max - ray_origin) * inv_dir;
+    float3 t_lo = min(t0, t1);
+    float3 t_hi = max(t0, t1);
+    t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+    t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
+
+    if (t_enter > t_exit || t_exit < 0.0f) {
+      if (debug_bvh_views == 0) {
+        imageStore(out_color_img, pixel, float4(0.0));
+        imageStore(out_depth_img, pixel, float4(0.0));
+        return;
+      }
+      t_enter = 0.0f;
+      t_exit = max_dist;
+    }
+    t_enter = max(t_enter, 0.0f);
+    t_exit = min(t_exit, max_dist);
+  }
+  else {
+    t_enter = 0.0f;
+    t_exit = max_dist;
+  }
+
+  /* Clip ray endpoint for tighter BVH pruning */
+  float3 ray_to = ray_origin + ray_dir * t_exit;
+
+  /* BVH traversal */
+  g_numNearShapes = 0;
+  for (int w = 0; w < kBitfieldWords; w++) {
+    g_bvh_bits[w] = 0u;
+  }
 
   if (use_bvh != 0 && bvh_root >= 0) {
     float3 rayDirOrtho = normalize(find_ortho(ray_dir));
@@ -340,99 +325,97 @@ void main()
 
       SdfAabbNodeGPU node = aabb_nodes[index];
 
-      if (!aabb_intersects(node.bounds_min.xyz, node.bounds_max.xyz, rayBoundsMin, rayBoundsMax)) {
+      /* Loose AABB test */
+      if (any(greaterThan(node.bounds_min.xyz, rayBoundsMax)) ||
+          any(greaterThan(rayBoundsMin, node.bounds_max.xyz)))
+      {
         continue;
       }
 
+      /* Tight orthogonal separation test */
       float3 aabbCenter = 0.5f * (node.bounds_min.xyz + node.bounds_max.xyz);
       float3 aabbHalfExtents = 0.5f * (node.bounds_max.xyz - node.bounds_min.xyz);
-      float separation = abs(dot(rayDirOrtho, ray_origin - aabbCenter)) - dot(rayDirOrthoAbs, aabbHalfExtents);
-
+      float separation = abs(dot(rayDirOrtho, ray_origin - aabbCenter)) -
+                          dot(rayDirOrthoAbs, aabbHalfExtents);
       if (separation > 0.0f) continue;
 
       if (node.child_a < 0) {
-        float t = aabb_ray_cast(node.bounds_min.xyz, node.bounds_max.xyz, ray_origin, ray_to);
-        if (t < 0.0f) continue;
+        /* Leaf: precise slab test (handles camera inside AABB) */
+        float3 lt1 = (node.bounds_min.xyz - ray_origin) * inv_dir;
+        float3 lt2 = (node.bounds_max.xyz - ray_origin) * inv_dir;
+        float ltMin = max(max(min(lt1.x, lt2.x), min(lt1.y, lt2.y)), min(lt1.z, lt2.z));
+        float ltMax = min(min(max(lt1.x, lt2.x), max(lt1.y, lt2.y)), max(lt1.z, lt2.z));
+        if (ltMax < 0.0f || ltMin > ltMax) continue;
 
-        numNearShapes = min(numNearShapes + 1, kMaxShapesPerRay);
-        aiNearShape[numNearShapes - 1] = node.shape_index;
+        int idx = node.shape_index;
+        if (idx >= 0 && idx < kMaxBitfieldBits) {
+          uint word = uint(idx) >> 5u;
+          uint bit = 1u << (uint(idx) & 31u);
+          if ((g_bvh_bits[word] & bit) == 0u) {
+            g_bvh_bits[word] |= bit;
+            g_numNearShapes++;
+          }
+        }
       }
       else {
-        stackTop = min(stackTop + 1, kAabbTreeStackSize - 1);
-        stack[stackTop] = node.child_a;
-        stackTop = min(stackTop + 1, kAabbTreeStackSize - 1);
-        stack[stackTop] = node.child_b;
+        if (stackTop + 2 < kAabbTreeStackSize) {
+          stack[++stackTop] = node.child_a;
+          stack[++stackTop] = node.child_b;
+        }
       }
     }
   }
   else {
-    /* If BVH is off, we pretend all objects are near */
-    numNearShapes = min(object_count, kMaxShapesPerRay);
-    for(int i=0; i<numNearShapes; i++) aiNearShape[i] = i;
+    /* BVH off: mark all objects as near */
+    g_numNearShapes = object_count;
+    for (int w = 0; w < kBitfieldWords; w++) {
+      g_bvh_bits[w] = 0xFFFFFFFFu;
+    }
   }
 
-  /* Compute scene AABB to bound ray */
-  float3 scene_min = float3(1e30f);
-  float3 scene_max = float3(-1e30f);
-  for (int i = 0; i < object_count; i++) {
-    scene_min = min(scene_min, objects[i].bbox_min.xyz);
-    scene_max = max(scene_max, objects[i].bbox_max.xyz);
-  }
-  float3 t0 = (scene_min - ray_origin) * inv_dir;
-  float3 t1 = (scene_max - ray_origin) * inv_dir;
-  float3 t_lo = min(t0, t1);
-  float3 t_hi = max(t0, t1);
-  float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
-  float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
-
-  if (t_enter > t_exit || t_exit < 0.0f) {
-    imageStore(out_color_img, pixel, float4(0.0));
-    imageStore(out_depth_img, pixel, float4(0.0));
-    return;
-  }
-  t_enter = max(t_enter, 0.0f);
-
+  /* Sphere tracing */
   float t = t_enter;
   bool hit = false;
   float3 hit_pos;
   float3 hit_color;
   int steps_taken = 0;
 
-  for (int step = 0; step < MAX_MARCH_STEPS; step++) {
+  for (int step = 0; step < sdf_max_steps; step++) {
     steps_taken++;
     float3 pos = ray_origin + ray_dir * t;
     float3 color;
     float d;
     if (use_bvh != 0) {
-      d = evalSceneBVH(pos, color, aiNearShape, numNearShapes);
-    } else {
+      d = evalSceneBVH(pos, color);
+    }
+    else {
       d = evalSceneFull(pos, color);
     }
 
-    if (d < EPSILON) {
+    if (d < sdf_ray_epsilon) {
       hit = true;
       hit_pos = pos;
       hit_color = color;
       break;
     }
 
-    t += max(d, EPSILON);
+    t += max(d, sdf_ray_epsilon);
     if (t > t_exit) {
       break;
     }
   }
 
-  /* Debug views execution and sync */
+  /* Debug views */
   int local_idx = int(gl_LocalInvocationID.y * kTileSize + gl_LocalInvocationID.x);
-  
-  if (debug_bvh_views == 1) { // Shape Count
-    float heat = float(use_bvh != 0 ? numNearShapes : object_count) / 16.0f;
+
+  if (debug_bvh_views == 1) {
+    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / 16.0f;
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     return;
   }
-  else if (debug_bvh_views == 2) { // Shape Count Per Tile
-    float heat = float(use_bvh != 0 ? numNearShapes : object_count) / 16.0f;
+  else if (debug_bvh_views == 2) {
+    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / 16.0f;
     tile_heat[local_idx] = heat;
     barrier();
     float max_heat = 0.0f;
@@ -443,13 +426,13 @@ void main()
     imageStore(out_depth_img, pixel, float4(0.0f));
     return;
   }
-  else if (debug_bvh_views == 3) { // Step Count
+  else if (debug_bvh_views == 3) {
     float heat = float(steps_taken) / 64.0f;
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     return;
   }
-  else if (debug_bvh_views == 4) { // Step Count Per Tile
+  else if (debug_bvh_views == 4) {
     float heat = float(steps_taken) / 64.0f;
     tile_heat[local_idx] = heat;
     barrier();
@@ -468,21 +451,26 @@ void main()
     return;
   }
 
-  float eps = EPSILON * 2.0f;
+  /* Normal computation */
+  float eps = sdf_ray_epsilon * 2.0f;
   float3 normal;
   if (use_bvh != 0) {
     normal = normalize(float3(
-        evalSceneDistBVH(hit_pos + float3(eps, 0.0f, 0.0f), aiNearShape, numNearShapes) -
-            evalSceneDistBVH(hit_pos - float3(eps, 0.0f, 0.0f), aiNearShape, numNearShapes),
-        evalSceneDistBVH(hit_pos + float3(0.0f, eps, 0.0f), aiNearShape, numNearShapes) -
-            evalSceneDistBVH(hit_pos - float3(0.0f, eps, 0.0f), aiNearShape, numNearShapes),
-        evalSceneDistBVH(hit_pos + float3(0.0f, 0.0f, eps), aiNearShape, numNearShapes) -
-            evalSceneDistBVH(hit_pos - float3(0.0f, 0.0f, eps), aiNearShape, numNearShapes)));
-  } else {
+        evalSceneDistBVH(hit_pos + float3(eps, 0.0f, 0.0f)) -
+            evalSceneDistBVH(hit_pos - float3(eps, 0.0f, 0.0f)),
+        evalSceneDistBVH(hit_pos + float3(0.0f, eps, 0.0f)) -
+            evalSceneDistBVH(hit_pos - float3(0.0f, eps, 0.0f)),
+        evalSceneDistBVH(hit_pos + float3(0.0f, 0.0f, eps)) -
+            evalSceneDistBVH(hit_pos - float3(0.0f, 0.0f, eps))));
+  }
+  else {
     normal = normalize(float3(
-        evalSceneDistFull(hit_pos + float3(eps, 0.0f, 0.0f)) - evalSceneDistFull(hit_pos - float3(eps, 0.0f, 0.0f)),
-        evalSceneDistFull(hit_pos + float3(0.0f, eps, 0.0f)) - evalSceneDistFull(hit_pos - float3(0.0f, eps, 0.0f)),
-        evalSceneDistFull(hit_pos + float3(0.0f, 0.0f, eps)) - evalSceneDistFull(hit_pos - float3(0.0f, 0.0f, eps))));
+        evalSceneDistFull(hit_pos + float3(eps, 0.0f, 0.0f)) -
+            evalSceneDistFull(hit_pos - float3(eps, 0.0f, 0.0f)),
+        evalSceneDistFull(hit_pos + float3(0.0f, eps, 0.0f)) -
+            evalSceneDistFull(hit_pos - float3(0.0f, eps, 0.0f)),
+        evalSceneDistFull(hit_pos + float3(0.0f, 0.0f, eps)) -
+            evalSceneDistFull(hit_pos - float3(0.0f, 0.0f, eps))));
   }
 
   /* Shading */

@@ -100,9 +100,31 @@ class RENDER_PT_proximity_raymarcher(Panel):
     def poll(cls, context):
         return context.engine == 'CYCLES'
 
+    @staticmethod
+    def _get_shading(context):
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        return space.shading
+        return None
+
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Analytical sphere tracer active.")
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        shading = self._get_shading(context)
+        if shading is None:
+            layout.label(text="No 3D Viewport found.")
+            return
+
+        col = layout.column()
+        col.prop(shading, "sdf_max_steps")
+        col.prop(shading, "sdf_ray_epsilon")
+        col.separator()
+        col.prop(shading, "sdf_use_bvh")
+        col.prop(shading, "sdf_bvh_debug_view")
 
 
 # ---------------------------------------------------------------------------
