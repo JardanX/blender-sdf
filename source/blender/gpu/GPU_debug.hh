@@ -61,6 +61,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #define GPU_DEBUG_SHADER_COMPILATION_GROUP "Shader Compilation"
 #define GPU_DEBUG_SHADER_SPECIALIZATION_GROUP "Shader Specialization"
 

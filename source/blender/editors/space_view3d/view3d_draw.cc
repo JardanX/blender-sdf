@@ -1632,6 +1632,7 @@ void view3d_draw_region_info(const bContext *C, ARegion *region)
       DRW_sdf_perf_info_get(&perf_text, &perf_active);
       if (perf_active && perf_text) {
         const int line_height = int(VIEW3D_OVERLAY_LINEHEIGHT);
+        yoffset -= int(0.6f * line_height);
         const char *p = perf_text;
         while (*p) {
           const char *eol = p;

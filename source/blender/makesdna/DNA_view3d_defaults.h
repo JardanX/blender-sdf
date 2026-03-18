@@ -38,6 +38,8 @@
     .sdf_surface_margin = 100, \
     .sdf_use_bvh = 1, \
     .sdf_bvh_debug_view = 0, \
+    .sdf_max_steps = 128, \
+    .sdf_ray_epsilon = 0.001f, \
   }
 
 #define _DNA_DEFAULT_View3DOverlay \

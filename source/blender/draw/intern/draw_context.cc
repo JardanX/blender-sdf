@@ -1069,29 +1069,34 @@ void DRW_draw_region_engine_info(int xoffset, int *yoffset, int line_height)
 #include "GPU_capabilities.hh"
 #include "MEM_guardedalloc.h"
 
+#include <algorithm>
+
 void DRW_sdf_perf_info_get(const char **r_text, bool *r_active)
 {
   static char perf_text_buf[1024];
 
-  uint64_t bvh_cpu = 0, raymarch_gpu = 0, fxaa_gpu = 0;
+  uint64_t bvh_cpu = 0, raymarch_gpu = 0, raymarch_cpu = 0, fxaa_gpu = 0, fxaa_cpu = 0;
   GPU_profile_get_latest_time("SDF BVH", nullptr, &bvh_cpu);
-  GPU_profile_get_latest_time("SDF Raymarch", &raymarch_gpu, nullptr);
-  GPU_profile_get_latest_time("SDF FXAA", &fxaa_gpu, nullptr);
+  GPU_profile_get_latest_time("SDF Raymarch", &raymarch_gpu, &raymarch_cpu);
+  GPU_profile_get_latest_time("SDF FXAA", &fxaa_gpu, &fxaa_cpu);
 
   int vram_total = 0, vram_free = 0;
   GPU_mem_stats_get(&vram_total, &vram_free);
 
   size_t mem_cpu = MEM_get_memory_in_use();
 
+  double raymarch_ms = double(std::max(raymarch_gpu, raymarch_cpu)) / 1e6;
+  double fxaa_ms = double(std::max(fxaa_gpu, fxaa_cpu)) / 1e6;
+
   snprintf(perf_text_buf, sizeof(perf_text_buf),
            "--- SDF Engine ---\n"
            "BVH CPU: %.2f ms\n"
-           "Raymarch GPU: %.2f ms\n"
-           "FXAA GPU: %.2f ms\n"
+           "Raymarch: %.2f ms\n"
+           "FXAA: %.2f ms\n"
            "Mem CPU: %.2f MB | Mem GPU: %d MB",
            double(bvh_cpu) / 1e6,
-           double(raymarch_gpu) / 1e6,
-           double(fxaa_gpu) / 1e6,
+           raymarch_ms,
+           fxaa_ms,
            double(mem_cpu) / (1024.0 * 1024.0),
            (vram_total - vram_free) / 1024);
 

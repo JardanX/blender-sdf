@@ -345,12 +345,10 @@ set(GLSL_SRC
 
   engines/sdf/shaders/sdf_march_comp.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
-  engines/sdf/shaders/sdf_march_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
   engines/sdf/shaders/sdf_select_march_frag.glsl
-  engines/sdf/shaders/sdf_outline_march_vert.glsl
-  engines/sdf/shaders/sdf_outline_march_frag.glsl
+
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/sdf_shader_shared.hh
 
