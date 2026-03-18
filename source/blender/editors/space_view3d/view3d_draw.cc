@@ -1680,6 +1680,7 @@ static void view3d_draw_view(const bContext *C, ARegion *region)
     G.profile_gpu_overlay = (v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) != 0;
   }
   DRW_draw_view(C);
+  G.profile_gpu_overlay = false;
 }
 
 RenderEngineType *ED_view3d_engine_type(const Scene *scene, int drawtype)

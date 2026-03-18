@@ -20,35 +20,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 
 shared float tile_heat[kTileSize * kTileSize];
 
-#ifdef USE_TILE_CULLING
-
-#define kMaxTileObjects 256
-#define kMaxGroupBits 128
-#define kGroupBitWords (kMaxGroupBits / 32)
-
-shared uint s_tileObjCount;
-shared int s_tileObjList[kMaxTileObjects];
-shared uint s_groupActive[kGroupBitWords];
-
-#else
-
-#define kAabbTreeStackSize 32
-#define kMaxBitfieldBits 256
-#define kBitfieldWords (kMaxBitfieldBits / 32)
-
-uint g_bvh_bits[kBitfieldWords];
-int g_numNearShapes;
-
-bool is_shape_near(int idx)
-{
-  if (idx >= kMaxBitfieldBits) {
-    return true;
-  }
-  return (g_bvh_bits[idx >> 5] & (1u << (uint(idx) & 31u))) != 0u;
-}
-
-#endif
-
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
   SDFPrimitiveData prim_data;
@@ -71,6 +42,166 @@ float evalObjectDist(float3 world_pos, int idx)
   float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
   return evalPrimitive(lp, obj);
 }
+
+#ifdef USE_TILE_CULLING
+
+#define kMaxTileObjects 256
+#define kMaxGroupBits 128
+#define kGroupBitWords (kMaxGroupBits / 32)
+#define kMaxObjBits 512
+#define kObjBitWords (kMaxObjBits / 32)
+
+shared uint s_tileObjCount;
+shared int s_tileObjList[kMaxTileObjects];
+shared uint s_groupActive[kGroupBitWords];
+shared uint s_objVisible[kObjBitWords];
+
+#else
+
+#define kAabbTreeStackSize 32
+#define kMaxBitfieldBits 256
+#define kBitfieldWords (kMaxBitfieldBits / 32)
+
+/* Per-ray bitfield: set during ray setup, marks objects whose AABB the ray intersects. */
+uint g_bvh_bits[kBitfieldWords];
+int g_numNearShapes;
+int g_numEvaluated;
+
+bool is_shape_near(int idx)
+{
+  if (idx >= kMaxBitfieldBits) {
+    return true;
+  }
+  return (g_bvh_bits[idx >> 5] & (1u << (uint(idx) & 31u))) != 0u;
+}
+
+float3 find_ortho(float3 v)
+{
+  if (abs(v.x) >= 0.57735f) {
+    return float3(v.y, -v.x, 0.0f);
+  }
+  return float3(0.0f, v.z, -v.y);
+}
+
+/*
+ * Combined per-step evaluation + empty-space skip.
+ * Iterates ONLY ray-visible objects (from per-ray bitfield).
+ * Per-step AABB containment test skips objects whose AABB doesn't contain pos.
+ * Returns SDF distance in scene_dist, nearest AABB distance in out_aabb_skip.
+ */
+float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_skip)
+{
+  float scene_dist = 1e10f;
+  out_color = float3(0.5f);
+  out_aabb_skip = 1e30f;
+  g_numEvaluated = 0;
+
+  /* Groups: per-object AABB check, substitute AABB distance when outside */
+  for (int g = 0; g < group_count; g++) {
+    SDFGroupGPU grp = groups[g];
+    float grp_dist = 1e10f;
+    float3 grp_color = grp.color.rgb;
+    bool grp_has_hit = false;
+
+    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
+      if (!is_shape_near(m)) continue;
+
+      /* Per-step AABB skip */
+      if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > sdf_ray_epsilon) {
+        continue;
+      }
+
+      SDFObjectGPU obj = objects[m];
+      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      float d = evalPrimitive(lp, obj);
+      g_numEvaluated++;
+
+      if (!grp_has_hit) {
+        grp_dist = d;
+        grp_color = obj.color.rgb;
+        grp_has_hit = true;
+      }
+      else {
+        float prev = grp_dist;
+        grp_dist = combineCSG(
+            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            obj.shell_distance, obj.shell_mode);
+        if (obj.csg_operation == 0 && d < prev) {
+          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          grp_color = mix(grp_color, obj.color.rgb, t);
+        }
+      }
+    }
+
+    if (!grp_has_hit) {
+      /* No object AABB contained this point — track nearest for empty-space skip */
+      float grp_aabb = 1e30f;
+      for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
+        grp_aabb = min(grp_aabb, point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz));
+      }
+      out_aabb_skip = min(out_aabb_skip, grp_aabb);
+      continue;
+    }
+
+    if (scene_dist >= 1e9f) {
+      scene_dist = grp_dist;
+      out_color = grp_color;
+    }
+    else {
+      float prev = scene_dist;
+      scene_dist = combineCSG(
+          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+          grp.shell_distance, grp.shell_mode);
+      if (grp.csg_operation == 0 && grp_dist < prev) {
+        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
+        out_color = mix(out_color, grp_color, t);
+      }
+    }
+  }
+
+  /* Ungrouped objects: per-step AABB test per object */
+  for (int i = 0; i < object_count; i++) {
+    if (!is_shape_near(i)) continue;
+    SDFObjectGPU obj = objects[i];
+    if (obj.group_id >= 0) continue;
+
+    float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
+    if (da > 0.0f) {
+      out_aabb_skip = min(out_aabb_skip, da);
+      continue;
+    }
+
+    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+    float d = evalPrimitive(lp, obj);
+    g_numEvaluated++;
+
+    if (scene_dist >= 1e9f) {
+      scene_dist = d;
+      out_color = obj.color.rgb;
+    }
+    else {
+      float prev = scene_dist;
+      scene_dist = combineCSG(
+          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+          obj.shell_distance, obj.shell_mode);
+      if (obj.csg_operation == 0 && d < prev) {
+        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+        out_color = mix(out_color, obj.color.rgb, t);
+      }
+    }
+  }
+
+  return scene_dist;
+}
+
+float evalSceneDistBVH(float3 world_pos)
+{
+  float3 dummy_color;
+  float dummy_skip;
+  return evalSceneBVH(world_pos, dummy_color, dummy_skip);
+}
+
+#endif
 
 #ifdef USE_TILE_CULLING
 
@@ -102,31 +233,85 @@ bool aabb_overlaps_tile(float3 bmin, float3 bmax, float4 tile_ndc, float4x4 view
            proj_max.y < tile_ndc.y || proj_min.y > tile_ndc.w);
 }
 
-float evalSceneTile(float3 world_pos, out float3 out_color)
+/* Flush accumulated group result into scene distance. */
+void flushGroup(int gid, float grp_dist, float3 grp_color,
+                inout float scene_dist, inout float3 out_color)
+{
+  if (scene_dist >= 1e9f) {
+    scene_dist = grp_dist;
+    out_color = grp_color;
+  }
+  else {
+    SDFGroupGPU grp = groups[gid];
+    float prev = scene_dist;
+    scene_dist = combineCSG(
+        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+        grp.shell_distance, grp.shell_mode);
+    if (grp.csg_operation == 0 && grp_dist < prev) {
+      float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
+      out_color = mix(out_color, grp_color, t);
+    }
+  }
+}
+
+/* Single-pass evaluation over flat sorted tile-visible list. */
+float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_skip)
 {
   float scene_dist = 1e10f;
   out_color = float3(0.5f);
+  out_aabb_skip = 1e30f;
 
-  for (int g = 0; g < group_count; g++) {
-    bool group_active;
-    if (g < kMaxGroupBits) {
-      group_active = (s_groupActive[uint(g) >> 5u] & (1u << (uint(g) & 31u))) != 0u;
+  int cur_group = -2;
+  float grp_dist = 1e10f;
+  float3 grp_color = float3(0.5f);
+  bool grp_has_hit = false;
+
+  uint n = min(s_tileObjCount, uint(kMaxTileObjects));
+  for (uint u = 0u; u <= n; u++) {
+    int i = (u < n) ? s_tileObjList[u] : -1;
+    int gid = (i >= 0) ? objects[i].group_id : -2;
+
+    /* Group boundary: flush previous group into scene */
+    if (gid != cur_group && grp_has_hit) {
+      flushGroup(cur_group, grp_dist, grp_color, scene_dist, out_color);
+      grp_has_hit = false;
+      grp_dist = 1e10f;
+    }
+
+    if (u >= n) break;
+
+    /* Per-step AABB skip (uses max group blend from _pad1) */
+    SDFObjectGPU obj = objects[i];
+    float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
+    float max_group_blend = intBitsToFloat(obj._pad1);
+    float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
+    if (da > skip_threshold) {
+      out_aabb_skip = min(out_aabb_skip, da);
+      continue;
+    }
+    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+    float d = evalPrimitive(lp, obj);
+    cur_group = gid;
+
+    if (gid < 0) {
+      /* Ungrouped: combine directly into scene */
+      if (scene_dist >= 1e9f) {
+        scene_dist = d;
+        out_color = obj.color.rgb;
+      }
+      else {
+        float prev = scene_dist;
+        scene_dist = combineCSG(
+            scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            obj.shell_distance, obj.shell_mode);
+        if (obj.csg_operation == 0 && d < prev) {
+          float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          out_color = mix(out_color, obj.color.rgb, t);
+        }
+      }
     }
     else {
-      group_active = true;
-    }
-    if (!group_active) continue;
-
-    SDFGroupGPU grp = groups[g];
-    float grp_dist = 1e10f;
-    float3 grp_color = grp.color.rgb;
-    bool grp_has_hit = false;
-
-    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      SDFObjectGPU obj = objects[m];
-      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-      float d = evalPrimitive(lp, obj);
-
+      /* Grouped: accumulate into group CSG chain */
       if (!grp_has_hit) {
         grp_dist = d;
         grp_color = obj.color.rgb;
@@ -143,55 +328,9 @@ float evalSceneTile(float3 world_pos, out float3 out_color)
         }
       }
     }
-
-    if (!grp_has_hit) continue;
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = grp_dist;
-      out_color = grp_color;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode);
-      if (grp.csg_operation == 0 && grp_dist < prev) {
-        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
-        out_color = mix(out_color, grp_color, t);
-      }
-    }
-  }
-
-  uint tile_count = min(s_tileObjCount, uint(kMaxTileObjects));
-  for (uint u = 0u; u < tile_count; u++) {
-    int i = s_tileObjList[u];
-    SDFObjectGPU obj = objects[i];
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = d;
-      out_color = obj.color.rgb;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-          obj.shell_distance, obj.shell_mode);
-      if (obj.csg_operation == 0 && d < prev) {
-        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
-        out_color = mix(out_color, obj.color.rgb, t);
-      }
-    }
   }
 
   return scene_dist;
-}
-
-float evalSceneDistTile(float3 world_pos)
-{
-  float3 dummy_color;
-  return evalSceneTile(world_pos, dummy_color);
 }
 
 int tile_active_obj_count()
@@ -211,192 +350,20 @@ int tile_active_obj_count()
 }
 
 #else
-
-float3 find_ortho(float3 v)
-{
-  if (abs(v.x) >= 0.57735f) {
-    return float3(v.y, -v.x, 0.0f);
-  }
-  return float3(0.0f, v.z, -v.y);
-}
-
-float evalSceneBVH(float3 world_pos, out float3 out_color)
-{
-  float scene_dist = 1e10f;
-  out_color = float3(0.5f);
-
-  for (int g = 0; g < group_count; g++) {
-    SDFGroupGPU grp = groups[g];
-    float grp_dist = 1e10f;
-    float3 grp_color = grp.color.rgb;
-    bool grp_has_hit = false;
-
-    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      if (!is_shape_near(m)) continue;
-
-      SDFObjectGPU obj = objects[m];
-      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-      float d = evalPrimitive(lp, obj);
-
-      if (!grp_has_hit) {
-        grp_dist = d;
-        grp_color = obj.color.rgb;
-        grp_has_hit = true;
-      }
-      else {
-        float prev = grp_dist;
-        grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode);
-        if (obj.csg_operation == 0 && d < prev) {
-          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
-          grp_color = mix(grp_color, obj.color.rgb, t);
-        }
-      }
-    }
-
-    if (!grp_has_hit) continue;
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = grp_dist;
-      out_color = grp_color;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode);
-      if (grp.csg_operation == 0 && grp_dist < prev) {
-        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
-        out_color = mix(out_color, grp_color, t);
-      }
-    }
-  }
-
-  for (int i = 0; i < object_count; i++) {
-    if (!is_shape_near(i)) continue;
-
-    SDFObjectGPU obj = objects[i];
-    if (obj.group_id >= 0) continue;
-
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = d;
-      out_color = obj.color.rgb;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-          obj.shell_distance, obj.shell_mode);
-      if (obj.csg_operation == 0 && d < prev) {
-        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
-        out_color = mix(out_color, obj.color.rgb, t);
-      }
-    }
-  }
-
-  return scene_dist;
-}
-
-float evalSceneFull(float3 world_pos, out float3 out_color)
-{
-  float scene_dist = 1e10f;
-  out_color = float3(0.5f);
-
-  for (int g = 0; g < group_count; g++) {
-    SDFGroupGPU grp = groups[g];
-    float grp_dist = 1e10f;
-    float3 grp_color = grp.color.rgb;
-    bool grp_has_hit = false;
-
-    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      SDFObjectGPU obj = objects[m];
-      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-      float d = evalPrimitive(lp, obj);
-
-      if (!grp_has_hit) {
-        grp_dist = d;
-        grp_color = obj.color.rgb;
-        grp_has_hit = true;
-      }
-      else {
-        float prev = grp_dist;
-        grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode);
-        if (obj.csg_operation == 0 && d < prev) {
-          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
-          grp_color = mix(grp_color, obj.color.rgb, t);
-        }
-      }
-    }
-
-    if (!grp_has_hit) continue;
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = grp_dist;
-      out_color = grp_color;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode);
-      if (grp.csg_operation == 0 && grp_dist < prev) {
-        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
-        out_color = mix(out_color, grp_color, t);
-      }
-    }
-  }
-
-  for (int i = 0; i < object_count; i++) {
-    SDFObjectGPU obj = objects[i];
-    if (obj.group_id >= 0) continue;
-
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = d;
-      out_color = obj.color.rgb;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-          obj.shell_distance, obj.shell_mode);
-      if (obj.csg_operation == 0 && d < prev) {
-        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
-        out_color = mix(out_color, obj.color.rgb, t);
-      }
-    }
-  }
-  return scene_dist;
-}
-
-float evalSceneDistFull(float3 world_pos)
-{
-  float3 dummy_color;
-  return evalSceneFull(world_pos, dummy_color);
-}
-
-float evalSceneDistBVH(float3 world_pos)
-{
-  float3 dummy_color;
-  return evalSceneBVH(world_pos, dummy_color);
-}
-
 #endif
 
 float3 heat_color(float t)
 {
-  float3 cool = float3(0.0, 1.0, 0.0);
-  float3 medium = float3(1.0, 1.0, 0.0);
+  t = clamp(t, 0.0f, 1.0f);
+  float3 cool = float3(0.0, 0.0, 1.0);
+  float3 medium = float3(0.0, 1.0, 0.0);
+  float3 warm = float3(1.0, 1.0, 0.0);
   float3 hot = float3(1.0, 0.0, 0.0);
-  return t < 0.5f ? mix(cool, medium, t / 0.5f) : mix(medium, hot, (t - 0.5f) / 0.5f);
+  if (t < 0.33f)
+    return mix(cool, medium, t / 0.33f);
+  if (t < 0.66f)
+    return mix(medium, warm, (t - 0.33f) / 0.33f);
+  return mix(warm, hot, (t - 0.66f) / 0.34f);
 }
 
 void main()
@@ -418,18 +385,33 @@ void main()
         tile_lo / float2(screen_size) * 2.0f - 1.0f,
         tile_hi / float2(screen_size) * 2.0f - 1.0f);
 
+    /* Add ALL tile-visible objects (grouped + ungrouped) to flat list */
     for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
       SDFObjectGPU obj = objects[i];
+      if (obj._pad0 == 0) continue; /* CPU frustum culled */
       if (!aabb_overlaps_tile(obj.bbox_min.xyz, obj.bbox_max.xyz, tile_ndc, viewproj)) continue;
-      if (obj.group_id >= 0) {
-        if (obj.group_id < kMaxGroupBits) {
-          atomicOr(s_groupActive[uint(obj.group_id) >> 5u], 1u << (uint(obj.group_id) & 31u));
-        }
+
+      uint slot = atomicAdd(s_tileObjCount, 1u);
+      if (slot < uint(kMaxTileObjects)) s_tileObjList[slot] = i;
+
+      if (obj.group_id >= 0 && obj.group_id < kMaxGroupBits) {
+        atomicOr(s_groupActive[uint(obj.group_id) >> 5u], 1u << (uint(obj.group_id) & 31u));
       }
-      else {
-        uint slot = atomicAdd(s_tileObjCount, 1u);
-        if (slot < uint(kMaxTileObjects)) s_tileObjList[slot] = i;
+    }
+  }
+  barrier();
+
+  /* Sort tile list by index to preserve CSG group ordering */
+  if (local_idx == 0) {
+    int n = int(min(s_tileObjCount, uint(kMaxTileObjects)));
+    for (int i = 1; i < n; i++) {
+      int key = s_tileObjList[i];
+      int j = i - 1;
+      while (j >= 0 && s_tileObjList[j] > key) {
+        s_tileObjList[j + 1] = s_tileObjList[j];
+        j--;
       }
+      s_tileObjList[j + 1] = key;
     }
   }
   barrier();
@@ -492,17 +474,17 @@ void main()
   }
 
 #ifndef USE_TILE_CULLING
-  float3 ray_to = ray_origin + ray_dir * t_exit;
-
+  /* Per-ray BVH: mark objects whose AABB the ray intersects (done ONCE per ray) */
   g_numNearShapes = 0;
+  g_numEvaluated = 0;
   for (int w = 0; w < kBitfieldWords; w++) {
     g_bvh_bits[w] = 0u;
   }
 
   if (use_bvh != 0 && bvh_root >= 0) {
+    float3 ray_to = ray_origin + ray_dir * t_exit;
     float3 rayDirOrtho = normalize(find_ortho(ray_dir));
     float3 rayDirOrthoAbs = abs(rayDirOrtho);
-
     float3 rayBoundsMin = min(ray_origin, ray_to);
     float3 rayBoundsMax = max(ray_origin, ray_to);
 
@@ -561,37 +543,107 @@ void main()
   }
 #endif
 
-  /* Sphere tracing */
+  /* Dynamic safety factor */
+  float step_factor = 0.85f;
+  for (int i = 0; i < object_count; i++) {
+    if (objects[i].blend > 0.001f && (objects[i].blend_type == 2 || objects[i].blend_type == 3)) {
+      step_factor = 0.7f; break;
+    }
+  }
+  for (int g = 0; g < group_count; g++) {
+    if (groups[g].blend > 0.001f && (groups[g].blend_type == 2 || groups[g].blend_type == 3)) {
+      step_factor = 0.7f; break;
+    }
+  }
+
+  /* Over-relaxation sphere tracing */
   float t = t_enter;
   bool hit = false;
   float3 hit_pos;
   float3 hit_color;
   int steps_taken = 0;
+  float omega = sdf_over_relaxation;
+  float prev_radius = 0.0f;
+  float step_length = 0.0f;
+  float t_prev = t_enter;
+  float d_prev = 1e10f;
 
   for (int step = 0; step < sdf_max_steps; step++) {
-    steps_taken++;
     float3 pos = ray_origin + ray_dir * t;
+
+    /* Combined evaluation + empty-space skip */
     float3 color;
     float d;
+    float aabb_skip;
 #ifdef USE_TILE_CULLING
-    d = evalSceneTile(pos, color);
+    d = evalSceneTile(pos, color, aabb_skip);
+
+    if (d >= 1e9f) {
+      t += max(aabb_skip, sdf_ray_epsilon);
+      prev_radius = 0.0f;
+      step_length = 0.0f;
+      if (t > t_exit) break;
+      continue;
+    }
+
+    /* Clamp step by nearest skipped AABB — never overshoot past unevaluated objects */
+    d = min(d, aabb_skip);
 #else
-    if (use_bvh != 0) {
-      d = evalSceneBVH(pos, color);
+    d = evalSceneBVH(pos, color, aabb_skip);
+
+    /* If no AABB contains this point, skip by nearest AABB distance */
+    if (d >= 1e9f) {
+      t += max(aabb_skip, sdf_ray_epsilon);
+      prev_radius = 0.0f;
+      step_length = 0.0f;
+      if (t > t_exit) break;
+      continue;
     }
-    else {
-      d = evalSceneFull(pos, color);
-    }
+
+    d = min(d, aabb_skip);
 #endif
 
-    if (d < sdf_ray_epsilon) {
+    steps_taken++;
+    float abs_d = abs(d);
+
+    /* Proper over-relaxation from Keinert et al. 2014 */
+    bool sor_fail = omega > 1.0f && (abs_d + prev_radius) < step_length;
+    if (sor_fail) {
+      step_length -= omega * step_length;
+      omega = 1.0f;
+    } else {
+      step_length = abs_d * step_factor * omega;
+    }
+
+    float adaptive_epsilon = sdf_ray_epsilon * (1.0f + t * 0.001f);
+
+    if (!sor_fail && d < adaptive_epsilon) {
       hit = true;
-      hit_pos = pos;
+      /* Secant refinement: interpolate between previous step (d>0) and current (d≈0) */
+      float denom = d_prev - d;
+      if (denom > 1e-8f) {
+        float alpha = d_prev / denom;
+        float t_refined = mix(t_prev, t, clamp(alpha, 0.0f, 1.0f));
+        hit_pos = ray_origin + ray_dir * t_refined;
+      }
+      else {
+        hit_pos = pos;
+      }
       hit_color = color;
       break;
     }
 
-    t += max(d, sdf_ray_epsilon);
+    /* Track previous step for secant refinement */
+    t_prev = t;
+    d_prev = d;
+    prev_radius = abs_d;
+
+    if (sor_fail) {
+      t += step_length;
+    } else {
+      t += max(step_length, sdf_ray_epsilon * 0.5f);
+    }
+
     if (t > t_exit) {
       break;
     }
@@ -621,7 +673,7 @@ void main()
     return;
   }
   else if (debug_bvh_views == 3) {
-    float heat = float(steps_taken) / float(sdf_max_steps);
+    float heat = float(steps_taken) / 128.0f;
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -629,7 +681,7 @@ void main()
     return;
   }
   else if (debug_bvh_views == 4) {
-    float heat = float(steps_taken) / float(sdf_max_steps);
+    float heat = float(steps_taken) / 128.0f;
     tile_heat[local_idx] = heat;
     barrier();
     float max_heat = 0.0f;
@@ -644,7 +696,7 @@ void main()
   }
 #else
   if (debug_bvh_views == 1) {
-    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / max(float(object_count), 1.0f);
+    float heat = float(g_numNearShapes) / max(float(object_count), 1.0f);
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -652,7 +704,7 @@ void main()
     return;
   }
   else if (debug_bvh_views == 2) {
-    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / max(float(object_count), 1.0f);
+    float heat = float(g_numNearShapes) / max(float(object_count), 1.0f);
     tile_heat[local_idx] = heat;
     barrier();
     float max_heat = 0.0f;
@@ -666,7 +718,7 @@ void main()
     return;
   }
   else if (debug_bvh_views == 3) {
-    float heat = float(steps_taken) / float(sdf_max_steps);
+    float heat = float(steps_taken) / 128.0f;
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -674,7 +726,7 @@ void main()
     return;
   }
   else if (debug_bvh_views == 4) {
-    float heat = float(steps_taken) / float(sdf_max_steps);
+    float heat = float(steps_taken) / 128.0f;
     tile_heat[local_idx] = heat;
     barrier();
     float max_heat = 0.0f;
@@ -692,10 +744,14 @@ void main()
   if (!hit) {
     imageStore(gbuf_pos_img, pixel, float4(0.0));
     imageStore(gbuf_color_img, pixel, float4(0.0));
+    imageStore(gbuf_normal_img, pixel, float4(0.0));
     return;
   }
+
+  float3 hit_normal = float3(0.0f);
 
   /* Output G-buffer */
   imageStore(gbuf_pos_img, pixel, float4(hit_pos, 1.0));
   imageStore(gbuf_color_img, pixel, float4(hit_color, 0.0));
+  imageStore(gbuf_normal_img, pixel, float4(hit_normal, 0.0));
 }

@@ -33,6 +33,13 @@ bool aabb_overlap(float3 a_min, float3 a_max, float3 b_min, float3 b_max)
   return all(lessThanEqual(a_min, b_max)) && all(greaterThanEqual(a_max, b_min));
 }
 
+/** Unsigned distance from a point to an AABB (0 if inside). */
+float point_aabb_dist(float3 p, float3 bmin, float3 bmax)
+{
+  float3 q = max(bmin - p, max(p - bmax, float3(0.0f)));
+  return length(q);
+}
+
 /** Ray-AABB intersection test (slab method).
  * Returns true if the ray intersects the AABB, with entry/exit t values.
  * \param origin: ray origin.

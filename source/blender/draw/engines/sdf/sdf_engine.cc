@@ -119,6 +119,7 @@ class Instance : public DrawEngine {
   gpu::Texture *comp_depth_tx_ = nullptr;
   gpu::Texture *gbuf_pos_tx_ = nullptr;
   gpu::Texture *gbuf_color_tx_ = nullptr;
+  gpu::Texture *gbuf_normal_tx_ = nullptr;
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
   int2 render_size_ = int2(0);
@@ -151,6 +152,7 @@ class Instance : public DrawEngine {
   int debug_bvh_views_ = 0;
   int sdf_max_steps_ = 128;
   float sdf_ray_epsilon_ = 0.001f;
+  float sdf_over_relaxation_ = 1.2f;
 
   float4 studio_light_dir_[4] = {};
   float4 studio_light_col_[4] = {};
@@ -649,6 +651,28 @@ class Instance : public DrawEngine {
         groups_gpu_[gi].first_object = (first >= 0) ? first : 0;
         groups_gpu_[gi].object_count = count;
       }
+
+      /* Compute max blend per group, store in each member's _pad1 */
+      for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
+        float max_blend = fabsf(groups_gpu_[gi].blend);
+        int start = groups_gpu_[gi].first_object;
+        int cnt = groups_gpu_[gi].object_count;
+        for (int m = start; m < start + cnt; m++) {
+          float b = (objects_[m].blend_type == 0) ? 0.0f : objects_[m].blend;
+          max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
+        }
+        for (int m = start; m < start + cnt; m++) {
+          memcpy(&objects_[m]._pad1, &max_blend, sizeof(float));
+        }
+      }
+      /* Ungrouped objects: store own blend in _pad1 */
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i].group_id < 0) {
+          float b = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
+          b += fabsf(objects_[i].shell_distance);
+          memcpy(&objects_[i]._pad1, &b, sizeof(float));
+        }
+      }
     }
 
     /* Expand AABBs for blend-aware CSG */
@@ -764,6 +788,42 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
+    /* Frustum culling: mark objects outside camera frustum via _pad0 flag */
+    {
+      const View &view = View::default_get();
+      float4x4 vp = view.winmat() * view.viewmat();
+      float4 planes[6];
+      /* Extract frustum planes from view-projection matrix */
+      for (int i = 0; i < 4; i++) {
+        planes[0][i] = vp[i][3] + vp[i][0]; /* left */
+        planes[1][i] = vp[i][3] - vp[i][0]; /* right */
+        planes[2][i] = vp[i][3] + vp[i][1]; /* bottom */
+        planes[3][i] = vp[i][3] - vp[i][1]; /* top */
+        planes[4][i] = vp[i][3] + vp[i][2]; /* near */
+        planes[5][i] = vp[i][3] - vp[i][2]; /* far */
+      }
+      for (int p = 0; p < 6; p++) {
+        planes[p] /= math::length(float3(planes[p]));
+      }
+      for (int i = 0; i < int(objects_.size()); i++) {
+        float3 bmin = new_mins[i];
+        float3 bmax = new_maxs[i];
+        bool visible = true;
+        for (int p = 0; p < 6; p++) {
+          float3 n(planes[p]);
+          float d = planes[p].w;
+          float3 pos_vertex(n.x > 0 ? bmax.x : bmin.x,
+                            n.y > 0 ? bmax.y : bmin.y,
+                            n.z > 0 ? bmax.z : bmin.z);
+          if (math::dot(n, pos_vertex) + d < 0.0f) {
+            visible = false;
+            break;
+          }
+        }
+        objects_[i]._pad0 = visible ? 1 : 0;
+      }
+    }
+
     /* Recompute scene AABB from final expanded bounds */
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
@@ -855,10 +915,14 @@ class Instance : public DrawEngine {
     if (v3d_mut->shading.sdf_ray_epsilon == 0.0f) {
       v3d_mut->shading.sdf_ray_epsilon = 0.001f;
     }
+    if (v3d_mut->shading.sdf_over_relaxation == 0.0f) {
+      v3d_mut->shading.sdf_over_relaxation = 1.2f;
+    }
     use_bvh_ = 1;
     debug_bvh_views_ = v3d->shading.sdf_bvh_debug_view;
     sdf_max_steps_ = v3d->shading.sdf_max_steps;
     sdf_ray_epsilon_ = v3d->shading.sdf_ray_epsilon;
+    sdf_over_relaxation_ = v3d->shading.sdf_over_relaxation;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
@@ -1159,6 +1223,9 @@ class Instance : public DrawEngine {
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
     }
+    if (gbuf_normal_tx_) {
+      GPU_texture_free(gbuf_normal_tx_);
+    }
     render_size_ = vp;
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
@@ -1166,6 +1233,7 @@ class Instance : public DrawEngine {
     comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
     gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
     gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    gbuf_normal_tx_ = GPU_texture_create_2d("sdf_gbuf_normal", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
   }
 
   void bind_ssbos(gpu::Shader *sh)
@@ -1205,6 +1273,7 @@ class Instance : public DrawEngine {
     GPU_texture_image_bind(comp_depth_tx_, GPU_shader_get_sampler_binding(sh, "out_depth_img"));
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
+    GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
@@ -1212,6 +1281,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "debug_bvh_views", debug_bvh_views_);
     GPU_shader_uniform_1i(sh, "sdf_max_steps", sdf_max_steps_);
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_1f(sh, "sdf_over_relaxation", sdf_over_relaxation_);
     GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
     GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
@@ -1229,6 +1299,7 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(comp_depth_tx_);
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_color_tx_);
+    GPU_texture_image_unbind(gbuf_normal_tx_);
     GPU_shader_unbind();
   }
 
@@ -1261,6 +1332,7 @@ class Instance : public DrawEngine {
     GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
     GPU_texture_image_bind(comp_color_tx_, GPU_shader_get_sampler_binding(sh, "out_color_img"));
     GPU_texture_image_bind(comp_depth_tx_, GPU_shader_get_sampler_binding(sh, "out_depth_img"));
+    GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
     if (matcap_tx_) {
       int matcap_slot = GPU_shader_get_sampler_binding(sh, "matcap_tx");
@@ -1300,6 +1372,7 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_texture_image_unbind(comp_color_tx_);
     GPU_texture_image_unbind(comp_depth_tx_);
+    GPU_texture_image_unbind(gbuf_normal_tx_);
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
     }
@@ -1444,6 +1517,9 @@ class Instance : public DrawEngine {
     }
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
+    }
+    if (gbuf_normal_tx_) {
+      GPU_texture_free(gbuf_normal_tx_);
     }
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);

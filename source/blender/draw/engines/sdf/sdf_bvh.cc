@@ -343,6 +343,9 @@ int SdfAabbTree::balance(int a)
 Vector<SdfAabbNodeGPU> SdfAabbTree::build_gpu_nodes(float tighten_radius) const
 {
   Vector<SdfAabbNodeGPU> gpu_nodes(nodes_.size());
+  for (int i = 0; i < nodes_.size(); ++i) {
+    gpu_nodes[i] = {};
+  }
 
   for (int i = 0; i < nodes_.size(); ++i) {
     if (nodes_[i].is_free()) {
