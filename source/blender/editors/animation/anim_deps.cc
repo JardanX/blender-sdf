@@ -344,6 +344,7 @@ void ANIM_sync_animchannels_to_data(const bContext *C)
       case ANIMTYPE_NLATRACK:
       case ANIMTYPE_NLAACTION:
       case ANIMTYPE_PALETTE:
+      case ANIMTYPE_DSMBALL:
       case ANIMTYPE_NUM_TYPES:
         break;
     }

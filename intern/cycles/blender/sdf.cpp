@@ -160,7 +160,7 @@ static constexpr int BRICK_BORDER = 2;
 /* -------------------------------------------------------------------- */
 /* Main sync function. */
 
-void BlenderSync::sync_sdf(BObjectInfo &b_ob_info, SDFGeometry *sdf_geom)
+void BlenderSync::sync_sdf(BObjectInfo & /*b_ob_info*/, SDFGeometry *sdf_geom)
 {
   /* Collect ALL SDF objects in the scene (not just this one).
    * All SDFs are baked into one shared atlas. */

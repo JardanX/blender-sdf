@@ -654,6 +654,10 @@ static int gather_frames_to_render_for_id(LibraryIDLinkCallbackData *cb_data)
     case ID_GP:
       /* TODO: gather frames. */
       break;
+    case ID_MB:
+    case ID_SF:
+    case ID_SG:
+      break;
   }
 
   AnimData *adt = BKE_animdata_from_id(id);

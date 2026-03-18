@@ -1516,12 +1516,6 @@ static wmOperatorStatus lightprobe_cache_bake_invoke(bContext *C,
                                                      wmOperator *op,
                                                      const wmEvent * /*event*/)
 {
-  wmWindowManager *wm = CTX_wm_manager(C);
-  wmWindow *win = CTX_wm_window(C);
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-  Main *bmain = CTX_data_main(C);
-  Scene *scene = CTX_data_scene(C);
-
   blender::Vector<Object *> probes = lightprobe_cache_irradiance_volume_subset_get(C, op);
 
   if (probes.is_empty()) {
@@ -1529,7 +1523,7 @@ static wmOperatorStatus lightprobe_cache_bake_invoke(bContext *C,
   }
 
   BakeOperatorData *data = MEM_new<BakeOperatorData>(__func__);
-  data->scene = scene;
+  data->scene = CTX_data_scene(C);
   data->report = "";
 
   MEM_delete(data);
@@ -1581,10 +1575,6 @@ static void lightprobe_cache_bake_cancel(bContext *C, wmOperator *op)
 /* Executes blocking bake. */
 static wmOperatorStatus lightprobe_cache_bake_exec(bContext *C, wmOperator *op)
 {
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-  Main *bmain = CTX_data_main(C);
-  Scene *scene = CTX_data_scene(C);
-
   G.is_break = false;
 
   blender::Vector<Object *> probes = lightprobe_cache_irradiance_volume_subset_get(C, op);

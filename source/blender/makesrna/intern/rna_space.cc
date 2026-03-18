@@ -1600,7 +1600,6 @@ static const EnumPropertyItem *rna_3DViewShading_render_pass_itemf(bContext *C,
                                                                    PropertyRNA * /*prop*/,
                                                                    bool *r_free)
 {
-  Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
 
   const bool aov_available = BKE_view_layer_has_valid_aov(view_layer);

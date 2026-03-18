@@ -26,7 +26,7 @@ static void node_declare(NodeDeclarationBuilder &b)
   b.add_output<decl::Color>("Color").no_muted_links();
 }
 
-static void node_shader_buts_tex_sky(uiLayout *layout, bContext *C, PointerRNA *ptr)
+static void node_shader_buts_tex_sky(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
 {
   layout->prop(ptr, "sky_type", UI_ITEM_R_SPLIT_EMPTY_NAME, "", ICON_NONE);
 

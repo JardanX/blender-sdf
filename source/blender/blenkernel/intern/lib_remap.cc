@@ -359,7 +359,7 @@ static void libblock_remap_data_preprocess(ID *id_owner,
  * this means we have to check whole Main database then.
  */
 static void libblock_remap_data_postprocess_object_update(Main *bmain,
-                                                          Object *old_ob,
+                                                          Object * /*old_ob*/,
                                                           Object * /*new_ob*/,
                                                           const bool do_sync_collection)
 {
