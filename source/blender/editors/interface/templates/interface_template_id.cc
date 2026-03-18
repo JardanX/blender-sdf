@@ -867,6 +867,9 @@ static StringRef template_id_browse_tip(const StructRNA *type)
       case ID_VF:
       case ID_GR:
       case ID_WM:
+      case ID_MB:
+      case ID_SF:
+      case ID_SG:
         break;
     }
   }

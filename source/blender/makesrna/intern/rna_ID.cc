@@ -575,6 +575,8 @@ StructRNA *ID_code_to_RNA_type(short idcode)
       return &RNA_World;
     case ID_WS:
       return &RNA_WorkSpace;
+    case ID_MB:
+      break;
   }
 
   return &RNA_ID;

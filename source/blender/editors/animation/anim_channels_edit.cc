@@ -331,6 +331,7 @@ void ANIM_set_active_channel(bAnimContext *ac,
       case ANIMTYPE_MASKDATABLOCK:
       case ANIMTYPE_MASKLAYER:
       case ANIMTYPE_PALETTE:
+      case ANIMTYPE_DSMBALL:
       case ANIMTYPE_NUM_TYPES:
         break;
     }
@@ -480,6 +481,7 @@ bool ANIM_is_active_channel(bAnimListElem *ale)
     case ANIMTYPE_MASKLAYER:
     case ANIMTYPE_NLATRACK:
     case ANIMTYPE_PALETTE:
+    case ANIMTYPE_DSMBALL:
     case ANIMTYPE_NUM_TYPES:
       break;
   }
@@ -627,6 +629,7 @@ static eAnimChannels_SetFlag anim_channels_selection_flag_for_toggle(const ListB
       case ANIMTYPE_GREASE_PENCIL_LAYER:
       case ANIMTYPE_MASKDATABLOCK:
       case ANIMTYPE_PALETTE:
+      case ANIMTYPE_DSMBALL:
       case ANIMTYPE_NUM_TYPES:
         break;
     }
@@ -810,6 +813,7 @@ static void anim_channels_select_set(bAnimContext *ac,
       case ANIMTYPE_GREASE_PENCIL_LAYER_GROUP:
       case ANIMTYPE_MASKDATABLOCK:
       case ANIMTYPE_PALETTE:
+      case ANIMTYPE_DSMBALL:
       case ANIMTYPE_NUM_TYPES:
         break;
     }
@@ -2889,6 +2893,7 @@ static bool animchannels_delete_containers(const bContext *C, bAnimContext *ac)
       case ANIMTYPE_NLATRACK:
       case ANIMTYPE_NLAACTION:
       case ANIMTYPE_PALETTE:
+      case ANIMTYPE_DSMBALL:
       case ANIMTYPE_NUM_TYPES:
         break;
     }
@@ -3067,6 +3072,7 @@ static wmOperatorStatus animchannels_delete_exec(bContext *C, wmOperator * /*op*
       case ANIMTYPE_NLATRACK:
       case ANIMTYPE_NLAACTION:
       case ANIMTYPE_PALETTE:
+      case ANIMTYPE_DSMBALL:
       case ANIMTYPE_NUM_TYPES:
         break;
     }
@@ -3898,6 +3904,7 @@ static void box_select_anim_channels(bAnimContext *ac, const rcti &rect, short s
         case ANIMTYPE_MASKLAYER:
         case ANIMTYPE_NLAACTION:
         case ANIMTYPE_PALETTE:
+        case ANIMTYPE_DSMBALL:
         case ANIMTYPE_NUM_TYPES:
           break;
       }

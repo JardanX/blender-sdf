@@ -120,7 +120,7 @@ template<typename ThresholdFn> Bitmap *image_to_bitmap(const ImBuf &ibuf, Thresh
         reinterpret_cast<ColorGeometry4f *>(ibuf.float_buffer.data), ibuf.x * ibuf.y};
     threading::parallel_for(IndexRange(ibuf.y), 4096, [&](const IndexRange range) {
       /* Use callback with the correct color conversion. */
-      constexpr bool is_float_color_fn =
+      [[maybe_unused]] constexpr bool is_float_color_fn =
           std::is_invocable_r_v<void, ThresholdFn, const ColorGeometry4f &>;
       for (const int y : range) {
         MutableSpan<potrace_word> scanline_words = words.slice(
@@ -156,7 +156,7 @@ template<typename ThresholdFn> Bitmap *image_to_bitmap(const ImBuf &ibuf, Thresh
                                         ibuf.x * ibuf.y};
   threading::parallel_for(IndexRange(ibuf.y), 4096, [&](const IndexRange range) {
     /* Use callback with the correct color conversion. */
-    constexpr bool is_float_color_fn =
+    [[maybe_unused]] constexpr bool is_float_color_fn =
         std::is_invocable_r_v<void, ThresholdFn, const ColorGeometry4f &>;
     for (const int y : range) {
       MutableSpan<potrace_word> scanline_words = words.slice(

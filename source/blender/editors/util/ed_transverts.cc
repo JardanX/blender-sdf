@@ -222,7 +222,6 @@ void ED_transverts_create_from_obedit(TransVertStore *tvs, const Object *obedit,
   BezTriple *bezt;
   BPoint *bp;
   TransVert *tv = nullptr;
-  MetaElem *ml;
   BMVert *eve;
   int a;
 

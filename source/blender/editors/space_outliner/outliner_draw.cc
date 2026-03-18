@@ -4206,8 +4206,6 @@ static void outliner_draw_sdf_reorder_buts(uiBlock *block,
           int total = BLI_listbase_count(&te->parent->subtree);
           const char *group_name = parent_tselem->id->name + 2;
 
-          Object *ob = (Object *)tselem->id;
-
           /* Layout from right: [restrict cols] [X] [down] [up] */
           const float restrict_width = outliner_right_columns_width(space_outliner);
           const int col_up = int(restrict_width) + 3 * UI_UNIT_X;   /* Up arrow */
