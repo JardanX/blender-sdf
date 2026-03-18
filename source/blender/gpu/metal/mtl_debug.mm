@@ -53,7 +53,7 @@ void MTLContext::debug_group_begin(const char *name, int index)
     this->main_command_buffer.push_debug_group(name, index);
   }
 
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
@@ -71,7 +71,7 @@ void MTLContext::debug_group_end()
     this->main_command_buffer.pop_debug_group();
   }
 
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
@@ -93,7 +93,7 @@ MTLContext::ScopeTimings::TimePoint MTLContext::ScopeTimings::epoch =
 
 void MTLContext::process_frame_timings()
 {
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 

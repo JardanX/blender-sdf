@@ -18,6 +18,8 @@
 
 #include "DRW_render.hh"
 
+#include "sdf_bvh.hh"
+
 namespace blender::draw::sdf {
 
 struct Engine : public DrawEngine::Pointer {

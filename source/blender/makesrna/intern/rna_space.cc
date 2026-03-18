@@ -4751,6 +4751,29 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
       prop, "Levels Resolution", "Voxel quality level (1=512, 2=1024, 3=2048, 4=4096)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "sdf_use_bvh", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_use_bvh", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Use BVH", "Use Bounding Volume Hierarchy for faster sphere tracing");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  static const EnumPropertyItem sdf_bvh_debug_view_items[] = {
+      {0, "NONE", 0, "None", "No debug view"},
+      {1, "SHAPE_COUNT", 0, "Shape Count", "Number of shapes tested per pixel"},
+      {2, "SHAPE_COUNT_TILE", 0, "Shape Count per Tile", "Maximum number of shapes tested in 8x8 tile"},
+      {3, "STEP_COUNT", 0, "Step Count", "Number of march steps per pixel"},
+      {4, "STEP_COUNT_TILE", 0, "Step Count per Tile", "Maximum number of march steps in 8x8 tile"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_bvh_debug_view", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_bvh_debug_view");
+  RNA_def_property_enum_items(prop, sdf_bvh_debug_view_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "BVH Debug View", "Visualize BVH performance and structure");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   static const EnumPropertyItem sdf_debug_grid_items[] = {
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},

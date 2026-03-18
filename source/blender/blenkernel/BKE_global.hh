@@ -173,6 +173,7 @@ struct Global {
   char gpu_debug_scope_name[200];
 
   bool profile_gpu;
+  bool profile_gpu_overlay;
 };
 
 /* **************** GLOBAL ********************* */

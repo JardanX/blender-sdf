@@ -1674,6 +1674,10 @@ static void view3d_draw_view(const bContext *C, ARegion *region)
                             nullptr);
 
   /* Only 100% compliant on new spec goes below */
+  View3D *v3d = CTX_wm_view3d(C);
+  if (v3d) {
+    G.profile_gpu_overlay = (v3d->overlay.flag & V3D_OVERLAY_SDF_PERF) != 0;
+  }
   DRW_draw_view(C);
 }
 

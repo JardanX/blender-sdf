@@ -16,12 +16,24 @@
 
 #include "GPU_debug.hh"
 
+#include "gpu_profile_report.hh"
+
 using namespace blender;
 using namespace blender::gpu;
 
+void GPU_profile_get_latest_time(const char *name, uint64_t *r_gpu_time, uint64_t *r_cpu_time)
+{
+  ProfileReport::get().get_latest_time(name, r_gpu_time, r_cpu_time);
+}
+
+void GPU_profile_add_group_cpu(const char *name, uint64_t cpu_start, uint64_t cpu_end)
+{
+  ProfileReport::get().add_group_cpu(name, cpu_start, cpu_end);
+}
+
 void GPU_debug_group_begin(const char *name)
 {
-  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu) {
+  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
   Context *ctx = Context::get();
@@ -32,7 +44,7 @@ void GPU_debug_group_begin(const char *name)
 
 void GPU_debug_group_end()
 {
-  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu) {
+  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
   Context *ctx = Context::get();

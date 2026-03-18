@@ -211,6 +211,10 @@ typedef struct View3DShading {
   short sdf_debug_grid;
   /** SDF draw engine: surface classify margin as percentage (0 or 100 = default 1.0x). */
   short sdf_surface_margin;
+  
+  char sdf_use_bvh;
+  char sdf_bvh_debug_view;
+  char _pad_sdf_bvh[6];
 
   struct IDProperty *prop;
   void *_pad2;

@@ -25,7 +25,7 @@ void VKContext::debug_group_begin(const char *name, int)
 {
   render_graph().debug_group_begin(name, debug::get_debug_group_color(name));
 
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
@@ -41,7 +41,7 @@ void VKContext::debug_group_end()
 {
   render_graph().debug_group_end();
 
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
@@ -60,7 +60,7 @@ void VKContext::debug_group_end()
 
 void VKContext::process_frame_timings()
 {
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 

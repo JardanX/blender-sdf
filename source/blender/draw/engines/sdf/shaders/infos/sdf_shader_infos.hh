@@ -10,6 +10,64 @@
 #include "gpu_shader_create_info.hh"
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Ray-March Compute Shader (Analytical Sphere Tracer)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_march_comp)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(2, read, SDFGroupGPU, groups[])
+STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
+SAMPLER(0, sampler2DArray, matcap_tx)
+IMAGE(0, rgba16f, write, out_color_img)
+IMAGE(1, r32f, write, out_depth_img)
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(int, lighting_type)
+PUSH_CONSTANT(int, use_specular)
+PUSH_CONSTANT(int, use_matcap_flip)
+PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, bvh_root)
+PUSH_CONSTANT(int, debug_bvh_views)
+PUSH_CONSTANT(int2, screen_size)
+PUSH_CONSTANT(float4, studio_light0)
+PUSH_CONSTANT(float4, studio_light1)
+PUSH_CONSTANT(float4, studio_light2)
+PUSH_CONSTANT(float4, studio_light3)
+PUSH_CONSTANT(float4, studio_color0)
+PUSH_CONSTANT(float4, studio_color1)
+PUSH_CONSTANT(float4, studio_color2)
+PUSH_CONSTANT(float4, studio_color3)
+PUSH_CONSTANT(float4, studio_spec0)
+PUSH_CONSTANT(float4, studio_spec1)
+PUSH_CONSTANT(float4, studio_spec2)
+PUSH_CONSTANT(float4, studio_spec3)
+PUSH_CONSTANT(float3, studio_ambient)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(draw_view)
+COMPUTE_SOURCE("sdf_march_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Blit Fragment Shader (Blits compute output)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_blit)
+DO_STATIC_COMPILATION()
+SAMPLER(0, sampler2D, color_tx)
+SAMPLER(1, sampler2D, depth_tx)
+FRAGMENT_OUT(0, float4, out_color)
+DEPTH_WRITE(DepthWrite::ANY)
+ADDITIONAL_INFO(gpu_fullscreen)
+FRAGMENT_SOURCE("sdf_blit_frag.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Ray-March Fragment Shader (Analytical Sphere Tracer)
  * \{ */
 

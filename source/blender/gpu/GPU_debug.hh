@@ -77,6 +77,12 @@ void GPU_debug_get_groups_names(int name_buf_len, char *r_name_buf);
 bool GPU_debug_group_match(const char *ref);
 
 /**
+ * Retrieve the latest frame times from the profiler (in nanoseconds).
+ */
+void GPU_profile_get_latest_time(const char *name, uint64_t *r_gpu_time, uint64_t *r_cpu_time);
+void GPU_profile_add_group_cpu(const char *name, uint64_t cpu_start, uint64_t cpu_end);
+
+/**
  * GPU Frame capture support.
  *
  * Allows instantaneous frame capture of GPU calls between begin/end.

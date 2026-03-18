@@ -106,6 +106,7 @@ set(SRC
   engines/workbench/workbench_state.cc
   engines/workbench/workbench_volume.cc
   engines/sdf/sdf_engine.cc
+  engines/sdf/sdf_bvh.cc
   engines/external/external_engine.cc
   # gpencil draw engine sources removed (not needed for SDF)
   # but shader files kept for overlay system dependencies
@@ -342,6 +343,8 @@ set(GLSL_SRC
 
   engines/workbench/workbench_shader_shared.hh
 
+  engines/sdf/shaders/sdf_march_comp.glsl
+  engines/sdf/shaders/sdf_blit_frag.glsl
   engines/sdf/shaders/sdf_march_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
