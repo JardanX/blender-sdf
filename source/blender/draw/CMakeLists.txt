@@ -342,10 +342,6 @@ set(GLSL_SRC
 
   engines/workbench/workbench_shader_shared.hh
 
-  engines/sdf/shaders/sdf_classify_comp.glsl
-  engines/sdf/shaders/sdf_augment_grids_comp.glsl
-  engines/sdf/shaders/sdf_bake_comp.glsl
-  engines/sdf/shaders/sdf_grid_blend_comp.glsl
   engines/sdf/shaders/sdf_march_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl

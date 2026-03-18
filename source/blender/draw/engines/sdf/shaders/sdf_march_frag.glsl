@@ -2,10 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* SDF ray-march fragment shader.
- * World-space mode: hybrid sphere-trace + DDA/Marmitt through single atlas.
- * Per-object mode: BVH instance traversal with per-object DDA.
- * Based on Hansson-Soderlund et al. 2022. */
+/* SDF analytical sphere tracer — evaluates SDF primitives directly per-pixel. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -14,820 +11,131 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-#define BRICK_SIZE 8
-#define BRICK_STORAGE 12
+#define MAX_MARCH_STEPS 256
+#define EPSILON 0.001f
 
-#define MAX_BRICK_STEPS 1024
-#define MAX_VOXEL_STEPS 32
-#define MAX_SPHERE_STEPS 1024
-#define MAX_INST_STACK 32
-
-/* Atlas lookup */
-
-int3 gridToCompact(int3 brick, int3 local_voxel, int slot, int bpa)
+/* Evaluate a single object's SDF in local space */
+float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
-  int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
-  int3 slot_origin = slot_block * BRICK_STORAGE;
-  return slot_origin + local_voxel + int3(2); /* +2 for overlap border */
+  SDFPrimitiveData prim_data;
+  prim_data.sdf_type = obj.sdf_type;
+  prim_data.size = obj.sdf_size.xyz;
+  prim_data.bevel = obj.bevel;
+  prim_data.box_corners = obj.box_corners;
+  prim_data.box_edges = obj.box_edges;
+  prim_data.box_modes = obj.box_modes;
+  prim_data.modifier_start = obj.modifier_start;
+  prim_data.modifier_count = obj.modifier_count;
+  prim_data.inverse_matrix = obj.inverse_matrix;
+
+  return evalObjectSDF(prim_data, local_pos);
 }
 
-void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out float s[8])
+/* Evaluate single object distance from world position */
+float evalObjectDist(float3 world_pos, int idx)
 {
-  int3 base = gridToCompact(brick, local_cell, slot, bpa);
-  s[0] = texelFetch(compact_atlas, base + int3(0, 0, 0), 0).r;
-  s[1] = texelFetch(compact_atlas, base + int3(1, 0, 0), 0).r;
-  s[2] = texelFetch(compact_atlas, base + int3(0, 1, 0), 0).r;
-  s[3] = texelFetch(compact_atlas, base + int3(1, 1, 0), 0).r;
-  s[4] = texelFetch(compact_atlas, base + int3(0, 0, 1), 0).r;
-  s[5] = texelFetch(compact_atlas, base + int3(1, 0, 1), 0).r;
-  s[6] = texelFetch(compact_atlas, base + int3(0, 1, 1), 0).r;
-  s[7] = texelFetch(compact_atlas, base + int3(1, 1, 1), 0).r;
+  SDFObjectGPU obj = objects[idx];
+  float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+  return evalPrimitive(lp, obj);
 }
 
-/* Trilinear sample world-space atlas at a world position.
- * Returns SDF distance. Sets out_slot: -1=empty/outside, -2=interior, >=0=active.
- * Uses texelFetch + manual trilinear to avoid hardware filter bleeding across slots. */
-float sampleAtlasWorld(float3 world_pos,
-                       int3 grid_res,
-                       float3 atlas_orig,
-                       float vs,
-                       int bpa,
-                       out int3 out_brick,
-                       out int out_slot)
+/* Evaluate full scene SDF with group-ordered CSG, output nearest color */
+float evalScene(float3 world_pos, out float3 out_color)
 {
-  float bws = float(BRICK_SIZE) * vs;
-  float3 bp = (world_pos - atlas_orig) / bws;
-  out_brick = int3(floor(bp));
+  float scene_dist = 1e10f;
+  out_color = float3(0.5f);
 
-  if (any(lessThan(out_brick, int3(0))) || any(greaterThanEqual(out_brick, grid_res))) {
-    out_brick = clamp(out_brick, int3(0), grid_res - int3(1));
-    out_slot = -1;
-    return 1e10f;
-  }
+  /* Per-group evaluation */
+  for (int g = 0; g < group_count; g++) {
+    SDFGroupGPU grp = groups[g];
+    float grp_dist = 1e10f;
+    float3 grp_color = grp.color.rgb;
+    bool grp_has_hit = false;
 
-  out_slot = texelFetch(indirection_tx, out_brick, 0).r;
+    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
+      SDFObjectGPU obj = objects[m];
+      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      float d = evalPrimitive(lp, obj);
 
-  if (out_slot == -1) {
-    return 1e10f;
-  }
-  if (out_slot == -2) {
-    return -1e10f;
-  }
-
-  /* Active brick: manual trilinear via texelFetch (safe across slot boundaries). */
-  float3 brick_origin = atlas_orig + float3(out_brick) * bws;
-  float3 voxel_pos = (world_pos - brick_origin) / vs;
-
-  int3 cell = clamp(int3(floor(voxel_pos)), int3(0), int3(BRICK_SIZE - 1));
-  float3 f = clamp(voxel_pos - float3(cell), float3(0.0f), float3(1.0f));
-
-  int3 sb = int3(out_slot % bpa, (out_slot / bpa) % bpa, out_slot / (bpa * bpa));
-  int3 base = sb * BRICK_STORAGE + cell + int3(2);
-
-  float s0 = texelFetch(compact_atlas, base + int3(0, 0, 0), 0).r;
-  float s1 = texelFetch(compact_atlas, base + int3(1, 0, 0), 0).r;
-  float s2 = texelFetch(compact_atlas, base + int3(0, 1, 0), 0).r;
-  float s3 = texelFetch(compact_atlas, base + int3(1, 1, 0), 0).r;
-  float s4 = texelFetch(compact_atlas, base + int3(0, 0, 1), 0).r;
-  float s5 = texelFetch(compact_atlas, base + int3(1, 0, 1), 0).r;
-  float s6 = texelFetch(compact_atlas, base + int3(0, 1, 1), 0).r;
-  float s7 = texelFetch(compact_atlas, base + int3(1, 1, 1), 0).r;
-
-  return mix(mix(mix(s0, s1, f.x), mix(s2, s3, f.x), f.y),
-             mix(mix(s4, s5, f.x), mix(s6, s7, f.x), f.y),
-             f.z);
-}
-
-/* Ray entry/exit t for a single brick AABB. */
-void computeBrickInterval(float3 ray_origin, float3 inv_dir, int3 brick,
-                          float3 atlas_orig, float bws,
-                          out float t_entry, out float t_exit_out)
-{
-  float3 brick_min = atlas_orig + float3(brick) * bws;
-  float3 brick_max = brick_min + float3(bws);
-  float3 t0 = (brick_min - ray_origin) * inv_dir;
-  float3 t1 = (brick_max - ray_origin) * inv_dir;
-  float3 t_lo = min(t0, t1);
-  float3 t_hi = max(t0, t1);
-  t_entry = max(max(t_lo.x, t_lo.y), t_lo.z);
-  t_exit_out = min(t_hi.x, min(t_hi.y, t_hi.z));
-}
-
-/* Manual trilinear color sample from atlas (avoids hardware filter bleed across slots). */
-float3 sampleAtlasColor(int3 brick_cell, float3 voxel_pos, int slot, int bpa)
-{
-  int3 cell = clamp(int3(floor(voxel_pos)), int3(0), int3(BRICK_SIZE - 1));
-  float3 f = clamp(voxel_pos - float3(cell), float3(0.0f), float3(1.0f));
-
-  int3 sb = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
-  int3 base = sb * BRICK_STORAGE + cell + int3(2);
-
-  float3 c0 = texelFetch(compact_atlas, base + int3(0, 0, 0), 0).gba;
-  float3 c1 = texelFetch(compact_atlas, base + int3(1, 0, 0), 0).gba;
-  float3 c2 = texelFetch(compact_atlas, base + int3(0, 1, 0), 0).gba;
-  float3 c3 = texelFetch(compact_atlas, base + int3(1, 1, 0), 0).gba;
-  float3 c4 = texelFetch(compact_atlas, base + int3(0, 0, 1), 0).gba;
-  float3 c5 = texelFetch(compact_atlas, base + int3(1, 0, 1), 0).gba;
-  float3 c6 = texelFetch(compact_atlas, base + int3(0, 1, 1), 0).gba;
-  float3 c7 = texelFetch(compact_atlas, base + int3(1, 1, 1), 0).gba;
-
-  return mix(mix(mix(c0, c1, f.x), mix(c2, c3, f.x), f.y),
-             mix(mix(c4, c5, f.x), mix(c6, c7, f.x), f.y),
-             f.z);
-}
-
-/* Normal computation */
-float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
-{
-  /* Dual voxel center: nearest grid corner to the hit point. */
-  float3 shifted = grid_pos_in_brick + float3(0.5f);
-  int3 dc = int3(floor(shifted));
-
-  /* Position within the dual voxel [0,1]^3. */
-  float3 uvw = shifted - float3(dc);
-
-  /* Atlas base for the 3x3x3 neighborhood.
-   * Corner positions range from (dc-1) to (dc+1). */
-  int3 cb = gridToCompact(brick, dc - int3(1), slot, bpa);
-
-  float vals[27];
-  for (int k = 0; k < 3; k++) {
-    for (int j = 0; j < 3; j++) {
-      vals[k * 9 + j * 3 + 0] = texelFetch(compact_atlas, cb + int3(0, j, k), 0).r;
-      vals[k * 9 + j * 3 + 1] = texelFetch(compact_atlas, cb + int3(1, j, k), 0).r;
-      vals[k * 9 + j * 3 + 2] = texelFetch(compact_atlas, cb + int3(2, j, k), 0).r;
-    }
-  }
-
-  float3 blended = float3(0.0f);
-
-  for (int kk = 0; kk < 2; kk++) {
-    for (int jj = 0; jj < 2; jj++) {
-      for (int ii = 0; ii < 2; ii++) {
-        float s[8];
-        s[0] = vals[(kk) * 9 + (jj) * 3 + (ii)];
-        s[1] = vals[(kk) * 9 + (jj) * 3 + (ii + 1)];
-        s[2] = vals[(kk) * 9 + (jj + 1) * 3 + (ii)];
-        s[3] = vals[(kk) * 9 + (jj + 1) * 3 + (ii + 1)];
-        s[4] = vals[(kk + 1) * 9 + (jj) * 3 + (ii)];
-        s[5] = vals[(kk + 1) * 9 + (jj) * 3 + (ii + 1)];
-        s[6] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii)];
-        s[7] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii + 1)];
-
-        float3 local_p = grid_pos_in_brick - float3(dc - int3(1) + int3(ii, jj, kk));
-
-        float3 grad = trilinearGradient(s, local_p);
-        float l = length(grad);
-        float3 n = l > 1e-8f ? grad / l : float3(0.0f, 0.0f, 1.0f);
-
-        float wu = ii == 0 ? (1.0f - uvw.x) : uvw.x;
-        float wv = jj == 0 ? (1.0f - uvw.y) : uvw.y;
-        float ww = kk == 0 ? (1.0f - uvw.z) : uvw.z;
-
-        blended += n * (wu * wv * ww);
+      if (!grp_has_hit) {
+        grp_dist = d;
+        grp_color = obj.color.rgb;
+        grp_has_hit = true;
       }
-    }
-  }
-
-  float l = length(blended);
-  return l > 1e-8f ? blended / l : float3(0.0f, 0.0f, 1.0f);
-}
-
-/* Voxel-level DDA + Marmitt refinement within a single brick. */
-bool refine_in_brick(float3 ray_origin,
-                     float3 ray_dir,
-                     float t_enter_brick,
-                     float t_exit_brick,
-                     int3 brick_cell,
-                     int slot,
-                     float vs,
-                     int bpa,
-                     float3 atlas_orig,
-                     out float out_hit_t,
-                     out int3 out_hit_cell)
-{
-  float inv_voxel = 1.0f / vs;
-  float3 brick_origin = atlas_orig + float3(brick_cell * BRICK_SIZE) * vs;
-  float3 V = (ray_origin - brick_origin) * inv_voxel;
-  float3 VD = ray_dir * inv_voxel;
-
-  float3 V_enter = V + t_enter_brick * VD;
-  int3 vcell = int3(floor(V_enter));
-  vcell = clamp(vcell, int3(0), int3(BRICK_SIZE - 1));
-
-  int3 vstep;
-  vstep.x = VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0);
-  vstep.y = VD.y > 0.0f ? 1 : (VD.y < 0.0f ? -1 : 0);
-  vstep.z = VD.z > 0.0f ? 1 : (VD.z < 0.0f ? -1 : 0);
-
-  float3 vtDelta = float3(VD.x != 0.0f ? abs(1.0f / VD.x) : 1e30f,
-                           VD.y != 0.0f ? abs(1.0f / VD.y) : 1e30f,
-                           VD.z != 0.0f ? abs(1.0f / VD.z) : 1e30f);
-
-  float3 vbound;
-  vbound.x = VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x);
-  vbound.y = VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y);
-  vbound.z = VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z);
-
-  float3 vtMax;
-  vtMax.x = VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f;
-  vtMax.y = VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f;
-  vtMax.z = VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f;
-
-  float vt_current = t_enter_brick;
-
-  for (int vstep_i = 0; vstep_i < MAX_VOXEL_STEPS; vstep_i++) {
-    if (any(lessThan(vcell, int3(0))) || any(greaterThan(vcell, int3(BRICK_SIZE - 1)))) {
-      break;
-    }
-
-    float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
-    vt_cell_exit = min(vt_cell_exit, t_exit_brick);
-
-    float s[8];
-    fetchCornersCompact(brick_cell, vcell, slot, bpa, s);
-
-    float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
-                     min(min(s[4], s[5]), min(s[6], s[7])));
-    float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
-                     max(max(s[4], s[5]), max(s[6], s[7])));
-
-    if (smin <= 0.0f) {
-      if (smax < 0.0f) {
-        out_hit_t = vt_current;
-        out_hit_cell = vcell;
-        return true;
-      }
-
-      float T_max = vt_cell_exit - vt_current;
-      if (T_max > 1e-8f) {
-        float k[8];
-        computeTrilinearCoeffs(s, k);
-
-        float3 o_local = V + vt_current * VD - float3(vcell);
-        o_local = clamp(o_local, float3(0.0f), float3(1.0f));
-        float3 d_scaled = VD * T_max;
-
-        float c[4];
-        computeCubicCoeffs(k, o_local, d_scaled, c);
-
-        if (c[0] <= 0.0f) {
-          out_hit_t = vt_current;
-          out_hit_cell = vcell;
-          return true;
-        }
-
-        float u_hit = solveCubicMarmittNR(c, 1.0f);
-        if (u_hit >= 0.0f) {
-          out_hit_t = vt_current + u_hit * T_max;
-          out_hit_cell = vcell;
-          return true;
-        }
-
-        /* Bisection fallback. */
-        float f_entry = c[0];
-        float f_exit = evalCubic(c, 1.0f);
-        if (f_entry * f_exit <= 0.0f) {
-          float lo = 0.0f, hi = 1.0f;
-          for (int bi = 0; bi < 8; bi++) {
-            float mid = (lo + hi) * 0.5f;
-            if (evalCubic(c, mid) * f_entry <= 0.0f) {
-              hi = mid;
-            }
-            else {
-              lo = mid;
-            }
-          }
-          out_hit_t = vt_current + lo * T_max;
-          out_hit_cell = vcell;
-          return true;
+      else {
+        float prev = grp_dist;
+        grp_dist = combineCSG(
+            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            obj.shell_distance, obj.shell_mode);
+        if (obj.csg_operation == 0 && d < prev) {
+          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          grp_color = mix(grp_color, obj.color.rgb, t);
         }
       }
     }
 
-    /* Advance voxel DDA. */
-    if (vtMax.x < vtMax.y) {
-      if (vtMax.x < vtMax.z) {
-        vt_current = vtMax.x;
-        vcell.x += vstep.x;
-        vtMax.x += vtDelta.x;
-      }
-      else {
-        vt_current = vtMax.z;
-        vcell.z += vstep.z;
-        vtMax.z += vtDelta.z;
-      }
-    }
-    else {
-      if (vtMax.y < vtMax.z) {
-        vt_current = vtMax.y;
-        vcell.y += vstep.y;
-        vtMax.y += vtDelta.y;
-      }
-      else {
-        vt_current = vtMax.z;
-        vcell.z += vstep.z;
-        vtMax.z += vtDelta.z;
-      }
+    if (!grp_has_hit) {
+      continue;
     }
 
-    if (vt_current >= t_exit_brick) {
-      break;
+    /* Combine group result into scene */
+    if (scene_dist >= 1e9f) {
+      scene_dist = grp_dist;
+      out_color = grp_color;
+    }
+    else {
+      float prev = scene_dist;
+      scene_dist = combineCSG(
+          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+          grp.shell_distance, grp.shell_mode);
+      if (grp.csg_operation == 0 && grp_dist < prev) {
+        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
+        out_color = mix(out_color, grp_color, t);
+      }
     }
   }
 
-  return false;
+  /* Ungrouped objects (group_id == -1) */
+  for (int i = 0; i < object_count; i++) {
+    SDFObjectGPU obj = objects[i];
+    if (obj.group_id >= 0) {
+      continue;
+    }
+
+    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+    float d = evalPrimitive(lp, obj);
+
+    if (scene_dist >= 1e9f) {
+      scene_dist = d;
+      out_color = obj.color.rgb;
+    }
+    else {
+      float prev = scene_dist;
+      scene_dist = combineCSG(
+          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+          obj.shell_distance, obj.shell_mode);
+      if (obj.csg_operation == 0 && d < prev) {
+        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+        out_color = mix(out_color, obj.color.rgb, t);
+      }
+    }
+  }
+
+  return scene_dist;
 }
 
-/* Brick-level DDA (used by per-object mode, calls refine_in_brick). */
-void dda_march(float3 ray_origin,
-               float3 ray_dir,
-               float t_enter,
-               float t_exit,
-               int3 grid_res,
-               float3 atlas_orig,
-               float vs,
-               int bpa,
-               int indir_offset,
-               out float out_hit_t,
-               out int3 out_hit_brick,
-               out int3 out_hit_cell,
-               out int out_hit_slot)
+/* Distance-only wrapper for normal computation */
+float evalSceneDist(float3 world_pos)
 {
-  out_hit_t = -1.0f;
-
-  float brick_world_size = float(BRICK_SIZE) * vs;
-  float inv_brick = 1.0f / brick_world_size;
-
-  float3 B = (ray_origin - atlas_orig) * inv_brick;
-  float3 BD = ray_dir * inv_brick;
-
-  float3 B_enter = B + t_enter * BD;
-  int3 brick_cell = int3(floor(B_enter));
-  brick_cell = clamp(brick_cell, int3(0), grid_res - int3(1));
-
-  int3 brick_step;
-  brick_step.x = BD.x > 0.0f ? 1 : (BD.x < 0.0f ? -1 : 0);
-  brick_step.y = BD.y > 0.0f ? 1 : (BD.y < 0.0f ? -1 : 0);
-  brick_step.z = BD.z > 0.0f ? 1 : (BD.z < 0.0f ? -1 : 0);
-
-  float3 brick_tDelta = float3(BD.x != 0.0f ? abs(1.0f / BD.x) : 1e30f,
-                                BD.y != 0.0f ? abs(1.0f / BD.y) : 1e30f,
-                                BD.z != 0.0f ? abs(1.0f / BD.z) : 1e30f);
-
-  float3 brick_boundary;
-  brick_boundary.x = BD.x > 0.0f ? float(brick_cell.x + 1) : float(brick_cell.x);
-  brick_boundary.y = BD.y > 0.0f ? float(brick_cell.y + 1) : float(brick_cell.y);
-  brick_boundary.z = BD.z > 0.0f ? float(brick_cell.z + 1) : float(brick_cell.z);
-
-  float3 brick_tMax;
-  brick_tMax.x = BD.x != 0.0f ? (brick_boundary.x - B.x) / BD.x : 1e30f;
-  brick_tMax.y = BD.y != 0.0f ? (brick_boundary.y - B.y) / BD.y : 1e30f;
-  brick_tMax.z = BD.z != 0.0f ? (brick_boundary.z - B.z) / BD.z : 1e30f;
-
-  float t_current = t_enter;
-
-  for (int bstep = 0; bstep < MAX_BRICK_STEPS; bstep++) {
-    if (any(lessThan(brick_cell, int3(0))) || any(greaterThanEqual(brick_cell, grid_res))) {
-      break;
-    }
-
-    int slot;
-    if (indir_offset < 0) {
-      slot = texelFetch(indirection_tx, brick_cell, 0).r;
-    }
-    else {
-      int flat_idx = brick_cell.x + brick_cell.y * grid_res.x +
-                     brick_cell.z * grid_res.x * grid_res.y;
-      slot = shape_indir[indir_offset + flat_idx];
-    }
-
-    if (slot == -2) {
-      out_hit_t = t_current;
-      out_hit_brick = brick_cell;
-      out_hit_cell = int3(0);
-      out_hit_slot = -2;
-      return;
-    }
-
-    if (slot >= 0) {
-      float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
-      t_brick_exit = min(t_brick_exit, t_exit);
-
-      float hit_t;
-      int3 hit_cell;
-      if (refine_in_brick(ray_origin, ray_dir, t_current, t_brick_exit,
-                          brick_cell, slot, vs, bpa, atlas_orig, hit_t, hit_cell))
-      {
-        out_hit_t = hit_t;
-        out_hit_brick = brick_cell;
-        out_hit_cell = hit_cell;
-        out_hit_slot = slot;
-        return;
-      }
-    }
-
-    /* Advance brick-level DDA. */
-    if (brick_tMax.x < brick_tMax.y) {
-      if (brick_tMax.x < brick_tMax.z) {
-        t_current = brick_tMax.x;
-        brick_cell.x += brick_step.x;
-        brick_tMax.x += brick_tDelta.x;
-      }
-      else {
-        t_current = brick_tMax.z;
-        brick_cell.z += brick_step.z;
-        brick_tMax.z += brick_tDelta.z;
-      }
-    }
-    else {
-      if (brick_tMax.y < brick_tMax.z) {
-        t_current = brick_tMax.y;
-        brick_cell.y += brick_step.y;
-        brick_tMax.y += brick_tDelta.y;
-      }
-      else {
-        t_current = brick_tMax.z;
-        brick_cell.z += brick_step.z;
-        brick_tMax.z += brick_tDelta.z;
-      }
-    }
-
-    if (t_current > t_exit) {
-      break;
-    }
-  }
+  float3 dummy_color;
+  return evalScene(world_pos, dummy_color);
 }
-
-/* Hybrid sphere-trace + DDA/Marmitt for world-space atlas.
- * Sphere-trace skips empty space, then DDA+Marmitt refines from the brick
- * entry point — identical voxel traversal to the original two-level DDA. */
-void sphere_trace_march(float3 ray_origin,
-                        float3 ray_dir,
-                        float t_enter,
-                        float t_exit,
-                        int3 grid_res,
-                        float3 atlas_orig,
-                        float vs,
-                        int bpa,
-                        out float out_hit_t,
-                        out int3 out_hit_brick,
-                        out int3 out_hit_cell,
-                        out int out_hit_slot)
-{
-  out_hit_t = -1.0f;
-
-  float bws = float(BRICK_SIZE) * vs;
-  float min_step = vs * 0.25f;
-  float omega = 0.8f;
-  float3 inv_dir = 1.0f / ray_dir;
-  float t = t_enter;
-
-  for (int step = 0; step < MAX_SPHERE_STEPS; step++) {
-    if (t > t_exit) {
-      break;
-    }
-
-    float3 pos = ray_origin + ray_dir * t;
-    int3 brick;
-    int slot;
-    float d = sampleAtlasWorld(pos, grid_res, atlas_orig, vs, bpa, brick, slot);
-
-    /* Empty brick (or outside grid): skip to brick exit. */
-    if (slot == -1) {
-      float dummy_entry, t_brick_exit;
-      computeBrickInterval(ray_origin, inv_dir, brick, atlas_orig, bws, dummy_entry, t_brick_exit);
-      t = max(t_brick_exit, t) + vs * 0.1f;
-      continue;
-    }
-
-    /* Interior brick: immediate hit. */
-    if (slot == -2) {
-      out_hit_t = t;
-      out_hit_brick = brick;
-      out_hit_cell = int3(0);
-      out_hit_slot = -2;
-      return;
-    }
-
-    /* Active brick with SDF data. */
-    float abs_d = abs(d);
-
-    /* Near surface: refine with DDA+Marmitt starting from brick entry point. */
-    if (abs_d < vs * 2.0f) {
-      float t_brick_enter, t_brick_exit;
-      computeBrickInterval(ray_origin, inv_dir, brick, atlas_orig, bws,
-                           t_brick_enter, t_brick_exit);
-      t_brick_enter = max(t_brick_enter, t_enter);
-      t_brick_exit = min(t_brick_exit, t_exit);
-
-      float hit_t;
-      int3 hit_cell;
-      if (refine_in_brick(ray_origin, ray_dir, t_brick_enter, t_brick_exit,
-                          brick, slot, vs, bpa, atlas_orig, hit_t, hit_cell))
-      {
-        out_hit_t = hit_t;
-        out_hit_brick = brick;
-        out_hit_cell = hit_cell;
-        out_hit_slot = slot;
-        return;
-      }
-
-      /* DDA didn't find a hit in this brick — skip past it. */
-      t = max(t_brick_exit, t) + vs * 0.1f;
-      continue;
-    }
-
-    /* Far from surface: relaxed sphere-trace step (omega < 1 prevents
-     * overshooting non-Lipschitz trilinear SDF near high-curvature features). */
-    t += max(abs_d * omega, min_step);
-  }
-}
-
-/* ---- Per-object sphere trace with pre-blended atlas data ---- */
-
-#define MAX_BLEND_OBJECTS 16
-
-struct BlendHit {
-  float world_t;
-  int driver_inst;
-  float3 hit_color;
-  float3 hit_normal;
-};
-
-/* Trilinear sample from a per-object brick map at a world position.
- * Atlas stores pre-blended CSG distance — no runtime blending needed. */
-float trilinearSampleObject(int inst_idx, float3 world_pos)
-{
-  SDFInstanceGPU inst = instances[inst_idx];
-  SDFShapeGPU shape = shapes[inst.shape_id];
-
-  float3 local_pos = (inst.world_to_local * float4(world_pos, 1.0f)).xyz;
-
-  int3 grid_res = shape.grid_params.xyz;
-  int indir_offset = shape.grid_params.w;
-  float3 local_origin = shape.local_params.xyz;
-  float local_vs = shape.local_params.w;
-  int bpa = shape.atlas_params.x;
-
-  float bws = float(BRICK_SIZE) * local_vs;
-  float3 bp = (local_pos - local_origin) / bws;
-  int3 brick = int3(floor(bp));
-
-  if (any(lessThan(brick, int3(0))) || any(greaterThanEqual(brick, grid_res))) {
-    return 1e10f;
-  }
-
-  int flat_idx = brick.x + brick.y * grid_res.x + brick.z * grid_res.x * grid_res.y;
-  int slot_id = shape_indir[indir_offset + flat_idx];
-
-  if (slot_id < 0) {
-    return 1e10f;
-  }
-
-  float3 brick_origin = local_origin + float3(brick) * bws;
-  float3 vp = (local_pos - brick_origin) / local_vs;
-
-  int3 cell = clamp(int3(floor(vp)), int3(0), int3(BRICK_SIZE - 1));
-  float3 f = clamp(vp - float3(cell), float3(0.0f), float3(1.0f));
-
-  int3 sb = int3(slot_id % bpa, (slot_id / bpa) % bpa, slot_id / (bpa * bpa));
-  int3 base = sb * BRICK_STORAGE + cell + int3(2);
-
-  float s0 = texelFetch(compact_atlas, base + int3(0, 0, 0), 0).r;
-  float s1 = texelFetch(compact_atlas, base + int3(1, 0, 0), 0).r;
-  float s2 = texelFetch(compact_atlas, base + int3(0, 1, 0), 0).r;
-  float s3 = texelFetch(compact_atlas, base + int3(1, 1, 0), 0).r;
-  float s4 = texelFetch(compact_atlas, base + int3(0, 0, 1), 0).r;
-  float s5 = texelFetch(compact_atlas, base + int3(1, 0, 1), 0).r;
-  float s6 = texelFetch(compact_atlas, base + int3(0, 1, 1), 0).r;
-  float s7 = texelFetch(compact_atlas, base + int3(1, 1, 1), 0).r;
-
-  return mix(mix(mix(s0, s1, f.x), mix(s2, s3, f.x), f.y),
-             mix(mix(s4, s5, f.x), mix(s6, s7, f.x), f.y),
-             f.z);
-}
-
-// Hybrid sphere-trace + DDA march through pre-blended per-object brick maps.
-BlendHit march_blended(float3 ray_origin, float3 ray_dir)
-{
-  BlendHit best;
-  best.world_t = -1.0f;
-  best.driver_inst = -1;
-  best.hit_color = float3(0.5f);
-  best.hit_normal = float3(0.0f, 0.0f, 1.0f);
-
-  float3 inv_dir = 1.0f / ray_dir;
-
-  /* BVH collect candidates. */
-  int cand_insts[MAX_BLEND_OBJECTS];
-  float cand_vs[MAX_BLEND_OBJECTS];
-  int num_cands = 0;
-  float combined_t_enter = 1e30f;
-  float combined_t_exit = -1e30f;
-
-  int stack[MAX_INST_STACK];
-  int sp = 0;
-  stack[sp++] = 0;
-
-  while (sp > 0) {
-    int node_idx = stack[--sp];
-    BVHNodeGPU node = bvh_nodes[node_idx];
-
-    float tn, tf;
-    if (!ray_aabb_intersect(
-            ray_origin, inv_dir, node.min_and_left.xyz, node.max_and_right.xyz, tn, tf))
-    {
-      continue;
-    }
-
-    int left = bvh_decode_int(node.min_and_left.w);
-    int right = bvh_decode_int(node.max_and_right.w);
-
-    if (left == -1) {
-      int idx = right;
-      if (idx >= 0 && idx < instance_count && num_cands < MAX_BLEND_OBJECTS) {
-        SDFShapeGPU sh = shapes[instances[idx].shape_id];
-        if (sh.atlas_params.y > 0) {
-          cand_insts[num_cands] = idx;
-          cand_vs[num_cands] = sh.local_params.w;
-          num_cands++;
-          combined_t_enter = min(combined_t_enter, max(tn, 0.0f));
-          combined_t_exit = max(combined_t_exit, tf);
-        }
-      }
-    }
-    else {
-      if (sp < MAX_INST_STACK) {
-        stack[sp++] = right;
-      }
-      if (sp < MAX_INST_STACK) {
-        stack[sp++] = left;
-      }
-    }
-  }
-
-  if (num_cands == 0) {
-    return best;
-  }
-
-  /* Sort by voxel size (finest first). */
-  for (int i = 0; i < num_cands - 1; i++) {
-    for (int j = i + 1; j < num_cands; j++) {
-      if (cand_vs[j] < cand_vs[i]) {
-        int ti = cand_insts[i]; cand_insts[i] = cand_insts[j]; cand_insts[j] = ti;
-        float tv = cand_vs[i]; cand_vs[i] = cand_vs[j]; cand_vs[j] = tv;
-      }
-    }
-  }
-
-  float finest_vs = cand_vs[0];
-  float dda_threshold = finest_vs * 3.0f;
-  float min_step = finest_vs * 0.5f;
-  float max_skip = finest_vs * 16.0f;
-  float omega = 0.8f;
-  float t = combined_t_enter;
-
-  /* Phase 1: Sphere trace to approach the surface. */
-  int near_inst = -1;
-  for (int step = 0; step < 256; step++) {
-    float3 pos = ray_origin + ray_dir * t;
-
-    float d = 1e10f;
-    for (int ci = 0; ci < num_cands; ci++) {
-      float sd = trilinearSampleObject(cand_insts[ci], pos);
-      if (sd < 1e9f) {
-        d = sd;
-        near_inst = cand_insts[ci];
-        break;
-      }
-    }
-
-    /* Close enough for DDA handoff. */
-    if (d < 1e9f && abs(d) < dda_threshold) {
-      break;
-    }
-
-    if (d >= 1e9f) {
-      t += max_skip;
-    }
-    else {
-      t += max(abs(d) * omega, min_step);
-    }
-
-    if (t > combined_t_exit) {
-      return best;
-    }
-  }
-
-  /* Phase 2: DDA + Marmitt on each candidate's grid, take nearest hit. */
-  if (near_inst < 0) {
-    return best;
-  }
-
-  /* Reorder so near_inst is tried first (keep rest in voxel-size order). */
-  for (int ci = 0; ci < num_cands; ci++) {
-    if (cand_insts[ci] == near_inst && ci > 0) {
-      int ti = cand_insts[0]; cand_insts[0] = cand_insts[ci]; cand_insts[ci] = ti;
-      float tv = cand_vs[0]; cand_vs[0] = cand_vs[ci]; cand_vs[ci] = tv;
-      break;
-    }
-  }
-
-  float dda_backup = finest_vs * 3.0f;
-
-  for (int ci = 0; ci < num_cands; ci++) {
-    int inst_idx = cand_insts[ci];
-    SDFInstanceGPU inst = instances[inst_idx];
-    SDFShapeGPU shape = shapes[inst.shape_id];
-
-    int3 grid_res = shape.grid_params.xyz;
-    int indir_offset = shape.grid_params.w;
-    float3 local_origin = shape.local_params.xyz;
-    float local_vs = shape.local_params.w;
-    int bpa = shape.atlas_params.x;
-
-    float3 local_ray_origin = (inst.world_to_local * float4(ray_origin, 1.0f)).xyz;
-    float3 local_ray_dir = mat3(inst.world_to_local) * ray_dir;
-
-    float3 grid_min = local_origin;
-    float3 grid_max = local_origin + float3(grid_res * BRICK_SIZE) * local_vs;
-
-    float3 local_inv = 1.0f / local_ray_dir;
-    float3 t0 = (grid_min - local_ray_origin) * local_inv;
-    float3 t1 = (grid_max - local_ray_origin) * local_inv;
-    float3 t_lo = min(t0, t1);
-    float3 t_hi = max(t0, t1);
-    float t_grid_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
-    float t_grid_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
-
-    float dda_t_enter = max(t - dda_backup, max(t_grid_enter, 0.0f));
-    float dda_t_exit = min(t_grid_exit, combined_t_exit);
-
-    if (dda_t_enter > dda_t_exit) {
-      continue;
-    }
-
-    /* Skip if already have a closer hit. */
-    if (best.world_t >= 0.0f && dda_t_enter > best.world_t) {
-      continue;
-    }
-
-    float hit_t;
-    int3 hit_brick, hit_cell;
-    int hit_slot;
-
-    dda_march(local_ray_origin, local_ray_dir, dda_t_enter, dda_t_exit,
-              grid_res, local_origin, local_vs, bpa, indir_offset,
-              hit_t, hit_brick, hit_cell, hit_slot);
-
-    if (hit_t < 0.0f) {
-      continue;
-    }
-    if (best.world_t >= 0.0f && hit_t >= best.world_t) {
-      continue;
-    }
-
-    best.world_t = hit_t;
-    best.driver_inst = inst_idx;
-
-    float3 hit_local = local_ray_origin + local_ray_dir * hit_t;
-    float3 brick_origin = local_origin + float3(hit_brick * BRICK_SIZE) * local_vs;
-    float3 pib = (hit_local - brick_origin) / local_vs;
-
-    int3 sb = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
-    float3 atlas_pos = float3(sb * BRICK_STORAGE) + pib + float3(2.0f);
-    int3 compact_size = int3(textureSize(compact_atlas, 0));
-    float3 atlas_uv = atlas_pos / float3(compact_size);
-    best.hit_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
-  }
-
-  /* World-space central differences for normals. */
-  if (best.world_t >= 0.0f) {
-    float3 hit_world = ray_origin + ray_dir * best.world_t;
-    float eps = finest_vs * 0.5f;
-    float nx = trilinearSampleObject(best.driver_inst, hit_world + float3(eps, 0.0f, 0.0f))
-             - trilinearSampleObject(best.driver_inst, hit_world - float3(eps, 0.0f, 0.0f));
-    float ny = trilinearSampleObject(best.driver_inst, hit_world + float3(0.0f, eps, 0.0f))
-             - trilinearSampleObject(best.driver_inst, hit_world - float3(0.0f, eps, 0.0f));
-    float nz = trilinearSampleObject(best.driver_inst, hit_world + float3(0.0f, 0.0f, eps))
-             - trilinearSampleObject(best.driver_inst, hit_world - float3(0.0f, 0.0f, eps));
-    float3 n = float3(nx, ny, nz);
-    if (dot(n, n) > 1e-12f) {
-      best.hit_normal = normalize(n);
-    }
-  }
-
-  return best;
-}
-
-/* ---- Main ---- */
 
 void main()
 {
   float2 uv = screen_uv;
 
-  /* ---- 1. Reconstruct camera ray ---- */
+  /* Reconstruct camera ray */
   ViewMatrices vm = drw_view();
   float4x4 view_inv = vm.viewinv;
   float4x4 win_inv = vm.wininv;
@@ -842,80 +150,69 @@ void main()
 
   float3 ray_origin = world_near.xyz;
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
+  float3 inv_dir = 1.0f / ray_dir;
 
-  /* ---- 2. Mode dispatch ---- */
-  float hit_t = -1.0f;
-  int3 hit_brick = int3(0);
-  int3 hit_local_cell = int3(0);
-  int hit_slot = -1;
-  float3 hit_color = float3(0.5f);
-  float3 hit_normal = float3(0.0f, 0.0f, 1.0f);
-  float3 hit_pos = float3(0.0f);
-
-  if (use_instanced != 0 && instance_count > 0 && bvh_node_count > 0) {
-    /* ---- Per-object mode: BVH + blended DDA ---- */
-    BlendHit bhit = march_blended(ray_origin, ray_dir);
-
-    if (bhit.world_t < 0.0f) {
-      discard;
-      return;
-    }
-
-    hit_t = bhit.world_t;
-    hit_pos = ray_origin + ray_dir * hit_t;
-    hit_color = bhit.hit_color;
-    hit_normal = bhit.hit_normal;
+  /* Compute scene AABB from all objects for ray bounds */
+  float3 scene_min = float3(1e30f);
+  float3 scene_max = float3(-1e30f);
+  for (int i = 0; i < object_count; i++) {
+    scene_min = min(scene_min, objects[i].bbox_min.xyz);
+    scene_max = max(scene_max, objects[i].bbox_max.xyz);
   }
-  else {
-    /* ---- World-space mode: hybrid sphere-trace + DDA/Marmitt ---- */
-    int3 grid_res = grid_resolution;
-    int3 total_res = grid_res * BRICK_SIZE;
-    float3 grid_world_min = atlas_origin;
-    float3 grid_world_max = atlas_origin + float3(total_res) * voxel_size;
 
-    float3 inv_dir = 1.0f / ray_dir;
-    float3 t0 = (grid_world_min - ray_origin) * inv_dir;
-    float3 t1 = (grid_world_max - ray_origin) * inv_dir;
-    float3 t_lo = min(t0, t1);
-    float3 t_hi = max(t0, t1);
-    float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
-    float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
+  float3 t0 = (scene_min - ray_origin) * inv_dir;
+  float3 t1 = (scene_max - ray_origin) * inv_dir;
+  float3 t_lo = min(t0, t1);
+  float3 t_hi = max(t0, t1);
+  float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
+  float t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
-    if (t_enter > t_exit || t_exit < 0.0f) {
-      discard;
-      return;
+  if (t_enter > t_exit || t_exit < 0.0f) {
+    discard;
+    return;
+  }
+  t_enter = max(t_enter, 0.0f);
+
+  /* Sphere trace */
+  float t = t_enter;
+  bool hit = false;
+  float3 hit_pos;
+  float3 hit_color;
+
+  for (int step = 0; step < MAX_MARCH_STEPS; step++) {
+    float3 pos = ray_origin + ray_dir * t;
+    float3 color;
+    float d = evalScene(pos, color);
+
+    if (d < EPSILON) {
+      hit = true;
+      hit_pos = pos;
+      hit_color = color;
+      break;
     }
-    t_enter = max(t_enter, 0.0f);
 
-    sphere_trace_march(ray_origin, ray_dir, t_enter, t_exit,
-                       grid_res, atlas_origin, voxel_size, bricks_per_axis,
-                       hit_t, hit_brick, hit_local_cell, hit_slot);
-
-    if (hit_t < 0.0f) {
-      discard;
-      return;
-    }
-
-    hit_pos = ray_origin + ray_dir * hit_t;
-
-    if (hit_slot == -2) {
-      hit_color = float3(0.5f);
-      hit_normal = -ray_dir;
-    }
-    else {
-      /* Read blended color and compute normal. */
-      float inv_voxel = 1.0f / voxel_size;
-      float3 brick_origin = atlas_origin + float3(hit_brick * BRICK_SIZE) * voxel_size;
-      float3 hit_in_brick = (hit_pos - brick_origin) * inv_voxel;
-
-      hit_color = sampleAtlasColor(hit_brick, hit_in_brick, hit_slot, bricks_per_axis);
-      hit_normal = computeDualVoxelNormal(hit_in_brick, hit_brick, hit_slot, bricks_per_axis);
+    t += max(d, EPSILON);
+    if (t > t_exit) {
+      break;
     }
   }
 
+  if (!hit) {
+    discard;
+    return;
+  }
 
-  /* ---- Shading ---- */
-  float3 normal = hit_normal;
+  /* Normal via central differences */
+  float eps = EPSILON * 2.0f;
+  float3 normal = normalize(float3(
+      evalSceneDist(hit_pos + float3(eps, 0.0f, 0.0f)) -
+          evalSceneDist(hit_pos - float3(eps, 0.0f, 0.0f)),
+      evalSceneDist(hit_pos + float3(0.0f, eps, 0.0f)) -
+          evalSceneDist(hit_pos - float3(0.0f, eps, 0.0f)),
+      evalSceneDist(hit_pos + float3(0.0f, 0.0f, eps)) -
+          evalSceneDist(hit_pos - float3(0.0f, 0.0f, eps))));
+
+  /* Shading */
   float3 obj_color = hit_color;
   float3 shaded_color;
 
@@ -923,7 +220,7 @@ void main()
     shaded_color = obj_color;
   }
   else if (lighting_type == 1) {
-    /* STUDIO lighting. */
+    /* STUDIO lighting */
     float3 N = normalize((vm.viewmat * float4(normal, 0.0f)).xyz);
     float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
     float3 I = drw_view_incident_vector(view_pos);
@@ -978,7 +275,7 @@ void main()
     shaded_color = diffuse_light + specular_light;
   }
   else {
-    /* MATCAP lighting. */
+    /* MATCAP lighting */
     float3 view_normal = normalize((vm.viewmat * float4(normal, 0.0f)).xyz);
     float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
     float3 I = drw_view_incident_vector(view_pos);
@@ -1001,6 +298,6 @@ void main()
 
   out_color = float4(shaded_color, 1.0f);
 
-  /* Write depth. */
+  /* Write depth */
   gl_FragDepth = drw_point_world_to_screen(hit_pos).z;
 }
