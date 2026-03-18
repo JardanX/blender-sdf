@@ -124,6 +124,7 @@ class RENDER_PT_proximity_raymarcher(Panel):
         col.prop(shading, "sdf_ray_epsilon")
         col.prop(shading, "sdf_over_relaxation")
         col.separator()
+        col.prop(shading, "sdf_use_cone_trace")
         col.prop(shading, "sdf_bvh_debug_view")
 
 

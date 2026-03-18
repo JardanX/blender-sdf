@@ -4757,12 +4757,20 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Use BVH", "Use Bounding Volume Hierarchy for faster sphere tracing");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "sdf_use_cone_trace", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_use_cone_trace", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Cone Trace Pre-Pass", "Coarse cone tracing per tile to skip empty space before per-pixel sphere tracing");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   static const EnumPropertyItem sdf_bvh_debug_view_items[] = {
       {0, "NONE", 0, "None", "No debug view"},
       {1, "SHAPE_COUNT", 0, "Shape Count", "Number of shapes tested per pixel"},
       {2, "SHAPE_COUNT_TILE", 0, "Shape Count per Tile", "Maximum number of shapes tested in 8x8 tile"},
       {3, "STEP_COUNT", 0, "Step Count", "Number of march steps per pixel"},
       {4, "STEP_COUNT_TILE", 0, "Step Count per Tile", "Maximum number of march steps in 8x8 tile"},
+      {5, "CONE_HEATMAP", 0, "Cone Heatmap", "Steps saved by cone trace pre-pass (green=many, red=none)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
