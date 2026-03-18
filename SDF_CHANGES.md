@@ -2413,3 +2413,53 @@ buffer, no BVH dependency, zero hard limits.
 | `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Complete rewrite: streaming batch evaluation (BATCH_SIZE=64), overflow fallback, single-pass group tracking, removed MAX_CANDIDATES/Lipschitz |
 | `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Rewrite: linear scan through sorted objects, no candidate buffer, single-pass group evaluation |
 | `draw/engines/sdf/sdf_engine.cc` | Asymmetric voxel deadband (0.9–1.25), proportional hysteresis padding, 50% contraction threshold |
+
+---
+
+## Replace Brick-Based SDF Engine with Analytical Sphere Tracer
+
+Stripped the entire brick/voxel atlas pipeline (~3500 lines C++, ~2000 lines GLSL across 10+ shaders)
+and replaced it with a bare-bones analytical sphere tracer that evaluates SDF primitives directly per-pixel.
+The overlay system (selection, outlines) already used analytical sphere tracing and is unchanged.
+
+### Deleted Files
+
+| File | Reason |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Brick classification compute shader — no longer needed |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Brick voxel baking compute shader — no longer needed |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Grid blending compute shader — no longer needed |
+| `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | Grid augmentation compute shader — no longer needed |
+| `draw/engines/sdf/shaders/sdf_prepare_dispatch_comp.glsl` | Dispatch preparation compute shader — no longer needed |
+| `scripts/startup/bl_operators/mesh_to_sdf.py` | Mesh-to-SDF grid operator — grid pipeline removed |
+
+### Rewritten Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Rewrite: ~3500→~850 lines. Removed all brick/atlas textures, BVH, compute dispatch, grid objects, incremental bake, dirty tracking, debug visualization, performance overlay. Kept: object_sync, end_sync (group building, sorting, AABB expansion), sync_shading, upload_objects, FXAA. New draw() dispatches fullscreen analytical sphere trace |
+| `draw/engines/sdf/sdf_engine.h` | Simplified: removed `sdf_perf_info_get`, `sdf_perf_active`, `sdf_atlas_get`, `sdf_indirection_get`, `sdf_object_id_atlas_get`, `SDF_PERF_BUF_SIZE`. Kept: `Engine`, SSBO getters, `sdf_atlas_params_get` (returns defaults) |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Removed `BrickCounter`, `ActiveBrick`, `SDFShapeGPU`, `SDFInstanceGPU`, `SDFClassifyParams`, `SDFBakeParams`, `SDFMarchParams`. Kept: `SDFObjectGPU`, `SDFGroupGPU`, `SDFModifierGPU`, `BVHNodeGPU` |
+| `draw/engines/sdf/sdf_private.hh` | Removed brick constants (`SDF_BRICK_SIZE`, `SDF_BRICK_STORAGE`, `SDF_MAX_BRICKS`, `SDF_MAX_GRID_RES`). Added `SDF_MAX_MARCH_STEPS = 256` |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Complete rewrite: ~1006→~270 lines. Analytical sphere tracer evaluating SDF primitives directly. `evalScene()` handles group-ordered CSG + ungrouped objects. Central differences for normals. Same shading (FLAT/STUDIO/MATCAP) |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed `sdf_classify`, `sdf_augment_grids`, `sdf_bake`, `sdf_grid_blend` shader infos. Simplified `sdf_march` to use 3 SSBOs + push constants (no atlas/indirection/shape/instance bindings) |
+| `draw/CMakeLists.txt` | Removed 4 deleted compute shader file entries |
+| `draw/intern/draw_context.cc` | `DRW_sdf_perf_info_get()` now returns null/false (no perf overlay) |
+
+### Modified Files (Python UI)
+
+| File | Change |
+|------|--------|
+| `scripts/startup/bl_operators/__init__.py` | Removed `"mesh_to_sdf"` from modules list |
+| `scripts/startup/bl_ui/space_view3d.py` | Removed "Mesh to SDF Grid" menu entry from SDF add menu |
+| `scripts/startup/bl_ui/properties_render.py` | Simplified `RENDER_PT_proximity_raymarcher` panel — removed `sdf_resolution`, `sdf_surface_margin`, `sdf_debug_grid` props |
+
+### Unchanged Files
+
+| File | Note |
+|------|------|
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Kept entirely — all SDF primitives, modifiers, CSG ops used by march + select + outline shaders |
+| `draw/engines/sdf/shaders/sdf_fxaa_*.glsl` | Kept — FXAA post-process unchanged |
+| `draw/engines/sdf/shaders/sdf_select_march_frag.glsl` | Kept — overlay selection already used analytical sphere tracing |
+| `draw/engines/sdf/shaders/sdf_outline_march_*.glsl` | Kept — overlay outline already used analytical sphere tracing |
+| `draw/engines/overlay/overlay_sdf.hh` | Kept — overlay code works with null atlas |

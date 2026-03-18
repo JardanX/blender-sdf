@@ -6,7 +6,7 @@
  * \ingroup draw_engine
  *
  * SDF (Signed Distance Field) draw engine.
- * Bakes SDF objects into a dense 3D atlas and ray-marches it.
+ * Analytical sphere tracer — evaluates SDF primitives directly per-pixel.
  */
 
 #pragma once
@@ -18,20 +18,11 @@
 
 #include "DRW_render.hh"
 
-#define SDF_PERF_BUF_SIZE 512
-
 namespace blender::draw::sdf {
 
 struct Engine : public DrawEngine::Pointer {
   DrawEngine *create_instance() final;
 };
-
-const char *sdf_perf_info_get();
-bool sdf_perf_active();
-
-gpu::Texture *sdf_atlas_get();
-gpu::Texture *sdf_indirection_get();
-gpu::Texture *sdf_object_id_atlas_get();
 
 void sdf_atlas_params_get(float *voxel_size,
                           float3 *origin,

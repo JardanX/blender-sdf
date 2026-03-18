@@ -1067,13 +1067,11 @@ void DRW_draw_region_engine_info(int xoffset, int *yoffset, int line_height)
 
 void DRW_sdf_perf_info_get(const char **r_text, bool *r_active)
 {
-  const char *text = blender::draw::sdf::sdf_perf_info_get();
-  bool active = blender::draw::sdf::sdf_perf_active();
   if (r_text) {
-    *r_text = text;
+    *r_text = nullptr;
   }
   if (r_active) {
-    *r_active = active;
+    *r_active = false;
   }
 }
 

@@ -26,7 +26,6 @@ _modules = [
     "image",
     "image_as_planes",
     "mesh",
-    "mesh_to_sdf",
     "node",
     "object",
     "object_align",
