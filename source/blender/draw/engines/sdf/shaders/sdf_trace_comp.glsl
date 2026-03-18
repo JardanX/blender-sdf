@@ -296,8 +296,12 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
     if (gid < 0) {
       /* Ungrouped: combine directly into scene */
       if (scene_dist >= 1e9f) {
-        scene_dist = d;
-        out_color = obj.color.rgb;
+        /* Only union (op=0) can create geometry from nothing.
+         * Subtraction/intersection with no base produces no surface. */
+        if (obj.csg_operation == 0) {
+          scene_dist = d;
+          out_color = obj.color.rgb;
+        }
       }
       else {
         float prev = scene_dist;
@@ -313,9 +317,11 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
     else {
       /* Grouped: accumulate into group CSG chain */
       if (!grp_has_hit) {
-        grp_dist = d;
-        grp_color = obj.color.rgb;
-        grp_has_hit = true;
+        if (obj.csg_operation == 0) {
+          grp_dist = d;
+          grp_color = obj.color.rgb;
+          grp_has_hit = true;
+        }
       }
       else {
         float prev = grp_dist;
@@ -636,7 +642,9 @@ void main()
         }
         else {
           float cos_theta = denom / max(t - t_prev, 1e-8f);
-          hit_pos = pos + ray_dir * d / clamp(cos_theta, 0.5f, 1.0f);
+          float near = clamp(5.0f / max(t, 0.1f), 0.0f, 1.0f);
+          float min_cos = mix(0.9f, 0.25f, near);
+          hit_pos = pos + ray_dir * d / clamp(cos_theta, min_cos, 1.0f);
         }
       }
       else {

@@ -91,7 +91,6 @@ class Instance : public DrawEngine {
     SH_TRACE_COMP = 0,
     SH_TRACE_TILE_COMP,
     SH_SHADE_COMP,
-    SH_NORMAL_COMP,
     SH_BLIT,
     SH_FXAA,
     SH_COUNT,
@@ -101,7 +100,6 @@ class Instance : public DrawEngine {
       "sdf_trace_comp",
       "sdf_trace_tile_comp",
       "sdf_shade_comp",
-      "sdf_normal_comp",
       "sdf_blit",
       "sdf_fxaa",
   };
@@ -111,7 +109,6 @@ class Instance : public DrawEngine {
   gpu::Shader *&trace_comp_sh_ = shaders_[SH_TRACE_COMP];
   gpu::Shader *&trace_tile_sh_ = shaders_[SH_TRACE_TILE_COMP];
   gpu::Shader *&shade_comp_sh_ = shaders_[SH_SHADE_COMP];
-  gpu::Shader *&normal_comp_sh_ = shaders_[SH_NORMAL_COMP];
   gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
 
@@ -1302,40 +1299,6 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(comp_depth_tx_);
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_color_tx_);
-    GPU_texture_image_unbind(gbuf_normal_tx_);
-    GPU_shader_unbind();
-  }
-
-  void draw_normal()
-  {
-    if (debug_bvh_views_ != 0) {
-      return;
-    }
-
-    gpu::Shader *sh = normal_comp_sh_;
-    if (!sh) {
-      return;
-    }
-
-    GPU_shader_bind(sh);
-    bind_ssbos(sh);
-
-    GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
-    GPU_texture_image_bind(
-        gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
-
-    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
-    GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
-    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
-    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
-    GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
-
-    int dispatch_x = (render_size_.x + 7) / 8;
-    int dispatch_y = (render_size_.y + 7) / 8;
-    GPU_compute_dispatch(sh, dispatch_x, dispatch_y, 1);
-
-    GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
     GPU_shader_unbind();
   }

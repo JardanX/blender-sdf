@@ -2,10 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Shade pass: multi-tap bilateral screen-space normals + lighting.
- * Sums Gaussian-weighted central differences at offsets 1-4 pixels,
- * with depth-aware bilateral gating to preserve silhouette edges.
- * Smooths over sphere march epsilon-step banding in the position buffer. */
+/* Shade pass: best-fit triangle normals + lighting from G-buffer. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -31,63 +28,39 @@ void main()
   float3 hit_pos = gbuf.xyz;
   float3 hit_color = imageLoad(gbuf_color_img, pixel).rgb;
 
-  /* Multi-tap bilateral Gaussian derivative.
-   * Spatial weights: Gaussian with sigma ~2.5 pixels.
-   * Bilateral gate: reject neighbors with depth jump > 5% of center depth. */
+  /* Best-fit triangle normal: pick the closer neighbor in each axis to avoid
+   * artifacts at depth discontinuities (silhouettes, CSG edges). */
+  float3 p0 = hit_pos;
+  float4 raw_r = imageLoad(gbuf_pos_img, pixel + int2(1, 0));
+  float4 raw_l = imageLoad(gbuf_pos_img, pixel + int2(-1, 0));
+  float4 raw_u = imageLoad(gbuf_pos_img, pixel + int2(0, 1));
+  float4 raw_d = imageLoad(gbuf_pos_img, pixel + int2(0, -1));
+
   float3 cam_pos = drw_view().viewinv[3].xyz;
-  float depth0 = length(hit_pos - cam_pos);
-  float disc = depth0 * 0.05f;
+  float depth0 = length(p0 - cam_pos);
+  float depth_r = (raw_r.w > 0.0f) ? length(raw_r.xyz - cam_pos) : 1e10f;
+  float depth_l = (raw_l.w > 0.0f) ? length(raw_l.xyz - cam_pos) : 1e10f;
+  float depth_u = (raw_u.w > 0.0f) ? length(raw_u.xyz - cam_pos) : 1e10f;
+  float depth_d = (raw_d.w > 0.0f) ? length(raw_d.xyz - cam_pos) : 1e10f;
 
-  /* Gaussian spatial weights for offsets 1,2,3,4 (sigma=2.5) */
-  float gs[4] = float[4](0.38f, 0.30f, 0.20f, 0.12f);
+  bool use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
+  bool use_up = abs(depth_u - depth0) < abs(depth_d - depth0);
 
-  float3 dx = float3(0.0f);
-  float3 dy = float3(0.0f);
-  float wx = 0.0f;
-  float wy = 0.0f;
-
-  for (int k = 1; k <= 4; k++) {
-    float ws = gs[k - 1];
-    float inv_span = 1.0f / float(2 * k);
-
-    float4 pr = imageLoad(gbuf_pos_img, pixel + int2(k, 0));
-    float4 pl = imageLoad(gbuf_pos_img, pixel + int2(-k, 0));
-    float4 pu = imageLoad(gbuf_pos_img, pixel + int2(0, k));
-    float4 pd = imageLoad(gbuf_pos_img, pixel + int2(0, -k));
-
-    float dr = (pr.w > 0.0f) ? abs(length(pr.xyz - cam_pos) - depth0) : 1e10f;
-    float dl = (pl.w > 0.0f) ? abs(length(pl.xyz - cam_pos) - depth0) : 1e10f;
-    float du = (pu.w > 0.0f) ? abs(length(pu.xyz - cam_pos) - depth0) : 1e10f;
-    float dd = (pd.w > 0.0f) ? abs(length(pd.xyz - cam_pos) - depth0) : 1e10f;
-
-    if (dr < disc && dl < disc) {
-      dx += ws * (pr.xyz - pl.xyz) * inv_span;
-      wx += ws;
-    }
-    if (du < disc && dd < disc) {
-      dy += ws * (pu.xyz - pd.xyz) * inv_span;
-      wy += ws;
-    }
-  }
+  float3 h = use_right ? raw_r.xyz : raw_l.xyz;
+  float3 v = use_up ? raw_u.xyz : raw_d.xyz;
 
   float3 normal;
-  if (wx > 0.001f && wy > 0.001f) {
-    dx /= wx;
-    dy /= wy;
-    normal = normalize(cross(dx, dy));
-  }
-  else {
-    normal = float3(0.0f, 0.0f, 1.0f);
-  }
+  if (use_right && use_up)
+    normal = normalize(cross(h - p0, v - p0));
+  else if (use_right && !use_up)
+    normal = normalize(cross(v - p0, h - p0));
+  else if (!use_right && use_up)
+    normal = normalize(cross(v - p0, h - p0));
+  else
+    normal = normalize(cross(h - p0, v - p0));
 
   if (any(isnan(normal)) || dot(normal, normal) < 0.5f) {
     normal = float3(0.0f, 0.0f, 1.0f);
-  }
-
-  /* Ensure normal faces camera */
-  float3 view_dir = normalize(hit_pos - cam_pos);
-  if (dot(normal, view_dir) > 0.0f) {
-    normal = -normal;
   }
 
   /* Shading */
