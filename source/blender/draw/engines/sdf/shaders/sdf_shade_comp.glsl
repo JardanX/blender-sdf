@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Shade pass: computes normals + lighting from G-buffer, outputs final color + depth. */
+/* Shade pass: brute-force tetrahedron normals + lighting from G-buffer. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -10,21 +10,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_shade_comp)
 
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
-
-/* Per-pixel BVH filter for normal computation */
-#define kAabbTreeStackSize 32
-#define kMaxBitfieldBits 256
-#define kBitfieldWords (kMaxBitfieldBits / 32)
-
-uint g_bvh_bits[kBitfieldWords];
-
-bool is_shape_near(int idx)
-{
-  if (idx >= kMaxBitfieldBits) {
-    return true;
-  }
-  return (g_bvh_bits[idx >> 5] & (1u << (uint(idx) & 31u))) != 0u;
-}
 
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -42,78 +27,8 @@ float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-float3 find_ortho(float3 v)
-{
-  if (abs(v.x) >= 0.57735f) {
-    return float3(v.y, -v.x, 0.0f);
-  }
-  return float3(0.0f, v.z, -v.y);
-}
-
-/* Scene evaluation with BVH bitfield filter */
-float evalSceneDistBVH(float3 world_pos)
-{
-  float scene_dist = 1e10f;
-
-  for (int g = 0; g < group_count; g++) {
-    SDFGroupGPU grp = groups[g];
-    float grp_dist = 1e10f;
-    bool grp_has_hit = false;
-
-    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      if (!is_shape_near(m)) continue;
-
-      SDFObjectGPU obj = objects[m];
-      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-      float d = evalPrimitive(lp, obj);
-
-      if (!grp_has_hit) {
-        grp_dist = d;
-        grp_has_hit = true;
-      }
-      else {
-        grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode);
-      }
-    }
-
-    if (!grp_has_hit) continue;
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = grp_dist;
-    }
-    else {
-      scene_dist = combineCSG(
-          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode);
-    }
-  }
-
-  for (int i = 0; i < object_count; i++) {
-    if (!is_shape_near(i)) continue;
-
-    SDFObjectGPU obj = objects[i];
-    if (obj.group_id >= 0) continue;
-
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-
-    if (scene_dist >= 1e9f) {
-      scene_dist = d;
-    }
-    else {
-      scene_dist = combineCSG(
-          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-          obj.shell_distance, obj.shell_mode);
-    }
-  }
-
-  return scene_dist;
-}
-
-/* Full scene evaluation (no BVH filter) */
-float evalSceneDistFull(float3 world_pos)
+/* Brute-force scene distance (no BVH, no tile culling) */
+float evalSceneDist(float3 world_pos)
 {
   float scene_dist = 1e10f;
 
@@ -168,54 +83,6 @@ float evalSceneDistFull(float3 world_pos)
   }
 
   return scene_dist;
-}
-
-void bvh_gather_near(float3 hit_pos)
-{
-  for (int w = 0; w < kBitfieldWords; w++) {
-    g_bvh_bits[w] = 0u;
-  }
-
-  if (use_bvh != 0 && bvh_root >= 0) {
-    float eps = sdf_ray_epsilon * 4.0f;
-    float3 query_min = hit_pos - float3(eps);
-    float3 query_max = hit_pos + float3(eps);
-
-    int stackTop = 0;
-    int stack[kAabbTreeStackSize];
-    stack[stackTop] = bvh_root;
-
-    while (stackTop >= 0) {
-      int index = stack[stackTop--];
-      if (index < 0) continue;
-
-      SdfAabbNodeGPU node = aabb_nodes[index];
-
-      if (any(greaterThan(node.bounds_min.xyz, query_max)) ||
-          any(greaterThan(query_min, node.bounds_max.xyz)))
-      {
-        continue;
-      }
-
-      if (node.child_a < 0) {
-        int idx = node.shape_index;
-        if (idx >= 0 && idx < kMaxBitfieldBits) {
-          g_bvh_bits[uint(idx) >> 5u] |= 1u << (uint(idx) & 31u);
-        }
-      }
-      else {
-        if (stackTop + 2 < kAabbTreeStackSize) {
-          stack[++stackTop] = node.child_a;
-          stack[++stackTop] = node.child_b;
-        }
-      }
-    }
-  }
-  else {
-    for (int w = 0; w < kBitfieldWords; w++) {
-      g_bvh_bits[w] = 0xFFFFFFFFu;
-    }
-  }
 }
 
 void main()
@@ -235,30 +102,14 @@ void main()
   float3 hit_pos = gbuf.xyz;
   float3 hit_color = imageLoad(gbuf_color_img, pixel).rgb;
 
-  /* BVH gather for normal computation */
-  bvh_gather_near(hit_pos);
-
-  /* Normal via central differences */
+  /* Tetrahedron normal (4 evals, brute force) */
   float eps = sdf_ray_epsilon * 2.0f;
-  float3 normal;
-  if (use_bvh != 0) {
-    normal = normalize(float3(
-        evalSceneDistBVH(hit_pos + float3(eps, 0.0f, 0.0f)) -
-            evalSceneDistBVH(hit_pos - float3(eps, 0.0f, 0.0f)),
-        evalSceneDistBVH(hit_pos + float3(0.0f, eps, 0.0f)) -
-            evalSceneDistBVH(hit_pos - float3(0.0f, eps, 0.0f)),
-        evalSceneDistBVH(hit_pos + float3(0.0f, 0.0f, eps)) -
-            evalSceneDistBVH(hit_pos - float3(0.0f, 0.0f, eps))));
-  }
-  else {
-    normal = normalize(float3(
-        evalSceneDistFull(hit_pos + float3(eps, 0.0f, 0.0f)) -
-            evalSceneDistFull(hit_pos - float3(eps, 0.0f, 0.0f)),
-        evalSceneDistFull(hit_pos + float3(0.0f, eps, 0.0f)) -
-            evalSceneDistFull(hit_pos - float3(0.0f, eps, 0.0f)),
-        evalSceneDistFull(hit_pos + float3(0.0f, 0.0f, eps)) -
-            evalSceneDistFull(hit_pos - float3(0.0f, 0.0f, eps))));
-  }
+  const float2 k = float2(1.0f, -1.0f);
+  float3 normal = normalize(
+      k.xyy * evalSceneDist(hit_pos + k.xyy * eps) +
+      k.yyx * evalSceneDist(hit_pos + k.yyx * eps) +
+      k.yxy * evalSceneDist(hit_pos + k.yxy * eps) +
+      k.xxx * evalSceneDist(hit_pos + k.xxx * eps));
 
   /* Shading */
   ViewMatrices vm = drw_view();

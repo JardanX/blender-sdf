@@ -1159,7 +1159,6 @@ class Instance : public DrawEngine {
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
     }
-
     render_size_ = vp;
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
@@ -1245,7 +1244,17 @@ class Instance : public DrawEngine {
     }
 
     GPU_shader_bind(sh);
-    bind_ssbos(sh);
+
+    /* SSBOs for brute-force normal computation */
+    if (object_ssbo_) {
+      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+    }
+    if (modifier_ssbo_) {
+      GPU_storagebuf_bind(modifier_ssbo_, GPU_shader_get_ssbo_binding(sh, "sdf_modifiers"));
+    }
+    if (group_ssbo_) {
+      GPU_storagebuf_bind(group_ssbo_, GPU_shader_get_ssbo_binding(sh, "groups"));
+    }
 
     /* G-buffer as read, final output as write */
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
@@ -1263,8 +1272,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(sh, "use_specular", use_specular_);
     GPU_shader_uniform_1i(sh, "use_matcap_flip", use_matcap_flip_);
-    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
-    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
