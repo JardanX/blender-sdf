@@ -122,6 +122,31 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Normal Compute Shader (Pass 1.5: tetrahedron gradient normals)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_normal_comp)
+LOCAL_GROUP_SIZE(8, 8)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(2, read, SDFGroupGPU, groups[])
+STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
+IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
+IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(float, sdf_ray_epsilon)
+PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, bvh_root)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_normal_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Blit Fragment Shader (Blits compute output)
  * \{ */
 
