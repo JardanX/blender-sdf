@@ -36,6 +36,8 @@
     .wire_color_type = V3D_SHADING_SINGLE_COLOR, \
     .sdf_resolution = 2, \
     .sdf_surface_margin = 100, \
+    .sdf_use_bvh = 1, \
+    .sdf_bvh_debug_view = 0, \
   }
 
 #define _DNA_DEFAULT_View3DOverlay \

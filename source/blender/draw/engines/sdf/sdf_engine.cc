@@ -86,27 +86,32 @@ class Instance : public DrawEngine {
   bool depth_mode_ = false;
 
   enum ShaderIndex {
-    SH_MARCH = 0,
+    SH_MARCH_COMP = 0,
+    SH_BLIT,
     SH_FXAA,
     SH_COUNT,
   };
 
   static constexpr const char *shader_info_names_[SH_COUNT] = {
-      "sdf_march",
+      "sdf_march_comp",
+      "sdf_blit",
       "sdf_fxaa",
   };
 
   gpu::Shader *shaders_[SH_COUNT] = {};
 
-  gpu::Shader *&march_sh_ = shaders_[SH_MARCH];
+  gpu::Shader *&march_comp_sh_ = shaders_[SH_MARCH_COMP];
+  gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
 
   BatchHandle shader_compile_batch_ = 0;
   bool shaders_compiled_ = false;
 
+  gpu::Texture *comp_color_tx_ = nullptr;
+  gpu::Texture *comp_depth_tx_ = nullptr;
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
-  int2 fxaa_viewport_size_ = int2(0);
+  int2 render_size_ = int2(0);
 
   gpu::StorageBuf *object_ssbo_ = nullptr;
   int object_ssbo_count_ = 0;
@@ -119,6 +124,10 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *group_ssbo_ = nullptr;
   int group_ssbo_count_ = 0;
 
+  SdfAabbTree bvh_tree_;
+  gpu::StorageBuf *bvh_nodes_ssbo_ = nullptr;
+  int bvh_nodes_ssbo_count_ = 0;
+
   gpu::Batch *fullscreen_batch_ = nullptr;
 
   const DRWContext *draw_ctx_ = nullptr;
@@ -128,6 +137,8 @@ class Instance : public DrawEngine {
   int lighting_type_ = V3D_LIGHTING_STUDIO;
   int use_specular_ = 0;
   int use_matcap_flip_ = 0;
+  int use_bvh_ = 1;
+  int debug_bvh_views_ = 0;
 
   float4 studio_light_dir_[4] = {};
   float4 studio_light_col_[4] = {};
@@ -171,6 +182,7 @@ class Instance : public DrawEngine {
     modifiers_.clear();
     groups_gpu_.clear();
     s_depsgraph_to_sorted.clear();
+    bvh_tree_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
     max_blend_ = 0.0f;
@@ -742,6 +754,14 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
+    bvh_tree_.clear();
+    for (int i = 0; i < int(objects_.size()); i++) {
+      SdfAabb bounds;
+      bounds.min = new_mins[i];
+      bounds.max = new_maxs[i];
+      bvh_tree_.create_proxy(bounds, i);
+    }
+
     needs_upload_ = true;
   }
 
@@ -785,6 +805,9 @@ class Instance : public DrawEngine {
     if (v3d == nullptr) {
       return;
     }
+
+    use_bvh_ = v3d->sdf_use_bvh;
+    debug_bvh_views_ = v3d->sdf_bvh_debug_view;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
@@ -1037,12 +1060,131 @@ class Instance : public DrawEngine {
         GPU_storagebuf_update(group_ssbo_, groups_gpu_.data());
       }
     }
+
+    Vector<SdfAabbNodeGPU> gpu_nodes = bvh_tree_.build_gpu_nodes();
+    const int bvh_count = math::max(int(gpu_nodes.size()), 1);
+    const size_t bvh_buf_size = bvh_count * sizeof(SdfAabbNodeGPU);
+
+    if (bvh_nodes_ssbo_ != nullptr && bvh_nodes_ssbo_count_ != bvh_count) {
+      GPU_storagebuf_free(bvh_nodes_ssbo_);
+      bvh_nodes_ssbo_ = nullptr;
+    }
+
+    if (bvh_nodes_ssbo_ == nullptr) {
+      if (gpu_nodes.is_empty()) {
+        SdfAabbNodeGPU dummy = {};
+        bvh_nodes_ssbo_ = GPU_storagebuf_create_ex(
+            bvh_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_bvh_ssbo");
+      }
+      else {
+        bvh_nodes_ssbo_ = GPU_storagebuf_create_ex(
+            bvh_buf_size, gpu_nodes.data(), GPU_USAGE_DYNAMIC, "sdf_bvh_ssbo");
+      }
+      bvh_nodes_ssbo_count_ = bvh_count;
+    }
+    else {
+      if (!gpu_nodes.is_empty()) {
+        GPU_storagebuf_update(bvh_nodes_ssbo_, gpu_nodes.data());
+      }
+    }
+  }
+
+  void ensure_compute_targets()
+  {
+    const int2 vp = int2(draw_ctx_->viewport_size_get());
+    if (comp_color_tx_ != nullptr && render_size_ == vp) {
+      return;
+    }
+
+    if (comp_color_tx_) {
+      GPU_texture_free(comp_color_tx_);
+    }
+    if (comp_depth_tx_) {
+      GPU_texture_free(comp_depth_tx_);
+    }
+
+    render_size_ = vp;
+
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    comp_color_tx_ = GPU_texture_create_2d("sdf_comp_color", vp.x, vp.y, 1, gpu::TextureFormat::RGBA16F, usage, nullptr);
+    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", vp.x, vp.y, 1, gpu::TextureFormat::R32F, usage, nullptr);
   }
 
   void draw_march()
   {
-    DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
+    ensure_compute_targets();
 
+    GPU_shader_bind(march_comp_sh_);
+
+    if (object_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_comp_sh_, "objects");
+      GPU_storagebuf_bind(object_ssbo_, slot);
+    }
+    if (modifier_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_comp_sh_, "sdf_modifiers");
+      GPU_storagebuf_bind(modifier_ssbo_, slot);
+    }
+    if (group_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_comp_sh_, "groups");
+      GPU_storagebuf_bind(group_ssbo_, slot);
+    }
+    if (bvh_nodes_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_comp_sh_, "aabb_nodes");
+      GPU_storagebuf_bind(bvh_nodes_ssbo_, slot);
+    }
+
+    /* Bind images */
+    int img_color_slot = GPU_shader_get_image_binding(march_comp_sh_, "out_color_img");
+    int img_depth_slot = GPU_shader_get_image_binding(march_comp_sh_, "out_depth_img");
+    GPU_texture_image_bind(comp_color_tx_, img_color_slot);
+    GPU_texture_image_bind(comp_depth_tx_, img_depth_slot);
+
+    GPU_shader_uniform_1i(march_comp_sh_, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1i(march_comp_sh_, "group_count", int(groups_gpu_.size()));
+    GPU_shader_uniform_1i(march_comp_sh_, "lighting_type", lighting_type_);
+    GPU_shader_uniform_1i(march_comp_sh_, "use_specular", use_specular_);
+    GPU_shader_uniform_1i(march_comp_sh_, "use_matcap_flip", use_matcap_flip_);
+    GPU_shader_uniform_1i(march_comp_sh_, "use_bvh", use_bvh_);
+    GPU_shader_uniform_1i(march_comp_sh_, "debug_bvh_views", debug_bvh_views_);
+    GPU_shader_uniform_1i(march_comp_sh_, "bvh_root", bvh_tree_.root());
+    GPU_shader_uniform_2i(march_comp_sh_, "screen_size", render_size_.x, render_size_.y);
+
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_light0", studio_light_dir_[0]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_light1", studio_light_dir_[1]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_light2", studio_light_dir_[2]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_light3", studio_light_dir_[3]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_color0", studio_light_col_[0]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_color1", studio_light_col_[1]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_color2", studio_light_col_[2]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_color3", studio_light_col_[3]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_spec0", studio_light_spec_[0]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_spec1", studio_light_spec_[1]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_spec2", studio_light_spec_[2]);
+    GPU_shader_uniform_4fv(march_comp_sh_, "studio_spec3", studio_light_spec_[3]);
+    GPU_shader_uniform_3fv(march_comp_sh_, "studio_ambient", studio_ambient_);
+
+    if (matcap_tx_) {
+      int matcap_slot = GPU_shader_get_sampler_binding(march_comp_sh_, "matcap_tx");
+      GPU_texture_bind(matcap_tx_, matcap_slot);
+    }
+
+    View &view = View::default_get();
+    view.matrices_ubo_get().push_update();
+    GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
+
+    int dispatch_x = (render_size_.x + 7) / 8;
+    int dispatch_y = (render_size_.y + 7) / 8;
+    GPU_compute_dispatch(march_comp_sh_, dispatch_x, dispatch_y, 1);
+
+    GPU_texture_image_unbind(comp_color_tx_);
+    GPU_texture_image_unbind(comp_depth_tx_);
+    if (matcap_tx_) {
+      GPU_texture_unbind(matcap_tx_);
+    }
+    GPU_shader_unbind();
+
+    /* Blit */
+    DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
     if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
       GPU_framebuffer_bind(dfbl->depth_only_fb);
     }
@@ -1056,69 +1198,26 @@ class Instance : public DrawEngine {
       GPU_framebuffer_bind(dfbl->default_fb);
     }
 
-    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_test(GPU_DEPTH_ALWAYS);
     GPU_depth_mask(true);
     GPU_blend(GPU_BLEND_NONE);
     GPU_face_culling(GPU_CULL_NONE);
     GPU_stencil_test(GPU_STENCIL_NONE);
 
-    GPU_shader_bind(march_sh_);
-
-    /* Bind SSBOs */
-    if (object_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(march_sh_, "objects");
-      GPU_storagebuf_bind(object_ssbo_, slot);
-    }
-    if (modifier_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(march_sh_, "sdf_modifiers");
-      GPU_storagebuf_bind(modifier_ssbo_, slot);
-    }
-    if (group_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(march_sh_, "groups");
-      GPU_storagebuf_bind(group_ssbo_, slot);
-    }
-
-    /* Push constants */
-    GPU_shader_uniform_1i(march_sh_, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1i(march_sh_, "group_count", int(groups_gpu_.size()));
-    GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
-    GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
-    GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
-
-    GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_light2", studio_light_dir_[2]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_light3", studio_light_dir_[3]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_color0", studio_light_col_[0]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_color1", studio_light_col_[1]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_color2", studio_light_col_[2]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_color3", studio_light_col_[3]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_spec0", studio_light_spec_[0]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_spec1", studio_light_spec_[1]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_spec2", studio_light_spec_[2]);
-    GPU_shader_uniform_4fv(march_sh_, "studio_spec3", studio_light_spec_[3]);
-    GPU_shader_uniform_3fv(march_sh_, "studio_ambient", studio_ambient_);
-
-    /* Bind matcap texture */
-    if (matcap_tx_) {
-      int matcap_slot = GPU_shader_get_sampler_binding(march_sh_, "matcap_tx");
-      GPU_texture_bind(matcap_tx_, matcap_slot);
-    }
-
-    /* Bind view UBO */
-    View &view = View::default_get();
-    view.matrices_ubo_get().push_update();
-    GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
+    GPU_shader_bind(blit_sh_);
+    int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
+    GPU_texture_bind(comp_color_tx_, color_slot);
+    int depth_slot = GPU_shader_get_sampler_binding(blit_sh_, "depth_tx");
+    GPU_texture_bind(comp_depth_tx_, depth_slot);
 
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
     }
-    GPU_batch_set_shader(fullscreen_batch_, march_sh_);
+    GPU_batch_set_shader(fullscreen_batch_, blit_sh_);
     GPU_batch_draw(fullscreen_batch_);
 
-    if (matcap_tx_) {
-      GPU_texture_unbind(matcap_tx_);
-    }
+    GPU_texture_unbind(comp_color_tx_);
+    GPU_texture_unbind(comp_depth_tx_);
     GPU_shader_unbind();
   }
 
@@ -1209,6 +1308,12 @@ class Instance : public DrawEngine {
     s_group_ssbo = nullptr;
     s_group_count = 0;
 
+    if (comp_color_tx_) {
+      GPU_texture_free(comp_color_tx_);
+    }
+    if (comp_depth_tx_) {
+      GPU_texture_free(comp_depth_tx_);
+    }
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);
     }
@@ -1226,6 +1331,9 @@ class Instance : public DrawEngine {
     }
     if (group_ssbo_) {
       GPU_storagebuf_free(group_ssbo_);
+    }
+    if (bvh_nodes_ssbo_) {
+      GPU_storagebuf_free(bvh_nodes_ssbo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);

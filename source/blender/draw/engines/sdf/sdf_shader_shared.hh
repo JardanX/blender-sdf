@@ -62,3 +62,12 @@ struct BVHNodeGPU {
   float4 min_and_left;  /* xyz=AABB min, w=left_child or -1 */
   float4 max_and_right; /* xyz=AABB max, w=right_child or obj_idx */
 };
+
+struct SdfAabbNodeGPU {
+  float4 bounds_min;
+  float4 bounds_max;
+  int parent;
+  int child_a;
+  int child_b;
+  int shape_index;
+};

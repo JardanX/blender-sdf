@@ -87,7 +87,7 @@ GLContext::GLContext(void *ghost_window, GLSharedOrphanLists &shared_orphan_list
 
 GLContext::~GLContext()
 {
-  if (G.profile_gpu) {
+  if (G.profile_gpu || G.profile_gpu_overlay) {
     /* Ensure query results are available. */
     finish();
     process_frame_timings();

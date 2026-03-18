@@ -376,7 +376,7 @@ void GLContext::debug_group_begin(const char *name, int index)
     glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, index, -1, name);
   }
 
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
@@ -403,7 +403,7 @@ void GLContext::debug_group_end()
     glPopDebugGroup();
   }
 
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
@@ -424,7 +424,7 @@ void GLContext::debug_group_end()
 
 void GLContext::process_frame_timings()
 {
-  if (!G.profile_gpu) {
+  if (!G.profile_gpu && !G.profile_gpu_overlay) {
     return;
   }
 
