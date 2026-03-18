@@ -1155,6 +1155,468 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
   return final_d;
 }
 
+/* -------------------------------------------------------------------- */
+/* Gradient Operations (shade pass: analytical normals)                  */
+/* -------------------------------------------------------------------- */
+
+/* ---- Gradient helpers ---- */
+
+float4 gradMin(float4 a, float4 b)
+{
+  float d = min(a.x, b.x);
+  float eps = 0.002f;
+  float h = clamp(0.5f + 0.5f * (b.x - a.x) / eps, 0.0f, 1.0f);
+  float3 g = mix(b.yzw, a.yzw, h);
+  return float4(d, g);
+}
+
+float4 gradMax(float4 a, float4 b)
+{
+  float d = max(a.x, b.x);
+  float eps = 0.002f;
+  float h = clamp(0.5f + 0.5f * (a.x - b.x) / eps, 0.0f, 1.0f);
+  float3 g = mix(b.yzw, a.yzw, h);
+  return float4(d, g);
+}
+
+float4 negGrad(float4 a)
+{
+  return float4(-a.x, -a.yzw);
+}
+
+/* ---- Smooth round blend variant (for chain-rule gradients) ---- */
+
+float opUnionIRoundSmooth(float a, float b, float r)
+{
+  float2 q = float2(a, b);
+  q = sdf_mirror2D(q, normalize(float2(-1.0f, 1.0f)));
+  q.y -= r;
+  q.y = min(0.0f, q.y);
+  float ad = sign(q.x) * length(q);
+  float2 s = float2(max(a, 0.0f), max(b, 0.0f));
+  float corn = length(s) - r;
+  float sk = max(0.001f, r * 0.05f);
+  float h = clamp(0.5f + 0.5f * (corn - ad) / sk, 0.0f, 1.0f);
+  return mix(corn, ad, h) - sk * h * (1.0f - h);
+}
+
+/* ---- Gradient blend operations ---- */
+
+float4 opSmoothUnionGrad(float4 a, float4 b, float k)
+{
+  float h = clamp(0.5f + 0.5f * (b.x - a.x) / k, 0.0f, 1.0f);
+  float d = mix(b.x, a.x, h) - k * h * (1.0f - h);
+  float3 g = mix(b.yzw, a.yzw, h);
+  return float4(d, g);
+}
+
+float4 opSmoothSubtractionGrad(float4 a, float4 b, float k)
+{
+  float h = clamp(0.5f - 0.5f * (b.x + a.x) / k, 0.0f, 1.0f);
+  float d = mix(b.x, -a.x, h) + k * h * (1.0f - h);
+  float3 g = mix(b.yzw, -a.yzw, h);
+  return float4(d, g);
+}
+
+float4 opSmoothIntersectionGrad(float4 a, float4 b, float k)
+{
+  float h = clamp(0.5f - 0.5f * (b.x - a.x) / k, 0.0f, 1.0f);
+  float d = mix(b.x, a.x, h) + k * h * (1.0f - h);
+  float3 g = mix(b.yzw, a.yzw, h);
+  return float4(d, g);
+}
+
+float4 opChamferUnionGrad(float4 a, float4 b, float r)
+{
+  float chamfer = (a.x - r + b.x) * 0.5f;
+  float3 cg = (a.yzw + b.yzw) * 0.5f;
+  return gradMin(gradMin(a, b), float4(chamfer, cg));
+}
+
+float4 opChamferIntersectionGrad(float4 a, float4 b, float r)
+{
+  float chamfer = (a.x + r + b.x) * 0.5f;
+  float3 cg = (a.yzw + b.yzw) * 0.5f;
+  return gradMax(gradMax(a, b), float4(chamfer, cg));
+}
+
+float4 opChamferSubtractionGrad(float4 a, float4 b, float r)
+{
+  return opChamferIntersectionGrad(b, negGrad(a), r);
+}
+
+float4 opRoundUnionGrad(float4 a, float4 b, float r)
+{
+  float f0 = opUnionIRound(a.x, b.x, r);
+  float eps = max(0.001f, r * 0.02f);
+  float dfd1 = (opUnionIRoundSmooth(a.x + eps, b.x, r) -
+                opUnionIRoundSmooth(a.x - eps, b.x, r)) /
+               (2.0f * eps);
+  float dfd2 = (opUnionIRoundSmooth(a.x, b.x + eps, r) -
+                opUnionIRoundSmooth(a.x, b.x - eps, r)) /
+               (2.0f * eps);
+  return float4(f0, dfd1 * a.yzw + dfd2 * b.yzw);
+}
+
+float4 opRoundSubtractionGrad(float4 a, float4 b, float r)
+{
+  return negGrad(opRoundUnionGrad(a, negGrad(b), r));
+}
+
+float4 opRoundIntersectionGrad(float4 a, float4 b, float r)
+{
+  return negGrad(opRoundUnionGrad(negGrad(a), negGrad(b), r));
+}
+
+/* ---- combineCSGGrad ---- */
+
+float4 combineCSGGrad(
+    float4 d1, float4 d2, int op, int bt, float k, float shell_dist, int shell_mode)
+{
+  if (op == SDF_CSG_OP_UNION) {
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) return opSmoothUnionGrad(d1, d2, k);
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) return opChamferUnionGrad(d1, d2, k);
+      else if (bt == SDF_BLEND_TYPE_ROUND) return opRoundUnionGrad(d1, d2, k);
+    }
+    return gradMin(d1, d2);
+  }
+  else if (op == SDF_CSG_OP_SUBTRACT) {
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) return opSmoothSubtractionGrad(d2, d1, k);
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) return opChamferSubtractionGrad(d2, d1, k);
+      else if (bt == SDF_BLEND_TYPE_ROUND) return opRoundSubtractionGrad(d2, d1, k);
+    }
+    return gradMax(d1, negGrad(d2));
+  }
+  else if (op == SDF_CSG_OP_INTERSECT) {
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) return opSmoothIntersectionGrad(d1, d2, k);
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) return opChamferIntersectionGrad(d1, d2, k);
+      else if (bt == SDF_BLEND_TYPE_ROUND) return opRoundIntersectionGrad(d1, d2, k);
+    }
+    return gradMax(d1, d2);
+  }
+  else if (op == SDF_CSG_OP_PUSH) {
+    float4 subtracted;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) subtracted = opSmoothSubtractionGrad(d2, d1, k);
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) subtracted = opChamferSubtractionGrad(d2, d1, k);
+      else subtracted = opRoundSubtractionGrad(d2, d1, k);
+    }
+    else {
+      subtracted = gradMax(d1, negGrad(d2));
+    }
+    return gradMin(subtracted, d2);
+  }
+  else if (op == SDF_CSG_OP_AVOID) {
+    float4 carved;
+    if (k > 0.0f && bt > 0) {
+      if (bt == SDF_BLEND_TYPE_SMOOTH) carved = opSmoothSubtractionGrad(d1, d2, k);
+      else if (bt == SDF_BLEND_TYPE_CHAMFER) carved = opChamferSubtractionGrad(d1, d2, k);
+      else carved = opRoundSubtractionGrad(d1, d2, k);
+    }
+    else {
+      carved = gradMax(d2, negGrad(d1));
+    }
+    return gradMin(d1, carved);
+  }
+  else if (op == SDF_CSG_OP_SHELL) {
+    float h = abs(shell_dist);
+    float lk = min(k, h);
+
+    if (shell_mode == SDF_SHELL_MODE_PUSH) {
+      float4 d_shell = float4(abs(d2.x) - h, d2.yzw * sign(d2.x));
+      float4 subtracted;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) subtracted = opSmoothSubtractionGrad(d_shell, d1, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER)
+          subtracted = opChamferSubtractionGrad(d_shell, d1, k);
+        else subtracted = opRoundSubtractionGrad(d_shell, d1, k);
+      }
+      else {
+        subtracted = gradMax(d1, negGrad(d_shell));
+      }
+      return gradMin(subtracted, d_shell);
+    }
+
+    float4 d_shell;
+    if (shell_dist < 0.0f) {
+      float4 d_sub;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_sub = opSmoothSubtractionGrad(d2, d1, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_sub = opChamferSubtractionGrad(d2, d1, k);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_sub = opRoundSubtractionGrad(d2, d1, k);
+        else d_sub = gradMax(d1, negGrad(d2));
+      }
+      else {
+        d_sub = gradMax(d1, negGrad(d2));
+      }
+      float4 lim = float4(d1.x + h, d1.yzw);
+      if (lk > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothUnionGrad(d_sub, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferUnionGrad(d_sub, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundUnionGrad(d_sub, lim, lk);
+        else d_shell = gradMin(d_sub, lim);
+      }
+      else {
+        d_shell = gradMin(d_sub, lim);
+      }
+    }
+    else {
+      float4 d_union;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_union = opSmoothUnionGrad(d1, d2, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_union = opChamferUnionGrad(d1, d2, k);
+        else if (bt == SDF_BLEND_TYPE_ROUND) d_union = opRoundUnionGrad(d1, d2, k);
+        else d_union = gradMin(d1, d2);
+      }
+      else {
+        d_union = gradMin(d1, d2);
+      }
+      float4 lim = float4(d1.x - h, d1.yzw);
+      if (lk > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothIntersectionGrad(d_union, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER)
+          d_shell = opChamferIntersectionGrad(d_union, lim, lk);
+        else if (bt == SDF_BLEND_TYPE_ROUND)
+          d_shell = opRoundIntersectionGrad(d_union, lim, lk);
+        else d_shell = gradMax(d_union, lim);
+      }
+      else {
+        d_shell = gradMax(d_union, lim);
+      }
+    }
+
+    if (shell_mode == SDF_SHELL_MODE_AVOID) {
+      float4 carved;
+      if (k > 0.0f && bt > 0) {
+        if (bt == SDF_BLEND_TYPE_SMOOTH) carved = opSmoothSubtractionGrad(d1, d_shell, k);
+        else if (bt == SDF_BLEND_TYPE_CHAMFER)
+          carved = opChamferSubtractionGrad(d1, d_shell, k);
+        else carved = opRoundSubtractionGrad(d1, d_shell, k);
+      }
+      else {
+        carved = gradMax(d_shell, negGrad(d1));
+      }
+      return gradMin(d1, carved);
+    }
+    return d_shell;
+  }
+  return d1;
+}
+
+/* ---- Gradient primitives ---- */
+
+float4 sdgSphere(float3 p, float r)
+{
+  float l = length(p);
+  float3 g = (l > 0.0001f) ? p / l : float3(0.0f, 0.0f, 1.0f);
+  return float4(l - r, g);
+}
+
+float4 sdgBox(float3 p, float3 b, float r)
+{
+  float3 w = abs(p) - (b - r);
+  float gv = max(w.x, max(w.y, w.z));
+  float3 q = max(w, float3(0.0f));
+  float l = length(q);
+  float4 f;
+  if (gv > 0.0f) {
+    f = float4(l, q / l);
+  }
+  else {
+    f = float4(gv, float3((w.x == gv) ? 1.0f : 0.0f,
+                           (w.y == gv) ? 1.0f : 0.0f,
+                           (w.z == gv) ? 1.0f : 0.0f));
+  }
+  return float4(f.x - r, f.yzw * sign(p));
+}
+
+float4 sdgCapsule(float3 p, float3 size)
+{
+  float hh = size.y;
+  float r = size.x;
+  p.z -= clamp(p.z, -hh, hh);
+  float l = length(p);
+  return float4(l - r, p / max(l, 0.0001f));
+}
+
+float4 sdgTorus(float3 p, float2 t)
+{
+  float lxy = length(p.xy);
+  float2 q = float2(lxy - t.x, p.z);
+  float lq = length(q);
+  float dist = lq - t.y;
+  float2 gq = (lq > 0.0001f) ? q / lq : float2(1.0f, 0.0f);
+  float2 pn = (lxy > 0.0001f) ? p.xy / lxy : float2(1.0f, 0.0f);
+  float3 grad = float3(pn * gq.x, gq.y);
+  return float4(dist, grad);
+}
+
+float4 sdgCappedTorus(float3 p, float2 sc, float ra, float rb)
+{
+  float sx = sign(p.x);
+  p.x = abs(p.x);
+  float la = length(p.xy);
+  float3 dk;
+  if (sc.y * p.x > sc.x * p.y) {
+    dk = float3(sc.x * sx, sc.y, 0.0f);
+  }
+  else {
+    float2 da = p.xy / max(la, 0.0001f);
+    dk = float3(da.x * sx, da.y, 0.0f);
+  }
+  float kv = (sc.y * p.x > sc.x * p.y) ? dot(p.xy, sc) : la;
+  float L2 = dot(p, p) + ra * ra - 2.0f * ra * kv;
+  float L = sqrt(max(L2, 0.0f));
+  float dist = L - rb;
+  float3 pp = float3(p.x * sx, p.y, p.z);
+  float3 grad = (L > 0.0001f) ? (pp - ra * dk) / L : float3(0.0f, 0.0f, 1.0f);
+  return float4(dist, grad);
+}
+
+float4 sdgCone(float3 p, float r, float h)
+{
+  float2 kv = float2(-r, 2.0f * h);
+  float m = dot(kv, kv);
+  float l = length(p.xy);
+  float2 qv = float2(-l, h - p.z);
+  float2 a = float2(l - min(l, (p.z < 0.0f) ? r : 0.0f), abs(p.z) - h);
+  float2 b = kv * clamp(dot(qv, kv) / m, 0.0f, 1.0f) - qv;
+  float s = (b.x < 0.0f && a.y < 0.0f) ? -1.0f : 1.0f;
+  float la = dot(a, a);
+  float lb = dot(b, b);
+  float dist = s * sqrt(min(la, lb));
+
+  float dl = sqrt(la);
+  float dm = sqrt(lb);
+  float2 radial = (l > 0.0001f) ? p.xy / l : float2(1.0f, 0.0f);
+  float sm = sqrt(m);
+
+  float2 ga = (dl > 0.001f) ? a / dl : float2(0.0f, 1.0f);
+  float3 cap_grad = s * float3(radial * ga.x, ga.y * ((p.z >= 0.0f) ? 1.0f : -1.0f));
+  float3 side_grad = s * float3(radial * kv.y / sm, -kv.x / sm);
+
+  float diff = s * dl - s * dm;
+  float t = clamp(0.5f + 0.5f * diff / 0.002f, 0.0f, 1.0f);
+  float3 grad = normalize(mix(cap_grad, side_grad, t));
+  return float4(dist, grad);
+}
+
+/* ---- evalPrimitiveOnlyGrad ---- */
+
+float4 evalPrimitiveOnlyGrad(SDFPrimitiveData obj, float3 local_pos)
+{
+  float3 size = obj.size;
+  float bevel = obj.bevel;
+
+  if (obj.sdf_type == 1) {
+    float4 dg = sdgSphere(local_pos, size.x - bevel);
+    dg.x -= bevel;
+    return dg;
+  }
+  else if (obj.sdf_type == 3) {
+    float4 dg = sdgCone(local_pos, max(size.x - bevel, 0.001f), max(size.y - bevel, 0.001f));
+    dg.x -= bevel;
+    return dg;
+  }
+  else if (obj.sdf_type == 4) {
+    float4 dg = sdgCapsule(local_pos, max(size - float3(bevel), float3(0.001f)));
+    dg.x -= bevel;
+    return dg;
+  }
+  else if (obj.sdf_type == 5) {
+    float major = max(size.x - bevel, 0.001f);
+    float minor = max(size.y - bevel, 0.001f);
+    float4 dg;
+    if (obj.box_modes.w != 0) {
+      dg = sdgCappedTorus(local_pos, obj.box_corners.xy, major, minor);
+    }
+    else {
+      dg = sdgTorus(local_pos, float2(major, minor));
+    }
+    dg.x -= bevel;
+    return dg;
+  }
+  else if (obj.sdf_type == 0) {
+    float4 corners = obj.box_corners;
+    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w + obj.box_edges.x +
+                        obj.box_edges.y + obj.box_edges.z + obj.box_edges.w) > 0.001f;
+    if (!hasAdvanced) {
+      float3 bs = max(size, float3(bevel + 0.001f));
+      return sdgBox(local_pos, bs, bevel);
+    }
+  }
+
+  /* Numerical gradient fallback (cylinder, advanced box, advanced ngon) */
+  float dist = evalPrimitiveOnly(obj, local_pos);
+  float minDim = min(min(size.x, size.y), size.z);
+  if (obj.sdf_type == 6) minDim = min(size.x, size.z);
+  float e = max(0.002f, minDim * 0.04f);
+  float3 gv = float3(evalPrimitiveOnly(obj, local_pos + float3(e, 0, 0)) -
+                          evalPrimitiveOnly(obj, local_pos - float3(e, 0, 0)),
+                      evalPrimitiveOnly(obj, local_pos + float3(0, e, 0)) -
+                          evalPrimitiveOnly(obj, local_pos - float3(0, e, 0)),
+                      evalPrimitiveOnly(obj, local_pos + float3(0, 0, e)) -
+                          evalPrimitiveOnly(obj, local_pos - float3(0, 0, e))) /
+              (2.0f * e);
+  return float4(dist, normalize(gv));
+}
+
+/* ---- applyDistanceModifiersGrad ---- */
+
+float4 applyDistanceModifiersGrad(float4 dg, int mod_start, int mod_count)
+{
+  for (int i = mod_start; i < mod_start + mod_count; i++) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+
+    if (mtype == SDF_MOD_HOLLOW || mtype == SDF_MOD_ONION) {
+      float s = (dg.x >= 0.0f) ? 1.0f : -1.0f;
+      dg = float4(abs(dg.x) - smod.params.x, dg.yzw * s);
+    }
+    else if (mtype == SDF_MOD_ROUND) {
+      dg.x -= smod.params.x;
+    }
+  }
+  return dg;
+}
+
+/* ---- evalObjectSDFGrad ---- */
+
+float4 evalObjectSDFGrad(SDFPrimitiveData obj, float3 p)
+{
+  /* Check for domain modifiers that require numerical fallback */
+  bool has_domain_mod = false;
+  for (int i = obj.modifier_start; i < obj.modifier_start + obj.modifier_count; i++) {
+    int mtype = sdf_modifiers[i].header.x;
+    if (mtype == SDF_MOD_MIRROR || mtype == SDF_MOD_TWIST || mtype == SDF_MOD_BEND ||
+        mtype == SDF_MOD_ELONGATE || mtype == SDF_MOD_ARRAY)
+    {
+      has_domain_mod = true;
+      break;
+    }
+  }
+
+  if (!has_domain_mod) {
+    float4 dg = evalPrimitiveOnlyGrad(obj, p);
+    return applyDistanceModifiersGrad(dg, obj.modifier_start, obj.modifier_count);
+  }
+
+  /* Domain modifiers present: numerical gradient via scalar evalObjectSDF */
+  float dist = evalObjectSDF(obj, p);
+  float eps = max(0.001f, sdf_ray_epsilon);
+  float3 grad = float3(evalObjectSDF(obj, p + float3(eps, 0, 0)) -
+                            evalObjectSDF(obj, p - float3(eps, 0, 0)),
+                        evalObjectSDF(obj, p + float3(0, eps, 0)) -
+                            evalObjectSDF(obj, p - float3(0, eps, 0)),
+                        evalObjectSDF(obj, p + float3(0, 0, eps)) -
+                            evalObjectSDF(obj, p - float3(0, 0, eps))) /
+                (2.0f * eps);
+  return float4(dist, normalize(grad));
+}
+
 /** \} */
 
 /** \} */

@@ -586,8 +586,11 @@ void main()
       continue;
     }
 
-    /* Clamp step by nearest skipped AABB — never overshoot past unevaluated objects */
-    d = min(d, aabb_skip);
+    /* Safe step: clamp by skipped AABBs with fixed floor to prevent crawling.
+     * Floor at 10x epsilon — safe for CSG cuts (features < 0.01 are sub-pixel). */
+    if (aabb_skip < d) {
+      d = max(aabb_skip, sdf_ray_epsilon * 10.0f);
+    }
 #else
     d = evalSceneBVH(pos, color, aabb_skip);
 
@@ -600,7 +603,9 @@ void main()
       continue;
     }
 
-    d = min(d, aabb_skip);
+    if (aabb_skip < d) {
+      d = max(aabb_skip, sdf_ray_epsilon * 10.0f);
+    }
 #endif
 
     steps_taken++;
@@ -619,15 +624,23 @@ void main()
 
     if (!sor_fail && d < adaptive_epsilon) {
       hit = true;
-      /* Secant refinement: interpolate between previous step (d>0) and current (d≈0) */
+      /* Surface projection with angle correction.
+       * Estimate cos(theta) between ray and surface normal from the rate of
+       * distance decrease: cos_theta ≈ (d_prev - d) / (t - t_prev).
+       * Project along ray by d/cos_theta to reach the true d=0 surface. */
       float denom = d_prev - d;
       if (denom > 1e-8f) {
         float alpha = d_prev / denom;
-        float t_refined = mix(t_prev, t, clamp(alpha, 0.0f, 1.0f));
-        hit_pos = ray_origin + ray_dir * t_refined;
+        if (alpha > 0.0f && alpha < 1.0f) {
+          hit_pos = ray_origin + ray_dir * mix(t_prev, t, alpha);
+        }
+        else {
+          float cos_theta = denom / max(t - t_prev, 1e-8f);
+          hit_pos = pos + ray_dir * d / clamp(cos_theta, 0.5f, 1.0f);
+        }
       }
       else {
-        hit_pos = pos;
+        hit_pos = pos + ray_dir * d;
       }
       hit_color = color;
       break;
@@ -748,10 +761,8 @@ void main()
     return;
   }
 
-  float3 hit_normal = float3(0.0f);
-
   /* Output G-buffer */
   imageStore(gbuf_pos_img, pixel, float4(hit_pos, 1.0));
   imageStore(gbuf_color_img, pixel, float4(hit_color, 0.0));
-  imageStore(gbuf_normal_img, pixel, float4(hit_normal, 0.0));
+  imageStore(gbuf_normal_img, pixel, float4(0.0));
 }
