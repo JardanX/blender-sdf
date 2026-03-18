@@ -28,6 +28,7 @@ IMAGE(4, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, use_cone_trace)
 PUSH_CONSTANT(int, bvh_root)
 PUSH_CONSTANT(int, debug_bvh_views)
 PUSH_CONSTANT(int, sdf_max_steps)
@@ -44,6 +45,24 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Cone March Pre-Pass (1 thread per tile)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_cone_march_comp)
+LOCAL_GROUP_SIZE(1, 1)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(4, write, float4, tile_hit_pos[])
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(draw_view)
+COMPUTE_SOURCE("sdf_cone_march_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Tile-Culled Trace Compute Shader
  * \{ */
 
@@ -55,6 +74,7 @@ STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
 STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
+STORAGE_BUF(4, read, float4, tile_hit_pos[])
 IMAGE(0, SFLOAT_16_16_16_16, write, image2D, out_color_img)
 IMAGE(1, SFLOAT_32, write, image2D, out_depth_img)
 IMAGE(2, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
@@ -63,6 +83,7 @@ IMAGE(4, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, use_cone_trace)
 PUSH_CONSTANT(int, bvh_root)
 PUSH_CONSTANT(int, debug_bvh_views)
 PUSH_CONSTANT(int, sdf_max_steps)

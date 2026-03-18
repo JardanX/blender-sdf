@@ -55,6 +55,7 @@ shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];
 shared uint s_groupActive[kGroupBitWords];
 shared uint s_objVisible[kObjBitWords];
+shared float4 s_coneHitPos;  /* Loaded from tile_hit_pos SSBO */
 
 #else
 
@@ -419,6 +420,12 @@ void main()
       }
       s_tileObjList[j + 1] = key;
     }
+
+    /* Load cone march result from SSBO (computed in separate pass) */
+    int tilesX = (screen_size.x + 7) / 8;
+    int tileIdx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * tilesX;
+    s_coneHitPos = (use_cone_trace != 0) ? tile_hit_pos[tileIdx]
+                                          : float4(0.0f, 0.0f, 0.0f, -1.0f);
   }
   barrier();
 #endif
@@ -478,6 +485,18 @@ void main()
     t_enter = 0.0f;
     t_exit = max_dist;
   }
+
+#ifdef USE_TILE_CULLING
+  float t_enter_before_cone = t_enter;
+  /* Project cone hit onto per-pixel ray to advance t_enter */
+  if (use_cone_trace != 0 && s_coneHitPos.w >= 0.0f) {
+    float projected = dot(s_coneHitPos.xyz - ray_origin, ray_dir);
+    float tan_half_tile = float(kTileSize) / float(screen_size.y);
+    float cone_r = projected * tan_half_tile;
+    projected = max(0.0f, projected - cone_r * 1.5f);
+    t_enter = max(t_enter, projected);
+  }
+#endif
 
 #ifndef USE_TILE_CULLING
   /* Per-ray BVH: mark objects whose AABB the ray intersects (done ONCE per ray) */
@@ -715,6 +734,18 @@ void main()
     imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
+  else if (debug_bvh_views == 5) {
+    float skip = t_enter - t_enter_before_cone;
+    float total_range = t_exit - t_enter_before_cone;
+    float savings = (total_range > 0.001f) ? clamp(skip / total_range, 0.0f, 1.0f) : 0.0f;
+    float3 cone_color = mix(float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), savings);
+    if (s_coneHitPos.w < 0.0f) cone_color = float3(0.0f);
+    imageStore(out_color_img, pixel, float4(cone_color, 1.0f));
+    imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
+    return;
+  }
 #else
   if (debug_bvh_views == 1) {
     float heat = float(g_numNearShapes) / max(float(object_count), 1.0f);
@@ -755,6 +786,13 @@ void main()
       max_heat = max(max_heat, tile_heat[i]);
     }
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
+    imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
+    return;
+  }
+  else if (debug_bvh_views == 5) {
+    imageStore(out_color_img, pixel, float4(0.0f, 0.0f, 0.0f, 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
     imageStore(gbuf_color_img, pixel, float4(0.0));

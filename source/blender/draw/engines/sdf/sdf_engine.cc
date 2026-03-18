@@ -90,6 +90,7 @@ class Instance : public DrawEngine {
   enum ShaderIndex {
     SH_TRACE_COMP = 0,
     SH_TRACE_TILE_COMP,
+    SH_CONE_MARCH_COMP,
     SH_SHADE_COMP,
     SH_BLIT,
     SH_FXAA,
@@ -99,6 +100,7 @@ class Instance : public DrawEngine {
   static constexpr const char *shader_info_names_[SH_COUNT] = {
       "sdf_trace_comp",
       "sdf_trace_tile_comp",
+      "sdf_cone_march_comp",
       "sdf_shade_comp",
       "sdf_blit",
       "sdf_fxaa",
@@ -108,6 +110,7 @@ class Instance : public DrawEngine {
 
   gpu::Shader *&trace_comp_sh_ = shaders_[SH_TRACE_COMP];
   gpu::Shader *&trace_tile_sh_ = shaders_[SH_TRACE_TILE_COMP];
+  gpu::Shader *&cone_march_sh_ = shaders_[SH_CONE_MARCH_COMP];
   gpu::Shader *&shade_comp_sh_ = shaders_[SH_SHADE_COMP];
   gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
@@ -139,6 +142,9 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *bvh_nodes_ssbo_ = nullptr;
   int bvh_nodes_ssbo_count_ = 0;
 
+  gpu::StorageBuf *cone_hit_ssbo_ = nullptr;
+  int cone_hit_ssbo_count_ = 0;
+
   gpu::Batch *fullscreen_batch_ = nullptr;
 
   const DRWContext *draw_ctx_ = nullptr;
@@ -150,6 +156,7 @@ class Instance : public DrawEngine {
   int use_matcap_flip_ = 0;
   int use_bvh_ = 1;
   int debug_bvh_views_ = 0;
+  int use_cone_trace_ = 0;
   int sdf_max_steps_ = 128;
   float sdf_ray_epsilon_ = 0.001f;
   float sdf_over_relaxation_ = 1.2f;
@@ -871,6 +878,12 @@ class Instance : public DrawEngine {
       needs_upload_ = false;
     }
 
+    GPU_debug_group_begin("SDF Cone March");
+    draw_cone_march();
+    GPU_debug_group_end();
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+
     GPU_debug_group_begin("SDF Trace");
     draw_trace();
     GPU_debug_group_end();
@@ -920,6 +933,7 @@ class Instance : public DrawEngine {
     }
     use_bvh_ = 1;
     debug_bvh_views_ = v3d->shading.sdf_bvh_debug_view;
+    use_cone_trace_ = v3d->shading.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = v3d->shading.sdf_max_steps;
     sdf_ray_epsilon_ = v3d->shading.sdf_ray_epsilon;
     sdf_over_relaxation_ = v3d->shading.sdf_over_relaxation;
@@ -1256,6 +1270,49 @@ class Instance : public DrawEngine {
     }
   }
 
+  void draw_cone_march()
+  {
+    if (use_cone_trace_ == 0 || !cone_march_sh_) {
+      return;
+    }
+
+    int tiles_x = (render_size_.x + 7) / 8;
+    int tiles_y = (render_size_.y + 7) / 8;
+    int total_tiles = tiles_x * tiles_y;
+
+    /* Allocate/resize cone hit SSBO */
+    if (cone_hit_ssbo_ != nullptr && cone_hit_ssbo_count_ != total_tiles) {
+      GPU_storagebuf_free(cone_hit_ssbo_);
+      cone_hit_ssbo_ = nullptr;
+    }
+    if (cone_hit_ssbo_ == nullptr && total_tiles > 0) {
+      cone_hit_ssbo_ = GPU_storagebuf_create_ex(
+          total_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
+      cone_hit_ssbo_count_ = total_tiles;
+    }
+
+    gpu::Shader *sh = cone_march_sh_;
+    GPU_shader_bind(sh);
+
+    /* Bind SSBOs */
+    if (object_ssbo_) {
+      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+    }
+    if (cone_hit_ssbo_) {
+      GPU_storagebuf_bind(cone_hit_ssbo_, GPU_shader_get_ssbo_binding(sh, "tile_hit_pos"));
+    }
+
+    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
+    GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
+
+    View &view = View::default_get();
+    view.matrices_ubo_get().push_update();
+    GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
+
+    GPU_compute_dispatch(sh, tiles_x, tiles_y, 1);
+    GPU_shader_unbind();
+  }
+
   void draw_trace()
   {
     ensure_compute_targets();
@@ -1268,6 +1325,14 @@ class Instance : public DrawEngine {
     GPU_shader_bind(sh);
     bind_ssbos(sh);
 
+    /* Bind cone march result SSBO (tile-culled path reads this) */
+    if (cone_hit_ssbo_ && use_cone_trace_ != 0) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_hit_pos");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(cone_hit_ssbo_, slot);
+      }
+    }
+
     /* Bind images: out_color/out_depth for debug views, G-buffer for hit data */
     GPU_texture_image_bind(comp_color_tx_, GPU_shader_get_sampler_binding(sh, "out_color_img"));
     GPU_texture_image_bind(comp_depth_tx_, GPU_shader_get_sampler_binding(sh, "out_depth_img"));
@@ -1278,6 +1343,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
+    GPU_shader_uniform_1i(sh, "use_cone_trace", use_cone_trace_);
     GPU_shader_uniform_1i(sh, "debug_bvh_views", debug_bvh_views_);
     GPU_shader_uniform_1i(sh, "sdf_max_steps", sdf_max_steps_);
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
@@ -1541,6 +1607,9 @@ class Instance : public DrawEngine {
     }
     if (bvh_nodes_ssbo_) {
       GPU_storagebuf_free(bvh_nodes_ssbo_);
+    }
+    if (cone_hit_ssbo_) {
+      GPU_storagebuf_free(cone_hit_ssbo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);
