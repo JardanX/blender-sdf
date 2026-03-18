@@ -2,22 +2,40 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+/* Trace pass: sphere tracing to find hit positions, outputs G-buffer. */
+
 #include "infos/sdf_shader_infos.hh"
 
-COMPUTE_SHADER_CREATE_INFO(sdf_march_comp)
+#ifdef USE_TILE_CULLING
+COMPUTE_SHADER_CREATE_INFO(sdf_trace_tile_comp)
+#else
+COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
+#endif
 
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
 #define kFltMax 1e30f
-#define kAabbTreeStackSize 64
 #define kTileSize 8
-#define kMaxBitfieldBits 1024
-#define kBitfieldWords (kMaxBitfieldBits / 32)
 
 shared float tile_heat[kTileSize * kTileSize];
 
-/* Per-invocation BVH filter */
+#ifdef USE_TILE_CULLING
+
+#define kMaxTileObjects 256
+#define kMaxGroupBits 128
+#define kGroupBitWords (kMaxGroupBits / 32)
+
+shared uint s_tileObjCount;
+shared int s_tileObjList[kMaxTileObjects];
+shared uint s_groupActive[kGroupBitWords];
+
+#else
+
+#define kAabbTreeStackSize 32
+#define kMaxBitfieldBits 256
+#define kBitfieldWords (kMaxBitfieldBits / 32)
+
 uint g_bvh_bits[kBitfieldWords];
 int g_numNearShapes;
 
@@ -28,6 +46,8 @@ bool is_shape_near(int idx)
   }
   return (g_bvh_bits[idx >> 5] & (1u << (uint(idx) & 31u))) != 0u;
 }
+
+#endif
 
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -52,7 +72,145 @@ float evalObjectDist(float3 world_pos, int idx)
   return evalPrimitive(lp, obj);
 }
 
-/* BVH helpers */
+#ifdef USE_TILE_CULLING
+
+bool aabb_overlaps_tile(float3 bmin, float3 bmax, float4 tile_ndc, float4x4 viewproj)
+{
+  float2 proj_min = float2(1e30f);
+  float2 proj_max = float2(-1e30f);
+  int behind_count = 0;
+
+  for (int i = 0; i < 8; i++) {
+    float3 corner = float3(
+        (i & 1) != 0 ? bmax.x : bmin.x,
+        (i & 2) != 0 ? bmax.y : bmin.y,
+        (i & 4) != 0 ? bmax.z : bmin.z);
+    float4 clip = viewproj * float4(corner, 1.0f);
+    if (clip.w <= 0.0f) {
+      behind_count++;
+      continue;
+    }
+    float2 ndc = clip.xy / clip.w;
+    proj_min = min(proj_min, ndc);
+    proj_max = max(proj_max, ndc);
+  }
+
+  if (behind_count == 8) return false;
+  if (behind_count > 0) return true;
+
+  return !(proj_max.x < tile_ndc.x || proj_min.x > tile_ndc.z ||
+           proj_max.y < tile_ndc.y || proj_min.y > tile_ndc.w);
+}
+
+float evalSceneTile(float3 world_pos, out float3 out_color)
+{
+  float scene_dist = 1e10f;
+  out_color = float3(0.5f);
+
+  for (int g = 0; g < group_count; g++) {
+    bool group_active;
+    if (g < kMaxGroupBits) {
+      group_active = (s_groupActive[uint(g) >> 5u] & (1u << (uint(g) & 31u))) != 0u;
+    }
+    else {
+      group_active = true;
+    }
+    if (!group_active) continue;
+
+    SDFGroupGPU grp = groups[g];
+    float grp_dist = 1e10f;
+    float3 grp_color = grp.color.rgb;
+    bool grp_has_hit = false;
+
+    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
+      SDFObjectGPU obj = objects[m];
+      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      float d = evalPrimitive(lp, obj);
+
+      if (!grp_has_hit) {
+        grp_dist = d;
+        grp_color = obj.color.rgb;
+        grp_has_hit = true;
+      }
+      else {
+        float prev = grp_dist;
+        grp_dist = combineCSG(
+            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            obj.shell_distance, obj.shell_mode);
+        if (obj.csg_operation == 0 && d < prev) {
+          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          grp_color = mix(grp_color, obj.color.rgb, t);
+        }
+      }
+    }
+
+    if (!grp_has_hit) continue;
+
+    if (scene_dist >= 1e9f) {
+      scene_dist = grp_dist;
+      out_color = grp_color;
+    }
+    else {
+      float prev = scene_dist;
+      scene_dist = combineCSG(
+          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+          grp.shell_distance, grp.shell_mode);
+      if (grp.csg_operation == 0 && grp_dist < prev) {
+        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
+        out_color = mix(out_color, grp_color, t);
+      }
+    }
+  }
+
+  uint tile_count = min(s_tileObjCount, uint(kMaxTileObjects));
+  for (uint u = 0u; u < tile_count; u++) {
+    int i = s_tileObjList[u];
+    SDFObjectGPU obj = objects[i];
+    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+    float d = evalPrimitive(lp, obj);
+
+    if (scene_dist >= 1e9f) {
+      scene_dist = d;
+      out_color = obj.color.rgb;
+    }
+    else {
+      float prev = scene_dist;
+      scene_dist = combineCSG(
+          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+          obj.shell_distance, obj.shell_mode);
+      if (obj.csg_operation == 0 && d < prev) {
+        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+        out_color = mix(out_color, obj.color.rgb, t);
+      }
+    }
+  }
+
+  return scene_dist;
+}
+
+float evalSceneDistTile(float3 world_pos)
+{
+  float3 dummy_color;
+  return evalSceneTile(world_pos, dummy_color);
+}
+
+int tile_active_obj_count()
+{
+  int cnt = int(min(s_tileObjCount, uint(kMaxTileObjects)));
+  for (int g = 0; g < group_count; g++) {
+    bool is_active;
+    if (g < kMaxGroupBits) {
+      is_active = (s_groupActive[uint(g) >> 5u] & (1u << (uint(g) & 31u))) != 0u;
+    }
+    else {
+      is_active = true;
+    }
+    if (is_active) cnt += groups[g].object_count;
+  }
+  return cnt;
+}
+
+#else
 
 float3 find_ortho(float3 v)
 {
@@ -62,7 +220,6 @@ float3 find_ortho(float3 v)
   return float3(0.0f, v.z, -v.y);
 }
 
-/* Scene evaluation with BVH bitfield filter */
 float evalSceneBVH(float3 world_pos, out float3 out_color)
 {
   float scene_dist = 1e10f;
@@ -116,7 +273,6 @@ float evalSceneBVH(float3 world_pos, out float3 out_color)
     }
   }
 
-  /* Ungrouped objects */
   for (int i = 0; i < object_count; i++) {
     if (!is_shape_near(i)) continue;
 
@@ -145,7 +301,6 @@ float evalSceneBVH(float3 world_pos, out float3 out_color)
   return scene_dist;
 }
 
-/* Full scene evaluation (no BVH filter) */
 float evalSceneFull(float3 world_pos, out float3 out_color)
 {
   float scene_dist = 1e10f;
@@ -234,6 +389,8 @@ float evalSceneDistBVH(float3 world_pos)
   return evalSceneBVH(world_pos, dummy_color);
 }
 
+#endif
+
 float3 heat_color(float t)
 {
   float3 cool = float3(0.0, 1.0, 0.0);
@@ -245,13 +402,48 @@ float3 heat_color(float t)
 void main()
 {
   int2 pixel = ivec2(gl_GlobalInvocationID.xy);
+  int local_idx = int(gl_LocalInvocationID.y * kTileSize + gl_LocalInvocationID.x);
+
+#ifdef USE_TILE_CULLING
+  if (local_idx == 0) s_tileObjCount = 0u;
+  if (local_idx < kGroupBitWords) s_groupActive[local_idx] = 0u;
+  barrier();
+
+  ViewMatrices vm = drw_view();
+  {
+    float4x4 viewproj = vm.winmat * vm.viewmat;
+    float2 tile_lo = float2(gl_WorkGroupID.xy) * float(kTileSize);
+    float2 tile_hi = min(tile_lo + float(kTileSize), float2(screen_size));
+    float4 tile_ndc = float4(
+        tile_lo / float2(screen_size) * 2.0f - 1.0f,
+        tile_hi / float2(screen_size) * 2.0f - 1.0f);
+
+    for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
+      SDFObjectGPU obj = objects[i];
+      if (!aabb_overlaps_tile(obj.bbox_min.xyz, obj.bbox_max.xyz, tile_ndc, viewproj)) continue;
+      if (obj.group_id >= 0) {
+        if (obj.group_id < kMaxGroupBits) {
+          atomicOr(s_groupActive[uint(obj.group_id) >> 5u], 1u << (uint(obj.group_id) & 31u));
+        }
+      }
+      else {
+        uint slot = atomicAdd(s_tileObjCount, 1u);
+        if (slot < uint(kMaxTileObjects)) s_tileObjList[slot] = i;
+      }
+    }
+  }
+  barrier();
+#endif
+
   if (pixel.x >= screen_size.x || pixel.y >= screen_size.y) {
     return;
   }
 
   float2 uv = (float2(pixel) + 0.5f) / float2(screen_size);
 
+#ifndef USE_TILE_CULLING
   ViewMatrices vm = drw_view();
+#endif
   float4x4 view_inv = vm.viewinv;
   float4x4 win_inv = vm.wininv;
 
@@ -268,7 +460,7 @@ void main()
 
   float max_dist = 1000.0f;
 
-  /* Scene AABB ray clipping (uniform, no per-pixel loop) */
+  /* Scene AABB ray clipping */
   float3 s_min = scene_aabb_min;
   float3 s_max = scene_aabb_max;
   bool scene_aabb_valid = all(lessThan(s_min, s_max));
@@ -283,13 +475,13 @@ void main()
     t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
     if (t_enter > t_exit || t_exit < 0.0f) {
-      if (debug_bvh_views == 0) {
-        imageStore(out_color_img, pixel, float4(0.0));
-        imageStore(out_depth_img, pixel, float4(0.0));
-        return;
+      if (debug_bvh_views != 0) {
+        imageStore(out_color_img, pixel, float4(heat_color(0.0f), 1.0f));
+        imageStore(out_depth_img, pixel, float4(0.0f));
       }
-      t_enter = 0.0f;
-      t_exit = max_dist;
+      imageStore(gbuf_pos_img, pixel, float4(0.0));
+      imageStore(gbuf_color_img, pixel, float4(0.0));
+      return;
     }
     t_enter = max(t_enter, 0.0f);
     t_exit = min(t_exit, max_dist);
@@ -299,10 +491,9 @@ void main()
     t_exit = max_dist;
   }
 
-  /* Clip ray endpoint for tighter BVH pruning */
+#ifndef USE_TILE_CULLING
   float3 ray_to = ray_origin + ray_dir * t_exit;
 
-  /* BVH traversal */
   g_numNearShapes = 0;
   for (int w = 0; w < kBitfieldWords; w++) {
     g_bvh_bits[w] = 0u;
@@ -325,14 +516,12 @@ void main()
 
       SdfAabbNodeGPU node = aabb_nodes[index];
 
-      /* Loose AABB test */
       if (any(greaterThan(node.bounds_min.xyz, rayBoundsMax)) ||
           any(greaterThan(rayBoundsMin, node.bounds_max.xyz)))
       {
         continue;
       }
 
-      /* Tight orthogonal separation test */
       float3 aabbCenter = 0.5f * (node.bounds_min.xyz + node.bounds_max.xyz);
       float3 aabbHalfExtents = 0.5f * (node.bounds_max.xyz - node.bounds_min.xyz);
       float separation = abs(dot(rayDirOrtho, ray_origin - aabbCenter)) -
@@ -340,7 +529,6 @@ void main()
       if (separation > 0.0f) continue;
 
       if (node.child_a < 0) {
-        /* Leaf: precise slab test (handles camera inside AABB) */
         float3 lt1 = (node.bounds_min.xyz - ray_origin) * inv_dir;
         float3 lt2 = (node.bounds_max.xyz - ray_origin) * inv_dir;
         float ltMin = max(max(min(lt1.x, lt2.x), min(lt1.y, lt2.y)), min(lt1.z, lt2.z));
@@ -366,12 +554,12 @@ void main()
     }
   }
   else {
-    /* BVH off: mark all objects as near */
     g_numNearShapes = object_count;
     for (int w = 0; w < kBitfieldWords; w++) {
       g_bvh_bits[w] = 0xFFFFFFFFu;
     }
   }
+#endif
 
   /* Sphere tracing */
   float t = t_enter;
@@ -385,12 +573,16 @@ void main()
     float3 pos = ray_origin + ray_dir * t;
     float3 color;
     float d;
+#ifdef USE_TILE_CULLING
+    d = evalSceneTile(pos, color);
+#else
     if (use_bvh != 0) {
       d = evalSceneBVH(pos, color);
     }
     else {
       d = evalSceneFull(pos, color);
     }
+#endif
 
     if (d < sdf_ray_epsilon) {
       hit = true;
@@ -405,18 +597,18 @@ void main()
     }
   }
 
-  /* Debug views */
-  int local_idx = int(gl_LocalInvocationID.y * kTileSize + gl_LocalInvocationID.x);
-
+  /* Debug views write directly to out_color/out_depth */
+#ifdef USE_TILE_CULLING
   if (debug_bvh_views == 1) {
-    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / 16.0f;
+    float heat = float(tile_active_obj_count()) / max(float(object_count), 1.0f);
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
   else if (debug_bvh_views == 2) {
-    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / 16.0f;
-    tile_heat[local_idx] = heat;
+    tile_heat[local_idx] = float(tile_active_obj_count()) / max(float(object_count), 1.0f);
     barrier();
     float max_heat = 0.0f;
     for (int i = 0; i < kTileSize * kTileSize; i++) {
@@ -424,16 +616,20 @@ void main()
     }
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
   else if (debug_bvh_views == 3) {
-    float heat = float(steps_taken) / 64.0f;
+    float heat = float(steps_taken) / float(sdf_max_steps);
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
   else if (debug_bvh_views == 4) {
-    float heat = float(steps_taken) / 64.0f;
+    float heat = float(steps_taken) / float(sdf_max_steps);
     tile_heat[local_idx] = heat;
     barrier();
     float max_heat = 0.0f;
@@ -442,119 +638,64 @@ void main()
     }
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
+#else
+  if (debug_bvh_views == 1) {
+    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / max(float(object_count), 1.0f);
+    imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
+    imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
+    return;
+  }
+  else if (debug_bvh_views == 2) {
+    float heat = float(use_bvh != 0 ? g_numNearShapes : object_count) / max(float(object_count), 1.0f);
+    tile_heat[local_idx] = heat;
+    barrier();
+    float max_heat = 0.0f;
+    for (int i = 0; i < kTileSize * kTileSize; i++) {
+      max_heat = max(max_heat, tile_heat[i]);
+    }
+    imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
+    imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
+    return;
+  }
+  else if (debug_bvh_views == 3) {
+    float heat = float(steps_taken) / float(sdf_max_steps);
+    imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
+    imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
+    return;
+  }
+  else if (debug_bvh_views == 4) {
+    float heat = float(steps_taken) / float(sdf_max_steps);
+    tile_heat[local_idx] = heat;
+    barrier();
+    float max_heat = 0.0f;
+    for (int i = 0; i < kTileSize * kTileSize; i++) {
+      max_heat = max(max_heat, tile_heat[i]);
+    }
+    imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
+    imageStore(out_depth_img, pixel, float4(0.0f));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
+    return;
+  }
+#endif
 
   if (!hit) {
-    imageStore(out_color_img, pixel, float4(0.0));
-    imageStore(out_depth_img, pixel, float4(0.0));
+    imageStore(gbuf_pos_img, pixel, float4(0.0));
+    imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
 
-  /* Normal computation */
-  float eps = sdf_ray_epsilon * 2.0f;
-  float3 normal;
-  if (use_bvh != 0) {
-    normal = normalize(float3(
-        evalSceneDistBVH(hit_pos + float3(eps, 0.0f, 0.0f)) -
-            evalSceneDistBVH(hit_pos - float3(eps, 0.0f, 0.0f)),
-        evalSceneDistBVH(hit_pos + float3(0.0f, eps, 0.0f)) -
-            evalSceneDistBVH(hit_pos - float3(0.0f, eps, 0.0f)),
-        evalSceneDistBVH(hit_pos + float3(0.0f, 0.0f, eps)) -
-            evalSceneDistBVH(hit_pos - float3(0.0f, 0.0f, eps))));
-  }
-  else {
-    normal = normalize(float3(
-        evalSceneDistFull(hit_pos + float3(eps, 0.0f, 0.0f)) -
-            evalSceneDistFull(hit_pos - float3(eps, 0.0f, 0.0f)),
-        evalSceneDistFull(hit_pos + float3(0.0f, eps, 0.0f)) -
-            evalSceneDistFull(hit_pos - float3(0.0f, eps, 0.0f)),
-        evalSceneDistFull(hit_pos + float3(0.0f, 0.0f, eps)) -
-            evalSceneDistFull(hit_pos - float3(0.0f, 0.0f, eps))));
-  }
-
-  /* Shading */
-  float3 obj_color = hit_color;
-  float3 shaded_color;
-
-  if (lighting_type == 0) {
-    shaded_color = obj_color;
-  }
-  else if (lighting_type == 1) {
-    float3 N = normalize((vm.viewmat * float4(normal, 0.0f)).xyz);
-    float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
-    float3 I = drw_view_incident_vector(view_pos);
-
-    float4 dirs[4] = float4[4](studio_light0, studio_light1, studio_light2, studio_light3);
-    float4 cols[4] = float4[4](studio_color0, studio_color1, studio_color2, studio_color3);
-    float4 specs[4] = float4[4](studio_spec0, studio_spec1, studio_spec2, studio_spec3);
-
-    float3 diffuse_light = studio_ambient;
-    float3 specular_light = studio_ambient;
-    float roughness = 0.5f;
-
-    for (int i = 0; i < 4; i++) {
-      float NL = dot(dirs[i].xyz, N);
-      float w = cols[i].w;
-      float w1 = w + 1.0f;
-      diffuse_light += cols[i].rgb * clamp((NL + w) / (w1 * w1), 0.0f, 1.0f);
-    }
-
-    float3 spec_col = float3(0.0f);
-    if (use_specular != 0) {
-      float3 R = -reflect(I, N);
-      for (int i = 0; i < 4; i++) {
-        float3 L = dirs[i].xyz;
-        float w = cols[i].w;
-        float3 H = normalize(L + I);
-        float spec_angle = clamp(dot(H, N), 0.0f, 1.0f);
-        float cNL = clamp(dot(L, N), 0.0f, 1.0f);
-
-        float gloss = (1.0f - roughness) * (1.0f - w);
-        float shininess = exp2(10.0f * gloss + 1.0f);
-        float norm_factor = shininess * 0.125f + 1.0f;
-        float spec = pow(spec_angle, shininess) * cNL * norm_factor;
-
-        float wrap_NL = dot(L, R);
-        float w_s = mix(w, 1.0f, roughness);
-        float w_s1 = w_s + 1.0f;
-        float spec_env = clamp((wrap_NL + w_s) / (w_s1 * w_s1), 0.0f, 1.0f);
-
-        specular_light += specs[i].rgb * mix(spec, spec_env, w * w);
-      }
-
-      spec_col = float3(0.05f);
-      float NV = clamp(dot(N, I), 0.0f, 1.0f);
-      float fresnel = exp2(-8.35f * NV) * (1.0f - roughness);
-      spec_col = mix(spec_col, float3(1.0f), fresnel);
-    }
-
-    specular_light *= spec_col;
-    float spec_energy = dot(spec_col, float3(0.33333f));
-    diffuse_light *= obj_color * (1.0f - spec_energy);
-    shaded_color = diffuse_light + specular_light;
-  }
-  else {
-    float3 view_normal = normalize((vm.viewmat * float4(normal, 0.0f)).xyz);
-    float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
-    float3 I = drw_view_incident_vector(view_pos);
-
-    float a = 1.0f / (1.0f + I.z);
-    float b = -I.x * I.y * a;
-    float3 b1 = float3(1.0f - I.x * I.x * a, b, -I.x);
-    float3 b2 = float3(b, 1.0f - I.y * I.y * a, -I.y);
-    float2 matcap_uv = float2(dot(b1, view_normal), dot(b2, view_normal));
-    if (use_matcap_flip != 0) {
-      matcap_uv.x = -matcap_uv.x;
-    }
-    matcap_uv = matcap_uv * 0.496f + 0.5f;
-
-    float3 diffuse = textureLod(matcap_tx, float3(matcap_uv, 0.0f), 0.0f).rgb;
-    float3 specular = textureLod(matcap_tx, float3(matcap_uv, 1.0f), 0.0f).rgb;
-
-    shaded_color = diffuse * obj_color + specular * float(use_specular);
-  }
-
-  imageStore(out_color_img, pixel, float4(shaded_color, 1.0f));
-  imageStore(out_depth_img, pixel, float4(drw_point_world_to_screen(hit_pos).z));
+  /* Output G-buffer */
+  imageStore(gbuf_pos_img, pixel, float4(hit_pos, 1.0));
+  imageStore(gbuf_color_img, pixel, float4(hit_color, 0.0));
 }

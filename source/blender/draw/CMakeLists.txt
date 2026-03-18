@@ -343,7 +343,8 @@ set(GLSL_SRC
 
   engines/workbench/workbench_shader_shared.hh
 
-  engines/sdf/shaders/sdf_march_comp.glsl
+  engines/sdf/shaders/sdf_trace_comp.glsl
+  engines/sdf/shaders/sdf_shade_comp.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
