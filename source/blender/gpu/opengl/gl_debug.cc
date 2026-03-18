@@ -407,6 +407,10 @@ void GLContext::debug_group_end()
     return;
   }
 
+  if (frame_timings.is_empty()) {
+    return;
+  }
+
   Vector<TimeQuery> &queries = frame_timings.last().queries;
   for (int i = queries.size() - 1; i >= 0; i--) {
     TimeQuery &query = queries[i];

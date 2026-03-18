@@ -11,7 +11,7 @@ void main()
   float2 uv = screen_uv;
   out_color = texture(color_tx, uv);
   float depth = texture(depth_tx, uv).r;
-  if (depth == 0.0f) {
+  if (depth == 0.0f && debug_bvh_views == 0) {
     discard;
   }
   gl_FragDepth = depth;

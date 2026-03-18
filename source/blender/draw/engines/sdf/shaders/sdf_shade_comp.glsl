@@ -27,7 +27,7 @@ float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-/* Brute-force scene distance (no BVH, no tile culling) */
+/* Scene distance with per-object AABB culling */
 float evalSceneDist(float3 world_pos)
 {
   float scene_dist = 1e10f;
@@ -38,6 +38,10 @@ float evalSceneDist(float3 world_pos)
     bool grp_has_hit = false;
 
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
+      if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > sdf_ray_epsilon) {
+        continue;
+      }
+
       SDFObjectGPU obj = objects[m];
       float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
       float d = evalPrimitive(lp, obj);
@@ -66,9 +70,12 @@ float evalSceneDist(float3 world_pos)
   }
 
   for (int i = 0; i < object_count; i++) {
-    SDFObjectGPU obj = objects[i];
-    if (obj.group_id >= 0) continue;
+    if (objects[i].group_id >= 0) continue;
+    if (point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz) > sdf_ray_epsilon) {
+      continue;
+    }
 
+    SDFObjectGPU obj = objects[i];
     float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
 
@@ -102,14 +109,39 @@ void main()
   float3 hit_pos = gbuf.xyz;
   float3 hit_color = imageLoad(gbuf_color_img, pixel).rgb;
 
-  /* Tetrahedron normal (4 evals, brute force) */
-  float eps = sdf_ray_epsilon * 2.0f;
-  const float2 k = float2(1.0f, -1.0f);
-  float3 normal = normalize(
-      k.xyy * evalSceneDist(hit_pos + k.xyy * eps) +
-      k.yyx * evalSceneDist(hit_pos + k.yyx * eps) +
-      k.yxy * evalSceneDist(hit_pos + k.yxy * eps) +
-      k.xxx * evalSceneDist(hit_pos + k.xxx * eps));
+  /* Best-fit triangle normal (Wicked Engine technique).
+   * Pick neighbors closest in depth to avoid step-march artifacts at iso-distance boundaries. */
+  float3 p0 = hit_pos;
+  float4 raw_r = imageLoad(gbuf_pos_img, pixel + int2( 1, 0));
+  float4 raw_l = imageLoad(gbuf_pos_img, pixel + int2(-1, 0));
+  float4 raw_u = imageLoad(gbuf_pos_img, pixel + int2( 0, 1));
+  float4 raw_d = imageLoad(gbuf_pos_img, pixel + int2( 0,-1));
+
+  float3 pr = raw_r.xyz, pl = raw_l.xyz, pu = raw_u.xyz, pd = raw_d.xyz;
+
+  /* Depth = distance from camera */
+  float3 cam_pos = drw_view().viewinv[3].xyz;
+  float depth0 = length(p0 - cam_pos);
+  float depth_r = (raw_r.w > 0.0f) ? length(pr - cam_pos) : 1e10f;
+  float depth_l = (raw_l.w > 0.0f) ? length(pl - cam_pos) : 1e10f;
+  float depth_u = (raw_u.w > 0.0f) ? length(pu - cam_pos) : 1e10f;
+  float depth_d = (raw_d.w > 0.0f) ? length(pd - cam_pos) : 1e10f;
+
+  /* Pick best horizontal/vertical by depth proximity */
+  bool use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
+  bool use_up    = abs(depth_u - depth0) < abs(depth_d - depth0);
+
+  float3 h = use_right ? pr : pl;
+  float3 v = use_up    ? pu : pd;
+
+  /* Form triangle with correct winding */
+  float3 normal;
+  if (use_right && use_up)       normal = normalize(cross(h - p0, v - p0));
+  else if (use_right && !use_up) normal = normalize(cross(v - p0, h - p0));
+  else if (!use_right && use_up) normal = normalize(cross(v - p0, h - p0));
+  else                           normal = normalize(cross(h - p0, v - p0));
+
+  if (any(isnan(normal)) || dot(normal, normal) < 0.5f) normal = float3(0.0f, 0.0f, 1.0f);
 
   /* Shading */
   ViewMatrices vm = drw_view();

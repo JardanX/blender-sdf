@@ -40,6 +40,7 @@
     .sdf_bvh_debug_view = 0, \
     .sdf_max_steps = 128, \
     .sdf_ray_epsilon = 0.001f, \
+    .sdf_over_relaxation = 1.2f, \
   }
 
 #define _DNA_DEFAULT_View3DOverlay \

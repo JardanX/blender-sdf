@@ -37,6 +37,9 @@ void GPU_debug_group_begin(const char *name)
     return;
   }
   Context *ctx = Context::get();
+  if (ctx == nullptr) {
+    return;
+  }
   DebugStack &stack = ctx->debug_stack;
   stack.append(StringRef(name));
   ctx->debug_group_begin(name, stack.size());
@@ -48,6 +51,9 @@ void GPU_debug_group_end()
     return;
   }
   Context *ctx = Context::get();
+  if (ctx == nullptr) {
+    return;
+  }
   ctx->debug_stack.pop_last();
   ctx->debug_group_end();
 }
