@@ -409,12 +409,12 @@ float opSmoothIntersection(float d1, float d2, float k)
 
 float opChamferUnion(float a, float b, float r)
 {
-  return min(min(a, b), (a - r + b) * 0.70710678f);
+  return min(min(a, b), (a - r + b) * 0.5f);
 }
 
 float opChamferIntersection(float a, float b, float r)
 {
-  return max(max(a, b), (a + r + b) * 0.70710678f);
+  return max(max(a, b), (a + r + b) * 0.5f);
 }
 
 float opChamferSubtraction(float d1, float d2, float r)

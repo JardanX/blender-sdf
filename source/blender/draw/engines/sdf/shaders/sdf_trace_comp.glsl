@@ -100,8 +100,9 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
       if (!is_shape_near(m)) continue;
 
-      /* Per-step AABB skip */
-      if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > sdf_ray_epsilon) {
+      /* Per-step AABB skip: expand threshold by blend radius so blend partners aren't pruned */
+      float aabb_skip_thresh = max(sdf_ray_epsilon, objects[m].blend);
+      if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > aabb_skip_thresh) {
         continue;
       }
 
@@ -159,7 +160,8 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     if (objects[i].group_id >= 0) continue;
 
     float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
-    if (da > 0.0f) {
+    float ungrouped_skip_thresh = max(0.0f, objects[i].blend);
+    if (da > ungrouped_skip_thresh) {
       out_aabb_skip = min(out_aabb_skip, da);
       continue;
     }
@@ -442,6 +444,7 @@ void main()
       cone_skip_target = projected;
     }
   }
+
 #endif
 
 #ifndef USE_TILE_CULLING
