@@ -394,7 +394,11 @@ void main()
 
   float3 ray_origin = world_near.xyz;
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
-  float3 inv_dir = 1.0f / ray_dir;
+  float3 safe_dir = float3(
+      abs(ray_dir.x) < 1e-8f ? 1e-8f : ray_dir.x,
+      abs(ray_dir.y) < 1e-8f ? 1e-8f : ray_dir.y,
+      abs(ray_dir.z) < 1e-8f ? 1e-8f : ray_dir.z);
+  float3 inv_dir = 1.0f / safe_dir;
 
   float max_dist = 1000.0f;
 
