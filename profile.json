@@ -1,3 +1,0 @@
-[{"name":"process_name","ph":"M","pid":1,"args":{"name":"GPU"}},
-{"name":"process_name","ph":"M","pid":2,"args":{"name":"CPU"}}
-]

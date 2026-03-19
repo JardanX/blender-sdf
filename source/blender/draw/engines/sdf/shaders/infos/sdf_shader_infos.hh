@@ -69,7 +69,7 @@ GPU_SHADER_CREATE_END()
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_cone_march_comp)
-LOCAL_GROUP_SIZE(1, 1)
+LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
 STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
