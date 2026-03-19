@@ -339,8 +339,14 @@ void main()
 
   if (local_idx == 0) {
     s_tileObjCount = uint(tile_prim_counts[tileIdx]);
-    s_coneHitPos = (use_cone_trace != 0) ? tile_hit_pos[tileIdx]
-                                          : float4(0.0f, 0.0f, 0.0f, -1.0f);
+    if (use_cone_trace != 0) {
+      int stTilesX = (screen_size.x + 15) / 16;
+      int stIdx = int(gl_WorkGroupID.x / 2u) + int(gl_WorkGroupID.y / 2u) * stTilesX;
+      s_coneHitPos = tile_hit_pos[stIdx];
+    }
+    else {
+      s_coneHitPos = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    }
   }
   barrier();
 
