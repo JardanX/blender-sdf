@@ -171,9 +171,7 @@ float sdAdvancedBox(float3 p,
     d2d = sdChamferBox2D(p.xy, sz, r);
   }
 
-  float tc = clamp(t, 0.0f, 1.0f);
-  float tapFace = max(1.0f - tapTop * tc - tapBot * (1.0f - tc), 0.001f);
-  float maxR_face = min(size.x * tapFace, size.y * tapFace);
+  float maxR_face = min(sz.x, sz.y);
 
   float dz = abs(p.z) - size.z;
   float edgeR = (p.z > 0.0f) ? edgeTop * min(maxR_face, size.z)
@@ -331,13 +329,9 @@ float sdAdvancedNgon(float3 p,
     d2d = sdRegularPolygon2D(p.xy, innerR, sides) - bevelR;
   }
 
-  float tc = clamp(t, 0.0f, 1.0f);
-  float tapFace = max(1.0f - tapTop * tc - tapBot * (1.0f - tc), 0.001f);
-  float apothem_face = R * tapFace * cos(an);
-
   float dz = abs(p.z) - halfH;
-  float edgeR = (p.z > 0.0f) ? edgeTop * min(apothem_face, halfH)
-                              : edgeBot * min(apothem_face, halfH);
+  float edgeR = (p.z > 0.0f) ? edgeTop * min(apothem, halfH)
+                              : edgeBot * min(apothem, halfH);
 
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
@@ -403,6 +397,17 @@ float opSmoothIntersection(float d1, float d2, float k)
   }
   float h = clamp(0.5f - 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
   return mix(d2, d1, h) + k * h * (1.0f - h);
+}
+
+/* ---- Color blend factor ---- */
+
+float colorBlendFactor(float d_prev, float d_new, int blend_type, float blend)
+{
+  if (blend_type > 0 && blend > 0.0f) {
+    float h = clamp(0.5f + 0.5f * (d_new - d_prev) / blend, 0.0f, 1.0f);
+    return smoothstep(0.0f, 1.0f, 1.0f - h);
+  }
+  return (d_new < d_prev) ? 1.0f : 0.0f;
 }
 
 /* ---- Chamfer blend operations ---- */
@@ -1153,6 +1158,44 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
   }
 
   return final_d;
+}
+
+/* ---- Cross-shader helpers ---- */
+
+float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
+{
+  SDFPrimitiveData prim_data;
+  prim_data.sdf_type = obj.sdf_type;
+  prim_data.size = obj.sdf_size.xyz;
+  prim_data.bevel = obj.bevel;
+  prim_data.box_corners = obj.box_corners;
+  prim_data.box_edges = obj.box_edges;
+  prim_data.box_modes = obj.box_modes;
+  prim_data.modifier_start = obj.modifier_start;
+  prim_data.modifier_count = obj.modifier_count;
+  prim_data.inverse_matrix = obj.inverse_matrix;
+
+  return evalObjectSDF(prim_data, local_pos);
+}
+
+void flushGroup(int gid, float grp_dist, float3 grp_color,
+                inout float scene_dist, inout float3 out_color)
+{
+  if (scene_dist >= 1e9f) {
+    scene_dist = grp_dist;
+    out_color = grp_color;
+  }
+  else {
+    SDFGroupGPU grp = groups[gid];
+    float prev = scene_dist;
+    scene_dist = combineCSG(
+        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+        grp.shell_distance, grp.shell_mode);
+    if (grp.csg_operation == 0) {
+      float t = colorBlendFactor(prev, grp_dist, grp.blend_type, grp.blend);
+      out_color = mix(out_color, grp_color, t);
+    }
+  }
 }
 
 /** \} */

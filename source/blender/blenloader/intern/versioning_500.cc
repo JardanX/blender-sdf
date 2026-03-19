@@ -4441,7 +4441,7 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
               v3d->shading.sdf_surface_margin = 100;
             }
             if (v3d->shading.sdf_max_steps == 0) {
-              v3d->shading.sdf_max_steps = 128;
+              v3d->shading.sdf_max_steps = 256;
             }
             if (v3d->shading.sdf_ray_epsilon == 0.0f) {
               v3d->shading.sdf_ray_epsilon = 0.001f;

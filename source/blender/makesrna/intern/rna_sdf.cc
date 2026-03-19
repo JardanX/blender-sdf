@@ -743,6 +743,12 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Group Order", "Evaluation order within group");
 
+  /* SDF Index */
+  prop = RNA_def_property(srna, "sdf_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_index");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "SDF Index", "Global evaluation order index");
+
   /* Animation data */
   rna_def_animdata_common(srna);
 }

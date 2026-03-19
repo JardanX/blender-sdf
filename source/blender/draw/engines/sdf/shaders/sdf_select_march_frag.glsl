@@ -13,22 +13,6 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_select_march)
 
 #define MAX_MARCH_STEPS 48
 
-float evalSelectPrimitive(float3 local_pos, SDFObjectGPU obj)
-{
-  SDFPrimitiveData prim_data;
-  prim_data.sdf_type = obj.sdf_type;
-  prim_data.size = obj.sdf_size.xyz;
-  prim_data.bevel = obj.bevel;
-  prim_data.box_corners = obj.box_corners;
-  prim_data.box_edges = obj.box_edges;
-  prim_data.box_modes = obj.box_modes;
-  prim_data.modifier_start = obj.modifier_start;
-  prim_data.modifier_count = obj.modifier_count;
-  prim_data.inverse_matrix = obj.inverse_matrix;
-
-  return evalObjectSDF(prim_data, local_pos);
-}
-
 void writeSelectHit(uint sel_id, float ndc_depth)
 {
   if (sel_id == uint(-1)) {
@@ -69,7 +53,11 @@ void main()
 
   float3 ray_origin = world_near.xyz;
   float3 ray_dir = normalize(world_far.xyz - world_near.xyz);
-  float3 inv_dir = 1.0f / ray_dir;
+  float3 safe_dir = float3(
+      abs(ray_dir.x) < 1e-8f ? 1e-8f : ray_dir.x,
+      abs(ray_dir.y) < 1e-8f ? 1e-8f : ray_dir.y,
+      abs(ray_dir.z) < 1e-8f ? 1e-8f : ray_dir.z);
+  float3 inv_dir = 1.0f / safe_dir;
 
   /* Group-aware per-object sphere-march. */
   float best_depth = 1.0f;
@@ -104,7 +92,7 @@ void main()
     for (int s = 0; s < MAX_MARCH_STEPS; s++) {
       float3 wp = ray_origin + ray_dir * t;
       float3 lp = (obj.inverse_matrix * float4(wp - obj.position.xyz, 1.0f)).xyz;
-      float d = evalSelectPrimitive(lp, obj);
+      float d = evalPrimitive(lp, obj);
 
       /* Verify against combined group SDF for CSG correctness. */
       if (d < thr && obj.group_id >= 0) {
@@ -116,7 +104,7 @@ void main()
             continue;
           }
           float3 mlp = (mobj.inverse_matrix * float4(wp - mobj.position.xyz, 1.0f)).xyz;
-          float md = evalSelectPrimitive(mlp, mobj);
+          float md = evalPrimitive(mlp, mobj);
           if (grp_dist >= 1e9f) {
             grp_dist = md;
           }

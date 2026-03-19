@@ -126,7 +126,6 @@ class Instance : public DrawEngine {
   gpu::Texture *comp_depth_tx_ = nullptr;
   gpu::Texture *gbuf_pos_tx_ = nullptr;
   gpu::Texture *gbuf_color_tx_ = nullptr;
-  gpu::Texture *gbuf_normal_tx_ = nullptr;
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
   int2 render_size_ = int2(0);
@@ -149,6 +148,9 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *cone_hit_ssbo_ = nullptr;
   int cone_hit_ssbo_count_ = 0;
 
+  gpu::StorageBuf *tile_far_hint_ssbo_ = nullptr;
+  int tile_far_hint_ssbo_count_ = 0;
+
   gpu::StorageBuf *tile_prim_counts_ssbo_ = nullptr;
   int tile_prim_counts_ssbo_tiles_ = 0;
   gpu::StorageBuf *tile_prim_lists_ssbo_ = nullptr;
@@ -166,7 +168,7 @@ class Instance : public DrawEngine {
   int use_bvh_ = 1;
   int debug_bvh_views_ = 0;
   int use_cone_trace_ = 0;
-  int sdf_max_steps_ = 128;
+  int sdf_max_steps_ = 256;
   float sdf_ray_epsilon_ = 0.001f;
   float sdf_over_relaxation_ = 1.2f;
   float sdf_cone_aperture_ = 1.25f;
@@ -288,7 +290,7 @@ class Instance : public DrawEngine {
     gpu_obj.group_id = -1;
     gpu_obj.group_first = 0;
     gpu_obj.group_order = sdf_data->group_order;
-    gpu_obj.original_index = int(objects_.size());
+    gpu_obj.original_index = sdf_data->sdf_index;
     object_group_ptrs_.append(sdf_data->sdf_group);
     object_ptrs_.append(ob);
 
@@ -643,7 +645,7 @@ class Instance : public DrawEngine {
                                i};
             }
             else {
-              sort_pairs[i] = {int64_t(1000000) + i, i};
+              sort_pairs[i] = {int64_t(1000000) + objects_[i].original_index, i};
             }
           }
           std::stable_sort(sort_pairs.begin(), sort_pairs.end());
@@ -918,6 +920,8 @@ class Instance : public DrawEngine {
     draw_shade();
     GPU_debug_group_end();
 
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+
     GPU_debug_group_begin("SDF Blit");
     draw_blit();
     GPU_debug_group_end();
@@ -947,7 +951,7 @@ class Instance : public DrawEngine {
     /* Apply defaults for unversioned viewports (new DNA fields default to 0) */
     View3D *v3d_mut = const_cast<View3D *>(v3d);
     if (v3d_mut->shading.sdf_max_steps == 0) {
-      v3d_mut->shading.sdf_max_steps = 128;
+      v3d_mut->shading.sdf_max_steps = 256;
     }
     if (v3d_mut->shading.sdf_ray_epsilon == 0.0f) {
       v3d_mut->shading.sdf_ray_epsilon = 0.001f;
@@ -1269,9 +1273,6 @@ class Instance : public DrawEngine {
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
     }
-    if (gbuf_normal_tx_) {
-      GPU_texture_free(gbuf_normal_tx_);
-    }
     render_size_ = vp;
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
@@ -1279,7 +1280,6 @@ class Instance : public DrawEngine {
     comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
     gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
     gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
-    gbuf_normal_tx_ = GPU_texture_create_2d("sdf_gbuf_normal", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
   }
 
   void bind_ssbos(gpu::Shader *sh)
@@ -1334,6 +1334,16 @@ class Instance : public DrawEngine {
       cone_hit_ssbo_ = GPU_storagebuf_create_ex(
           total_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
       cone_hit_ssbo_count_ = total_tiles;
+    }
+
+    if (tile_far_hint_ssbo_ != nullptr && tile_far_hint_ssbo_count_ != total_tiles) {
+      GPU_storagebuf_free(tile_far_hint_ssbo_);
+      tile_far_hint_ssbo_ = nullptr;
+    }
+    if (tile_far_hint_ssbo_ == nullptr && total_tiles > 0) {
+      tile_far_hint_ssbo_ = GPU_storagebuf_create_ex(
+          total_tiles * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_far_hint");
+      tile_far_hint_ssbo_count_ = total_tiles;
     }
   }
 
@@ -1409,6 +1419,10 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(tile_prim_lists_ssbo_,
                           GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
     }
+    if (tile_far_hint_ssbo_) {
+      GPU_storagebuf_bind(tile_far_hint_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_far_hint"));
+    }
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
@@ -1460,13 +1474,18 @@ class Instance : public DrawEngine {
         GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
       }
     }
+    if (tile_far_hint_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_far_hint");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(tile_far_hint_ssbo_, slot);
+      }
+    }
 
     /* Bind images: out_color/out_depth for debug views, G-buffer for hit data */
     GPU_texture_image_bind(comp_color_tx_, GPU_shader_get_sampler_binding(sh, "out_color_img"));
     GPU_texture_image_bind(comp_depth_tx_, GPU_shader_get_sampler_binding(sh, "out_depth_img"));
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
-    GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
@@ -1494,7 +1513,6 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(comp_depth_tx_);
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_color_tx_);
-    GPU_texture_image_unbind(gbuf_normal_tx_);
     GPU_shader_unbind();
   }
 
@@ -1511,31 +1529,17 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(sh);
 
-    /* SSBOs for brute-force normal computation */
-    if (object_ssbo_) {
-      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
-    }
-    if (modifier_ssbo_) {
-      GPU_storagebuf_bind(modifier_ssbo_, GPU_shader_get_ssbo_binding(sh, "sdf_modifiers"));
-    }
-    if (group_ssbo_) {
-      GPU_storagebuf_bind(group_ssbo_, GPU_shader_get_ssbo_binding(sh, "groups"));
-    }
-
     /* G-buffer as read, final output as write */
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
     GPU_texture_image_bind(comp_color_tx_, GPU_shader_get_sampler_binding(sh, "out_color_img"));
     GPU_texture_image_bind(comp_depth_tx_, GPU_shader_get_sampler_binding(sh, "out_depth_img"));
-    GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
     if (matcap_tx_) {
       int matcap_slot = GPU_shader_get_sampler_binding(sh, "matcap_tx");
       GPU_texture_bind(matcap_tx_, matcap_slot);
     }
 
-    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1i(sh, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(sh, "use_specular", use_specular_);
     GPU_shader_uniform_1i(sh, "use_matcap_flip", use_matcap_flip_);
@@ -1567,7 +1571,6 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_texture_image_unbind(comp_color_tx_);
     GPU_texture_image_unbind(comp_depth_tx_);
-    GPU_texture_image_unbind(gbuf_normal_tx_);
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
     }
@@ -1713,9 +1716,6 @@ class Instance : public DrawEngine {
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
     }
-    if (gbuf_normal_tx_) {
-      GPU_texture_free(gbuf_normal_tx_);
-    }
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);
     }
@@ -1739,6 +1739,9 @@ class Instance : public DrawEngine {
     }
     if (cone_hit_ssbo_) {
       GPU_storagebuf_free(cone_hit_ssbo_);
+    }
+    if (tile_far_hint_ssbo_) {
+      GPU_storagebuf_free(tile_far_hint_ssbo_);
     }
     if (tile_prim_counts_ssbo_) {
       GPU_storagebuf_free(tile_prim_counts_ssbo_);

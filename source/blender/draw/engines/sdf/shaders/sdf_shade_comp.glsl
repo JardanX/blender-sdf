@@ -9,7 +9,6 @@
 COMPUTE_SHADER_CREATE_INFO(sdf_shade_comp)
 
 #include "draw_view_lib.glsl"
-#include "sdf_lib.glsl"
 
 void main()
 {
@@ -26,15 +25,23 @@ void main()
   }
 
   float3 hit_pos = gbuf.xyz;
-  float3 hit_color = imageLoad(gbuf_color_img, pixel).rgb;
+  float4 gbuf_col = imageLoad(gbuf_color_img, pixel);
+  float3 hit_color = gbuf_col.rgb;
+  float obj_id = gbuf_col.w;
 
   /* Best-fit triangle normal: pick the closer neighbor in each axis to avoid
-   * artifacts at depth discontinuities (silhouettes, CSG edges). */
+   * artifacts at depth discontinuities (silhouettes, CSG edges).
+   * Prefer same-object-ID neighbors to prevent normal bleed across CSG boundaries. */
   float3 p0 = hit_pos;
   float4 raw_r = imageLoad(gbuf_pos_img, pixel + int2(1, 0));
   float4 raw_l = imageLoad(gbuf_pos_img, pixel + int2(-1, 0));
   float4 raw_u = imageLoad(gbuf_pos_img, pixel + int2(0, 1));
   float4 raw_d = imageLoad(gbuf_pos_img, pixel + int2(0, -1));
+
+  float id_r = imageLoad(gbuf_color_img, pixel + int2(1, 0)).w;
+  float id_l = imageLoad(gbuf_color_img, pixel + int2(-1, 0)).w;
+  float id_u = imageLoad(gbuf_color_img, pixel + int2(0, 1)).w;
+  float id_d = imageLoad(gbuf_color_img, pixel + int2(0, -1)).w;
 
   float3 view_fwd = -normalize(drw_view().viewinv[2].xyz);
   float depth0 = dot(p0, view_fwd);
@@ -43,8 +50,20 @@ void main()
   float depth_u = (raw_u.w > 0.0f) ? dot(raw_u.xyz, view_fwd) : 1e10f;
   float depth_d = (raw_d.w > 0.0f) ? dot(raw_d.xyz, view_fwd) : 1e10f;
 
-  bool use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
-  bool use_up = abs(depth_u - depth0) < abs(depth_d - depth0);
+  bool r_same = (id_r == obj_id) && (raw_r.w > 0.0f);
+  bool l_same = (id_l == obj_id) && (raw_l.w > 0.0f);
+  bool u_same = (id_u == obj_id) && (raw_u.w > 0.0f);
+  bool d_same = (id_d == obj_id) && (raw_d.w > 0.0f);
+
+  bool use_right;
+  if (r_same && !l_same) use_right = true;
+  else if (l_same && !r_same) use_right = false;
+  else use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
+
+  bool use_up;
+  if (u_same && !d_same) use_up = true;
+  else if (d_same && !u_same) use_up = false;
+  else use_up = abs(depth_u - depth0) < abs(depth_d - depth0);
 
   float3 h = use_right ? raw_r.xyz : raw_l.xyz;
   float3 v = use_up ? raw_u.xyz : raw_d.xyz;
