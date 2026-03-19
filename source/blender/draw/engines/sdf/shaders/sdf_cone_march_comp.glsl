@@ -2,10 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Cone march pre-pass: one thread per tile, coarse sphere trace using
- * tile-culled primitive lists from tile_prim_counts/tile_prim_lists SSBOs.
- * Finds approximate surface distance along tile center ray and writes
- * hit position to tile_hit_pos SSBO for the per-pixel trace to skip. */
+/* Cone march pass: one thread per tile, coarse sphere trace using
+ * tile-culled prim lists. Zeros tile_prim_counts for empty tiles,
+ * writes hit position to tile_hit_pos for non-empty tiles. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -14,7 +13,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_cone_march_comp)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-#define kMaxTileObjects 256
+#define kMaxTileObjects 512
 
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
@@ -32,7 +31,6 @@ float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
-/* Flush accumulated group result into scene distance. */
 void flushGroup(int gid, float grp_dist, float3 grp_color,
                 inout float scene_dist, inout float3 out_color)
 {
@@ -53,7 +51,6 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
   }
 }
 
-/* Evaluate scene SDF using tile-culled prim list (same logic as evalSceneTile). */
 float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float out_aabb_skip)
 {
   float scene_dist = 1e10f;
@@ -67,7 +64,15 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
 
   for (int u = 0; u <= tile_count; u++) {
     int i = (u < tile_count) ? tile_prim_lists[base_offset + u] : -1;
-    int gid = (i >= 0) ? objects[i].group_id : -2;
+    SDFObjectGPU obj;
+    int gid;
+    if (i >= 0) {
+      obj = objects[i];
+      gid = obj.group_id;
+    }
+    else {
+      gid = -2;
+    }
 
     if (gid != cur_group && grp_has_hit) {
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
@@ -77,9 +82,6 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
 
     if (u >= tile_count) break;
 
-    SDFObjectGPU obj = objects[i];
-
-    /* Per-step AABB skip */
     float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
     float max_group_blend = intBitsToFloat(obj._pad1);
     float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
@@ -138,7 +140,6 @@ void main()
     return;
   }
 
-  /* Build ray through tile center */
   float2 tile_center = (float2(tileX, tileY) + 0.5f) * 8.0f;
   float2 uv = tile_center / float2(screen_size);
 
@@ -157,7 +158,6 @@ void main()
   float3 rd = normalize(world_far.xyz - world_near.xyz);
   float3 inv_dir = 1.0f / rd;
 
-  /* Scene AABB ray clipping */
   float t_enter = 0.0f;
   float t_exit = 1000.0f;
   bool scene_aabb_valid = all(lessThan(scene_aabb_min, scene_aabb_max));
@@ -171,6 +171,7 @@ void main()
     t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
     if (t_enter > t_exit || t_exit < 0.0f) {
+      tile_prim_counts[tileIdx] = 0;
       tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
       return;
     }
@@ -203,10 +204,6 @@ void main()
 
     float cone_r = t * tan_half_tile * sdf_cone_aperture;
     if (d < cone_r) {
-      /* Surface detected. Advance past t_safe by Lipschitz margin with
-       * 3× cone_r buffer: tight bound puts edge pixels at SDF=0 (exactly
-       * at surface), which breaks at grazing angles due to projection
-       * error. 3× cone_r costs <0.03 of skip but eliminates tile seams. */
       float margin = cone_r_safe * 3.0f;
       float t_skip = t_safe + max(d_safe - margin, 0.0f);
       tile_hit_pos[tileIdx] = float4(ro + rd * t_skip, t_skip);
@@ -220,7 +217,14 @@ void main()
     if (t > t_exit) break;
   }
 
-  /* Didn't find surface — write best safe skip */
+  /* Traversed full range without finding surface — tile is empty */
+  if (t >= t_exit && t_safe > t_enter) {
+    tile_prim_counts[tileIdx] = 0;
+    tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    return;
+  }
+
+  /* Ran out of steps — write best safe skip */
   if (t_safe > t_enter) {
     float margin = cone_r_safe * 3.0f;
     float t_skip = t_safe + max(d_safe - margin, 0.0f);

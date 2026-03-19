@@ -65,7 +65,7 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Cone March Pre-Pass (coarse sphere trace per tile)
+/** \name SDF Cone March Pre-Pass
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_cone_march_comp)
@@ -75,7 +75,7 @@ STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
 STORAGE_BUF(4, write, float4, tile_hit_pos[])
-STORAGE_BUF(5, read, int, tile_prim_counts[])
+STORAGE_BUF(5, read_write, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
@@ -93,7 +93,7 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Tile-Culled Trace Compute Shader
+/** \name SDF Tile-Culled Trace
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_trace_tile_comp)
@@ -103,7 +103,6 @@ DEFINE("USE_TILE_CULLING")
 STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
-STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
 STORAGE_BUF(4, read, float4, tile_hit_pos[])
 STORAGE_BUF(5, read, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
