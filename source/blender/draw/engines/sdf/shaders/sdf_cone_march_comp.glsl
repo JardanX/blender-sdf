@@ -156,7 +156,13 @@ void main()
 
   float3 ro = world_near.xyz;
   float3 rd = normalize(world_far.xyz - world_near.xyz);
-  float3 inv_dir = 1.0f / rd;
+  float3 safe_rd = float3(
+      abs(rd.x) < 1e-8f ? 1e-8f : rd.x,
+      abs(rd.y) < 1e-8f ? 1e-8f : rd.y,
+      abs(rd.z) < 1e-8f ? 1e-8f : rd.z);
+  float3 inv_dir = 1.0f / safe_rd;
+
+  bool is_persp = drw_view_is_perspective();
 
   float t_enter = 0.0f;
   float t_exit = 1000.0f;
@@ -180,6 +186,17 @@ void main()
   }
 
   float tan_half_tile = float(8) / float(screen_size.y);
+  /* Ortho: tile world-space half-size is constant, not distance-dependent.
+   * Use a larger radius than perspective to trigger earlier — this pushes the
+   * skip position further from the surface, giving the trace enough steps to
+   * converge consistently across tile boundaries. */
+  float ortho_cone_r = 0.0f;
+  float ortho_tile_world = 0.0f;
+  if (!is_persp) {
+    float ortho_height = 2.0f / vm.winmat[1][1];
+    ortho_tile_world = (ortho_height / float(screen_size.y)) * 8.0f;
+    ortho_cone_r = ortho_tile_world * sdf_cone_aperture;
+  }
   float cone_epsilon = sdf_ray_epsilon * 8.0f;
   int base_offset = tileIdx * kMaxTileObjects;
 
@@ -202,10 +219,10 @@ void main()
       d = max(aabb_skip, cone_epsilon);
     }
 
-    float cone_r = t * tan_half_tile * sdf_cone_aperture;
+    float cone_r = is_persp ? t * tan_half_tile * sdf_cone_aperture : ortho_cone_r;
     if (d < cone_r) {
-      float margin = cone_r_safe * 3.0f;
-      float t_skip = t_safe + max(d_safe - margin, 0.0f);
+      float margin = is_persp ? cone_r_safe * 3.0f : ortho_tile_world * 3.0f;
+      float t_skip = max(t_safe + max(d_safe - margin, 0.0f), t_enter);
       tile_hit_pos[tileIdx] = float4(ro + rd * t_skip, t_skip);
       return;
     }
@@ -226,8 +243,8 @@ void main()
 
   /* Ran out of steps — write best safe skip */
   if (t_safe > t_enter) {
-    float margin = cone_r_safe * 3.0f;
-    float t_skip = t_safe + max(d_safe - margin, 0.0f);
+    float margin = is_persp ? cone_r_safe * 3.0f : ortho_tile_world * 3.0f;
+    float t_skip = max(t_safe + max(d_safe - margin, 0.0f), t_enter);
     tile_hit_pos[tileIdx] = float4(ro + rd * t_skip, t_skip);
   }
   else {
