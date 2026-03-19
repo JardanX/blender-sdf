@@ -84,12 +84,14 @@ class Instance : public DrawEngine {
   bool fxaa_enabled_ = true;
   float max_blend_ = 0.0f;
   float max_shell_distance_ = 0.0f;
+  float step_factor_ = 0.85f;
   bool needs_upload_ = true;
   bool depth_mode_ = false;
 
   enum ShaderIndex {
     SH_TRACE_COMP = 0,
     SH_TRACE_TILE_COMP,
+    SH_TILE_CULL_COMP,
     SH_CONE_MARCH_COMP,
     SH_SHADE_COMP,
     SH_BLIT,
@@ -100,6 +102,7 @@ class Instance : public DrawEngine {
   static constexpr const char *shader_info_names_[SH_COUNT] = {
       "sdf_trace_comp",
       "sdf_trace_tile_comp",
+      "sdf_tile_cull_comp",
       "sdf_cone_march_comp",
       "sdf_shade_comp",
       "sdf_blit",
@@ -110,6 +113,7 @@ class Instance : public DrawEngine {
 
   gpu::Shader *&trace_comp_sh_ = shaders_[SH_TRACE_COMP];
   gpu::Shader *&trace_tile_sh_ = shaders_[SH_TRACE_TILE_COMP];
+  gpu::Shader *&tile_cull_sh_ = shaders_[SH_TILE_CULL_COMP];
   gpu::Shader *&cone_march_sh_ = shaders_[SH_CONE_MARCH_COMP];
   gpu::Shader *&shade_comp_sh_ = shaders_[SH_SHADE_COMP];
   gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
@@ -144,6 +148,11 @@ class Instance : public DrawEngine {
 
   gpu::StorageBuf *cone_hit_ssbo_ = nullptr;
   int cone_hit_ssbo_count_ = 0;
+
+  gpu::StorageBuf *tile_prim_counts_ssbo_ = nullptr;
+  int tile_prim_counts_ssbo_tiles_ = 0;
+  gpu::StorageBuf *tile_prim_lists_ssbo_ = nullptr;
+  int tile_prim_lists_ssbo_tiles_ = 0;
 
   gpu::Batch *fullscreen_batch_ = nullptr;
 
@@ -208,6 +217,7 @@ class Instance : public DrawEngine {
     scene_max_ = float3(-1e30f);
     max_blend_ = 0.0f;
     max_shell_distance_ = 0.0f;
+    step_factor_ = 0.85f;
   }
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
@@ -539,6 +549,11 @@ class Instance : public DrawEngine {
     scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
     max_blend_ = math::max(max_blend_, gpu_obj.blend);
+    if (gpu_obj.blend > 0.001f &&
+        (gpu_obj.blend_type == SDF_BLEND_CHAMFER || gpu_obj.blend_type == SDF_BLEND_ROUND))
+    {
+      step_factor_ = 0.7f;
+    }
     if (sdf_data->csg_operation == SDF_CSG_SHELL) {
       max_shell_distance_ = math::max(max_shell_distance_, fabsf(sdf_data->shell_distance));
     }
@@ -588,6 +603,11 @@ class Instance : public DrawEngine {
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(
             group->color[0], group->color[1], group->color[2], group->color[3]);
+        if (gpu_grp.blend > 0.001f &&
+            (gpu_grp.blend_type == SDF_BLEND_CHAMFER || gpu_grp.blend_type == SDF_BLEND_ROUND))
+        {
+          step_factor_ = 0.7f;
+        }
         groups_gpu_.append(gpu_grp);
         group_index_map.add(group, g_idx);
 
@@ -877,6 +897,12 @@ class Instance : public DrawEngine {
       GPU_debug_group_end();
       needs_upload_ = false;
     }
+
+    GPU_debug_group_begin("SDF Tile Cull");
+    draw_tile_cull();
+    GPU_debug_group_end();
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
     GPU_debug_group_begin("SDF Cone March");
     draw_cone_march();
@@ -1270,17 +1296,31 @@ class Instance : public DrawEngine {
     }
   }
 
-  void draw_cone_march()
+  void ensure_tile_ssbos(int total_tiles)
   {
-    if (use_cone_trace_ == 0 || !cone_march_sh_) {
-      return;
+    /* tile_prim_counts */
+    if (tile_prim_counts_ssbo_ != nullptr && tile_prim_counts_ssbo_tiles_ != total_tiles) {
+      GPU_storagebuf_free(tile_prim_counts_ssbo_);
+      tile_prim_counts_ssbo_ = nullptr;
+    }
+    if (tile_prim_counts_ssbo_ == nullptr && total_tiles > 0) {
+      tile_prim_counts_ssbo_ = GPU_storagebuf_create_ex(
+          total_tiles * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_prim_counts");
+      tile_prim_counts_ssbo_tiles_ = total_tiles;
     }
 
-    int tiles_x = (render_size_.x + 7) / 8;
-    int tiles_y = (render_size_.y + 7) / 8;
-    int total_tiles = tiles_x * tiles_y;
+    /* tile_prim_lists (256 ints per tile) */
+    if (tile_prim_lists_ssbo_ != nullptr && tile_prim_lists_ssbo_tiles_ != total_tiles) {
+      GPU_storagebuf_free(tile_prim_lists_ssbo_);
+      tile_prim_lists_ssbo_ = nullptr;
+    }
+    if (tile_prim_lists_ssbo_ == nullptr && total_tiles > 0) {
+      tile_prim_lists_ssbo_ = GPU_storagebuf_create_ex(
+          total_tiles * 256 * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_prim_lists");
+      tile_prim_lists_ssbo_tiles_ = total_tiles;
+    }
 
-    /* Allocate/resize cone hit SSBO */
+    /* cone hit */
     if (cone_hit_ssbo_ != nullptr && cone_hit_ssbo_count_ != total_tiles) {
       GPU_storagebuf_free(cone_hit_ssbo_);
       cone_hit_ssbo_ = nullptr;
@@ -1290,19 +1330,87 @@ class Instance : public DrawEngine {
           total_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
       cone_hit_ssbo_count_ = total_tiles;
     }
+  }
+
+  void draw_tile_cull()
+  {
+    if (!tile_cull_sh_ || use_bvh_ == 0) {
+      return;
+    }
+
+    ensure_compute_targets();
+
+    int tiles_x = (render_size_.x + 7) / 8;
+    int tiles_y = (render_size_.y + 7) / 8;
+    int total_tiles = tiles_x * tiles_y;
+
+    ensure_tile_ssbos(total_tiles);
+
+    gpu::Shader *sh = tile_cull_sh_;
+    GPU_shader_bind(sh);
+
+    if (object_ssbo_) {
+      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+    }
+    if (tile_prim_counts_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+    }
+    if (tile_prim_lists_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+    }
+
+    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
+    GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
+
+    View &view = View::default_get();
+    view.matrices_ubo_get().push_update();
+    GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
+
+    GPU_compute_dispatch(sh, tiles_x, tiles_y, 1);
+    GPU_shader_unbind();
+  }
+
+  void draw_cone_march()
+  {
+    if (use_cone_trace_ == 0 || !cone_march_sh_) {
+      return;
+    }
+
+    int tiles_x = (render_size_.x + 7) / 8;
+    int tiles_y = (render_size_.y + 7) / 8;
 
     gpu::Shader *sh = cone_march_sh_;
     GPU_shader_bind(sh);
 
-    /* Bind SSBOs */
     if (object_ssbo_) {
       GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+    }
+    if (modifier_ssbo_) {
+      GPU_storagebuf_bind(modifier_ssbo_, GPU_shader_get_ssbo_binding(sh, "sdf_modifiers"));
+    }
+    if (group_ssbo_) {
+      GPU_storagebuf_bind(group_ssbo_, GPU_shader_get_ssbo_binding(sh, "groups"));
     }
     if (cone_hit_ssbo_) {
       GPU_storagebuf_bind(cone_hit_ssbo_, GPU_shader_get_ssbo_binding(sh, "tile_hit_pos"));
     }
+    if (tile_prim_counts_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+    }
+    if (tile_prim_lists_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+    }
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
+    GPU_shader_uniform_1i(sh, "sdf_max_steps", sdf_max_steps_);
+    GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
+    GPU_shader_uniform_3fv(sh, "scene_aabb_max", scene_max_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     View &view = View::default_get();
@@ -1325,11 +1433,23 @@ class Instance : public DrawEngine {
     GPU_shader_bind(sh);
     bind_ssbos(sh);
 
-    /* Bind cone march result SSBO (tile-culled path reads this) */
-    if (cone_hit_ssbo_ && use_cone_trace_ != 0) {
+    /* Bind tile prim list + cone hit SSBOs (tile-culled path) */
+    if (cone_hit_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "tile_hit_pos");
       if (slot >= 0) {
         GPU_storagebuf_bind(cone_hit_ssbo_, slot);
+      }
+    }
+    if (tile_prim_counts_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
+      }
+    }
+    if (tile_prim_lists_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
       }
     }
 
@@ -1348,6 +1468,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "sdf_max_steps", sdf_max_steps_);
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_1f(sh, "sdf_over_relaxation", sdf_over_relaxation_);
+    GPU_shader_uniform_1f(sh, "sdf_step_factor", step_factor_);
     GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
     GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
@@ -1610,6 +1731,12 @@ class Instance : public DrawEngine {
     }
     if (cone_hit_ssbo_) {
       GPU_storagebuf_free(cone_hit_ssbo_);
+    }
+    if (tile_prim_counts_ssbo_) {
+      GPU_storagebuf_free(tile_prim_counts_ssbo_);
+    }
+    if (tile_prim_lists_ssbo_) {
+      GPU_storagebuf_free(tile_prim_lists_ssbo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);

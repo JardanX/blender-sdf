@@ -46,16 +46,9 @@ float evalObjectDist(float3 world_pos, int idx)
 #ifdef USE_TILE_CULLING
 
 #define kMaxTileObjects 256
-#define kMaxGroupBits 128
-#define kGroupBitWords (kMaxGroupBits / 32)
-#define kMaxObjBits 512
-#define kObjBitWords (kMaxObjBits / 32)
-
 shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];
-shared uint s_groupActive[kGroupBitWords];
-shared uint s_objVisible[kObjBitWords];
-shared float4 s_coneHitPos;  /* Loaded from tile_hit_pos SSBO */
+shared float4 s_coneHitPos;
 
 #else
 
@@ -206,34 +199,6 @@ float evalSceneDistBVH(float3 world_pos)
 
 #ifdef USE_TILE_CULLING
 
-bool aabb_overlaps_tile(float3 bmin, float3 bmax, float4 tile_ndc, float4x4 viewproj)
-{
-  float2 proj_min = float2(1e30f);
-  float2 proj_max = float2(-1e30f);
-  int behind_count = 0;
-
-  for (int i = 0; i < 8; i++) {
-    float3 corner = float3(
-        (i & 1) != 0 ? bmax.x : bmin.x,
-        (i & 2) != 0 ? bmax.y : bmin.y,
-        (i & 4) != 0 ? bmax.z : bmin.z);
-    float4 clip = viewproj * float4(corner, 1.0f);
-    if (clip.w <= 0.0f) {
-      behind_count++;
-      continue;
-    }
-    float2 ndc = clip.xy / clip.w;
-    proj_min = min(proj_min, ndc);
-    proj_max = max(proj_max, ndc);
-  }
-
-  if (behind_count == 8) return false;
-  if (behind_count > 0) return true;
-
-  return !(proj_max.x < tile_ndc.x || proj_min.x > tile_ndc.z ||
-           proj_max.y < tile_ndc.y || proj_min.y > tile_ndc.w);
-}
-
 /* Flush accumulated group result into scene distance. */
 void flushGroup(int gid, float grp_dist, float3 grp_color,
                 inout float scene_dist, inout float3 out_color)
@@ -342,18 +307,7 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
 
 int tile_active_obj_count()
 {
-  int cnt = int(min(s_tileObjCount, uint(kMaxTileObjects)));
-  for (int g = 0; g < group_count; g++) {
-    bool is_active;
-    if (g < kMaxGroupBits) {
-      is_active = (s_groupActive[uint(g) >> 5u] & (1u << (uint(g) & 31u))) != 0u;
-    }
-    else {
-      is_active = true;
-    }
-    if (is_active) cnt += groups[g].object_count;
-  }
-  return cnt;
+  return int(min(s_tileObjCount, uint(kMaxTileObjects)));
 }
 
 #else
@@ -379,55 +333,25 @@ void main()
   int local_idx = int(gl_LocalInvocationID.y * kTileSize + gl_LocalInvocationID.x);
 
 #ifdef USE_TILE_CULLING
-  if (local_idx == 0) s_tileObjCount = 0u;
-  if (local_idx < kGroupBitWords) s_groupActive[local_idx] = 0u;
-  barrier();
+  /* Load tile prim list from SSBOs (built by tile cull pass) */
+  int tilesX = (screen_size.x + 7) / 8;
+  int tileIdx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * tilesX;
 
-  ViewMatrices vm = drw_view();
-  {
-    float4x4 viewproj = vm.winmat * vm.viewmat;
-    float2 tile_lo = float2(gl_WorkGroupID.xy) * float(kTileSize);
-    float2 tile_hi = min(tile_lo + float(kTileSize), float2(screen_size));
-    float4 tile_ndc = float4(
-        tile_lo / float2(screen_size) * 2.0f - 1.0f,
-        tile_hi / float2(screen_size) * 2.0f - 1.0f);
-
-    /* Add ALL tile-visible objects (grouped + ungrouped) to flat list */
-    for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
-      SDFObjectGPU obj = objects[i];
-      if (obj._pad0 == 0) continue; /* CPU frustum culled */
-      if (!aabb_overlaps_tile(obj.bbox_min.xyz, obj.bbox_max.xyz, tile_ndc, viewproj)) continue;
-
-      uint slot = atomicAdd(s_tileObjCount, 1u);
-      if (slot < uint(kMaxTileObjects)) s_tileObjList[slot] = i;
-
-      if (obj.group_id >= 0 && obj.group_id < kMaxGroupBits) {
-        atomicOr(s_groupActive[uint(obj.group_id) >> 5u], 1u << (uint(obj.group_id) & 31u));
-      }
-    }
-  }
-  barrier();
-
-  /* Sort tile list by index to preserve CSG group ordering */
   if (local_idx == 0) {
-    int n = int(min(s_tileObjCount, uint(kMaxTileObjects)));
-    for (int i = 1; i < n; i++) {
-      int key = s_tileObjList[i];
-      int j = i - 1;
-      while (j >= 0 && s_tileObjList[j] > key) {
-        s_tileObjList[j + 1] = s_tileObjList[j];
-        j--;
-      }
-      s_tileObjList[j + 1] = key;
-    }
-
-    /* Load cone march result from SSBO (computed in separate pass) */
-    int tilesX = (screen_size.x + 7) / 8;
-    int tileIdx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * tilesX;
+    s_tileObjCount = uint(tile_prim_counts[tileIdx]);
     s_coneHitPos = (use_cone_trace != 0) ? tile_hit_pos[tileIdx]
                                           : float4(0.0f, 0.0f, 0.0f, -1.0f);
   }
   barrier();
+
+  uint n = min(s_tileObjCount, uint(kMaxTileObjects));
+  int base = tileIdx * kMaxTileObjects;
+  for (uint i = uint(local_idx); i < n; i += 64u) {
+    s_tileObjList[i] = tile_prim_lists[base + int(i)];
+  }
+  barrier();
+
+  ViewMatrices vm = drw_view();
 #endif
 
   if (pixel.x >= screen_size.x || pixel.y >= screen_size.y) {
@@ -488,12 +412,10 @@ void main()
 
 #ifdef USE_TILE_CULLING
   float t_enter_before_cone = t_enter;
-  /* Project cone hit onto per-pixel ray to advance t_enter */
+  /* Cone march stores the last position where SDF > cone_r (safe for
+   * all pixel rays in the tile by Lipschitz bound). Use directly. */
   if (use_cone_trace != 0 && s_coneHitPos.w >= 0.0f) {
     float projected = dot(s_coneHitPos.xyz - ray_origin, ray_dir);
-    float tan_half_tile = float(kTileSize) / float(screen_size.y);
-    float cone_r = projected * tan_half_tile;
-    projected = max(0.0f, projected - cone_r * 1.5f);
     t_enter = max(t_enter, projected);
   }
 #endif
@@ -568,18 +490,7 @@ void main()
   }
 #endif
 
-  /* Dynamic safety factor */
-  float step_factor = 0.85f;
-  for (int i = 0; i < object_count; i++) {
-    if (objects[i].blend > 0.001f && (objects[i].blend_type == 2 || objects[i].blend_type == 3)) {
-      step_factor = 0.7f; break;
-    }
-  }
-  for (int g = 0; g < group_count; g++) {
-    if (groups[g].blend > 0.001f && (groups[g].blend_type == 2 || groups[g].blend_type == 3)) {
-      step_factor = 0.7f; break;
-    }
-  }
+  float step_factor = sdf_step_factor;
 
   /* Over-relaxation sphere tracing */
   float t = t_enter;
