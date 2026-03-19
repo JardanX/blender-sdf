@@ -18,8 +18,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 #define kFltMax 1e30f
 #define kTileSize 8
 
-shared float tile_heat[kTileSize * kTileSize];
-
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
   SDFPrimitiveData prim_data;
@@ -45,15 +43,17 @@ float evalObjectDist(float3 world_pos, int idx)
 
 #ifdef USE_TILE_CULLING
 
-#define kMaxTileObjects 256
+#define kMaxTileObjects 512
 shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];
 shared float4 s_coneHitPos;
 
 #else
 
-#define kAabbTreeStackSize 32
-#define kMaxBitfieldBits 256
+shared float tile_heat[kTileSize * kTileSize];
+
+#define kAabbTreeStackSize 16
+#define kMaxBitfieldBits 128
 #define kBitfieldWords (kMaxBitfieldBits / 32)
 
 /* Per-ray bitfield: set during ray setup, marks objects whose AABB the ray intersects. */
@@ -156,15 +156,15 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
   /* Ungrouped objects: per-step AABB test per object */
   for (int i = 0; i < object_count; i++) {
     if (!is_shape_near(i)) continue;
-    SDFObjectGPU obj = objects[i];
-    if (obj.group_id >= 0) continue;
+    if (objects[i].group_id >= 0) continue;
 
-    float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
+    float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
     if (da > 0.0f) {
       out_aabb_skip = min(out_aabb_skip, da);
       continue;
     }
 
+    SDFObjectGPU obj = objects[i];
     float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
     g_numEvaluated++;
@@ -235,7 +235,15 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
   uint n = min(s_tileObjCount, uint(kMaxTileObjects));
   for (uint u = 0u; u <= n; u++) {
     int i = (u < n) ? s_tileObjList[u] : -1;
-    int gid = (i >= 0) ? objects[i].group_id : -2;
+    SDFObjectGPU obj;
+    int gid;
+    if (i >= 0) {
+      obj = objects[i];
+      gid = obj.group_id;
+    }
+    else {
+      gid = -2;
+    }
 
     /* Group boundary: flush previous group into scene */
     if (gid != cur_group && grp_has_hit) {
@@ -245,9 +253,6 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
     }
 
     if (u >= n) break;
-
-    /* Per-step AABB skip (uses max group blend from _pad1) */
-    SDFObjectGPU obj = objects[i];
     float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
     float max_group_blend = intBitsToFloat(obj._pad1);
     float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
@@ -343,6 +348,20 @@ void main()
                                           : float4(0.0f, 0.0f, 0.0f, -1.0f);
   }
   barrier();
+
+  /* Empty tile (zeroed by cone march for CSG-empty tiles): clear and exit */
+  if (s_tileObjCount == 0u) {
+    if (pixel.x < screen_size.x && pixel.y < screen_size.y) {
+      if (debug_bvh_views != 0) {
+        imageStore(out_color_img, pixel, float4(heat_color(0.0f), 1.0f));
+        imageStore(out_depth_img, pixel, float4(0.0f));
+      }
+      imageStore(gbuf_pos_img, pixel, float4(0.0));
+      imageStore(gbuf_color_img, pixel, float4(0.0));
+      imageStore(gbuf_normal_img, pixel, float4(0.0));
+    }
+    return;
+  }
 
   uint n = min(s_tileObjCount, uint(kMaxTileObjects));
   int base = tileIdx * kMaxTileObjects;
@@ -627,12 +646,17 @@ void main()
     return;
   }
   else if (debug_bvh_views == 2) {
-    tile_heat[local_idx] = float(tile_active_obj_count()) / max(float(object_count), 1.0f);
+    s_tileObjList[local_idx] = floatBitsToInt(
+        float(tile_active_obj_count()) / max(float(object_count), 1.0f));
     barrier();
-    float max_heat = 0.0f;
-    for (int i = 0; i < kTileSize * kTileSize; i++) {
-      max_heat = max(max_heat, tile_heat[i]);
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+      if (uint(local_idx) < stride)
+        s_tileObjList[local_idx] = floatBitsToInt(
+            max(intBitsToFloat(s_tileObjList[local_idx]),
+                intBitsToFloat(s_tileObjList[local_idx + int(stride)])));
+      barrier();
     }
+    float max_heat = intBitsToFloat(s_tileObjList[0]);
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -648,13 +672,16 @@ void main()
     return;
   }
   else if (debug_bvh_views == 4) {
-    float heat = float(steps_taken) / 128.0f;
-    tile_heat[local_idx] = heat;
+    s_tileObjList[local_idx] = floatBitsToInt(float(steps_taken) / 128.0f);
     barrier();
-    float max_heat = 0.0f;
-    for (int i = 0; i < kTileSize * kTileSize; i++) {
-      max_heat = max(max_heat, tile_heat[i]);
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+      if (uint(local_idx) < stride)
+        s_tileObjList[local_idx] = floatBitsToInt(
+            max(intBitsToFloat(s_tileObjList[local_idx]),
+                intBitsToFloat(s_tileObjList[local_idx + int(stride)])));
+      barrier();
     }
+    float max_heat = intBitsToFloat(s_tileObjList[0]);
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -683,13 +710,14 @@ void main()
     return;
   }
   else if (debug_bvh_views == 2) {
-    float heat = float(g_numNearShapes) / max(float(object_count), 1.0f);
-    tile_heat[local_idx] = heat;
+    tile_heat[local_idx] = float(g_numNearShapes) / max(float(object_count), 1.0f);
     barrier();
-    float max_heat = 0.0f;
-    for (int i = 0; i < kTileSize * kTileSize; i++) {
-      max_heat = max(max_heat, tile_heat[i]);
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+      if (uint(local_idx) < stride)
+        tile_heat[local_idx] = max(tile_heat[local_idx], tile_heat[local_idx + stride]);
+      barrier();
     }
+    float max_heat = tile_heat[0];
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -705,13 +733,14 @@ void main()
     return;
   }
   else if (debug_bvh_views == 4) {
-    float heat = float(steps_taken) / 128.0f;
-    tile_heat[local_idx] = heat;
+    tile_heat[local_idx] = float(steps_taken) / 128.0f;
     barrier();
-    float max_heat = 0.0f;
-    for (int i = 0; i < kTileSize * kTileSize; i++) {
-      max_heat = max(max_heat, tile_heat[i]);
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+      if (uint(local_idx) < stride)
+        tile_heat[local_idx] = max(tile_heat[local_idx], tile_heat[local_idx + stride]);
+      barrier();
     }
+    float max_heat = tile_heat[0];
     imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));

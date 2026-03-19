@@ -11,7 +11,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_tile_cull_comp)
 #include "draw_view_lib.glsl"
 
 #define kTileSize 8
-#define kMaxTileObjects 256
+#define kMaxTileObjects 512
 
 shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];
@@ -60,35 +60,49 @@ void main()
       tile_hi / float2(screen_size) * 2.0f - 1.0f);
 
   for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
-    SDFObjectGPU obj = objects[i];
-    if (obj._pad0 == 0) continue;
-    if (!aabb_overlaps_tile(obj.bbox_min.xyz, obj.bbox_max.xyz, tile_ndc, viewproj)) continue;
+    if (objects[i]._pad0 == 0) continue;
+    if (!aabb_overlaps_tile(objects[i].bbox_min.xyz, objects[i].bbox_max.xyz, tile_ndc, viewproj)) continue;
 
     uint slot = atomicAdd(s_tileObjCount, 1u);
     if (slot < uint(kMaxTileObjects)) s_tileObjList[slot] = i;
   }
   barrier();
 
-  /* Thread 0: sort + expand groups + write to SSBOs */
-  if (local_idx == 0) {
-    int n = int(min(s_tileObjCount, uint(kMaxTileObjects)));
+  /* Parallel bitonic sort */
+  {
+    uint n = min(s_tileObjCount, uint(kMaxTileObjects));
 
-    /* Insertion sort by index preserves CSG group ordering */
-    for (int i = 1; i < n; i++) {
-      int key = s_tileObjList[i];
-      int j = i - 1;
-      while (j >= 0 && s_tileObjList[j] > key) {
-        s_tileObjList[j + 1] = s_tileObjList[j];
-        j--;
+    for (uint i = n + uint(local_idx); i < uint(kMaxTileObjects); i += 64u) {
+      s_tileObjList[i] = 0x7FFFFFFF;
+    }
+    barrier();
+
+    for (uint k = 2u; k <= uint(kMaxTileObjects); k <<= 1u) {
+      for (uint j = k >> 1u; j > 0u; j >>= 1u) {
+        for (uint t = uint(local_idx); t < uint(kMaxTileObjects) / 2u; t += 64u) {
+          uint block = t / j;
+          uint offset = t & (j - 1u);
+          uint i = block * 2u * j + offset;
+          uint partner = i + j;
+          bool ascending = ((i & k) == 0u);
+          int a = s_tileObjList[i];
+          int b = s_tileObjList[partner];
+          int lo = min(a, b);
+          int hi = max(a, b);
+          s_tileObjList[i] = ascending ? lo : hi;
+          s_tileObjList[partner] = ascending ? hi : lo;
+        }
+        barrier();
       }
-      s_tileObjList[j + 1] = key;
     }
 
-    s_tileObjCount = uint(n);
+    if (local_idx == 0) {
+      s_tileObjCount = n;
+    }
   }
   barrier();
 
-  /* All threads cooperatively write shared → SSBOs */
+  /* Write shared → SSBOs */
   int tilesX = (screen_size.x + 7) / 8;
   int tileIdx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * tilesX;
 

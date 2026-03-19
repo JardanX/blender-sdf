@@ -1302,13 +1302,14 @@ class Instance : public DrawEngine {
     }
     if (bvh_nodes_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "aabb_nodes");
-      GPU_storagebuf_bind(bvh_nodes_ssbo_, slot);
+      if (slot >= 0) {
+        GPU_storagebuf_bind(bvh_nodes_ssbo_, slot);
+      }
     }
   }
 
   void ensure_tile_ssbos(int total_tiles)
   {
-    /* tile_prim_counts */
     if (tile_prim_counts_ssbo_ != nullptr && tile_prim_counts_ssbo_tiles_ != total_tiles) {
       GPU_storagebuf_free(tile_prim_counts_ssbo_);
       tile_prim_counts_ssbo_ = nullptr;
@@ -1319,18 +1320,16 @@ class Instance : public DrawEngine {
       tile_prim_counts_ssbo_tiles_ = total_tiles;
     }
 
-    /* tile_prim_lists (256 ints per tile) */
     if (tile_prim_lists_ssbo_ != nullptr && tile_prim_lists_ssbo_tiles_ != total_tiles) {
       GPU_storagebuf_free(tile_prim_lists_ssbo_);
       tile_prim_lists_ssbo_ = nullptr;
     }
     if (tile_prim_lists_ssbo_ == nullptr && total_tiles > 0) {
       tile_prim_lists_ssbo_ = GPU_storagebuf_create_ex(
-          total_tiles * 256 * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_prim_lists");
+          total_tiles * 512 * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_prim_lists");
       tile_prim_lists_ssbo_tiles_ = total_tiles;
     }
 
-    /* cone hit */
     if (cone_hit_ssbo_ != nullptr && cone_hit_ssbo_count_ != total_tiles) {
       GPU_storagebuf_free(cone_hit_ssbo_);
       cone_hit_ssbo_ = nullptr;
@@ -1446,7 +1445,7 @@ class Instance : public DrawEngine {
     GPU_shader_bind(sh);
     bind_ssbos(sh);
 
-    /* Bind tile prim list + cone hit SSBOs (tile-culled path) */
+    /* Bind tile SSBOs (tile-culled path) */
     if (cone_hit_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "tile_hit_pos");
       if (slot >= 0) {
