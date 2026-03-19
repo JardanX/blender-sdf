@@ -18,11 +18,13 @@
 #include "BLI_string.h"
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BKE_anim_data.hh"
 #include "BKE_idtype.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
+#include "BKE_main.hh"
 #include "BKE_sdf.hh"
 
 #include "BLT_translation.hh"
@@ -39,7 +41,7 @@ static void sdf_init_data(ID *id)
   sdf->runtime = new blender::bke::SDFRuntime();
 }
 
-static void sdf_copy_data(Main * /*bmain*/,
+static void sdf_copy_data(Main *bmain,
                           std::optional<Library *> /*owner_library*/,
                           ID *id_dst,
                           const ID *id_src,
@@ -51,6 +53,11 @@ static void sdf_copy_data(Main * /*bmain*/,
   sdf_dst->mat = static_cast<Material **>(MEM_dupallocN(sdf_src->mat));
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
   sdf_dst->runtime = new blender::bke::SDFRuntime();
+
+  if (bmain != nullptr && sdf_src->sdf_index > 0) {
+    sdf_dst->sdf_index = sdf_src->sdf_index + 1;
+    BKE_sdf_shift_indices_from(bmain, sdf_dst->sdf_index, sdf_dst);
+  }
 }
 
 static void sdf_free_data(ID *id)
@@ -234,6 +241,54 @@ void BKE_sdf_modifier_move(SDF *sdf, SDFModifier *mod, int direction)
     if (next) {
       BLI_remlink(&sdf->modifiers, mod);
       BLI_insertlinkafter(&sdf->modifiers, next, mod);
+    }
+  }
+}
+
+int BKE_sdf_next_index(Main *bmain)
+{
+  int max_idx = 0;
+  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
+    SDF *sdf = (SDF *)id;
+    if (sdf->sdf_index > max_idx) {
+      max_idx = sdf->sdf_index;
+    }
+  }
+  return max_idx + 1;
+}
+
+void BKE_sdf_reindex_all(Main *bmain)
+{
+  /* Collect all SDFs, sort by current index, reassign 1-based */
+  int count = BLI_listbase_count(&bmain->sdfs);
+  if (count == 0) {
+    return;
+  }
+
+  blender::Vector<SDF *> all_sdfs(count);
+  int i = 0;
+  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
+    all_sdfs[i++] = (SDF *)id;
+  }
+
+  std::stable_sort(all_sdfs.begin(), all_sdfs.end(), [](const SDF *a, const SDF *b) {
+    return a->sdf_index < b->sdf_index;
+  });
+
+  for (int idx = 0; idx < count; idx++) {
+    all_sdfs[idx]->sdf_index = idx + 1;
+  }
+}
+
+void BKE_sdf_shift_indices_from(Main *bmain, int from_index, const SDF *skip)
+{
+  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
+    SDF *sdf = (SDF *)id;
+    if (sdf == skip) {
+      continue;
+    }
+    if (sdf->sdf_index >= from_index) {
+      sdf->sdf_index++;
     }
   }
 }

@@ -20,4 +20,5 @@ void main()
       0.75,         /* subpix: default filtering amount */
       0.125,        /* edgeThreshold: good default quality */
       0.0312);      /* edgeThresholdMin: visible limit */
+  out_color.a = textureLod(color_tx, screen_uv, 0.0).a;
 }

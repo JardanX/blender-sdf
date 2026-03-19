@@ -149,6 +149,40 @@ SDFGroupMember *BKE_sdf_group_member_add(SDFGroup *group, Object *ob)
   return member;
 }
 
+SDFGroupMember *BKE_sdf_group_member_insert_after(SDFGroup *group,
+                                                   Object *after_ob,
+                                                   Object *new_ob)
+{
+  SDFGroupMember *after_member = nullptr;
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    if (member->object == after_ob) {
+      after_member = member;
+      break;
+    }
+  }
+
+  SDFGroupMember *new_member = static_cast<SDFGroupMember *>(
+      MEM_callocN(sizeof(SDFGroupMember), "SDFGroupMember"));
+  new_member->object = new_ob;
+
+  if (after_member) {
+    BLI_insertlinkafter(&group->members, after_member, new_member);
+  }
+  else {
+    BLI_addtail(&group->members, new_member);
+  }
+  group->totmember++;
+
+  if (new_ob && new_ob->type == OB_SDF && new_ob->data) {
+    SDF *sdf = static_cast<SDF *>(new_ob->data);
+    sdf->sdf_group = group;
+    id_us_plus(&group->id);
+  }
+
+  BKE_sdf_group_reindex_members(group);
+  return new_member;
+}
+
 void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member)
 {
   if (member->object && member->object->type == OB_SDF && member->object->data) {

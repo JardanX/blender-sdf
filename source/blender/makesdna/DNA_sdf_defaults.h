@@ -39,6 +39,7 @@
     .ngon_edge_mode = 0, \
     .ngon_star = 0.0f, \
     .torus_angle = ((float)M_PI * 2.0f), \
+    .sdf_index = 0, \
   }
 
 /** \} */

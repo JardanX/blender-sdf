@@ -33,19 +33,40 @@ float sd_sphere(float3 p, float r)
   return length(p) - r;
 }
 
+float sd_cylinder(float3 p, float3 size)
+{
+  float2 e = max(size.xy, float2(0.001f));
+  float2 pn = p.xy / e;
+  float rn = length(pn);
+  float2 g = pn / (e * max(rn, 1e-6f));
+  float radial = (rn - 1.0f) / max(length(g), 1e-6f);
+  float vertical = abs(p.z) - size.z;
+  float2 d = float2(radial, vertical);
+  return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
+}
+
+float sd_cone(float3 p, float r, float h)
+{
+  float2 q = float2(length(p.xy), p.z);
+  float2 k1 = float2(0.0f, h);
+  float2 k2 = float2(-r, 2.0f * h);
+  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
+  float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
 float sd_capsule(float3 p, float3 size)
 {
-  /* Capsule along Y axis: half-height = size.y, radius = size.x. */
   float h = size.y;
   float r = size.x;
-  p.y -= clamp(p.y, -h, h);
+  p.z -= clamp(p.z, -h, h);
   return length(p) - r;
 }
 
 float sd_torus(float3 p, float2 t)
 {
-  /* t.x = major radius, t.y = minor radius. */
-  float2 q = float2(length(p.xz) - t.x, p.y);
+  float2 q = float2(length(p.xy) - t.x, p.z);
   return length(q) - t.y;
 }
 
@@ -65,6 +86,14 @@ float eval_sdf(float3 p)
   else if (sdf_type == 1) {
     /* SDF_TYPE_SPHERE */
     d = sd_sphere(p, sdf_size.x);
+  }
+  else if (sdf_type == 2) {
+    /* SDF_TYPE_CYLINDER */
+    d = sd_cylinder(p, sdf_size);
+  }
+  else if (sdf_type == 3) {
+    /* SDF_TYPE_CONE */
+    d = sd_cone(p, sdf_size.x, sdf_size.y);
   }
   else if (sdf_type == 4) {
     /* SDF_TYPE_CAPSULE */

@@ -39,7 +39,7 @@
     .sdf_use_bvh = 1, \
     .sdf_bvh_debug_view = 0, \
     .sdf_use_cone_trace = 1, \
-    .sdf_max_steps = 512, \
+    .sdf_max_steps = 256, \
     .sdf_ray_epsilon = 0.0001f, \
     .sdf_over_relaxation = 1.5f, \
     .sdf_cone_aperture = 0.5f, \

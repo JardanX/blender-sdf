@@ -162,7 +162,7 @@ typedef struct SDF {
   /* Group */
   struct SDFGroup *sdf_group;
   int group_order;
-  char _pad5[4];
+  int sdf_index;
 
   /* Modifiers */
   ListBase modifiers; /* SDFModifier */

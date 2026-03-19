@@ -79,8 +79,10 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
 
   Object *ob = add_type(C, OB_SDF, name, loc, rot, false, local_view_bits);
   if (ob && ob->data) {
+    Main *bmain = CTX_data_main(C);
     SDF *sdf_data = static_cast<SDF *>(ob->data);
     sdf_data->sdf_type = type;
+    sdf_data->sdf_index = BKE_sdf_next_index(bmain);
 
     switch (type) {
       case SDF_TYPE_CAPSULE:
@@ -107,7 +109,6 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         break;
     }
 
-    Main *bmain = CTX_data_main(C);
     SDFGroup *group = nullptr;
     Object *active = CTX_data_active_object(C);
     if (active && active->type == OB_SDF && active->data) {

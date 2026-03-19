@@ -18,22 +18,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 #define kFltMax 1e30f
 #define kTileSize 8
 
-float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
-{
-  SDFPrimitiveData prim_data;
-  prim_data.sdf_type = obj.sdf_type;
-  prim_data.size = obj.sdf_size.xyz;
-  prim_data.bevel = obj.bevel;
-  prim_data.box_corners = obj.box_corners;
-  prim_data.box_edges = obj.box_edges;
-  prim_data.box_modes = obj.box_modes;
-  prim_data.modifier_start = obj.modifier_start;
-  prim_data.modifier_count = obj.modifier_count;
-  prim_data.inverse_matrix = obj.inverse_matrix;
-
-  return evalObjectSDF(prim_data, local_pos);
-}
-
 float evalObjectDist(float3 world_pos, int idx)
 {
   SDFObjectGPU obj = objects[idx];
@@ -83,11 +67,12 @@ float3 find_ortho(float3 v)
  * Per-step AABB containment test skips objects whose AABB doesn't contain pos.
  * Returns SDF distance in scene_dist, nearest AABB distance in out_aabb_skip.
  */
-float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_skip)
+float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_skip, out float out_obj_id)
 {
   float scene_dist = 1e10f;
   out_color = float3(0.5f);
   out_aabb_skip = 1e30f;
+  out_obj_id = -1.0f;
   g_numEvaluated = 0;
 
   /* Groups: per-object AABB check, substitute AABB distance when outside */
@@ -96,11 +81,11 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     float grp_dist = 1e10f;
     float3 grp_color = grp.color.rgb;
     bool grp_has_hit = false;
+    float grp_winner_id = -1.0f;
 
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
       if (!is_shape_near(m)) continue;
 
-      /* Per-step AABB skip: expand threshold by blend radius so blend partners aren't pruned */
       float aabb_skip_thresh = max(sdf_ray_epsilon, objects[m].blend);
       if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > aabb_skip_thresh) {
         continue;
@@ -114,6 +99,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       if (!grp_has_hit) {
         grp_dist = d;
         grp_color = obj.color.rgb;
+        grp_winner_id = float(obj.original_index);
         grp_has_hit = true;
       }
       else {
@@ -122,14 +108,16 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode);
         if (obj.csg_operation == 0 && d < prev) {
-          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          grp_winner_id = float(obj.original_index);
+        }
+        if (obj.csg_operation == 0) {
+          float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
           grp_color = mix(grp_color, obj.color.rgb, t);
         }
       }
     }
 
     if (!grp_has_hit) {
-      /* No object AABB contained this point — track nearest for empty-space skip */
       float grp_aabb = 1e30f;
       for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
         grp_aabb = min(grp_aabb, point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz));
@@ -141,6 +129,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     if (scene_dist >= 1e9f) {
       scene_dist = grp_dist;
       out_color = grp_color;
+      out_obj_id = grp_winner_id;
     }
     else {
       float prev = scene_dist;
@@ -148,7 +137,10 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
           scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
           grp.shell_distance, grp.shell_mode);
       if (grp.csg_operation == 0 && grp_dist < prev) {
-        float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
+        out_obj_id = grp_winner_id;
+      }
+      if (grp.csg_operation == 0) {
+        float t = colorBlendFactor(prev, grp_dist, grp.blend_type, grp.blend);
         out_color = mix(out_color, grp_color, t);
       }
     }
@@ -174,6 +166,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     if (scene_dist >= 1e9f) {
       scene_dist = d;
       out_color = obj.color.rgb;
+      out_obj_id = float(obj.original_index);
     }
     else {
       float prev = scene_dist;
@@ -181,7 +174,10 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
           scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
           obj.shell_distance, obj.shell_mode);
       if (obj.csg_operation == 0 && d < prev) {
-        float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+        out_obj_id = float(obj.original_index);
+      }
+      if (obj.csg_operation == 0) {
+        float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
         out_color = mix(out_color, obj.color.rgb, t);
       }
     }
@@ -194,74 +190,60 @@ float evalSceneDistBVH(float3 world_pos)
 {
   float3 dummy_color;
   float dummy_skip;
-  return evalSceneBVH(world_pos, dummy_color, dummy_skip);
+  float dummy_id;
+  return evalSceneBVH(world_pos, dummy_color, dummy_skip, dummy_id);
 }
 
 #endif
 
 #ifdef USE_TILE_CULLING
 
-/* Flush accumulated group result into scene distance. */
-void flushGroup(int gid, float grp_dist, float3 grp_color,
-                inout float scene_dist, inout float3 out_color)
-{
-  if (scene_dist >= 1e9f) {
-    scene_dist = grp_dist;
-    out_color = grp_color;
-  }
-  else {
-    SDFGroupGPU grp = groups[gid];
-    float prev = scene_dist;
-    scene_dist = combineCSG(
-        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-        grp.shell_distance, grp.shell_mode);
-    if (grp.csg_operation == 0 && grp_dist < prev) {
-      float t = clamp(1.0f - (grp_dist - scene_dist) / max(grp.blend, 0.001f), 0.0f, 1.0f);
-      out_color = mix(out_color, grp_color, t);
-    }
-  }
-}
-
-/* Single-pass evaluation over flat sorted tile-visible list. */
-float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_skip)
+/* Single-pass evaluation over flat sorted tile-visible list.
+ * Deferred struct load: only bbox/group loaded for AABB skip path. */
+float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_skip, out float out_obj_id)
 {
   float scene_dist = 1e10f;
   out_color = float3(0.5f);
   out_aabb_skip = 1e30f;
+  out_obj_id = -1.0f;
 
   int cur_group = -2;
   float grp_dist = 1e10f;
   float3 grp_color = float3(0.5f);
   bool grp_has_hit = false;
+  float grp_winner_id = -1.0f;
 
   uint n = min(s_tileObjCount, uint(kMaxTileObjects));
-  for (uint u = 0u; u <= n; u++) {
-    int i = (u < n) ? s_tileObjList[u] : -1;
-    SDFObjectGPU obj;
-    int gid;
-    if (i >= 0) {
-      obj = objects[i];
-      gid = obj.group_id;
-    }
-    else {
-      gid = -2;
-    }
+  for (uint u = 0u; u < n; u++) {
+    int i = s_tileObjList[u];
+
+    /* Partial read: group_id for boundary detection */
+    int gid = objects[i].group_id;
 
     /* Group boundary: flush previous group into scene */
     if (gid != cur_group && grp_has_hit) {
+      float prev = scene_dist;
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, out_color);
+      if (prev >= 1e9f || grp_dist < prev) {
+        out_obj_id = grp_winner_id;
+      }
       grp_has_hit = false;
       grp_dist = 1e10f;
+      grp_winner_id = -1.0f;
     }
 
-    if (u >= n) break;
-    float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
-    float max_group_blend = intBitsToFloat(obj._pad1);
+    /* Partial read: AABB + blend threshold only */
+    float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
+    float max_group_blend = intBitsToFloat(objects[i]._pad1);
     float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
     if (da > skip_threshold) {
       out_aabb_skip = min(out_aabb_skip, da);
+      cur_group = gid;
       continue;
     }
+
+    /* Full struct load: only when AABB test passes */
+    SDFObjectGPU obj = objects[i];
     float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
     cur_group = gid;
@@ -269,11 +251,10 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
     if (gid < 0) {
       /* Ungrouped: combine directly into scene */
       if (scene_dist >= 1e9f) {
-        /* Only union (op=0) can create geometry from nothing.
-         * Subtraction/intersection with no base produces no surface. */
         if (obj.csg_operation == 0) {
           scene_dist = d;
           out_color = obj.color.rgb;
+          out_obj_id = float(obj.original_index);
         }
       }
       else {
@@ -282,17 +263,21 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
             scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode);
         if (obj.csg_operation == 0 && d < prev) {
-          float t = clamp(1.0f - (d - scene_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          out_obj_id = float(obj.original_index);
+        }
+        if (obj.csg_operation == 0) {
+          float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
           out_color = mix(out_color, obj.color.rgb, t);
         }
       }
     }
     else {
-      /* Grouped: accumulate into group CSG chain */
+      /* Grouped: accumulate into group CSG chain, track per-object winner */
       if (!grp_has_hit) {
         if (obj.csg_operation == 0) {
           grp_dist = d;
           grp_color = obj.color.rgb;
+          grp_winner_id = float(obj.original_index);
           grp_has_hit = true;
         }
       }
@@ -302,10 +287,22 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode);
         if (obj.csg_operation == 0 && d < prev) {
-          float t = clamp(1.0f - (d - grp_dist) / max(obj.blend, 0.001f), 0.0f, 1.0f);
+          grp_winner_id = float(obj.original_index);
+        }
+        if (obj.csg_operation == 0) {
+          float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
           grp_color = mix(grp_color, obj.color.rgb, t);
         }
       }
+    }
+  }
+
+  /* Flush final group */
+  if (grp_has_hit) {
+    float prev = scene_dist;
+    flushGroup(cur_group, grp_dist, grp_color, scene_dist, out_color);
+    if (prev >= 1e9f || grp_dist < prev) {
+      out_obj_id = grp_winner_id;
     }
   }
 
@@ -360,7 +357,6 @@ void main()
       }
       imageStore(gbuf_pos_img, pixel, float4(0.0));
       imageStore(gbuf_color_img, pixel, float4(0.0));
-      imageStore(gbuf_normal_img, pixel, float4(0.0));
     }
     return;
   }
@@ -524,6 +520,7 @@ void main()
   bool hit = false;
   float3 hit_pos;
   float3 hit_color;
+  float hit_obj_id = -1.0f;
   int steps_taken = 0;
   float omega = sdf_over_relaxation;
   float prev_radius = 0.0f;
@@ -538,7 +535,8 @@ void main()
     float3 skip_pos = ray_origin + ray_dir * cone_skip_target;
     float3 skip_color;
     float skip_aabb;
-    float skip_d = evalSceneTile(skip_pos, skip_color, skip_aabb);
+    float skip_id;
+    float skip_d = evalSceneTile(skip_pos, skip_color, skip_aabb, skip_id);
     if (skip_d > sdf_ray_epsilon * 2.0f) {
       t = cone_skip_target;
       if (skip_d < 1e9f) {
@@ -547,6 +545,7 @@ void main()
       }
     }
   }
+
 #endif
 
   for (int step = 0; step < sdf_max_steps; step++) {
@@ -557,8 +556,9 @@ void main()
     float3 color;
     float d;
     float aabb_skip;
+    float cur_obj_id;
 #ifdef USE_TILE_CULLING
-    d = evalSceneTile(pos, color, aabb_skip);
+    d = evalSceneTile(pos, color, aabb_skip, cur_obj_id);
 
     if (d >= 1e9f) {
       t += max(aabb_skip, sdf_ray_epsilon);
@@ -574,7 +574,7 @@ void main()
       d = max(aabb_skip, sdf_ray_epsilon * 10.0f);
     }
 #else
-    d = evalSceneBVH(pos, color, aabb_skip);
+    d = evalSceneBVH(pos, color, aabb_skip, cur_obj_id);
 
     /* If no AABB contains this point, skip by nearest AABB distance */
     if (d >= 1e9f) {
@@ -626,6 +626,7 @@ void main()
         hit_pos = pos + ray_dir * d;
       }
       hit_color = color;
+      hit_obj_id = cur_obj_id;
       break;
     }
 
@@ -765,12 +766,10 @@ void main()
   if (!hit) {
     imageStore(gbuf_pos_img, pixel, float4(0.0));
     imageStore(gbuf_color_img, pixel, float4(0.0));
-    imageStore(gbuf_normal_img, pixel, float4(0.0));
     return;
   }
 
   /* Output G-buffer */
   imageStore(gbuf_pos_img, pixel, float4(hit_pos, 1.0));
-  imageStore(gbuf_color_img, pixel, float4(hit_color, 0.0));
-  imageStore(gbuf_normal_img, pixel, float4(0.0));
+  imageStore(gbuf_color_img, pixel, float4(hit_color, hit_obj_id));
 }

@@ -93,6 +93,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_sdf.hh"
 #include "BKE_sdf_group.hh"
 #include "BKE_speaker.h"
 #include "BKE_vfont.hh"
@@ -2480,6 +2481,7 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
     }
 
     BKE_id_multi_tagged_delete(bmain);
+    BKE_sdf_reindex_all(bmain);
   }
 
   if (confirm) {
@@ -4463,7 +4465,7 @@ static void object_add_sync_rigid_body(Main *bmain, Object *object_src, Object *
   }
 }
 
-/** Add duplicated SDF object to the same group as the original. */
+/** Add duplicated SDF object to the same group as the original, right after it. */
 static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
 {
   if (object_src->type != OB_SDF || !object_src->data) {
@@ -4476,7 +4478,7 @@ static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
   }
 
   /* The copy system already set sdf_group and incremented user count
-   * via foreach_id + IDWALK_CB_USER. Undo that so member_add can
+   * via foreach_id + IDWALK_CB_USER. Undo that so member_insert_after can
    * set it cleanly with a single id_us_plus. */
   if (object_new->data) {
     SDF *sdf_new = static_cast<SDF *>(object_new->data);
@@ -4486,7 +4488,7 @@ static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
     }
   }
 
-  BKE_sdf_group_member_add(group, object_new);
+  BKE_sdf_group_member_insert_after(group, object_src, object_new);
 }
 
 /** Create new mirror empties for duplicated SDF objects. */

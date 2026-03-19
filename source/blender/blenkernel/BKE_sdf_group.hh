@@ -22,6 +22,9 @@ struct SDFGroupRuntime {};
 
 SDFGroup *BKE_sdf_group_add(Main *bmain, const char *name);
 SDFGroupMember *BKE_sdf_group_member_add(SDFGroup *group, Object *ob);
+SDFGroupMember *BKE_sdf_group_member_insert_after(SDFGroup *group,
+                                                   Object *after_ob,
+                                                   Object *new_ob);
 void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member);
 void BKE_sdf_group_member_move(SDFGroup *group, SDFGroupMember *member, int direction);
 void BKE_sdf_group_reindex_members(SDFGroup *group);
