@@ -124,29 +124,22 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
 
 void main()
 {
-  /* Super-tile: each thread covers a 2×2 block of 8×8 tiles (16×16 pixels) */
-  int stX = int(gl_GlobalInvocationID.x);
-  int stY = int(gl_GlobalInvocationID.y);
-  int stTilesX = (screen_size.x + 15) / 16;
-  int stTilesY = (screen_size.y + 15) / 16;
-  if (stX >= stTilesX || stY >= stTilesY) return;
-
-  int stIdx = stX + stY * stTilesX;
-
-  /* Read prim list from one of the 4 sub-tiles (center-biased) */
+  int tileX = int(gl_GlobalInvocationID.x);
+  int tileY = int(gl_GlobalInvocationID.y);
   int tilesX = (screen_size.x + 7) / 8;
-  int subTileX = min(stX * 2 + 1, tilesX - 1);
-  int subTileY = min(stY * 2 + 1, ((screen_size.y + 7) / 8) - 1);
-  int subTileIdx = subTileX + subTileY * tilesX;
-  int tile_count = min(tile_prim_counts[subTileIdx], kMaxTileObjects);
+  int tilesY = (screen_size.y + 7) / 8;
+  if (tileX >= tilesX || tileY >= tilesY) return;
+
+  int tileIdx = tileX + tileY * tilesX;
+  int tile_count = min(tile_prim_counts[tileIdx], kMaxTileObjects);
 
   if (tile_count == 0) {
-    tile_hit_pos[stIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
     return;
   }
 
-  /* Build ray through super-tile center (16×16 pixel area) */
-  float2 tile_center = (float2(stX, stY) + 0.5f) * 16.0f;
+  /* Build ray through tile center */
+  float2 tile_center = (float2(tileX, tileY) + 0.5f) * 8.0f;
   float2 uv = tile_center / float2(screen_size);
 
   ViewMatrices vm = drw_view();
@@ -178,19 +171,21 @@ void main()
     t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
     if (t_enter > t_exit || t_exit < 0.0f) {
-      tile_hit_pos[stIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+      tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
       return;
     }
     t_enter = max(t_enter, 0.0f);
     t_exit = min(t_exit, 1000.0f);
   }
 
-  float tan_half_tile = float(16) / float(screen_size.y);
+  float tan_half_tile = float(8) / float(screen_size.y);
   float cone_epsilon = sdf_ray_epsilon * 8.0f;
-  int base_offset = subTileIdx * kMaxTileObjects;
+  int base_offset = tileIdx * kMaxTileObjects;
 
   float t = t_enter;
   float t_safe = t_enter;
+  float d_safe = 0.0f;
+  float cone_r_safe = 0.0f;
   for (int step = 0; step < 16; step++) {
     float3 pos = ro + rd * t;
     float aabb_skip;
@@ -208,20 +203,30 @@ void main()
 
     float cone_r = t * tan_half_tile * 1.25f;
     if (d < cone_r) {
-      tile_hit_pos[stIdx] = float4(ro + rd * t_safe, t_safe);
+      /* Surface detected. Advance past t_safe by Lipschitz margin with
+       * 3× cone_r buffer: tight bound puts edge pixels at SDF=0 (exactly
+       * at surface), which breaks at grazing angles due to projection
+       * error. 3× cone_r costs <0.03 of skip but eliminates tile seams. */
+      float margin = cone_r_safe * 3.0f;
+      float t_skip = t_safe + max(d_safe - margin, 0.0f);
+      tile_hit_pos[tileIdx] = float4(ro + rd * t_skip, t_skip);
       return;
     }
 
     t_safe = t;
+    d_safe = d;
+    cone_r_safe = cone_r;
     t += d;
     if (t > t_exit) break;
   }
 
-  /* Didn't find surface in 16 steps — still write t_safe for partial skip */
+  /* Didn't find surface — write best safe skip */
   if (t_safe > t_enter) {
-    tile_hit_pos[stIdx] = float4(ro + rd * t_safe, t_safe);
+    float margin = cone_r_safe * 3.0f;
+    float t_skip = t_safe + max(d_safe - margin, 0.0f);
+    tile_hit_pos[tileIdx] = float4(ro + rd * t_skip, t_skip);
   }
   else {
-    tile_hit_pos[stIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
   }
 }
