@@ -4811,6 +4811,28 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
                            "but may overshoot thin features)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "sdf_cone_aperture", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_cone_aperture");
+  RNA_def_property_range(prop, 0.5f, 8.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 4.0f, 1, 2);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Cone Aperture",
+                           "Cone march termination radius multiplier (higher = earlier "
+                           "termination, more skip but less precise)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_cone_steps", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_cone_steps");
+  RNA_def_property_range(prop, 4, 128);
+  RNA_def_property_ui_range(prop, 8, 64, 1, -1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Cone Steps",
+                           "Max cone march steps per tile (more = better empty-space "
+                           "skipping but slower cone pass)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   static const EnumPropertyItem sdf_debug_grid_items[] = {
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},

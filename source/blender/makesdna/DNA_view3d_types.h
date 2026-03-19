@@ -220,7 +220,9 @@ typedef struct View3DShading {
   int sdf_max_steps;
   float sdf_ray_epsilon;
   float sdf_over_relaxation;
-  char _pad_sor[4];
+  float sdf_cone_aperture;
+  int sdf_cone_steps;
+  char _pad_cone[4];
 
   struct IDProperty *prop;
   void *_pad2;

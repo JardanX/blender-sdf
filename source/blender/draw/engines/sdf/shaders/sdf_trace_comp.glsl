@@ -412,11 +412,12 @@ void main()
 
 #ifdef USE_TILE_CULLING
   float t_enter_before_cone = t_enter;
-  /* Cone march stores the last position where SDF > cone_r (safe for
-   * all pixel rays in the tile by Lipschitz bound). Use directly. */
+  float cone_skip_target = -1.0f;
   if (use_cone_trace != 0 && s_coneHitPos.w >= 0.0f) {
     float projected = dot(s_coneHitPos.xyz - ray_origin, ray_dir);
-    t_enter = max(t_enter, projected);
+    if (projected > t_enter) {
+      cone_skip_target = projected;
+    }
   }
 #endif
 
@@ -504,7 +505,26 @@ void main()
   float t_prev = t_enter;
   float d_prev = 1e10f;
 
+#ifdef USE_TILE_CULLING
+  /* Cone skip: jump to cone position and evaluate SDF there.
+   * Handles both surface approach AND empty-space skipping (booleans). */
+  if (cone_skip_target > 0.0f) {
+    float3 skip_pos = ray_origin + ray_dir * cone_skip_target;
+    float3 skip_color;
+    float skip_aabb;
+    float skip_d = evalSceneTile(skip_pos, skip_color, skip_aabb);
+    if (skip_d > sdf_ray_epsilon * 2.0f) {
+      t = cone_skip_target;
+      if (skip_d < 1e9f) {
+        d_prev = skip_d;
+        t_prev = cone_skip_target - skip_d;
+      }
+    }
+  }
+#endif
+
   for (int step = 0; step < sdf_max_steps; step++) {
+    if (t > t_exit) break;
     float3 pos = ray_origin + ray_dir * t;
 
     /* Combined evaluation + empty-space skip */
@@ -594,10 +614,6 @@ void main()
     } else {
       t += max(step_length, sdf_ray_epsilon * 0.5f);
     }
-
-    if (t > t_exit) {
-      break;
-    }
   }
 
   /* Debug views write directly to out_color/out_depth */
@@ -646,7 +662,7 @@ void main()
     return;
   }
   else if (debug_bvh_views == 5) {
-    float skip = t_enter - t_enter_before_cone;
+    float skip = (cone_skip_target > 0.0f) ? cone_skip_target - t_enter_before_cone : 0.0f;
     float total_range = t_exit - t_enter_before_cone;
     float savings = (total_range > 0.001f) ? clamp(skip / total_range, 0.0f, 1.0f) : 0.0f;
     float3 cone_color = mix(float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), savings);

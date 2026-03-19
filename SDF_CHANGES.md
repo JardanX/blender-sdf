@@ -5,6 +5,31 @@
 
 ---
 
+## Multi-Pass SDF Ray Marching Pipeline
+
+Extracted the monolithic trace shader into a 3-pass pipeline: tile cull → cone march → per-pixel trace. The tile cull builds per-tile primitive lists into SSBOs. The cone march does coarse SDF sphere tracing per tile to find approximate surface distance. The per-pixel trace loads tile-culled prim lists from SSBOs and uses cone march results to skip empty space.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_tile_cull_comp.glsl` | Tile cull pass: 64 threads (8×8 workgroup) cooperatively test objects against tile NDC bounds, sort by index, write per-tile prim counts/lists to SSBOs |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_cone_march_comp.glsl` | Complete rewrite: real SDF evaluation using tile prim list SSBOs, Lipschitz-safe `t_safe` output, (8,8) workgroup for GPU occupancy, configurable steps/aperture |
+| `draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Tile culling code replaced with cooperative SSBO→shared memory load. Cone skip as first-step hint (no tile-boundary artifacts). `step_factor` moved to CPU push constant. Early `t > t_exit` check |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_tile_cull_comp` CREATE_INFO. Updated `sdf_cone_march_comp` with SDF eval SSBOs + cone parameters. Added tile prim SSBO slots (5,6) to `sdf_trace_tile_comp`. Added `sdf_step_factor` push constant to both trace infos |
+| `draw/engines/sdf/sdf_engine.cc` | Added `SH_TILE_CULL_COMP` shader + `tile_prim_counts/lists` SSBOs. New `draw_tile_cull()` + `ensure_tile_ssbos()`. Cone march dispatch at (8,8) workgroup. `step_factor` computed on CPU. Draw flow: tile_cull → barrier → cone_march → barrier → trace → barrier → shade → blit |
+| `draw/CMakeLists.txt` | Registered `sdf_tile_cull_comp.glsl` |
+| `makesdna/DNA_view3d_types.h` | Added `sdf_cone_aperture` (float) and `sdf_cone_steps` (int) to `View3DShading` |
+| `makesrna/intern/rna_space.cc` | Added RNA properties for cone aperture (0.5–8.0) and cone steps (4–128) |
+| `scripts/startup/bl_ui/properties_render.py` | Added cone aperture and cone steps to SDF render settings panel |
+
+---
+
 ## Quick Summary
 
 We added **SDF (Signed Distance Field)** as a new native object type in Blender.
