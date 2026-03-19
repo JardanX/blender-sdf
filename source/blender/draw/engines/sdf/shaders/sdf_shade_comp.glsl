@@ -36,12 +36,12 @@ void main()
   float4 raw_u = imageLoad(gbuf_pos_img, pixel + int2(0, 1));
   float4 raw_d = imageLoad(gbuf_pos_img, pixel + int2(0, -1));
 
-  float3 cam_pos = drw_view().viewinv[3].xyz;
-  float depth0 = length(p0 - cam_pos);
-  float depth_r = (raw_r.w > 0.0f) ? length(raw_r.xyz - cam_pos) : 1e10f;
-  float depth_l = (raw_l.w > 0.0f) ? length(raw_l.xyz - cam_pos) : 1e10f;
-  float depth_u = (raw_u.w > 0.0f) ? length(raw_u.xyz - cam_pos) : 1e10f;
-  float depth_d = (raw_d.w > 0.0f) ? length(raw_d.xyz - cam_pos) : 1e10f;
+  float3 view_fwd = -normalize(drw_view().viewinv[2].xyz);
+  float depth0 = dot(p0, view_fwd);
+  float depth_r = (raw_r.w > 0.0f) ? dot(raw_r.xyz, view_fwd) : 1e10f;
+  float depth_l = (raw_l.w > 0.0f) ? dot(raw_l.xyz, view_fwd) : 1e10f;
+  float depth_u = (raw_u.w > 0.0f) ? dot(raw_u.xyz, view_fwd) : 1e10f;
+  float depth_d = (raw_d.w > 0.0f) ? dot(raw_d.xyz, view_fwd) : 1e10f;
 
   bool use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
   bool use_up = abs(depth_u - depth0) < abs(depth_d - depth0);

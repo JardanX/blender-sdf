@@ -551,10 +551,8 @@ class Instance : public DrawEngine {
     scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
     max_blend_ = math::max(max_blend_, gpu_obj.blend);
-    if (gpu_obj.blend > 0.001f &&
-        (gpu_obj.blend_type == SDF_BLEND_CHAMFER || gpu_obj.blend_type == SDF_BLEND_ROUND))
-    {
-      step_factor_ = 0.7f;
+    if (gpu_obj.blend > 0.001f && gpu_obj.blend_type == SDF_BLEND_ROUND) {
+      step_factor_ = min_ff(step_factor_, 0.65f);
     }
     if (sdf_data->csg_operation == SDF_CSG_SHELL) {
       max_shell_distance_ = math::max(max_shell_distance_, fabsf(sdf_data->shell_distance));
@@ -605,10 +603,8 @@ class Instance : public DrawEngine {
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(
             group->color[0], group->color[1], group->color[2], group->color[3]);
-        if (gpu_grp.blend > 0.001f &&
-            (gpu_grp.blend_type == SDF_BLEND_CHAMFER || gpu_grp.blend_type == SDF_BLEND_ROUND))
-        {
-          step_factor_ = 0.7f;
+        if (gpu_grp.blend > 0.001f && gpu_grp.blend_type == SDF_BLEND_ROUND) {
+          step_factor_ = min_ff(step_factor_, 0.65f);
         }
         groups_gpu_.append(gpu_grp);
         group_index_map.add(group, g_idx);
