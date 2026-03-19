@@ -1296,7 +1296,7 @@ class Instance : public DrawEngine {
     }
   }
 
-  void ensure_tile_ssbos(int total_tiles)
+  void ensure_tile_ssbos(int total_tiles, int tiles_x, int tiles_y)
   {
     /* tile_prim_counts */
     if (tile_prim_counts_ssbo_ != nullptr && tile_prim_counts_ssbo_tiles_ != total_tiles) {
@@ -1320,15 +1320,18 @@ class Instance : public DrawEngine {
       tile_prim_lists_ssbo_tiles_ = total_tiles;
     }
 
-    /* cone hit */
-    if (cone_hit_ssbo_ != nullptr && cone_hit_ssbo_count_ != total_tiles) {
+    /* cone hit (super-tile granularity: 2×2 tiles = 16×16 pixels) */
+    int st_x = (tiles_x + 1) / 2;
+    int st_y = (tiles_y + 1) / 2;
+    int super_tiles = st_x * st_y;
+    if (cone_hit_ssbo_ != nullptr && cone_hit_ssbo_count_ != super_tiles) {
       GPU_storagebuf_free(cone_hit_ssbo_);
       cone_hit_ssbo_ = nullptr;
     }
-    if (cone_hit_ssbo_ == nullptr && total_tiles > 0) {
+    if (cone_hit_ssbo_ == nullptr && super_tiles > 0) {
       cone_hit_ssbo_ = GPU_storagebuf_create_ex(
-          total_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
-      cone_hit_ssbo_count_ = total_tiles;
+          super_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
+      cone_hit_ssbo_count_ = super_tiles;
     }
   }
 
