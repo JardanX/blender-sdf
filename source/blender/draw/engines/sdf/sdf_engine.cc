@@ -169,6 +169,8 @@ class Instance : public DrawEngine {
   int sdf_max_steps_ = 128;
   float sdf_ray_epsilon_ = 0.001f;
   float sdf_over_relaxation_ = 1.2f;
+  float sdf_cone_aperture_ = 1.25f;
+  int sdf_cone_steps_ = 16;
 
   float4 studio_light_dir_[4] = {};
   float4 studio_light_col_[4] = {};
@@ -957,12 +959,20 @@ class Instance : public DrawEngine {
     if (v3d_mut->shading.sdf_over_relaxation == 0.0f) {
       v3d_mut->shading.sdf_over_relaxation = 1.2f;
     }
+    if (v3d_mut->shading.sdf_cone_aperture == 0.0f) {
+      v3d_mut->shading.sdf_cone_aperture = 1.25f;
+    }
+    if (v3d_mut->shading.sdf_cone_steps == 0) {
+      v3d_mut->shading.sdf_cone_steps = 16;
+    }
     use_bvh_ = 1;
     debug_bvh_views_ = v3d->shading.sdf_bvh_debug_view;
     use_cone_trace_ = v3d->shading.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = v3d->shading.sdf_max_steps;
     sdf_ray_epsilon_ = v3d->shading.sdf_ray_epsilon;
     sdf_over_relaxation_ = v3d->shading.sdf_over_relaxation;
+    sdf_cone_aperture_ = v3d->shading.sdf_cone_aperture;
+    sdf_cone_steps_ = v3d->shading.sdf_cone_steps;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
@@ -1407,10 +1417,11 @@ class Instance : public DrawEngine {
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
-    GPU_shader_uniform_1i(sh, "sdf_max_steps", sdf_max_steps_);
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
     GPU_shader_uniform_3fv(sh, "scene_aabb_max", scene_max_);
+    GPU_shader_uniform_1f(sh, "sdf_cone_aperture", sdf_cone_aperture_);
+    GPU_shader_uniform_1i(sh, "sdf_cone_steps", sdf_cone_steps_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     View &view = View::default_get();

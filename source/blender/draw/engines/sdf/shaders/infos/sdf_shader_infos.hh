@@ -65,7 +65,7 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Cone March Pre-Pass (1 thread per tile, real SDF evaluation)
+/** \name SDF Cone March Pre-Pass (coarse sphere trace per tile)
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_cone_march_comp)
@@ -79,8 +79,9 @@ STORAGE_BUF(5, read, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
-PUSH_CONSTANT(int, sdf_max_steps)
 PUSH_CONSTANT(float, sdf_ray_epsilon)
+PUSH_CONSTANT(float, sdf_cone_aperture)
+PUSH_CONSTANT(int, sdf_cone_steps)
 PUSH_CONSTANT(float3, scene_aabb_min)
 PUSH_CONSTANT(float3, scene_aabb_max)
 PUSH_CONSTANT(int2, screen_size)

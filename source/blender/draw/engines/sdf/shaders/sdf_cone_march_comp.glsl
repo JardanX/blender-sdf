@@ -186,7 +186,7 @@ void main()
   float t_safe = t_enter;
   float d_safe = 0.0f;
   float cone_r_safe = 0.0f;
-  for (int step = 0; step < 16; step++) {
+  for (int step = 0; step < sdf_cone_steps; step++) {
     float3 pos = ro + rd * t;
     float aabb_skip;
     float d = evalSceneCone(pos, tile_count, base_offset, aabb_skip);
@@ -201,7 +201,7 @@ void main()
       d = max(aabb_skip, cone_epsilon);
     }
 
-    float cone_r = t * tan_half_tile * 1.25f;
+    float cone_r = t * tan_half_tile * sdf_cone_aperture;
     if (d < cone_r) {
       /* Surface detected. Advance past t_safe by Lipschitz margin with
        * 3× cone_r buffer: tight bound puts edge pixels at SDF=0 (exactly
