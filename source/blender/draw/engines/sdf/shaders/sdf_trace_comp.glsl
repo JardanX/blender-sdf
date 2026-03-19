@@ -600,9 +600,8 @@ void main()
     if (!sor_fail && d < adaptive_epsilon) {
       hit = true;
       /* Surface projection with angle correction.
-       * Estimate cos(theta) between ray and surface normal from the rate of
-       * distance decrease: cos_theta ≈ (d_prev - d) / (t - t_prev).
-       * Project along ray by d/cos_theta to reach the true d=0 surface. */
+       * cos_theta estimated from distance decrease rate. Distance-adaptive clamp:
+       * aggressive close (eliminates step bands), conservative far (no puffiness). */
       float denom = d_prev - d;
       if (denom > 1e-8f) {
         float alpha = d_prev / denom;
