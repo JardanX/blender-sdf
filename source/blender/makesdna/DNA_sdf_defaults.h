@@ -25,6 +25,8 @@
     .csg_operation = 0, \
     .shell_distance = 0.2f, \
     .shell_mode = 0, \
+    .shell_blend_top = 0.1f, \
+    .shell_blend_bottom = 0.1f, \
     .chamfer_k2 = 0.01f, \
     .chamfer_k3 = 0.01f, \
     .box_corners = {0.0f, 0.0f, 0.0f, 0.0f}, \

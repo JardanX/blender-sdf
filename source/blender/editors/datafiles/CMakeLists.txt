@@ -959,6 +959,7 @@ if(WITH_BLENDER)
       sdf_capsule
       sdf_torus
       sdf_ngon
+      sdf_polygon
       sdf_group
       volume_data
       vpaint_hlt

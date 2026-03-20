@@ -48,13 +48,13 @@ struct SDFGroupGPU {
   float blend;
   float shell_distance;
   int shell_mode;
+  float shell_blend_top;
+  float shell_blend_bottom;
   float chamfer_k2;
   float chamfer_k3;
   int first_object;
   int object_count;
   int _pad0;
-  int _pad1;
-  int _pad2;
   float4 color;
 };
 
@@ -65,13 +65,11 @@ struct SDFModifierGPU {
   float4 params2;
 };
 
-/* BVH node: interior (left>=0) or leaf (left=-1, right=obj_idx) */
+/* Per-edge precomputed polygon data (CPU → GPU) */
 struct SDFPolygonPointGPU {
-  float2 co;       /* Original vertex position */
-  float corner;    /* Corner radius */
-  float _pad;
-  float2 inset_co; /* Inset position (center of rounding arc, CPU-computed) */
-  float2 _pad2;
+  float4 vi_edge;    /* vi.x, vi.y, edge.x, edge.y  (edge = vj - vi) */
+  float4 arc_data;   /* corner, inset_co.x, inset_co.y, 0 */
+  float4 arc_normal; /* n_prev.x, n_prev.y, n_next.x, n_next.y */
 };
 
 struct BVHNodeGPU {

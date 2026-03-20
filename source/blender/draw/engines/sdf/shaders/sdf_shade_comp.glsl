@@ -184,6 +184,7 @@ void main()
     shaded_color = diffuse * obj_color + specular * float(use_specular);
   }
 
-  imageStore(out_color_img, pixel, float4(shaded_color, 1.0f));
+  float alpha = all_valid ? 1.0f : 0.0f;
+  imageStore(out_color_img, pixel, float4(shaded_color, alpha));
   imageStore(out_depth_img, pixel, float4(drw_point_world_to_screen(hit_pos).z));
 }

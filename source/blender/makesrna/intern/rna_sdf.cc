@@ -24,7 +24,7 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_CAPSULE, "CAPSULE", ICON_SDF_CAPSULE, "Capsule", "Capsule SDF primitive"},
     {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
     {SDF_TYPE_NGON, "NGON", ICON_SDF_NGON, "N-Gon", "Regular polygon prism SDF primitive"},
-    {SDF_TYPE_POLYGON, "POLYGON", ICON_SDF_NGON, "Polygon", "Arbitrary polygon prism SDF primitive"},
+    {SDF_TYPE_POLYGON, "POLYGON", ICON_SDF_POLYGON, "Polygon", "Arbitrary polygon prism SDF primitive"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -69,8 +69,11 @@ static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
   if (sdf->csg_operation == SDF_CSG_SHELL && sdf->shell_mode == SDF_SHELL_NORMAL &&
       sdf->shell_distance > 0.0f)
   {
-    if (sdf->blend > sdf->shell_distance) {
-      sdf->blend = sdf->shell_distance;
+    if (sdf->shell_blend_top > sdf->shell_distance) {
+      sdf->shell_blend_top = sdf->shell_distance;
+    }
+    if (sdf->shell_blend_bottom > sdf->shell_distance) {
+      sdf->shell_blend_bottom = sdf->shell_distance;
     }
   }
 
@@ -230,6 +233,23 @@ static void rna_SDFModifier_bend_axis_set(PointerRNA *ptr, int value)
 {
   SDFModifier *mod = (SDFModifier *)ptr->data;
   mod->params[1] = (float)value;
+}
+
+static void rna_SDFPolygonPoint_smooth_set(PointerRNA *ptr, bool value)
+{
+  SDFPolygonPoint *pt = (SDFPolygonPoint *)ptr->data;
+  pt->smooth = value ? 1 : 0;
+  if (value && pt->handle[0] == 0.0f && pt->handle[1] == 0.0f) {
+    SDFPolygonPoint *next = pt->next ? pt->next : nullptr;
+    if (next) {
+      pt->handle[0] = (pt->co[0] + next->co[0]) * 0.5f;
+      pt->handle[1] = (pt->co[1] + next->co[1]) * 0.5f;
+    }
+    else {
+      pt->handle[0] = pt->co[0];
+      pt->handle[1] = pt->co[1] + 0.5f;
+    }
+  }
 }
 
 static SDFPolygonPoint *rna_SDF_polygon_point_new(SDF *sdf, float x, float y)
@@ -624,6 +644,20 @@ static void rna_def_sdf_polygon_point(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.1f, 3);
   RNA_def_property_ui_text(prop, "Corner", "Corner smoothing radius");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "handle", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "handle");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Handle", "Bezier control point position");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "smooth", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "smooth", 1);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_SDFPolygonPoint_smooth_set");
+  RNA_def_property_ui_text(prop, "Smooth", "Use bezier curve for edge from this point");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
 }
 
 static void rna_def_sdf_polygon_points(BlenderRNA *brna, PropertyRNA *cprop)
@@ -740,6 +774,22 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "shell_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_shell_mode_items);
   RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Shell Blend Top */
+  prop = RNA_def_property(srna, "shell_blend_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "shell_blend_top");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend Top", "Blend amount for the outer shell edge");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Shell Blend Bottom */
+  prop = RNA_def_property(srna, "shell_blend_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "shell_blend_bottom");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend Bottom", "Blend amount for the inner shell edge");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Box Corner Bevels */

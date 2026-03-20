@@ -1556,6 +1556,11 @@ def km_view3d(params):
             ("view3d.cursor3d", params.cursor_set_event, None),
         ])
 
+    # SDF polygon point placement
+    items.extend([
+        ("sdf.polygon_point_add_click", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+    ])
+
     items.extend([
         # Visibility.
         ("view3d.localview", {"type": 'NUMPAD_SLASH', "value": 'PRESS'}, None),
