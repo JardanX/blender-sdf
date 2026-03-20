@@ -34,6 +34,7 @@ typedef enum eSDFType {
   SDF_TYPE_CAPSULE = 4,
   SDF_TYPE_TORUS = 5,
   SDF_TYPE_NGON = 6,
+  SDF_TYPE_POLYGON = 7,
 } eSDFType;
 
 /* Box corner/edge blend mode */
@@ -90,6 +91,13 @@ enum {
   SDF_MOD_ARRAY_RADIAL = 1,
 };
 
+typedef struct SDFPolygonPoint {
+  struct SDFPolygonPoint *next, *prev;
+  float co[2];
+  float corner;
+  char _pad[4];
+} SDFPolygonPoint;
+
 typedef struct SDFModifier {
   struct SDFModifier *next, *prev;
 
@@ -136,6 +144,8 @@ typedef struct SDF {
   int csg_operation; /* eSDFCSGOperation */
   float shell_distance;
   int shell_mode; /* eSDFShellMode */
+  float chamfer_k2;
+  float chamfer_k3;
   char _pad6[4];
 
   /* Box properties */
@@ -154,6 +164,15 @@ typedef struct SDF {
   float ngon_taper;
   int ngon_edge_mode; /* eSDFBoxMode */
   float ngon_star;
+
+  /* Polygon properties */
+  ListBase polygon_points; /* SDFPolygonPoint */
+  int totpolygon;
+  float polygon_edge_top;
+  float polygon_edge_bottom;
+  float polygon_taper;
+  int polygon_edge_mode; /* eSDFBoxMode */
+  char _pad5[4];
 
   /* Torus */
   float torus_angle; /* Radians, 2*PI = full torus */

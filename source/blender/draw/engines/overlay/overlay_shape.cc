@@ -924,6 +924,164 @@ ShapeCache::ShapeCache()
     sphere_low_detail = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
   }
+  /* SDF solid cylinder: radius 1, z in [-1, 1], capped. */
+  {
+    constexpr int segments = 24;
+    const float pi2 = 2.0f * math::numbers::pi;
+    Vector<VertexPos> verts;
+
+    for (int i = 0; i < segments; i++) {
+      float a0 = pi2 * float(i) / float(segments);
+      float a1 = pi2 * float(i + 1) / float(segments);
+      float c0 = math::cos(a0), s0 = math::sin(a0);
+      float c1 = math::cos(a1), s1 = math::sin(a1);
+
+      /* Side quad as two triangles. */
+      verts.append({{c0, s0, -1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{c0, s0, 1.0f}});
+      verts.append({{c0, s0, 1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{c1, s1, 1.0f}});
+
+      /* Top cap fan triangle. */
+      verts.append({{0.0f, 0.0f, 1.0f}});
+      verts.append({{c0, s0, 1.0f}});
+      verts.append({{c1, s1, 1.0f}});
+
+      /* Bottom cap fan triangle. */
+      verts.append({{0.0f, 0.0f, -1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{c0, s0, -1.0f}});
+    }
+    sdf_cylinder_solid = BatchPtr(
+        GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
+  /* SDF solid cone: base radius 1 at z=-1, apex at z=1. */
+  {
+    constexpr int segments = 24;
+    const float pi2 = 2.0f * math::numbers::pi;
+    Vector<VertexPos> verts;
+
+    for (int i = 0; i < segments; i++) {
+      float a0 = pi2 * float(i) / float(segments);
+      float a1 = pi2 * float(i + 1) / float(segments);
+      float c0 = math::cos(a0), s0 = math::sin(a0);
+      float c1 = math::cos(a1), s1 = math::sin(a1);
+
+      /* Side triangle to apex. */
+      verts.append({{c0, s0, -1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{0.0f, 0.0f, 1.0f}});
+
+      /* Base cap fan triangle. */
+      verts.append({{0.0f, 0.0f, -1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{c0, s0, -1.0f}});
+    }
+    sdf_cone_solid = BatchPtr(
+        GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
+  /* SDF solid capsule: radius 1, cylinder z in [-1, 1], hemisphere caps. */
+  {
+    constexpr int seg = 16;
+    constexpr int ring_count = 8;
+    const float pi2 = 2.0f * math::numbers::pi;
+    const float pi_half = math::numbers::pi * 0.5f;
+    Vector<VertexPos> verts;
+
+    /* Cylinder body. */
+    for (int i = 0; i < seg; i++) {
+      float a0 = pi2 * float(i) / float(seg);
+      float a1 = pi2 * float(i + 1) / float(seg);
+      float c0 = math::cos(a0), s0 = math::sin(a0);
+      float c1 = math::cos(a1), s1 = math::sin(a1);
+      verts.append({{c0, s0, -1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{c0, s0, 1.0f}});
+      verts.append({{c0, s0, 1.0f}});
+      verts.append({{c1, s1, -1.0f}});
+      verts.append({{c1, s1, 1.0f}});
+    }
+
+    /* Top hemisphere (z offset +1). */
+    for (int j = 0; j < ring_count; j++) {
+      float lat0 = pi_half * float(j) / float(ring_count);
+      float lat1 = pi_half * float(j + 1) / float(ring_count);
+      float cla0 = math::cos(lat0), sla0 = math::sin(lat0);
+      float cla1 = math::cos(lat1), sla1 = math::sin(lat1);
+      for (int i = 0; i < seg; i++) {
+        float a0 = pi2 * float(i) / float(seg);
+        float a1 = pi2 * float(i + 1) / float(seg);
+        float c0 = math::cos(a0), s0 = math::sin(a0);
+        float c1 = math::cos(a1), s1 = math::sin(a1);
+        verts.append({{c0 * cla0, s0 * cla0, sla0 + 1.0f}});
+        verts.append({{c1 * cla0, s1 * cla0, sla0 + 1.0f}});
+        verts.append({{c0 * cla1, s0 * cla1, sla1 + 1.0f}});
+        verts.append({{c0 * cla1, s0 * cla1, sla1 + 1.0f}});
+        verts.append({{c1 * cla0, s1 * cla0, sla0 + 1.0f}});
+        verts.append({{c1 * cla1, s1 * cla1, sla1 + 1.0f}});
+      }
+    }
+
+    /* Bottom hemisphere (z offset -1). */
+    for (int j = 0; j < ring_count; j++) {
+      float lat0 = pi_half * float(j) / float(ring_count);
+      float lat1 = pi_half * float(j + 1) / float(ring_count);
+      float cla0 = math::cos(lat0), sla0 = math::sin(lat0);
+      float cla1 = math::cos(lat1), sla1 = math::sin(lat1);
+      for (int i = 0; i < seg; i++) {
+        float a0 = pi2 * float(i) / float(seg);
+        float a1 = pi2 * float(i + 1) / float(seg);
+        float c0 = math::cos(a0), s0 = math::sin(a0);
+        float c1 = math::cos(a1), s1 = math::sin(a1);
+        verts.append({{c0 * cla0, s0 * cla0, -sla0 - 1.0f}});
+        verts.append({{c0 * cla1, s0 * cla1, -sla1 - 1.0f}});
+        verts.append({{c1 * cla0, s1 * cla0, -sla0 - 1.0f}});
+        verts.append({{c1 * cla0, s1 * cla0, -sla0 - 1.0f}});
+        verts.append({{c0 * cla1, s0 * cla1, -sla1 - 1.0f}});
+        verts.append({{c1 * cla1, s1 * cla1, -sla1 - 1.0f}});
+      }
+    }
+
+    sdf_capsule_solid = BatchPtr(
+        GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
+  /* SDF solid torus: major radius 1, minor radius 1 (scaled at draw time). */
+  {
+    constexpr int major_seg = 24;
+    constexpr int minor_seg = 12;
+    const float pi2 = 2.0f * math::numbers::pi;
+    Vector<VertexPos> verts;
+
+    for (int i = 0; i < major_seg; i++) {
+      float u0 = pi2 * float(i) / float(major_seg);
+      float u1 = pi2 * float(i + 1) / float(major_seg);
+      float cu0 = math::cos(u0), su0 = math::sin(u0);
+      float cu1 = math::cos(u1), su1 = math::sin(u1);
+
+      for (int j = 0; j < minor_seg; j++) {
+        float v0 = pi2 * float(j) / float(minor_seg);
+        float v1 = pi2 * float(j + 1) / float(minor_seg);
+        float cv0 = math::cos(v0), sv0 = math::sin(v0);
+        float cv1 = math::cos(v1), sv1 = math::sin(v1);
+
+        float3 p00 = {(1.0f + cv0) * cu0, (1.0f + cv0) * su0, sv0};
+        float3 p10 = {(1.0f + cv0) * cu1, (1.0f + cv0) * su1, sv0};
+        float3 p01 = {(1.0f + cv1) * cu0, (1.0f + cv1) * su0, sv1};
+        float3 p11 = {(1.0f + cv1) * cu1, (1.0f + cv1) * su1, sv1};
+
+        verts.append({p00});
+        verts.append({p10});
+        verts.append({p01});
+        verts.append({p01});
+        verts.append({p10});
+        verts.append({p11});
+      }
+    }
+    sdf_torus_solid = BatchPtr(
+        GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
   /* ground line */
   {
     const Vector<float2> ring = ring_vertices(1.35f, diamond_nsegments);

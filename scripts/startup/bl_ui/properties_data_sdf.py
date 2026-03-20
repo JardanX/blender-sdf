@@ -3,9 +3,104 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
-from bpy.types import Panel, Menu, Operator
+from bpy.types import Panel, Menu, Operator, GizmoGroup
 from bpy.props import EnumProperty, IntProperty
-from mathutils import Matrix
+from mathutils import Matrix, Vector
+
+
+# Polygon Point Gizmos
+
+def _make_sdf_point_getter(point_index):
+    def getter():
+        ob = bpy.context.object
+        if not ob or ob.type != 'SDF' or not ob.data:
+            return (0.0, 0.0, 0.0)
+        sdf = ob.data
+        if point_index >= len(sdf.polygon_points):
+            return (0.0, 0.0, 0.0)
+        pt = sdf.polygon_points[point_index]
+        return (pt.co[0], pt.co[1], 0.0)
+    return getter
+
+def _make_sdf_point_setter(point_index):
+    def setter(value):
+        ob = bpy.context.object
+        if not ob or ob.type != 'SDF' or not ob.data:
+            return
+        sdf = ob.data
+        if point_index >= len(sdf.polygon_points):
+            return
+        pt = sdf.polygon_points[point_index]
+        pt.co[0] = value[0]
+        pt.co[1] = value[1]
+    return setter
+
+
+class VIEW3D_GGT_sdf_polygon(GizmoGroup):
+    bl_idname = "VIEW3D_GGT_sdf_polygon"
+    bl_label = "SDF Polygon Points"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'WINDOW'
+    bl_options = {'3D', 'PERSISTENT', 'SHOW_MODAL_ALL'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        if ob and ob.type == 'SDF' and ob.data:
+            return ob.data.sdf_type == 'POLYGON'
+        return False
+
+    def setup(self, context):
+        self.gizmos_list = []
+        self._rebuild(context)
+
+    def _rebuild(self, context):
+        for gz in self.gizmos_list:
+            self.gizmos.remove(gz)
+        self.gizmos_list.clear()
+
+        ob = context.object
+        if not ob or ob.type != 'SDF' or not ob.data:
+            return
+        sdf = ob.data
+        if sdf.sdf_type != 'POLYGON':
+            return
+
+        for i, _pt in enumerate(sdf.polygon_points):
+            gz = self.gizmos.new("GIZMO_GT_move_3d")
+            gz.draw_style = 'SQUARE_2D'
+            gz.draw_options = {'FILL', 'ALIGN_VIEW'}
+            gz.use_draw_modal = True
+            gz.use_draw_value = True
+            gz.scale_basis = 0.08
+            gz.color = 0.9, 0.9, 0.9
+            gz.alpha = 0.9
+            gz.color_highlight = 1.0, 1.0, 1.0
+            gz.alpha_highlight = 1.0
+            gz.target_set_handler("offset",
+                                  get=_make_sdf_point_getter(i),
+                                  set=_make_sdf_point_setter(i))
+            self.gizmos_list.append(gz)
+
+        self._last_count = len(sdf.polygon_points)
+
+    def refresh(self, context):
+        ob = context.object
+        if not ob or ob.type != 'SDF' or not ob.data:
+            return
+        sdf = ob.data
+        if sdf.sdf_type != 'POLYGON':
+            return
+
+        count = len(sdf.polygon_points)
+        if count != getattr(self, '_last_count', -1):
+            self._rebuild(context)
+            return
+
+        mat = ob.matrix_world
+        for i, gz in enumerate(self.gizmos_list):
+            if i < count:
+                gz.matrix_basis = mat
 
 
 # Pie Menus
@@ -127,7 +222,7 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         sdf = context.sdf
-        return sdf and sdf.sdf_type in ('BOX', 'NGON', 'TORUS')
+        return sdf and sdf.sdf_type in ('BOX', 'NGON', 'TORUS', 'POLYGON')
 
     def draw(self, context):
         layout = self.layout
@@ -137,6 +232,8 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             self.draw_ngon(layout, sdf)
         elif sdf.sdf_type == 'TORUS':
             self.draw_torus(layout, sdf)
+        elif sdf.sdf_type == 'POLYGON':
+            self.draw_polygon(layout, sdf)
         else:
             self.draw_box(layout, sdf)
 
@@ -218,6 +315,74 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             layout.separator()
             layout.prop(sdf, "ngon_edge_mode", text="Edges")
 
+    @staticmethod
+    def draw_polygon(layout, sdf):
+        layout.label(text="Points")
+        for i, pt in enumerate(sdf.polygon_points):
+            row = layout.row(align=True)
+            row.prop(pt, "co", index=0, text=f"P{i+1} X")
+            row.prop(pt, "co", index=1, text="Y")
+            row.prop(pt, "corner", text="R")
+
+        row = layout.row(align=True)
+        row.operator("sdf.polygon_point_add", text="Add Point", icon='ADD')
+        row.operator("sdf.polygon_point_remove", text="Remove", icon='REMOVE')
+
+        layout.separator()
+
+        layout.label(text="Edge Chamfer")
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(sdf, "polygon_edge_top", text="Top")
+        row.prop(sdf, "polygon_edge_bottom", text="Bottom")
+
+        layout.separator()
+
+        layout.prop(sdf, "polygon_taper")
+
+        has_shape = (sdf.polygon_edge_top + sdf.polygon_edge_bottom
+                     + abs(sdf.polygon_taper)) > 0.001
+        if has_shape:
+            layout.separator()
+            layout.prop(sdf, "polygon_edge_mode", text="Edges")
+
+
+# Polygon Point Operators
+
+class SDF_OT_polygon_point_add(Operator):
+    """Add a point to the polygon"""
+    bl_idname = "sdf.polygon_point_add"
+    bl_label = "Add Polygon Point"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sdf = getattr(context, 'sdf', None)
+        return sdf is not None and sdf.sdf_type == 'POLYGON'
+
+    def execute(self, context):
+        sdf = context.sdf
+        sdf.polygon_points.new(x=0.0, y=0.0)
+        return {'FINISHED'}
+
+
+class SDF_OT_polygon_point_remove(Operator):
+    """Remove the last point from the polygon"""
+    bl_idname = "sdf.polygon_point_remove"
+    bl_label = "Remove Polygon Point"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sdf = getattr(context, 'sdf', None)
+        return sdf is not None and sdf.sdf_type == 'POLYGON' and len(sdf.polygon_points) > 3
+
+    def execute(self, context):
+        sdf = context.sdf
+        pts = sdf.polygon_points
+        if len(pts) > 3:
+            pts.remove(pts[-1])
+        return {'FINISHED'}
 
 
 # Operation Panel
@@ -253,6 +418,12 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
             if sdf.blend_type != 'LINEAR':
                 layout.label(text="Blend")
                 layout.prop(sdf, "blend", text="")
+
+                if sdf.blend_type in ('CHAMFER', 'ROUND'):
+                    layout.label(text="Edge Smoothness")
+                    row = layout.row(align=True)
+                    row.prop(sdf, "chamfer_k2", text="K2")
+                    row.prop(sdf, "chamfer_k3", text="K3")
 
             if sdf.csg_operation == 'SHELL':
                 layout.label(text="Distance")
@@ -482,6 +653,9 @@ classes = (
     SDF_OT_modifier_add,
     SDF_OT_modifier_remove,
     SDF_OT_modifier_move,
+    SDF_OT_polygon_point_add,
+    SDF_OT_polygon_point_remove,
+    VIEW3D_GGT_sdf_polygon,
     SDF_MT_modifier_add,
     DATA_PT_context_sdf,
     DATA_PT_sdf_shape,

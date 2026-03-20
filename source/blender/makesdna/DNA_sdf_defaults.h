@@ -25,6 +25,8 @@
     .csg_operation = 0, \
     .shell_distance = 0.2f, \
     .shell_mode = 0, \
+    .chamfer_k2 = 0.01f, \
+    .chamfer_k3 = 0.01f, \
     .box_corners = {0.0f, 0.0f, 0.0f, 0.0f}, \
     .box_edge_top = 0.0f, \
     .box_edge_bottom = 0.0f, \
@@ -38,6 +40,11 @@
     .ngon_taper = 0.0f, \
     .ngon_edge_mode = 0, \
     .ngon_star = 0.0f, \
+    .totpolygon = 0, \
+    .polygon_edge_top = 0.0f, \
+    .polygon_edge_bottom = 0.0f, \
+    .polygon_taper = 0.0f, \
+    .polygon_edge_mode = 0, \
     .torus_angle = ((float)M_PI * 2.0f), \
     .sdf_index = 0, \
   }

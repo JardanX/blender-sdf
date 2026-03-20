@@ -20,6 +20,7 @@ STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
 STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
+STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
 IMAGE(0, SFLOAT_16_16_16_16, write, image2D, out_color_img)
 IMAGE(1, SFLOAT_32, write, image2D, out_depth_img)
 IMAGE(2, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
@@ -74,6 +75,7 @@ STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
 STORAGE_BUF(4, write, float4, tile_hit_pos[])
+STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(5, read_write, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
 STORAGE_BUF(7, write, float, tile_far_hint[])
@@ -104,6 +106,7 @@ STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
 STORAGE_BUF(4, read, float4, tile_hit_pos[])
+STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(5, read, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
 STORAGE_BUF(7, read, float, tile_far_hint[])
@@ -177,6 +180,7 @@ DO_STATIC_COMPILATION()
 SAMPLER(0, sampler2D, color_tx)
 SAMPLER(1, sampler2D, depth_tx)
 PUSH_CONSTANT(int, debug_bvh_views)
+PUSH_CONSTANT(float3, bg_color)
 FRAGMENT_OUT(0, float4, out_color)
 DEPTH_WRITE(DepthWrite::ANY)
 ADDITIONAL_INFO(gpu_fullscreen)
@@ -200,29 +204,5 @@ GPU_SHADER_CREATE_END()
 
 /** \} */
 
-/* -------------------------------------------------------------------- */
-/** \name SDF Selection March Fragment Shader
- * \{ */
-
-GPU_SHADER_CREATE_INFO(sdf_select_march)
-DO_STATIC_COMPILATION()
-STORAGE_BUF(0, read, uint, select_id_map_buf[])
-STORAGE_BUF(1, read, SDFObjectGPU, sdf_objects[])
-STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
-STORAGE_BUF(5, read, SDFGroupGPU, groups[])
-/* Selection bindings: match select_id_patch slots without the vertex interface. */
-UNIFORM_BUF(4, SelectInfoData, select_info_buf)
-STORAGE_BUF(6, read_write, uint, out_select_buf[])
-PUSH_CONSTANT(float, voxel_size)
-PUSH_CONSTANT(int, object_count)
-PUSH_CONSTANT(int, group_count)
-DEPTH_WRITE(DepthWrite::ANY)
-TYPEDEF_SOURCE("sdf_shader_shared.hh")
-TYPEDEF_SOURCE("select_shader_shared.hh")
-ADDITIONAL_INFO(gpu_fullscreen)
-ADDITIONAL_INFO(draw_view)
-FRAGMENT_SOURCE("sdf_select_march_frag.glsl")
-GPU_SHADER_CREATE_END()
-
-/** \} */
+/* MATHOPS: Removed — SDF Selection March (sdf_select_march_frag.glsl deleted) */
 

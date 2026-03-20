@@ -47,6 +47,8 @@ typedef struct SDFGroup {
   float blend;
   float shell_distance;
   int shell_mode; /* eSDFShellMode */
+  float chamfer_k2;
+  float chamfer_k3;
   char _pad0[4];
 
   float color[4];
@@ -55,6 +57,11 @@ typedef struct SDFGroup {
   ListBase members; /* SDFGroupMember */
   int totmember;
   int group_order;
+
+  /* Modifier stack */
+  ListBase modifiers; /* SDFModifier */
+  int totmodifier;
+  char _pad1[4];
 
   SDFGroupRuntimeHandle *runtime; /* Keep last. */
 } SDFGroup;

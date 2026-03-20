@@ -60,7 +60,7 @@ void main()
       tile_hi / float2(screen_size) * 2.0f - 1.0f);
 
   for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
-    if (objects[i]._pad0 == 0) continue;
+    if (objects[i]._pad2 == 0) continue;
     if (!aabb_overlaps_tile(objects[i].bbox_min.xyz, objects[i].bbox_max.xyz, tile_ndc, viewproj)) continue;
 
     uint slot = atomicAdd(s_tileObjCount, 1u);

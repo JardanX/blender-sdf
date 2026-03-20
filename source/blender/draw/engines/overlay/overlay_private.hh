@@ -304,6 +304,12 @@ struct VertexWithColor {
   GPU_VERTEX_FORMAT_FUNC(VertexWithColor, pos, color);
 };
 
+struct VertexPos {
+  float3 pos;
+
+  GPU_VERTEX_FORMAT_FUNC(VertexPos, pos);
+};
+
 struct VertShaded {
   float3 pos;
   VertexClass vclass;
@@ -404,6 +410,12 @@ class ShapeCache {
   BatchPtr lightprobe_cube;
   BatchPtr lightprobe_planar;
   BatchPtr lightprobe_grid;
+
+  /* SDF proxy meshes (solid surfaces for picking/outline). */
+  BatchPtr sdf_cylinder_solid;
+  BatchPtr sdf_cone_solid;
+  BatchPtr sdf_capsule_solid;
+  BatchPtr sdf_torus_solid;
 
   ShapeCache();
 

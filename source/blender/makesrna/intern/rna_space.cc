@@ -4833,6 +4833,26 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
                            "skipping but slower cone pass)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "sdf_resolution_scale", PROP_FLOAT, PROP_PERCENTAGE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_resolution_scale");
+  RNA_def_property_range(prop, 20.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 20.0f, 100.0f, 5, 0);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Resolution Scale",
+                           "Viewport render resolution as percentage of full size "
+                           "(lower = faster, upscaled to viewport)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_adaptive_resolution", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_adaptive_resolution", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Adaptive Resolution",
+                           "Render at half resolution during viewport navigation, "
+                           "full resolution when static");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   static const EnumPropertyItem sdf_debug_grid_items[] = {
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},

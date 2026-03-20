@@ -2,7 +2,9 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-from bpy.types import Panel
+import bpy
+from bpy.types import Panel, Operator
+from bpy.props import EnumProperty
 from bpy.app.translations import contexts as i18n_contexts
 from bl_ui.utils import PresetPanel
 
@@ -87,6 +89,95 @@ class RENDER_PT_proximity_cycles(Panel):
                 pass
 
 
+_SDF_PRESETS = {
+    'LOW': {
+        'sdf_resolution_scale': 50.0,
+        'sdf_adaptive_resolution': True,
+        'sdf_max_steps': 128,
+        'sdf_ray_epsilon': 0.001,
+        'sdf_over_relaxation': 1.3,
+        'sdf_use_cone_trace': True,
+        'sdf_cone_aperture': 0.5,
+        'sdf_cone_steps': 32,
+    },
+    'MEDIUM': {
+        'sdf_resolution_scale': 100.0,
+        'sdf_adaptive_resolution': True,
+        'sdf_max_steps': 256,
+        'sdf_ray_epsilon': 0.0001,
+        'sdf_over_relaxation': 1.3,
+        'sdf_use_cone_trace': True,
+        'sdf_cone_aperture': 0.5,
+        'sdf_cone_steps': 64,
+    },
+    'HIGH': {
+        'sdf_resolution_scale': 100.0,
+        'sdf_adaptive_resolution': False,
+        'sdf_max_steps': 512,
+        'sdf_ray_epsilon': 0.0001,
+        'sdf_over_relaxation': 1.3,
+        'sdf_use_cone_trace': True,
+        'sdf_cone_aperture': 0.5,
+        'sdf_cone_steps': 64,
+    },
+}
+
+
+_SDF_UNVERSIONED_DEFAULTS = {
+    'sdf_resolution_scale': (0.0, 100.0),
+    'sdf_max_steps': (0, 512),
+    'sdf_ray_epsilon': (0.0, 0.0001),
+    'sdf_over_relaxation': (0.0, 1.3),
+    'sdf_cone_aperture': (0.0, 0.5),
+    'sdf_cone_steps': (0, 64),
+}
+
+
+def _matches_preset(shading, preset_key):
+    vals = _SDF_PRESETS[preset_key]
+    for attr, expected in vals.items():
+        actual = getattr(shading, attr)
+        if attr in _SDF_UNVERSIONED_DEFAULTS:
+            zero_val, fallback = _SDF_UNVERSIONED_DEFAULTS[attr]
+            if isinstance(zero_val, float):
+                if abs(actual - zero_val) < 1e-6:
+                    actual = fallback
+            elif actual == zero_val:
+                actual = fallback
+        if isinstance(expected, float):
+            if abs(actual - expected) > 1e-4:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+class SDF_OT_raymarcher_preset(Operator):
+    bl_idname = "sdf.raymarcher_preset"
+    bl_label = "SDF Ray Marcher Preset"
+    bl_options = {'INTERNAL'}
+
+    preset: EnumProperty(
+        items=[
+            ('LOW', "Low", "Fast viewport: 50% resolution, adaptive, 128 steps"),
+            ('MEDIUM', "Medium", "Balanced: full resolution, adaptive, 256 steps"),
+            ('HIGH', "High", "Maximum quality: full resolution, no adaptive, 512 steps"),
+        ],
+    )
+
+    def execute(self, context):
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        vals = _SDF_PRESETS[self.preset]
+                        for attr, val in vals.items():
+                            setattr(space.shading, attr, val)
+                        area.tag_redraw()
+                        return {'FINISHED'}
+        return {'CANCELLED'}
+
+
 class RENDER_PT_proximity_raymarcher(Panel):
     """SDF Ray Marcher settings (MathOPS addon)"""
     bl_space_type = 'PROPERTIES'
@@ -119,7 +210,15 @@ class RENDER_PT_proximity_raymarcher(Panel):
             layout.label(text="No 3D Viewport found.")
             return
 
+        row = layout.row(align=True)
+        for key, label in (('LOW', "Low"), ('MEDIUM', "Medium"), ('HIGH', "High")):
+            sub = row.row(align=True)
+            sub.operator("sdf.raymarcher_preset", text=label,
+                         depress=_matches_preset(shading, key)).preset = key
+
         col = layout.column()
+        col.prop(shading, "sdf_resolution_scale", slider=True)
+        col.prop(shading, "sdf_adaptive_resolution")
         col.prop(shading, "sdf_max_steps")
         col.prop(shading, "sdf_ray_epsilon")
         col.prop(shading, "sdf_over_relaxation")
@@ -462,6 +561,7 @@ class RENDER_PT_hydra_debug(RenderButtonsPanel, Panel):
 
 
 classes = (
+    SDF_OT_raymarcher_preset,
     RENDER_PT_context,
     RENDER_PT_proximity_cycles,
     RENDER_PT_proximity_raymarcher,

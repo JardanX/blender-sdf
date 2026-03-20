@@ -26,63 +26,59 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
   float3 grp_color = float3(0.5f);
   bool grp_has_hit = false;
 
-  for (int u = 0; u <= tile_count; u++) {
-    int i = (u < tile_count) ? tile_prim_lists[base_offset + u] : -1;
-    SDFObjectGPU obj;
-    int gid;
-    if (i >= 0) {
-      obj = objects[i];
-      gid = obj.group_id;
-    }
-    else {
-      gid = -2;
-    }
+  for (int u = 0; u < tile_count; u++) {
+    int i = tile_prim_lists[base_offset + u];
 
+    /* Partial reads: group_id + AABB only */
+    int gid = objects[i].group_id;
+
+    /* Group boundary flush */
     if (gid != cur_group && grp_has_hit) {
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
       grp_has_hit = false;
       grp_dist = 1e10f;
     }
 
-    if (u >= tile_count) break;
-
-    float da = point_aabb_dist(world_pos, obj.bbox_min.xyz, obj.bbox_max.xyz);
-    float max_group_blend = intBitsToFloat(obj._pad1);
+    /* AABB skip (partial read) */
+    float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
+    float max_group_blend = intBitsToFloat(objects[i]._pad3);
     float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
     if (da > skip_threshold) {
       out_aabb_skip = min(out_aabb_skip, da);
+      cur_group = gid;
       continue;
     }
 
+    SDFObjectGPU obj = objects[i];
     float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
     cur_group = gid;
 
     if (gid < 0) {
       if (scene_dist >= 1e9f) {
-        if (obj.csg_operation == 0) {
-          scene_dist = d;
-        }
+        if (obj.csg_operation == 0) { scene_dist = d; }
       }
       else {
         scene_dist = combineCSG(
             scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode);
+            obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
       }
     }
     else {
       if (!grp_has_hit) {
-        if (obj.csg_operation == 0) {
-          grp_dist = d;
-          grp_has_hit = true;
-        }
+        if (obj.csg_operation == 0) { grp_dist = d; grp_has_hit = true; }
       }
       else {
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode);
+            obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
       }
     }
+  }
+
+  /* Flush final group */
+  if (grp_has_hit) {
+    flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
   }
 
   return scene_dist;
@@ -189,18 +185,7 @@ void main()
       float margin = is_persp ? cone_r_safe * 3.0f : ortho_tile_world * 3.0f;
       float t_skip = max(t_safe + max(d_safe - margin, 0.0f), t_enter);
       tile_hit_pos[tileIdx] = float4(ro + rd * t_skip, t_skip);
-
-      /* Estimate t_far: a few large steps past the surface */
-      float t_far = t + d;
-      for (int j = 0; j < 3; j++) {
-        float3 far_pos = ro + rd * t_far;
-        float aabb_skip_f;
-        float d_far = evalSceneCone(far_pos, tile_count, base_offset, aabb_skip_f);
-        if (d_far >= 1e9f) break;
-        t_far += max(d_far, cone_epsilon) * 2.0f;
-        if (t_far > t_exit) { t_far = t_exit; break; }
-      }
-      tile_far_hint[tileIdx] = t_far;
+      tile_far_hint[tileIdx] = t_exit;
       return;
     }
 

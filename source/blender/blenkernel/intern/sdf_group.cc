@@ -48,6 +48,7 @@ static void sdf_group_copy_data(Main * /*bmain*/,
   const SDFGroup *group_src = (const SDFGroup *)id_src;
 
   BLI_duplicatelist(&group_dst->members, &group_src->members);
+  BLI_duplicatelist(&group_dst->modifiers, &group_src->modifiers);
 
   group_dst->runtime = new blender::bke::SDFGroupRuntime();
 }
@@ -57,6 +58,7 @@ static void sdf_group_free_data(ID *id)
   SDFGroup *group = (SDFGroup *)id;
   BKE_animdata_free(&group->id, false);
   BLI_freelistN(&group->members);
+  BLI_freelistN(&group->modifiers);
   delete group->runtime;
 }
 
@@ -65,6 +67,9 @@ static void sdf_group_foreach_id(ID *id, LibraryForeachIDData *data)
   SDFGroup *group = (SDFGroup *)id;
   LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, member->object, IDWALK_CB_NOP);
+  }
+  LISTBASE_FOREACH (SDFModifier *, mod, &group->modifiers) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mod->mirror_ob, IDWALK_CB_NOP);
   }
 }
 
@@ -76,6 +81,7 @@ static void sdf_group_blend_write(BlendWriter *writer, ID *id, const void *id_ad
   BKE_id_blend_write(writer, &group->id);
 
   BLO_write_struct_list(writer, SDFGroupMember, &group->members);
+  BLO_write_struct_list(writer, SDFModifier, &group->modifiers);
 }
 
 static void sdf_group_blend_read_data(BlendDataReader *reader, ID *id)
@@ -83,6 +89,7 @@ static void sdf_group_blend_read_data(BlendDataReader *reader, ID *id)
   SDFGroup *group = (SDFGroup *)id;
 
   BLO_read_struct_list(reader, SDFGroupMember, &group->members);
+  BLO_read_struct_list(reader, SDFModifier, &group->modifiers);
 
   group->runtime = new blender::bke::SDFGroupRuntime();
 }
@@ -288,5 +295,108 @@ void BKE_sdf_group_reindex_members(SDFGroup *group)
       sdf->group_order = i;
     }
     i++;
+  }
+}
+
+static const char *sdf_group_modifier_type_name(int type)
+{
+  switch (type) {
+    case SDF_MOD_MIRROR:
+      return "Mirror";
+    case SDF_MOD_TWIST:
+      return "Twist";
+    case SDF_MOD_BEND:
+      return "Bend";
+    case SDF_MOD_ELONGATE:
+      return "Elongate";
+    case SDF_MOD_HOLLOW:
+      return "Hollow";
+    case SDF_MOD_ROUND:
+      return "Round";
+    case SDF_MOD_ONION:
+      return "Onion";
+    case SDF_MOD_BEVEL:
+      return "Bevel";
+    case SDF_MOD_ARRAY:
+      return "Array";
+    default:
+      return "Modifier";
+  }
+}
+
+SDFModifier *BKE_sdf_group_modifier_add(SDFGroup *group, int type)
+{
+  SDFModifier *mod = static_cast<SDFModifier *>(MEM_callocN(sizeof(SDFModifier), "SDFModifier"));
+  mod->type = type;
+  mod->show_viewport = 1;
+
+  switch (type) {
+    case SDF_MOD_MIRROR:
+      mod->flag = SDF_MOD_MIRROR_X;
+      mod->params[0] = 0.0f;
+      break;
+    case SDF_MOD_TWIST:
+      mod->params[0] = 1.0f;
+      break;
+    case SDF_MOD_BEND:
+      mod->params[0] = 1.0f;
+      mod->params[1] = 0.0f;
+      break;
+    case SDF_MOD_ELONGATE:
+      mod->params[0] = 0.5f;
+      mod->params[1] = 0.0f;
+      mod->params[2] = 0.0f;
+      break;
+    case SDF_MOD_HOLLOW:
+      mod->params[0] = 0.1f;
+      break;
+    case SDF_MOD_ROUND:
+      mod->params[0] = 0.05f;
+      break;
+    case SDF_MOD_ONION:
+      mod->params[0] = 0.1f;
+      break;
+    case SDF_MOD_BEVEL:
+      mod->params[0] = 0.1f;
+      break;
+    case SDF_MOD_ARRAY:
+      mod->flag = SDF_MOD_ARRAY_LINEAR;
+      mod->params[0] = 3.0f;
+      mod->params[1] = 1.0f;
+      mod->params[2] = 0.0f;
+      mod->params[3] = 0.0f;
+      break;
+    default:
+      break;
+  }
+
+  BLI_strncpy(mod->name, sdf_group_modifier_type_name(type), sizeof(mod->name));
+  BLI_addtail(&group->modifiers, mod);
+  group->totmodifier++;
+  return mod;
+}
+
+void BKE_sdf_group_modifier_remove(SDFGroup *group, SDFModifier *mod)
+{
+  BLI_remlink(&group->modifiers, mod);
+  MEM_freeN(mod);
+  group->totmodifier--;
+}
+
+void BKE_sdf_group_modifier_move(SDFGroup *group, SDFModifier *mod, int direction)
+{
+  if (direction == -1) {
+    SDFModifier *prev = mod->prev;
+    if (prev) {
+      BLI_remlink(&group->modifiers, mod);
+      BLI_insertlinkbefore(&group->modifiers, prev, mod);
+    }
+  }
+  else if (direction == 1) {
+    SDFModifier *next = mod->next;
+    if (next) {
+      BLI_remlink(&group->modifiers, mod);
+      BLI_insertlinkafter(&group->modifiers, next, mod);
+    }
   }
 }

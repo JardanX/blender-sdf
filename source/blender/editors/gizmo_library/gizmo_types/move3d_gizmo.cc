@@ -133,6 +133,24 @@ static void move_geom_draw(const wmGizmo *gz,
     immVertex3f(pos, radius_diag, -radius_diag, 0.0f);
     immEnd();
   }
+  else if (draw_style == ED_GIZMO_MOVE_STYLE_SQUARE_2D) {
+    if (filled) {
+      immBegin(GPU_PRIM_TRI_FAN, 4);
+      immVertex3f(pos, -radius, -radius, 0.0f);
+      immVertex3f(pos, radius, -radius, 0.0f);
+      immVertex3f(pos, radius, radius, 0.0f);
+      immVertex3f(pos, -radius, radius, 0.0f);
+      immEnd();
+    }
+    else {
+      immBegin(GPU_PRIM_LINE_LOOP, 4);
+      immVertex3f(pos, -radius, -radius, 0.0f);
+      immVertex3f(pos, radius, -radius, 0.0f);
+      immVertex3f(pos, radius, radius, 0.0f);
+      immVertex3f(pos, -radius, radius, 0.0f);
+      immEnd();
+    }
+  }
   else {
     BLI_assert(0);
   }
@@ -453,7 +471,8 @@ static void GIZMO_GT_move_3d(wmGizmoType *gzt)
   /* rna */
   static const EnumPropertyItem rna_enum_draw_style[] = {
       {ED_GIZMO_MOVE_STYLE_RING_2D, "RING_2D", 0, "Ring", ""},
-      {ED_GIZMO_MOVE_STYLE_CROSS_2D, "CROSS_2D", 0, "Ring", ""},
+      {ED_GIZMO_MOVE_STYLE_CROSS_2D, "CROSS_2D", 0, "Cross", ""},
+      {ED_GIZMO_MOVE_STYLE_SQUARE_2D, "SQUARE_2D", 0, "Square", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const EnumPropertyItem rna_enum_draw_options[] = {

@@ -25,58 +25,77 @@ void main()
   }
 
   float3 hit_pos = gbuf.xyz;
-  float4 gbuf_col = imageLoad(gbuf_color_img, pixel);
-  float3 hit_color = gbuf_col.rgb;
-  float obj_id = gbuf_col.w;
+  float3 hit_color = imageLoad(gbuf_color_img, pixel).rgb;
 
-  /* Best-fit triangle normal: pick the closer neighbor in each axis to avoid
-   * artifacts at depth discontinuities (silhouettes, CSG edges).
-   * Prefer same-object-ID neighbors to prevent normal bleed across CSG boundaries. */
+  /* Normal reconstruction from position G-buffer.
+   * Central differences on smooth surfaces (no left/right ambiguity — fixes
+   * crosshatch in orthographic view). Best-fit triangle at discontinuities
+   * (concave edges, silhouettes) to avoid crease artifacts. */
   float3 p0 = hit_pos;
+  float3 view_fwd = -normalize(drw_view().viewinv[2].xyz);
+  float d0 = dot(p0, view_fwd);
+
   float4 raw_r = imageLoad(gbuf_pos_img, pixel + int2(1, 0));
   float4 raw_l = imageLoad(gbuf_pos_img, pixel + int2(-1, 0));
   float4 raw_u = imageLoad(gbuf_pos_img, pixel + int2(0, 1));
   float4 raw_d = imageLoad(gbuf_pos_img, pixel + int2(0, -1));
 
-  float id_r = imageLoad(gbuf_color_img, pixel + int2(1, 0)).w;
-  float id_l = imageLoad(gbuf_color_img, pixel + int2(-1, 0)).w;
-  float id_u = imageLoad(gbuf_color_img, pixel + int2(0, 1)).w;
-  float id_d = imageLoad(gbuf_color_img, pixel + int2(0, -1)).w;
+  bool r_valid = raw_r.w > 0.0f;
+  bool l_valid = raw_l.w > 0.0f;
+  bool u_valid = raw_u.w > 0.0f;
+  bool d_valid = raw_d.w > 0.0f;
 
-  float3 view_fwd = -normalize(drw_view().viewinv[2].xyz);
-  float depth0 = dot(p0, view_fwd);
-  float depth_r = (raw_r.w > 0.0f) ? dot(raw_r.xyz, view_fwd) : 1e10f;
-  float depth_l = (raw_l.w > 0.0f) ? dot(raw_l.xyz, view_fwd) : 1e10f;
-  float depth_u = (raw_u.w > 0.0f) ? dot(raw_u.xyz, view_fwd) : 1e10f;
-  float depth_d = (raw_d.w > 0.0f) ? dot(raw_d.xyz, view_fwd) : 1e10f;
-
-  bool r_same = (id_r == obj_id) && (raw_r.w > 0.0f);
-  bool l_same = (id_l == obj_id) && (raw_l.w > 0.0f);
-  bool u_same = (id_u == obj_id) && (raw_u.w > 0.0f);
-  bool d_same = (id_d == obj_id) && (raw_d.w > 0.0f);
-
-  bool use_right;
-  if (r_same && !l_same) use_right = true;
-  else if (l_same && !r_same) use_right = false;
-  else use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
-
-  bool use_up;
-  if (u_same && !d_same) use_up = true;
-  else if (d_same && !u_same) use_up = false;
-  else use_up = abs(depth_u - depth0) < abs(depth_d - depth0);
-
-  float3 h = use_right ? raw_r.xyz : raw_l.xyz;
-  float3 v = use_up ? raw_u.xyz : raw_d.xyz;
+  float dr = r_valid ? dot(raw_r.xyz, view_fwd) : d0;
+  float dl = l_valid ? dot(raw_l.xyz, view_fwd) : d0;
+  float du = u_valid ? dot(raw_u.xyz, view_fwd) : d0;
+  float dd = d_valid ? dot(raw_d.xyz, view_fwd) : d0;
 
   float3 normal;
-  if (use_right && use_up)
-    normal = normalize(cross(h - p0, v - p0));
-  else if (use_right && !use_up)
-    normal = normalize(cross(v - p0, h - p0));
-  else if (!use_right && use_up)
-    normal = normalize(cross(v - p0, h - p0));
-  else
-    normal = normalize(cross(h - p0, v - p0));
+  bool all_valid = r_valid && l_valid && u_valid && d_valid;
+
+  if (all_valid) {
+    float4 deltas = abs(float4(dr, dl, du, dd) - d0);
+    float max_d = max(max(deltas.x, deltas.y), max(deltas.z, deltas.w));
+    float min_d = min(min(deltas.x, deltas.y), min(deltas.z, deltas.w));
+    bool is_edge = max_d > min_d * 4.0f + sdf_ray_epsilon;
+
+    if (!is_edge) {
+      /* Smooth: central differences */
+      float3 hDeriv = (raw_r.xyz - raw_l.xyz) * 0.5f;
+      float3 vDeriv = (raw_u.xyz - raw_d.xyz) * 0.5f;
+      normal = normalize(cross(hDeriv, vDeriv));
+    }
+    else {
+      /* Edge: best-fit triangle (pick most coplanar pair) */
+      float4 tri = float4(
+          max(deltas.x, deltas.z),
+          max(deltas.x, deltas.w),
+          max(deltas.y, deltas.z),
+          max(deltas.y, deltas.w));
+      float best = min(min(tri.x, tri.y), min(tri.z, tri.w));
+
+      float3 e1, e2;
+      if (tri.x == best) {
+        e1 = raw_r.xyz - p0; e2 = raw_u.xyz - p0;
+      }
+      else if (tri.y == best) {
+        e1 = raw_d.xyz - p0; e2 = raw_r.xyz - p0;
+      }
+      else if (tri.z == best) {
+        e1 = raw_u.xyz - p0; e2 = raw_l.xyz - p0;
+      }
+      else {
+        e1 = raw_l.xyz - p0; e2 = raw_d.xyz - p0;
+      }
+      normal = normalize(cross(e1, e2));
+    }
+  }
+  else {
+    /* Missing neighbors: use whichever valid side */
+    float3 hDeriv = r_valid ? (raw_r.xyz - p0) : (l_valid ? (p0 - raw_l.xyz) : float3(1, 0, 0));
+    float3 vDeriv = u_valid ? (raw_u.xyz - p0) : (d_valid ? (p0 - raw_d.xyz) : float3(0, 1, 0));
+    normal = normalize(cross(hDeriv, vDeriv));
+  }
 
   if (any(isnan(normal)) || dot(normal, normal) < 0.5f) {
     normal = float3(0.0f, 0.0f, 1.0f);

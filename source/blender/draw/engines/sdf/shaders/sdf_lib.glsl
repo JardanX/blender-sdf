@@ -160,6 +160,14 @@ float sdAdvancedBox(float3 p,
   float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
   float2 sz = size.xy * tapFactor;
 
+  /* Lipschitz correction: the per-slice taper creates a gradient magnitude of
+   * sqrt(1 + slope^2) on the side walls. Dividing uniformly by this value
+   * ensures the SDF is globally Lipschitz-1, which is required for safe
+   * over-relaxation sphere tracing. This slightly underestimates distance
+   * at the caps, costing a few extra steps, but avoids crack artifacts. */
+  float slope = max(size.x, size.y) * (tapTop + tapBot) / (2.0f * max(taperZ, 0.001f));
+  float lipschitz = sqrt(1.0f + slope * slope);
+
   float maxR = min(sz.x, sz.y);
   float4 r = corners * maxR;
 
@@ -180,37 +188,37 @@ float sdAdvancedBox(float3 p,
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
       float2 dd = float2(d2d + edgeR, dz + edgeR);
-      return min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR;
+      return (min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR) / lipschitz;
     }
     else {
       float base = max(d2d, dz);
       float cham = (d2d + dz + edgeR) * 0.70710678f;
       float dd = max(base, cham);
       if (dd <= 0.0f) {
-        return dd;
+        return dd / lipschitz;
       }
       if (d2d <= 0.0f && dz <= 0.0f) {
-        return cham;
+        return cham / lipschitz;
       }
       if (dz <= -edgeR) {
-        return d2d;
+        return d2d / lipschitz;
       }
       if (d2d <= -edgeR) {
-        return dz;
+        return dz / lipschitz;
       }
       float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
       if (tc2 <= 0.0f) {
-        return length(float2(d2d, dz + edgeR));
+        return length(float2(d2d, dz + edgeR)) / lipschitz;
       }
       if (tc2 >= 1.0f) {
-        return length(float2(d2d + edgeR, dz));
+        return length(float2(d2d + edgeR, dz)) / lipschitz;
       }
-      return cham;
+      return cham / lipschitz;
     }
   }
   else {
     float2 dd = float2(d2d, dz);
-    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    return (length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f)) / lipschitz;
   }
 }
 
@@ -317,6 +325,10 @@ float sdAdvancedNgon(float3 p,
   float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
   float scaledR = R * tapFactor;
 
+  /* Lipschitz correction (same rationale as sdAdvancedBox). */
+  float slope = R * (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
+  float lipschitz = sqrt(1.0f + slope * slope);
+
   float an = SDF_PI / float(sides);
   float apothem = scaledR * cos(an);
   float bevelR = corner * apothem;
@@ -336,37 +348,174 @@ float sdAdvancedNgon(float3 p,
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
       float2 dd = float2(d2d + edgeR, dz + edgeR);
-      return min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR;
+      return (min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR) / lipschitz;
     }
     else {
       float base = max(d2d, dz);
       float cham = (d2d + dz + edgeR) * 0.70710678f;
       float dd = max(base, cham);
       if (dd <= 0.0f) {
-        return dd;
+        return dd / lipschitz;
       }
       if (d2d <= 0.0f && dz <= 0.0f) {
-        return cham;
+        return cham / lipschitz;
       }
       if (dz <= -edgeR) {
-        return d2d;
+        return d2d / lipschitz;
       }
       if (d2d <= -edgeR) {
-        return dz;
+        return dz / lipschitz;
       }
       float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
       if (tc2 <= 0.0f) {
-        return length(float2(d2d, dz + edgeR));
+        return length(float2(d2d, dz + edgeR)) / lipschitz;
       }
       if (tc2 >= 1.0f) {
-        return length(float2(d2d + edgeR, dz));
+        return length(float2(d2d + edgeR, dz)) / lipschitz;
       }
-      return cham;
+      return cham / lipschitz;
     }
   }
   else {
     float2 dd = float2(d2d, dz);
-    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    return (length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f)) / lipschitz;
+  }
+}
+
+/* ---- Arbitrary polygon 2D SDF ---- */
+
+float sdPolygon2D(float2 p, int ps, int pc)
+{
+  float d = dot(p - polygon_points[ps].co, p - polygon_points[ps].co);
+  float s = 1.0f;
+  for (int i = 0, j = pc - 1; i < pc; j = i, i++) {
+    float2 vi = polygon_points[ps + i].co;
+    float2 vj = polygon_points[ps + j].co;
+    float2 e = vj - vi;
+    float2 w = p - vi;
+    float2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0f, 1.0f);
+    d = min(d, dot(b, b));
+    bvec3 cond = bvec3(p.y >= vi.y, p.y < vj.y, e.x * w.y > e.y * w.x);
+    if (all(cond) || all(not(cond))) {
+      s *= -1.0f;
+    }
+  }
+  return s * sqrt(d);
+}
+
+/* Sharp polygon SDF + localized arc intersection for per-corner rounding.
+ * max(d_sharp, d_arc) within each corner's angular zone. */
+float sdPolygon2DRounded(float2 p, int ps, int pc)
+{
+  /* Sharp polygon SDF */
+  float d = dot(p - polygon_points[ps].co, p - polygon_points[ps].co);
+  float s = 1.0f;
+  for (int i = 0, j = pc - 1; i < pc; j = i, i++) {
+    float2 vi = polygon_points[ps + i].co;
+    float2 vj = polygon_points[ps + j].co;
+    float2 e = vj - vi;
+    float2 w = p - vi;
+    float2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0f, 1.0f);
+    d = min(d, dot(b, b));
+    bvec3 cond = bvec3(p.y >= vi.y, p.y < vj.y, e.x * w.y > e.y * w.x);
+    if (all(cond) || all(not(cond))) {
+      s *= -1.0f;
+    }
+  }
+  float sd = s * sqrt(d);
+
+  /* Per-corner arc intersection */
+  for (int i = 0; i < pc; i++) {
+    float R = polygon_points[ps + i].corner;
+    if (R < 0.001f) continue;
+
+    int ip = (i - 1 + pc) % pc;
+    int in_ = (i + 1) % pc;
+    float2 vi = polygon_points[ps + i].co;
+    float2 vp = polygon_points[ps + ip].co;
+    float2 vn = polygon_points[ps + in_].co;
+
+    float2 e_prev = vi - vp;
+    float2 e_next = vn - vi;
+    float2 n_prev = float2(e_prev.y, -e_prev.x);
+    float2 n_next = float2(e_next.y, -e_next.x);
+
+    float2 C = polygon_points[ps + i].inset_co;
+    float2 to_p = p - C;
+
+    float cross1 = n_prev.x * to_p.y - n_prev.y * to_p.x;
+    float cross2 = to_p.x * n_next.y - to_p.y * n_next.x;
+    float cross_nn = n_prev.x * n_next.y - n_prev.y * n_next.x;
+
+    bool in_zone = (cross_nn > 0.0f) ? (cross1 >= 0.0f && cross2 >= 0.0f)
+                                      : (cross1 <= 0.0f && cross2 <= 0.0f);
+
+    if (in_zone) {
+      float d_arc = length(to_p) - R;
+      sd = max(sd, d_arc);
+    }
+  }
+  return sd;
+}
+
+float sdAdvancedPolygon(float3 p,
+                        float halfH,
+                        int ps,
+                        int pc,
+                        float edgeTop,
+                        float edgeBot,
+                        float tapTop,
+                        float tapBot,
+                        int edgeMode,
+                        float taperH)
+{
+  float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
+  float t = (zn + 1.0f) * 0.5f;
+  float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
+
+  float slope = (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
+  float lipschitz = sqrt(1.0f + slope * slope);
+
+  float d2d = sdPolygon2DRounded(p.xy / tapFactor, ps, pc) * tapFactor;
+
+  float dz = abs(p.z) - halfH;
+  float edgeR = (p.z > 0.0f) ? edgeTop * min(halfH, halfH)
+                              : edgeBot * min(halfH, halfH);
+
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d2d + edgeR, dz + edgeR);
+      return (min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR) / lipschitz;
+    }
+    else {
+      float base = max(d2d, dz);
+      float cham = (d2d + dz + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) {
+        return dd / lipschitz;
+      }
+      if (d2d <= 0.0f && dz <= 0.0f) {
+        return cham / lipschitz;
+      }
+      if (dz <= -edgeR) {
+        return d2d / lipschitz;
+      }
+      if (d2d <= -edgeR) {
+        return dz / lipschitz;
+      }
+      float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) {
+        return length(float2(d2d, dz + edgeR)) / lipschitz;
+      }
+      if (tc2 >= 1.0f) {
+        return length(float2(d2d + edgeR, dz)) / lipschitz;
+      }
+      return cham / lipschitz;
+    }
+  }
+  else {
+    float2 dd = float2(d2d, dz);
+    return (length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f)) / lipschitz;
   }
 }
 
@@ -427,6 +576,34 @@ float opChamferSubtraction(float d1, float d2, float r)
   return opChamferIntersection(d2, -d1, r);
 }
 
+/* ---- Smooth chamfer (k2/k3 control edge softness) ---- */
+
+float opSmoothChamferUnion(float d1, float d2, float k, float k2, float k3)
+{
+  float chamfer_plane = (d1 + d2 - k) * 0.70710678f;
+  float term1 = opSmoothUnion(d1, chamfer_plane, k2);
+  float term2 = opSmoothUnion(d2, chamfer_plane, k3);
+  return min(term1, term2);
+}
+
+float opSmoothChamferSubtraction(float d1, float d2, float k, float k2, float k3)
+{
+  float A = -d1;
+  float B = d2;
+  float chamfer_plane = (A + B + k) * 0.70710678f;
+  float term1 = opSmoothIntersection(A, chamfer_plane, k2);
+  float term2 = opSmoothIntersection(B, chamfer_plane, k3);
+  return max(term1, term2);
+}
+
+float opSmoothChamferIntersection(float d1, float d2, float k, float k2, float k3)
+{
+  float chamfer_plane = (d1 + d2 + k) * 0.70710678f;
+  float term1 = opSmoothIntersection(d1, chamfer_plane, k2);
+  float term2 = opSmoothIntersection(d2, chamfer_plane, k3);
+  return max(term1, term2);
+}
+
 /* ---- 2D mirror helper (for round blend operations) ---- */
 
 float2 sdf_mirror2D(float2 p, float2 N)
@@ -467,6 +644,37 @@ float opRoundSubtraction(float d1, float d2, float r)
 float opRoundIntersection(float d1, float d2, float r)
 {
   return -opUnionIRound(-d1, -d2, r);
+}
+
+/* ---- Smooth spherical round (k2/k3 control edge softness) ---- */
+
+float opSmoothRoundUnion(float a, float b, float r, float k2, float k3)
+{
+  float2 s = float2(max(a, 0.0f), max(b, 0.0f));
+  float corner = length(s) - r;
+  float term1 = opSmoothUnion(a, corner, k2);
+  float term2 = opSmoothUnion(b, corner, k3);
+  return min(term1, term2);
+}
+
+float opSmoothRoundSubtraction(float d1, float d2, float r, float k2, float k3)
+{
+  float a = d2;
+  float b = d1;
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corner = r - length(s);
+  float term1 = opSmoothIntersection(a, corner, k2);
+  float term2 = opSmoothIntersection(-b, corner, k3);
+  return max(term1, term2);
+}
+
+float opSmoothRoundIntersection(float d1, float d2, float r, float k2, float k3)
+{
+  float2 s = float2(min(d1, 0.0f), max(-d2, 0.0f));
+  float corner = r - length(s);
+  float term1 = opSmoothIntersection(d1, corner, k2);
+  float term2 = opSmoothIntersection(d2, corner, k3);
+  return max(term1, term2);
 }
 
 /* ---- SDF modifier evaluation ---- */
@@ -696,6 +904,8 @@ struct SDFPrimitiveData {
   int4 box_modes;
   int modifier_start;
   int modifier_count;
+  int polygon_point_start;
+  int polygon_point_count;
   float4x4 inverse_matrix;
 };
 
@@ -722,25 +932,25 @@ struct SDFPrimitiveData {
 
 /**
  * Combine two SDF distances using the specified CSG operation and blend type.
- * \param d1: accumulated distance field.
- * \param d2: new object's distance.
- * \param op: CSG operation (0=union, 1=subtract, 2=intersect, 3=shell).
- * \param bt: blend type (0=linear, 1=smooth, 2=chamfer, 3=round).
- * \param k: blend radius for smooth/chamfer/round transitions.
- * \param shell_dist: shell expansion thickness (only used when op == SHELL).
- * \return combined distance.
+ * \param k2: chamfer/round edge smoothness for shape 1 (0 = sharp).
+ * \param k3: chamfer/round edge smoothness for shape 2 (0 = sharp).
  */
-float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist, int shell_mode)
+float combineCSG(float d1, float d2, int op, int bt, float k,
+                 float shell_dist, int shell_mode, float k2, float k3)
 {
+  bool has_smooth = (k2 > 0.0f || k3 > 0.0f);
+
   if (op == SDF_CSG_OP_UNION) {
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
         return opSmoothUnion(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        if (has_smooth) return opSmoothChamferUnion(d1, d2, k, k2, k3);
         return opChamferUnion(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_ROUND) {
+        if (has_smooth) return opSmoothRoundUnion(d1, d2, k, k2, k3);
         return opRoundUnion(d1, d2, k);
       }
     }
@@ -752,9 +962,11 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist, 
         return opSmoothSubtraction(d2, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        if (has_smooth) return opSmoothChamferSubtraction(d2, d1, k, k2, k3);
         return opChamferSubtraction(d2, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_ROUND) {
+        if (has_smooth) return opSmoothRoundSubtraction(d2, d1, k, k2, k3);
         return opRoundSubtraction(d2, d1, k);
       }
     }
@@ -766,27 +978,29 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist, 
         return opSmoothIntersection(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+        if (has_smooth) return opSmoothChamferIntersection(d1, d2, k, k2, k3);
         return opChamferIntersection(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_ROUND) {
+        if (has_smooth) return opSmoothRoundIntersection(d1, d2, k, k2, k3);
         return opRoundIntersection(d1, d2, k);
       }
     }
     return max(d1, d2);
   }
   else if (op == SDF_CSG_OP_PUSH) {
-    /* Push: subtract d2 from base (with blend), then hard-union d2 back.
-     * Effect: the push object dents the base but remains visible as solid. */
     float subtracted;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
         subtracted = opSmoothSubtraction(d2, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        subtracted = opChamferSubtraction(d2, d1, k);
+        if (has_smooth) subtracted = opSmoothChamferSubtraction(d2, d1, k, k2, k3);
+        else subtracted = opChamferSubtraction(d2, d1, k);
       }
       else {
-        subtracted = opRoundSubtraction(d2, d1, k);
+        if (has_smooth) subtracted = opSmoothRoundSubtraction(d2, d1, k, k2, k3);
+        else subtracted = opRoundSubtraction(d2, d1, k);
       }
     }
     else {
@@ -795,18 +1009,18 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist, 
     return min(subtracted, d2);
   }
   else if (op == SDF_CSG_OP_AVOID) {
-    /* Avoid: subtract base from avoid object, then hard union with base.
-     * Effect: the avoid object is carved by the base geometry. */
     float carved;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
         carved = opSmoothSubtraction(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        carved = opChamferSubtraction(d1, d2, k);
+        if (has_smooth) carved = opSmoothChamferSubtraction(d1, d2, k, k2, k3);
+        else carved = opChamferSubtraction(d1, d2, k);
       }
       else {
-        carved = opRoundSubtraction(d1, d2, k);
+        if (has_smooth) carved = opSmoothRoundSubtraction(d1, d2, k, k2, k3);
+        else carved = opRoundSubtraction(d1, d2, k);
       }
     }
     else {
@@ -903,6 +1117,16 @@ float combineCSG(float d1, float d2, int op, int bt, float k, float shell_dist, 
   return d1; /* Fallback for unknown ops. */
 }
 
+/* Gradient-aware CSG combine for normal computation.
+ * Picks the gradient (yzw) from whichever branch combineCSG selects. */
+float4 combineCSGGrad(float4 dg1, float4 dg2, int op, int bt, float k,
+                      float shell_dist, int shell_mode, float k2, float k3)
+{
+  float combined = combineCSG(dg1.x, dg2.x, op, bt, k, shell_dist, shell_mode, k2, k3);
+  float t = (abs(combined - dg1.x) <= abs(combined - dg2.x)) ? 0.0f : 1.0f;
+  return float4(combined, mix(dg1.yzw, dg2.yzw, t));
+}
+
 /**
  * Evaluate the base primitive shape only.
  */
@@ -962,6 +1186,32 @@ float evalPrimitiveOnly(SDFPrimitiveData obj, float3 local_pos)
       float dz = abs(local_pos.z) - halfH;
       float2 dd = float2(d2d, dz);
       dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    }
+  }
+  else if (obj.sdf_type == 7) { /* POLYGON */
+    float halfH = max(size.z - bevel, 0.001f);
+    int ps = obj.polygon_point_start;
+    int pc = obj.polygon_point_count;
+    float maxCorner = obj.box_corners.x;
+    float edgeTop = obj.box_edges.x;
+    float edgeBot = obj.box_edges.y;
+    float tapTop = obj.box_edges.z;
+    float tapBot = obj.box_edges.w;
+    int edgeMode = obj.box_modes.y;
+    bool hasEdgeTaper = (edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
+    if (pc >= 3) {
+      if (hasEdgeTaper || maxCorner > 0.001f) {
+        dist = sdAdvancedPolygon(local_pos, halfH, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH);
+      }
+      else {
+        float d2d = sdPolygon2D(local_pos.xy, ps, pc);
+        float dz = abs(local_pos.z) - halfH;
+        float2 dd = float2(d2d, dz);
+        dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+      }
+    }
+    else {
+      dist = 1e10f;
     }
   }
   else { /* BOX (default) */
@@ -1102,7 +1352,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0);
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0.0f, 0.0f);
     }
   }
   else if (mtype == SDF_MOD_ARRAY) {
@@ -1153,7 +1403,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0);
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0.0f, 0.0f);
     }
   }
 
@@ -1173,6 +1423,8 @@ float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
   prim_data.box_modes = obj.box_modes;
   prim_data.modifier_start = obj.modifier_start;
   prim_data.modifier_count = obj.modifier_count;
+  prim_data.polygon_point_start = obj.polygon_point_start;
+  prim_data.polygon_point_count = obj.polygon_point_count;
   prim_data.inverse_matrix = obj.inverse_matrix;
 
   return evalObjectSDF(prim_data, local_pos);
@@ -1190,7 +1442,7 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
     float prev = scene_dist;
     scene_dist = combineCSG(
         scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-        grp.shell_distance, grp.shell_mode);
+        grp.shell_distance, grp.shell_mode, grp.chamfer_k2, grp.chamfer_k3);
     if (grp.csg_operation == 0) {
       float t = colorBlendFactor(prev, grp_dist, grp.blend_type, grp.blend);
       out_color = mix(out_color, grp_color, t);

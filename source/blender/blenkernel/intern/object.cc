@@ -113,6 +113,7 @@
 #include "BKE_multires.hh"
 #include "BKE_node.hh"
 #include "BKE_object.hh"
+#include "BKE_sdf.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_particle.h"

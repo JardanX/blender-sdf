@@ -43,7 +43,8 @@
 #include "overlay_prepass.hh"
 #include "overlay_relation.hh"
 #include "overlay_sculpt.hh"
-#include "overlay_sdf.hh"
+/* MATHOPS: Removed — SDF picking overlay, replaced by mesh proxy system. */
+// #include "overlay_sdf.hh"
 #include "overlay_speaker.hh"
 #include "overlay_text.hh"
 #include "overlay_wireframe.hh"
@@ -104,7 +105,6 @@ class Instance : public DrawEngine {
     Prepass prepass;
     Relations relations = {selection_type_};
     Sculpts sculpts;
-    Sdfs sdfs = {selection_type_};
     Speakers speakers = {selection_type_};
     Wireframe wireframe;
   } regular{selection_type_}, infront{selection_type_};

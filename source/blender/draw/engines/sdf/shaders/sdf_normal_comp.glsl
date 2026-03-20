@@ -88,7 +88,7 @@ void main()
       if (m < NORMAL_MAX_BITS) {
         if ((bvh_bits[uint(m) >> 5u] & (1u << (uint(m) & 31u))) == 0u) continue;
       }
-      float mgb = intBitsToFloat(objects[m]._pad1);
+      float mgb = intBitsToFloat(objects[m]._pad3);
       float normal_thresh = max(sdf_ray_epsilon * 4.0f, mgb);
       if (point_aabb_dist(hit_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) >
           normal_thresh)
@@ -108,6 +108,8 @@ void main()
       prim.box_modes = obj.box_modes;
       prim.modifier_start = obj.modifier_start;
       prim.modifier_count = obj.modifier_count;
+      prim.polygon_point_start = obj.polygon_point_start;
+      prim.polygon_point_count = obj.polygon_point_count;
       prim.inverse_matrix = obj.inverse_matrix;
 
       float4 dg = evalObjectSDFGrad(prim, lp);
@@ -125,7 +127,7 @@ void main()
       else {
         grp_dg = combineCSGGrad(
             grp_dg, dg, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode);
+            obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
       }
     }
 
@@ -137,7 +139,7 @@ void main()
     else {
       scene_dg = combineCSGGrad(
           scene_dg, grp_dg, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode);
+          grp.shell_distance, grp.shell_mode, grp.chamfer_k2, grp.chamfer_k3);
     }
   }
 

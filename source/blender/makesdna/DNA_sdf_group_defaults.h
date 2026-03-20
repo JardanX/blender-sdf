@@ -21,9 +21,13 @@
     .blend = 0.1f, \
     .shell_distance = 0.2f, \
     .shell_mode = 0, \
+    .chamfer_k2 = 0.01f, \
+    .chamfer_k3 = 0.01f, \
     .color = {1.0f, 1.0f, 1.0f, 1.0f}, \
     .totmember = 0, \
     .group_order = 0, \
+    .modifiers = {NULL, NULL}, \
+    .totmodifier = 0, \
   }
 
 /** \} */

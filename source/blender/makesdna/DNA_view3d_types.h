@@ -215,14 +215,15 @@ typedef struct View3DShading {
   char sdf_use_bvh;
   char sdf_bvh_debug_view;
   char sdf_use_cone_trace;
-  char _pad_sdf_bvh[5];
+  char sdf_adaptive_resolution;
+  char _pad_sdf_bvh[4];
   
   int sdf_max_steps;
   float sdf_ray_epsilon;
   float sdf_over_relaxation;
   float sdf_cone_aperture;
   int sdf_cone_steps;
-  char _pad_cone[4];
+  float sdf_resolution_scale;
 
   struct IDProperty *prop;
   void *_pad2;

@@ -24,6 +24,20 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_CAPSULE, "CAPSULE", ICON_SDF_CAPSULE, "Capsule", "Capsule SDF primitive"},
     {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
     {SDF_TYPE_NGON, "NGON", ICON_SDF_NGON, "N-Gon", "Regular polygon prism SDF primitive"},
+    {SDF_TYPE_POLYGON, "POLYGON", ICON_SDF_NGON, "Polygon", "Arbitrary polygon prism SDF primitive"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
+    {SDF_MOD_MIRROR, "MIRROR", ICON_MOD_MIRROR, "Mirror", "Mirror across axes"},
+    {SDF_MOD_TWIST, "TWIST", ICON_MOD_SIMPLEDEFORM, "Twist", "Twist around Z axis"},
+    {SDF_MOD_BEND, "BEND", ICON_MOD_SIMPLEDEFORM, "Bend", "Bend around an axis"},
+    {SDF_MOD_ELONGATE, "ELONGATE", ICON_MOD_LENGTH, "Elongate", "Stretch along axes"},
+    {SDF_MOD_HOLLOW, "HOLLOW", ICON_MOD_SOLIDIFY, "Hollow", "Make hollow with wall thickness"},
+    {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Round", "Additional rounding"},
+    {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
+    {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
+    {SDF_MOD_ARRAY, "ARRAY", ICON_MOD_ARRAY, "Array", "Duplicate geometry"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -41,6 +55,7 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
 #  include "BKE_sdf_group.hh"
 
 #  include "DNA_object_types.h"
+#  include "DNA_sdf_group_types.h"
 
 #  include "DEG_depsgraph.hh"
 
@@ -88,6 +103,14 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
       sdf->size[1] = 1.0f;
       sdf->size[2] = 1.0f;
       break;
+    case SDF_TYPE_POLYGON:
+      sdf->size[0] = 1.0f;
+      sdf->size[1] = 1.0f;
+      sdf->size[2] = 1.0f;
+      if (BLI_listbase_is_empty(&sdf->polygon_points)) {
+        BKE_sdf_polygon_init_triangle(sdf);
+      }
+      break;
     default:
       sdf->size[0] = 1.0f;
       sdf->size[1] = 1.0f;
@@ -100,7 +123,16 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 
 static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
-  DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+  ID *owner = ptr->owner_id;
+  DEG_id_tag_update(owner, ID_RECALC_GEOMETRY);
+  if (GS(owner->name) == ID_SG) {
+    SDFGroup *group = (SDFGroup *)owner;
+    LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+      if (member->object) {
+        DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
+      }
+    }
+  }
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
@@ -200,6 +232,60 @@ static void rna_SDFModifier_bend_axis_set(PointerRNA *ptr, int value)
   mod->params[1] = (float)value;
 }
 
+static SDFPolygonPoint *rna_SDF_polygon_point_new(SDF *sdf, float x, float y)
+{
+  SDFPolygonPoint *pt = BKE_sdf_polygon_point_add(sdf, x, y, 0.0f);
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+  return pt;
+}
+
+static void rna_SDF_polygon_point_remove(SDF *sdf, ReportList *reports, PointerRNA *pt_ptr)
+{
+  SDFPolygonPoint *pt = (SDFPolygonPoint *)pt_ptr->data;
+  if (BLI_findindex(&sdf->polygon_points, pt) == -1) {
+    BKE_report(reports, RPT_ERROR, "Point not in polygon");
+    return;
+  }
+  if (sdf->totpolygon <= 3) {
+    BKE_report(reports, RPT_ERROR, "Polygon must have at least 3 points");
+    return;
+  }
+  BKE_sdf_polygon_point_remove(sdf, pt);
+  pt_ptr->data = nullptr;
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
+static void rna_SDF_polygon_point_move(SDF *sdf, ReportList *reports, int from, int to)
+{
+  SDFPolygonPoint *pt = (SDFPolygonPoint *)BLI_findlink(&sdf->polygon_points, from);
+  if (!pt) {
+    BKE_reportf(reports, RPT_ERROR, "Invalid point index %d", from);
+    return;
+  }
+  int direction = (to > from) ? 1 : -1;
+  int steps = abs(to - from);
+  for (int i = 0; i < steps; i++) {
+    if (direction == -1) {
+      SDFPolygonPoint *prev = pt->prev;
+      if (prev) {
+        BLI_remlink(&sdf->polygon_points, pt);
+        BLI_insertlinkbefore(&sdf->polygon_points, prev, pt);
+      }
+    }
+    else {
+      SDFPolygonPoint *next = pt->next;
+      if (next) {
+        BLI_remlink(&sdf->polygon_points, pt);
+        BLI_insertlinkafter(&sdf->polygon_points, next, pt);
+      }
+    }
+  }
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
 static void rna_SDF_sdf_group_set(PointerRNA *ptr,
                                    PointerRNA value,
                                    ReportList * /*reports*/)
@@ -293,19 +379,6 @@ static const EnumPropertyItem rna_enum_sdf_shell_mode_items[] = {
 static const EnumPropertyItem rna_enum_sdf_box_mode_items[] = {
     {SDF_BOX_MODE_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth rounding"},
     {SDF_BOX_MODE_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer (45-degree cut)"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
-static const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
-    {SDF_MOD_MIRROR, "MIRROR", ICON_MOD_MIRROR, "Mirror", "Mirror across axes"},
-    {SDF_MOD_TWIST, "TWIST", ICON_MOD_SIMPLEDEFORM, "Twist", "Twist around Z axis"},
-    {SDF_MOD_BEND, "BEND", ICON_MOD_SIMPLEDEFORM, "Bend", "Bend around an axis"},
-    {SDF_MOD_ELONGATE, "ELONGATE", ICON_MOD_LENGTH, "Elongate", "Stretch along axes"},
-    {SDF_MOD_HOLLOW, "HOLLOW", ICON_MOD_SOLIDIFY, "Hollow", "Make hollow with wall thickness"},
-    {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Round", "Additional rounding"},
-    {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
-    {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
-    {SDF_MOD_ARRAY, "ARRAY", ICON_MOD_ARRAY, "Array", "Duplicate geometry"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -528,6 +601,65 @@ static void rna_def_sdf_modifiers(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 }
 
+static void rna_def_sdf_polygon_point(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFPolygonPoint", nullptr);
+  RNA_def_struct_ui_text(srna, "SDF Polygon Point", "Point in an SDF polygon");
+  RNA_def_struct_sdna(srna, "SDFPolygonPoint");
+
+  prop = RNA_def_property(srna, "co", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "co");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Position", "2D position in local XY plane");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "corner", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "corner");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Corner", "Corner smoothing radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+}
+
+static void rna_def_sdf_polygon_points(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "SDFPolygonPoints");
+  srna = RNA_def_struct(brna, "SDFPolygonPoints", nullptr);
+  RNA_def_struct_sdna(srna, "SDF");
+  RNA_def_struct_ui_text(srna, "SDF Polygon Points", "Collection of polygon points");
+
+  func = RNA_def_function(srna, "new", "rna_SDF_polygon_point_new");
+  RNA_def_function_ui_description(func, "Add a point to the polygon");
+  RNA_def_float(func, "x", 0.0f, -FLT_MAX, FLT_MAX, "X", "", -10.0f, 10.0f);
+  RNA_def_float(func, "y", 0.0f, -FLT_MAX, FLT_MAX, "Y", "", -10.0f, 10.0f);
+  parm = RNA_def_pointer(func, "point", "SDFPolygonPoint", "", "New point");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_SDF_polygon_point_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a point from the polygon");
+  parm = RNA_def_pointer(func, "point", "SDFPolygonPoint", "", "Point to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "move", "rna_SDF_polygon_point_move");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Move a point in the polygon order");
+  parm = RNA_def_int(func, "from_index", -1, 0, INT_MAX, "From Index", "", 0, 10000);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "to_index", -1, 0, INT_MAX, "To Index", "", 0, 10000);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
+
 static void rna_def_sdf(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -578,6 +710,21 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "csg_operation", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_csg_items);
   RNA_def_property_ui_text(prop, "CSG Operation", "Boolean operation type");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Chamfer/Round Smoothness */
+  prop = RNA_def_property(srna, "chamfer_k2", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "chamfer_k2");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Smoothness 1", "Smooth the chamfer/round edge on shape 1");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "chamfer_k3", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "chamfer_k3");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Smoothness 2", "Smooth the chamfer/round edge on shape 2");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Shell Distance */
@@ -696,6 +843,44 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Star", "Star factor (0 = regular polygon, 1 = maximum star)");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
+  /* Polygon Points */
+  prop = RNA_def_property(srna, "polygon_points", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "polygon_points", nullptr);
+  RNA_def_property_struct_type(prop, "SDFPolygonPoint");
+  RNA_def_property_ui_text(prop, "Polygon Points", "Points defining the polygon shape");
+  rna_def_sdf_polygon_points(brna, prop);
+
+  /* Polygon Edge Top */
+  prop = RNA_def_property(srna, "polygon_edge_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_edge_top");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Edge Top", "Top edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Polygon Edge Bottom */
+  prop = RNA_def_property(srna, "polygon_edge_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_edge_bottom");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Edge Bottom", "Bottom edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Polygon Taper */
+  prop = RNA_def_property(srna, "polygon_taper", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_taper");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(
+      prop, "Taper", "Taper factor (positive tapers top, negative tapers bottom)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Polygon Edge Mode */
+  prop = RNA_def_property(srna, "polygon_edge_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_box_mode_items);
+  RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
   /* Torus Angle */
   prop = RNA_def_property(srna, "torus_angle", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_float_sdna(prop, nullptr, "torus_angle");
@@ -756,6 +941,7 @@ static void rna_def_sdf(BlenderRNA *brna)
 void RNA_def_sdf(BlenderRNA *brna)
 {
   rna_def_sdf_modifier(brna);
+  rna_def_sdf_polygon_point(brna);
   rna_def_sdf(brna);
 }
 

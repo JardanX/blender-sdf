@@ -103,6 +103,70 @@ static void rna_SDFGroup_member_move(SDFGroup *group,
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
+static SDFModifier *rna_SDFGroup_modifier_new(SDFGroup *group, int type)
+{
+  SDFModifier *mod = BKE_sdf_group_modifier_add(group, type);
+
+  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    if (member->object) {
+      DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
+    }
+  }
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+
+  return mod;
+}
+
+static void rna_SDFGroup_modifier_remove(SDFGroup *group,
+                                          ReportList *reports,
+                                          PointerRNA *mod_ptr)
+{
+  SDFModifier *mod = (SDFModifier *)mod_ptr->data;
+
+  if (BLI_findindex(&group->modifiers, mod) == -1) {
+    BKE_reportf(reports, RPT_ERROR, "Modifier '%s' not in group", mod->name);
+    return;
+  }
+
+  BKE_sdf_group_modifier_remove(group, mod);
+  mod_ptr->data = nullptr;
+
+  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    if (member->object) {
+      DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
+    }
+  }
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
+static void rna_SDFGroup_modifier_move(SDFGroup *group,
+                                        ReportList *reports,
+                                        int from,
+                                        int to)
+{
+  SDFModifier *mod = (SDFModifier *)BLI_findlink(&group->modifiers, from);
+  if (!mod) {
+    BKE_reportf(reports, RPT_ERROR, "Invalid modifier index %d", from);
+    return;
+  }
+
+  int direction = (to > from) ? 1 : -1;
+  int steps = abs(to - from);
+  for (int i = 0; i < steps; i++) {
+    BKE_sdf_group_modifier_move(group, mod, direction);
+  }
+
+  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    if (member->object) {
+      DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
+    }
+  }
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
 static bool rna_SDFGroupMember_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
 {
   Object *ob = (Object *)value.owner_id;
@@ -137,6 +201,43 @@ static const EnumPropertyItem rna_enum_sdf_group_csg_items[] = {
     {SDF_CSG_AVOID, "AVOID", ICON_SDF_CSG_AVOID, "Avoid", "Object carved by all other objects"},
     {0, nullptr, 0, nullptr, nullptr},
 };
+
+extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[];
+
+static void rna_def_sdf_group_modifiers(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "SDFGroupModifiers");
+  srna = RNA_def_struct(brna, "SDFGroupModifiers", nullptr);
+  RNA_def_struct_sdna(srna, "SDFGroup");
+  RNA_def_struct_ui_text(srna, "SDF Group Modifiers", "Collection of SDF group modifiers");
+
+  func = RNA_def_function(srna, "new", "rna_SDFGroup_modifier_new");
+  RNA_def_function_ui_description(func, "Add a new SDF modifier to the group");
+  parm = RNA_def_enum(
+      func, "type", rna_enum_sdf_modifier_type_items, 0, "Type", "Modifier type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "modifier", "SDFModifier", "", "New modifier");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_SDFGroup_modifier_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove an SDF modifier from the group");
+  parm = RNA_def_pointer(func, "modifier", "SDFModifier", "", "Modifier to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "move", "rna_SDFGroup_modifier_move");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Move a modifier in the group stack");
+  parm = RNA_def_int(func, "from_index", -1, 0, INT_MAX, "From Index", "", 0, 10000);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "to_index", -1, 0, INT_MAX, "To Index", "", 0, 10000);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
 
 static void rna_def_sdf_group_member(BlenderRNA *brna)
 {
@@ -230,6 +331,21 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Blend", "Blend amount for group-level CSG operations");
   RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
 
+  /* Chamfer/Round Smoothness */
+  prop = RNA_def_property(srna, "chamfer_k2", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "chamfer_k2");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Smoothness 1", "Smooth the chamfer/round edge on shape 1");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  prop = RNA_def_property(srna, "chamfer_k3", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "chamfer_k3");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Smoothness 2", "Smooth the chamfer/round edge on shape 2");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
   /* Shell Distance */
   prop = RNA_def_property(srna, "shell_distance", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "shell_distance");
@@ -266,6 +382,13 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "SDFGroupMember");
   RNA_def_property_ui_text(prop, "Members", "Ordered list of SDF objects in this group");
   rna_def_sdf_group_members(brna, prop);
+
+  /* Modifiers */
+  prop = RNA_def_property(srna, "modifiers", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "modifiers", nullptr);
+  RNA_def_property_struct_type(prop, "SDFModifier");
+  RNA_def_property_ui_text(prop, "Modifiers", "Modifier stack applied to the group as a whole");
+  rna_def_sdf_group_modifiers(brna, prop);
 
   /* Animation data */
   rna_def_animdata_common(srna);

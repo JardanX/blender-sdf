@@ -13,6 +13,7 @@ struct Main;
 struct Object;
 struct SDFGroup;
 struct SDFGroupMember;
+struct SDFModifier;
 
 namespace blender::bke {
 
@@ -31,6 +32,11 @@ void BKE_sdf_group_reindex_members(SDFGroup *group);
 void BKE_sdf_group_cleanup_null_members(SDFGroup *group);
 void BKE_sdf_groups_cleanup_all_null_members(Main *bmain);
 void BKE_sdf_groups_remove_object(Main *bmain, Object *ob);
+
+/* Modifier stack */
+SDFModifier *BKE_sdf_group_modifier_add(SDFGroup *group, int type);
+void BKE_sdf_group_modifier_remove(SDFGroup *group, SDFModifier *mod);
+void BKE_sdf_group_modifier_move(SDFGroup *group, SDFModifier *mod, int direction);
 
 /* Rebuild sdf->sdf_group back-pointers from member lists. Call after lib-link. */
 void BKE_sdf_groups_after_lib_link(Main *bmain);

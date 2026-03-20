@@ -29,6 +29,7 @@
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_view3d_types.h"
@@ -4452,7 +4453,58 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 126)) {
+    /* Migrate SDF viewport defaults to correct values.
+     * Previous versions had wrong fallback values written into saved files by the draw engine;
+     * this versioning block corrects them once at load time. */
+    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
+      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
+        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
+          if (sl->spacetype == SPACE_VIEW3D) {
+            View3D *v3d = (View3D *)sl;
+            View3DShading &s = v3d->shading;
+
+            /* Resolution scale: 0 or any sub-minimum value means uninitialized.
+             * Also enable cone trace pre-pass when fully uninitialized. */
+            if (s.sdf_resolution_scale < 20.0f) {
+              s.sdf_resolution_scale = 100.0f;
+              s.sdf_use_cone_trace = 1;
+            }
+            if (s.sdf_max_steps == 0) {
+              s.sdf_max_steps = 256;
+            }
+            /* 0.001 was the old wrong fallback value. */
+            if (s.sdf_ray_epsilon == 0.0f || s.sdf_ray_epsilon == 0.001f) {
+              s.sdf_ray_epsilon = 0.0001f;
+            }
+            /* 1.2 was the old wrong fallback value. */
+            if (s.sdf_over_relaxation == 0.0f || s.sdf_over_relaxation == 1.2f) {
+              s.sdf_over_relaxation = 1.3f;
+            }
+            /* 1.25 was the old wrong fallback value. */
+            if (s.sdf_cone_aperture == 0.0f || s.sdf_cone_aperture == 1.25f) {
+              s.sdf_cone_aperture = 0.5f;
+            }
+            /* 16 was the old wrong fallback value. */
+            if (s.sdf_cone_steps == 0 || s.sdf_cone_steps == 16) {
+              s.sdf_cone_steps = 64;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 127)) {
+    LISTBASE_FOREACH (SDF *, sdf, &bmain->sdfs) {
+      BLI_listbase_clear(&sdf->polygon_points);
+      sdf->totpolygon = 0;
+    }
+  }
+
   /**
+
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.
    *
