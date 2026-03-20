@@ -330,12 +330,17 @@ class Instance : public DrawEngine {
       gpu_obj.polygon_point_start = int(polygon_points_.size());
       gpu_obj.polygon_point_count = 0;
 
-      /* Collect original points */
+      /* Collect original points (uniform XY scale preserves aspect ratio) */
+      float poly_scale = math::min(scale.x, scale.y);
       Vector<float2> pts;
       Vector<float> crn;
+      Vector<float2> hdl;
+      Vector<int> smth;
       LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
-        pts.append(float2(pt->co[0], pt->co[1]));
-        crn.append(pt->corner);
+        pts.append(float2(pt->co[0] * poly_scale, pt->co[1] * poly_scale));
+        crn.append(pt->corner * poly_scale);
+        hdl.append(float2(pt->handle[0] * poly_scale, pt->handle[1] * poly_scale));
+        smth.append(pt->smooth);
       }
       int pc = int(pts.size());
 
@@ -344,31 +349,45 @@ class Instance : public DrawEngine {
         max_corner = math::max(max_corner, crn[i]);
       }
 
-      /* Compute inset vertices (moved inward by max_corner along bisector) */
+      /* Precompute per-edge data */
       for (int i = 0; i < pc; i++) {
-        SDFPolygonPointGPU gpu_pt = {};
-        gpu_pt.co = pts[i];
-        gpu_pt.corner = crn[i];
+        int j = (i + 1) % pc;
+        int ip = (i - 1 + pc) % pc;
 
-        if (crn[i] > 0.001f && pc >= 3) {
-          int ip = (i - 1 + pc) % pc;
-          int in_ = (i + 1) % pc;
-          float2 to_prev = math::normalize(pts[ip] - pts[i]);
-          float2 to_next = math::normalize(pts[in_] - pts[i]);
-          float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
-          float sin_half = sqrtf((1.0f - cos_theta) * 0.5f);
-          float2 bisector = math::normalize(to_prev + to_next);
-          float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
-          float inset_dist = crn[i] / math::max(sin_half, 0.01f);
-          if (cross_val > 0.0f) {
-            gpu_pt.inset_co = pts[i] - bisector * inset_dist;
-          }
-          else {
-            gpu_pt.inset_co = pts[i] + bisector * inset_dist;
-          }
+        SDFPolygonPointGPU gpu_pt = {};
+
+        if (smth[i]) {
+          /* Bezier segment: start=pts[i], control=hdl[i], end=pts[j] */
+          gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, hdl[i].x, hdl[i].y);
+          gpu_pt.arc_data = float4(pts[j].x, pts[j].y, 0.0f, -1.0f);
+          gpu_pt.arc_normal = float4(0.0f);
         }
         else {
-          gpu_pt.inset_co = pts[i];
+          /* Straight segment */
+          float2 edge = pts[j] - pts[i];
+          gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, edge.x, edge.y);
+
+          float2 inset_co = pts[i];
+          float inset_dist_sq = 0.0f;
+          if (crn[i] > 0.001f && pc >= 3) {
+            float2 to_prev = math::normalize(pts[ip] - pts[i]);
+            float2 to_next = math::normalize(pts[j] - pts[i]);
+            float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
+            float sin_half = sqrtf((1.0f - cos_theta) * 0.5f);
+            float2 bisector = math::normalize(to_prev + to_next);
+            float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
+            float inset_dist = crn[i] / math::max(sin_half, 0.01f);
+            inset_co = pts[i] + bisector * inset_dist;
+            inset_dist_sq = inset_dist * inset_dist;
+            if (cross_val > 0.0f) {
+              crn[i] = -crn[i];
+            }
+          }
+          gpu_pt.arc_data = float4(crn[i], inset_co.x, inset_co.y, inset_dist_sq);
+
+          float2 e_prev = pts[i] - pts[ip];
+          float2 e_next = pts[j] - pts[i];
+          gpu_pt.arc_normal = float4(e_prev.y, -e_prev.x, e_next.y, -e_next.x);
         }
 
         polygon_points_.append(gpu_pt);
@@ -466,10 +485,15 @@ class Instance : public DrawEngine {
         break;
       }
       case SDF_TYPE_POLYGON: {
+        float ps = math::min(scale.x, scale.y);
         float max_xy = 0.0f;
         LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
-          max_xy = math::max(max_xy, fabsf(pt->co[0]));
-          max_xy = math::max(max_xy, fabsf(pt->co[1]));
+          max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
+          max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
+          if (pt->smooth) {
+            max_xy = math::max(max_xy, fabsf(pt->handle[0]) * ps);
+            max_xy = math::max(max_xy, fabsf(pt->handle[1]) * ps);
+          }
         }
         local_extent = float3(
             max_xy + bevel + pad, max_xy + bevel + pad, sz.z + bevel + pad);
@@ -685,13 +709,18 @@ class Instance : public DrawEngine {
         gpu_grp.blend = group->blend;
         gpu_grp.shell_distance = group->shell_distance;
         gpu_grp.shell_mode = group->shell_mode;
+        gpu_grp.shell_blend_top = group->shell_blend_top;
+        gpu_grp.shell_blend_bottom = group->shell_blend_bottom;
         gpu_grp.chamfer_k2 = group->chamfer_k2;
         gpu_grp.chamfer_k3 = group->chamfer_k3;
         gpu_grp.first_object = obj_offset;
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(
             group->color[0], group->color[1], group->color[2], group->color[3]);
-        if (gpu_grp.blend > 0.001f && gpu_grp.blend_type == SDF_BLEND_ROUND) {
+        float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
+                                  ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
+                                  : gpu_grp.blend;
+        if (grp_eff_blend > 0.001f && gpu_grp.blend_type == SDF_BLEND_ROUND) {
           step_factor_ = min_ff(step_factor_, 0.65f);
         }
         groups_gpu_.append(gpu_grp);
@@ -767,7 +796,11 @@ class Instance : public DrawEngine {
 
       /* Compute max blend per group, store in each member's _pad1 */
       for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
-        float max_blend = fabsf(groups_gpu_[gi].blend);
+        float grp_blend = (groups_gpu_[gi].csg_operation == SDF_CSG_SHELL)
+                              ? std::max(groups_gpu_[gi].shell_blend_top,
+                                         groups_gpu_[gi].shell_blend_bottom)
+                              : fabsf(groups_gpu_[gi].blend);
+        float max_blend = grp_blend;
         int start = groups_gpu_[gi].first_object;
         int cnt = groups_gpu_[gi].object_count;
         for (int m = start; m < start + cnt; m++) {
@@ -858,7 +891,11 @@ class Instance : public DrawEngine {
           }
 
           for (int sub_g = g + 1; sub_g < int(groups_gpu_.size()); sub_g++) {
-            float sub_blend = groups_gpu_[sub_g].blend + fabsf(groups_gpu_[sub_g].shell_distance);
+            float sg_blend = (groups_gpu_[sub_g].csg_operation == SDF_CSG_SHELL)
+                                 ? std::max(groups_gpu_[sub_g].shell_blend_top,
+                                            groups_gpu_[sub_g].shell_blend_bottom)
+                                 : groups_gpu_[sub_g].blend;
+            float sub_blend = sg_blend + fabsf(groups_gpu_[sub_g].shell_distance);
             if (sub_blend > 0.0f) {
               float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
               float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);

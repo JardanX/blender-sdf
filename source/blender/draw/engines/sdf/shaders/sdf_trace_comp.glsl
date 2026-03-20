@@ -106,7 +106,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         float prev = grp_dist;
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, 0.0f, 0.0f, obj.chamfer_k2, obj.chamfer_k3);
         if (obj.csg_operation == 0 && d < prev) {
           grp_winner_id = float(obj.original_index);
         }
@@ -135,7 +135,9 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       float prev = scene_dist;
       scene_dist = combineCSG(
           scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode, grp.chamfer_k2, grp.chamfer_k3);
+          grp.shell_distance, grp.shell_mode,
+          grp.shell_blend_top, grp.shell_blend_bottom,
+          grp.chamfer_k2, grp.chamfer_k3);
       if (grp.csg_operation == 0 && grp_dist < prev) {
         out_obj_id = grp_winner_id;
       }
@@ -172,7 +174,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       float prev = scene_dist;
       scene_dist = combineCSG(
           scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-          obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
+          obj.shell_distance, obj.shell_mode, 0.0f, 0.0f, obj.chamfer_k2, obj.chamfer_k3);
       if (obj.csg_operation == 0 && d < prev) {
         out_obj_id = float(obj.original_index);
       }
@@ -261,7 +263,7 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
         float prev = scene_dist;
         scene_dist = combineCSG(
             scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, 0.0f, 0.0f, obj.chamfer_k2, obj.chamfer_k3);
         if (obj.csg_operation == 0 && d < prev) {
           out_obj_id = float(obj.original_index);
         }
@@ -285,7 +287,7 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
         float prev = grp_dist;
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, 0.0f, 0.0f, obj.chamfer_k2, obj.chamfer_k3);
         if (obj.csg_operation == 0 && d < prev) {
           grp_winner_id = float(obj.original_index);
         }

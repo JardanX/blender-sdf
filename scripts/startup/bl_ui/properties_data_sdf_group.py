@@ -59,8 +59,14 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
         row.prop(grp, "blend_type", expand=True, icon_only=True)
 
         if grp.blend_type != 'LINEAR':
-            layout.label(text="Blend")
-            layout.prop(grp, "blend", text="")
+            if grp.csg_operation == 'SHELL':
+                layout.label(text="Blend Top")
+                layout.prop(grp, "shell_blend_top", text="")
+                layout.label(text="Blend Bottom")
+                layout.prop(grp, "shell_blend_bottom", text="")
+            else:
+                layout.label(text="Blend")
+                layout.prop(grp, "blend", text="")
 
             if grp.blend_type in ('CHAMFER', 'ROUND'):
                 layout.label(text="Edge Smoothness")

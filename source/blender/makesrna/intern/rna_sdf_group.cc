@@ -361,6 +361,22 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
   RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
 
+  /* Shell Blend Top */
+  prop = RNA_def_property(srna, "shell_blend_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "shell_blend_top");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend Top", "Blend amount for the outer shell edge");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  /* Shell Blend Bottom */
+  prop = RNA_def_property(srna, "shell_blend_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "shell_blend_bottom");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend Bottom", "Blend amount for the inner shell edge");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
   /* Color */
   prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "color");

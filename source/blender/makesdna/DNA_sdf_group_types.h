@@ -47,6 +47,8 @@ typedef struct SDFGroup {
   float blend;
   float shell_distance;
   int shell_mode; /* eSDFShellMode */
+  float shell_blend_top;
+  float shell_blend_bottom;
   float chamfer_k2;
   float chamfer_k3;
   char _pad0[4];
