@@ -22,15 +22,19 @@ struct SDFObjectGPU {
   int csg_operation;
   float shell_distance;
   int shell_mode;
+  float chamfer_k2;
+  float chamfer_k3;
   int modifier_start;
   int modifier_count;
   int group_id;     /* -1 = ungrouped */
   int group_first;  /* 1 = base shape in group */
   int group_order;
   int original_index;
-  int _pad0;
-  int _pad1;
+  int polygon_point_start;
+  int polygon_point_count;
   int _pad2;
+  int _pad3;
+  int _pad4; /* Align float4 color to 16 bytes (20 scalars × 4 = 80 = 5 × 16) */
   float4 color;
   float4 box_corners;
   float4 box_edges;   /* x=top, y=bottom, z=tapTop, w=tapBot */
@@ -44,9 +48,13 @@ struct SDFGroupGPU {
   float blend;
   float shell_distance;
   int shell_mode;
+  float chamfer_k2;
+  float chamfer_k3;
   int first_object;
   int object_count;
-  float _pad0;
+  int _pad0;
+  int _pad1;
+  int _pad2;
   float4 color;
 };
 
@@ -58,6 +66,14 @@ struct SDFModifierGPU {
 };
 
 /* BVH node: interior (left>=0) or leaf (left=-1, right=obj_idx) */
+struct SDFPolygonPointGPU {
+  float2 co;       /* Original vertex position */
+  float corner;    /* Corner radius */
+  float _pad;
+  float2 inset_co; /* Inset position (center of rounding arc, CPU-computed) */
+  float2 _pad2;
+};
+
 struct BVHNodeGPU {
   float4 min_and_left;  /* xyz=AABB min, w=left_child or -1 */
   float4 max_and_right; /* xyz=AABB max, w=right_child or obj_idx */

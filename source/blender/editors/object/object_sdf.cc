@@ -60,6 +60,8 @@ static const char *sdf_type_name(int type)
       return "SDF Torus";
     case SDF_TYPE_NGON:
       return "SDF N-Gon";
+    case SDF_TYPE_POLYGON:
+      return "SDF Polygon";
     default:
       return "SDF";
   }
@@ -104,6 +106,12 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         sdf_data->size[0] = 1.0f;
         sdf_data->size[1] = 1.0f;
         sdf_data->size[2] = 1.0f;
+        break;
+      case SDF_TYPE_POLYGON:
+        sdf_data->size[0] = 1.0f;
+        sdf_data->size[1] = 1.0f;
+        sdf_data->size[2] = 1.0f;
+        BKE_sdf_polygon_init_triangle(sdf_data);
         break;
       default:
         break;

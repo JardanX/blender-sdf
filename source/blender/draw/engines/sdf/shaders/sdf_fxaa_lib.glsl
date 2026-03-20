@@ -5,42 +5,48 @@
 /**
  * SDF FXAA library — self-contained FXAA 3.11 implementation.
  *
- * Ported from the MathOPS addon's postprocess/fxaa.glsl which uses
- * sRGB-based luma (LinearToSRGB + weighted green/red) for better
- * perceptual edge detection on SDF ray-march output.
- *
- * Quality preset 29: 12 search steps, low dither.
+ * Matches the MathOPS addon's postprocess/fxaa.glsl: sRGB-based luma
+ * for perceptual edge detection, preset 29 (12 search steps).
  */
 
 #pragma once
 
 #ifndef FXAA_QUALITY__PRESET
-#  define FXAA_QUALITY__PRESET 25
+#  define FXAA_QUALITY__PRESET 29
 #endif
 
-#if (FXAA_QUALITY__PRESET == 25)
-/* 8 search steps — good balance of quality and performance.
- * Preset 29 (12 steps) was overkill for SDF viewport where
- * voxel-resolution aliasing dominates over sub-pixel edges. */
-#  define FXAA_QUALITY__PS 8
+#if (FXAA_QUALITY__PRESET == 29)
+#  define FXAA_QUALITY__PS 12
 #  define FXAA_QUALITY__P0 1.0
 #  define FXAA_QUALITY__P1 1.5
 #  define FXAA_QUALITY__P2 2.0
 #  define FXAA_QUALITY__P3 2.0
 #  define FXAA_QUALITY__P4 2.0
 #  define FXAA_QUALITY__P5 2.0
-#  define FXAA_QUALITY__P6 4.0
-#  define FXAA_QUALITY__P7 8.0
+#  define FXAA_QUALITY__P6 2.0
+#  define FXAA_QUALITY__P7 2.0
+#  define FXAA_QUALITY__P8 2.0
+#  define FXAA_QUALITY__P9 4.0
+#  define FXAA_QUALITY__P10 12.0
+#  define FXAA_QUALITY__P11 12.0
 #endif
 
 #define FxaaSat(x) clamp(x, 0.0, 1.0)
 #define FxaaTexTop(t, p) textureLod(t, p, 0.0)
 #define FxaaTexOff(t, p, o, r) textureLod(t, p + (vec2(o) * r), 0.0)
 
-/* Perceptual luma for edge detection. */
+vec3 FxaaLinearToSRGB(vec3 linear)
+{
+  vec3 higher = vec3(1.055) * pow(linear, vec3(1.0 / 2.4)) - vec3(0.055);
+  vec3 lower = linear * vec3(12.92);
+  return mix(lower, higher, step(vec3(0.0031308), linear));
+}
+
+/* sRGB-aware luma for perceptual edge detection (matches MathOPS). */
 float FxaaLuma(vec3 rgb)
 {
-  return dot(rgb, vec3(0.299, 0.587, 0.114));
+  vec3 srgb = FxaaLinearToSRGB(clamp(rgb, 0.0, 1.0));
+  return srgb.g * (0.587 / 0.299) + srgb.r;
 }
 
 float FxaaLuma(vec4 rgba)

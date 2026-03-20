@@ -39,11 +39,13 @@
     .sdf_use_bvh = 1, \
     .sdf_bvh_debug_view = 0, \
     .sdf_use_cone_trace = 1, \
-    .sdf_max_steps = 256, \
+    .sdf_max_steps = 512, \
     .sdf_ray_epsilon = 0.0001f, \
-    .sdf_over_relaxation = 1.5f, \
+    .sdf_over_relaxation = 1.3f, \
     .sdf_cone_aperture = 0.5f, \
     .sdf_cone_steps = 64, \
+    .sdf_resolution_scale = 100.0f, \
+    .sdf_adaptive_resolution = 0, \
   }
 
 #define _DNA_DEFAULT_View3DOverlay \

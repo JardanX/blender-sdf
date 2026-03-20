@@ -33,6 +33,8 @@
 #include "DNA_view3d_enums.h"
 #include "DNA_view3d_types.h"
 
+#include "ED_view3d.hh"
+
 #include "IMB_imbuf_types.hh"
 
 #include "MEM_guardedalloc.h"
@@ -129,6 +131,15 @@ class Instance : public DrawEngine {
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
   int2 render_size_ = int2(0);
+  int2 viewport_size_ = int2(0);
+  int2 fxaa_size_ = int2(0);
+  float resolution_scale_ = 1.0f;
+  bool adaptive_resolution_ = false;
+  bool scene_changed_ = false;
+  bool view_changed_ = false;
+  int scroll_cooldown_ = 0;
+  uint64_t prev_data_hash_ = 0;
+  float4x4 prev_viewmat_ = float4x4::identity();
 
   gpu::StorageBuf *object_ssbo_ = nullptr;
   int object_ssbo_count_ = 0;
@@ -136,6 +147,10 @@ class Instance : public DrawEngine {
   Vector<SDFModifierGPU> modifiers_;
   gpu::StorageBuf *modifier_ssbo_ = nullptr;
   int modifier_ssbo_count_ = 0;
+
+  Vector<SDFPolygonPointGPU> polygon_points_;
+  gpu::StorageBuf *polygon_ssbo_ = nullptr;
+  int polygon_ssbo_count_ = 0;
 
   Vector<SDFGroupGPU> groups_gpu_;
   gpu::StorageBuf *group_ssbo_ = nullptr;
@@ -214,6 +229,7 @@ class Instance : public DrawEngine {
     object_group_ptrs_.clear();
     object_ptrs_.clear();
     modifiers_.clear();
+    polygon_points_.clear();
     groups_gpu_.clear();
     s_depsgraph_to_sorted.clear();
     bvh_tree_.clear();
@@ -286,6 +302,8 @@ class Instance : public DrawEngine {
     gpu_obj.csg_operation = sdf_data->csg_operation;
     gpu_obj.shell_distance = sdf_data->shell_distance;
     gpu_obj.shell_mode = sdf_data->shell_mode;
+    gpu_obj.chamfer_k2 = sdf_data->chamfer_k2;
+    gpu_obj.chamfer_k3 = sdf_data->chamfer_k3;
 
     gpu_obj.group_id = -1;
     gpu_obj.group_first = 0;
@@ -306,6 +324,62 @@ class Instance : public DrawEngine {
                                  math::max(ngon_taper, 0.0f),
                                  math::max(-ngon_taper, 0.0f));
       gpu_obj.box_modes = int4(0, sdf_data->ngon_edge_mode, sdf_data->ngon_sides, 0);
+    }
+    else if (sdf_data->sdf_type == SDF_TYPE_POLYGON) {
+      float poly_taper = sdf_data->polygon_taper;
+      gpu_obj.polygon_point_start = int(polygon_points_.size());
+      gpu_obj.polygon_point_count = 0;
+
+      /* Collect original points */
+      Vector<float2> pts;
+      Vector<float> crn;
+      LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+        pts.append(float2(pt->co[0], pt->co[1]));
+        crn.append(pt->corner);
+      }
+      int pc = int(pts.size());
+
+      float max_corner = 0.0f;
+      for (int i = 0; i < pc; i++) {
+        max_corner = math::max(max_corner, crn[i]);
+      }
+
+      /* Compute inset vertices (moved inward by max_corner along bisector) */
+      for (int i = 0; i < pc; i++) {
+        SDFPolygonPointGPU gpu_pt = {};
+        gpu_pt.co = pts[i];
+        gpu_pt.corner = crn[i];
+
+        if (crn[i] > 0.001f && pc >= 3) {
+          int ip = (i - 1 + pc) % pc;
+          int in_ = (i + 1) % pc;
+          float2 to_prev = math::normalize(pts[ip] - pts[i]);
+          float2 to_next = math::normalize(pts[in_] - pts[i]);
+          float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
+          float sin_half = sqrtf((1.0f - cos_theta) * 0.5f);
+          float2 bisector = math::normalize(to_prev + to_next);
+          float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
+          float inset_dist = crn[i] / math::max(sin_half, 0.01f);
+          if (cross_val > 0.0f) {
+            gpu_pt.inset_co = pts[i] - bisector * inset_dist;
+          }
+          else {
+            gpu_pt.inset_co = pts[i] + bisector * inset_dist;
+          }
+        }
+        else {
+          gpu_pt.inset_co = pts[i];
+        }
+
+        polygon_points_.append(gpu_pt);
+        gpu_obj.polygon_point_count++;
+      }
+      gpu_obj.box_corners = float4(max_corner, 0.0f, 0.0f, 0.0f);
+      gpu_obj.box_edges = float4(sdf_data->polygon_edge_top,
+                                 sdf_data->polygon_edge_bottom,
+                                 math::max(poly_taper, 0.0f),
+                                 math::max(-poly_taper, 0.0f));
+      gpu_obj.box_modes = int4(0, sdf_data->polygon_edge_mode, 0, 0);
     }
     else if (sdf_data->sdf_type == SDF_TYPE_TORUS) {
       float angle_rad = sdf_data->torus_angle;
@@ -389,6 +463,16 @@ class Instance : public DrawEngine {
       case SDF_TYPE_NGON: {
         float r = sz.x;
         local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
+        break;
+      }
+      case SDF_TYPE_POLYGON: {
+        float max_xy = 0.0f;
+        LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+          max_xy = math::max(max_xy, fabsf(pt->co[0]));
+          max_xy = math::max(max_xy, fabsf(pt->co[1]));
+        }
+        local_extent = float3(
+            max_xy + bevel + pad, max_xy + bevel + pad, sz.z + bevel + pad);
         break;
       }
       default:
@@ -601,6 +685,8 @@ class Instance : public DrawEngine {
         gpu_grp.blend = group->blend;
         gpu_grp.shell_distance = group->shell_distance;
         gpu_grp.shell_mode = group->shell_mode;
+        gpu_grp.chamfer_k2 = group->chamfer_k2;
+        gpu_grp.chamfer_k3 = group->chamfer_k3;
         gpu_grp.first_object = obj_offset;
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(
@@ -689,7 +775,7 @@ class Instance : public DrawEngine {
           max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
         }
         for (int m = start; m < start + cnt; m++) {
-          memcpy(&objects_[m]._pad1, &max_blend, sizeof(float));
+          memcpy(&objects_[m]._pad3, &max_blend, sizeof(float));
         }
       }
       /* Ungrouped objects: store own blend in _pad1 */
@@ -697,7 +783,7 @@ class Instance : public DrawEngine {
         if (objects_[i].group_id < 0) {
           float b = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
           b += fabsf(objects_[i].shell_distance);
-          memcpy(&objects_[i]._pad1, &b, sizeof(float));
+          memcpy(&objects_[i]._pad3, &b, sizeof(float));
         }
       }
     }
@@ -847,7 +933,7 @@ class Instance : public DrawEngine {
             break;
           }
         }
-        objects_[i]._pad0 = visible ? 1 : 0;
+        objects_[i]._pad2 = visible ? 1 : 0;
       }
     }
 
@@ -891,6 +977,34 @@ class Instance : public DrawEngine {
 
     DRW_submission_start();
 
+    /* Detect scene and view changes for adaptive resolution */
+    {
+      uint64_t h = 0xcbf29ce484222325ULL;
+      auto hash_bytes = [&](const void *data, size_t size) {
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < size; i++) {
+          h ^= p[i];
+          h *= 0x100000001b3ULL;
+        }
+      };
+      hash_bytes(objects_.data(), objects_.size() * sizeof(SDFObjectGPU));
+      hash_bytes(modifiers_.data(), modifiers_.size() * sizeof(SDFModifierGPU));
+      hash_bytes(groups_gpu_.data(), groups_gpu_.size() * sizeof(SDFGroupGPU));
+      scene_changed_ = (h != prev_data_hash_);
+      prev_data_hash_ = h;
+
+      const float4x4 &cur_viewmat = View::default_get().viewmat();
+      view_changed_ = (cur_viewmat != prev_viewmat_);
+      prev_viewmat_ = cur_viewmat;
+
+      if (scene_changed_ || view_changed_) {
+        scroll_cooldown_ = 3;
+      }
+      else if (scroll_cooldown_ > 0) {
+        scroll_cooldown_--;
+      }
+    }
+
     if (needs_upload_) {
       GPU_debug_group_begin("SDF Upload");
       upload_objects();
@@ -932,6 +1046,10 @@ class Instance : public DrawEngine {
 
     DRW_submission_end();
 
+    if (adaptive_resolution_ && render_size_ != viewport_size_) {
+      DRW_viewport_request_redraw();
+    }
+
     /* Update static globals for overlay */
     s_object_count = int(objects_.size());
     s_object_ssbo = object_ssbo_;
@@ -948,31 +1066,21 @@ class Instance : public DrawEngine {
       return;
     }
 
-    /* Apply defaults for unversioned viewports (new DNA fields default to 0) */
-    View3D *v3d_mut = const_cast<View3D *>(v3d);
-    if (v3d_mut->shading.sdf_max_steps == 0) {
-      v3d_mut->shading.sdf_max_steps = 256;
-    }
-    if (v3d_mut->shading.sdf_ray_epsilon == 0.0f) {
-      v3d_mut->shading.sdf_ray_epsilon = 0.001f;
-    }
-    if (v3d_mut->shading.sdf_over_relaxation == 0.0f) {
-      v3d_mut->shading.sdf_over_relaxation = 1.2f;
-    }
-    if (v3d_mut->shading.sdf_cone_aperture == 0.0f) {
-      v3d_mut->shading.sdf_cone_aperture = 1.25f;
-    }
-    if (v3d_mut->shading.sdf_cone_steps == 0) {
-      v3d_mut->shading.sdf_cone_steps = 16;
-    }
+    const View3DShading &s = v3d->shading;
+
     use_bvh_ = 1;
-    debug_bvh_views_ = v3d->shading.sdf_bvh_debug_view;
-    use_cone_trace_ = v3d->shading.sdf_use_cone_trace ? 1 : 0;
-    sdf_max_steps_ = v3d->shading.sdf_max_steps;
-    sdf_ray_epsilon_ = v3d->shading.sdf_ray_epsilon;
-    sdf_over_relaxation_ = v3d->shading.sdf_over_relaxation;
-    sdf_cone_aperture_ = v3d->shading.sdf_cone_aperture;
-    sdf_cone_steps_ = v3d->shading.sdf_cone_steps;
+    debug_bvh_views_ = s.sdf_bvh_debug_view;
+    use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
+    sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 512;
+    sdf_ray_epsilon_ = s.sdf_ray_epsilon > 0.0f ? s.sdf_ray_epsilon : 0.0001f;
+    sdf_over_relaxation_ = s.sdf_over_relaxation >= 1.0f ? s.sdf_over_relaxation : 1.3f;
+    sdf_cone_aperture_ = s.sdf_cone_aperture > 0.0f ? s.sdf_cone_aperture : 0.5f;
+    sdf_cone_steps_ = s.sdf_cone_steps > 0 ? s.sdf_cone_steps : 64;
+
+    float scale_pct = s.sdf_resolution_scale;
+    resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
+    adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
+
 
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
@@ -984,7 +1092,7 @@ class Instance : public DrawEngine {
         GPU_framebuffer_free(march_fb_);
         march_fb_ = nullptr;
       }
-      render_size_ = int2(0);
+      fxaa_size_ = int2(0);
     }
     fxaa_enabled_ = new_fxaa;
   }
@@ -1200,6 +1308,33 @@ class Instance : public DrawEngine {
       }
     }
 
+    /* Polygon points SSBO */
+    const int poly_count = math::max(int(polygon_points_.size()), 1);
+    const size_t poly_buf_size = poly_count * sizeof(SDFPolygonPointGPU);
+
+    if (polygon_ssbo_ != nullptr && polygon_ssbo_count_ != poly_count) {
+      GPU_storagebuf_free(polygon_ssbo_);
+      polygon_ssbo_ = nullptr;
+    }
+
+    if (polygon_ssbo_ == nullptr) {
+      if (polygon_points_.is_empty()) {
+        SDFPolygonPointGPU dummy = {};
+        polygon_ssbo_ = GPU_storagebuf_create_ex(
+            poly_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_polygon_points_ssbo");
+      }
+      else {
+        polygon_ssbo_ = GPU_storagebuf_create_ex(
+            poly_buf_size, polygon_points_.data(), GPU_USAGE_DYNAMIC, "sdf_polygon_points_ssbo");
+      }
+      polygon_ssbo_count_ = poly_count;
+    }
+    else {
+      if (!polygon_points_.is_empty()) {
+        GPU_storagebuf_update(polygon_ssbo_, polygon_points_.data());
+      }
+    }
+
     const int grp_count = math::max(int(groups_gpu_.size()), 1);
     const size_t grp_buf_size = grp_count * sizeof(SDFGroupGPU);
 
@@ -1257,7 +1392,17 @@ class Instance : public DrawEngine {
   void ensure_compute_targets()
   {
     const int2 vp = int2(draw_ctx_->viewport_size_get());
-    if (comp_color_tx_ != nullptr && render_size_ == vp) {
+    float scale = resolution_scale_;
+    bool is_interacting = scroll_cooldown_ > 0;
+    if (adaptive_resolution_ && is_interacting) {
+      scale *= 0.5f;
+      scale = math::max(scale, 0.1f);
+    }
+    int2 scaled = int2(math::max(int(vp.x * scale), 1),
+                       math::max(int(vp.y * scale), 1));
+    viewport_size_ = vp;
+
+    if (comp_color_tx_ != nullptr && render_size_ == scaled) {
       return;
     }
 
@@ -1273,13 +1418,13 @@ class Instance : public DrawEngine {
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
     }
-    render_size_ = vp;
+    render_size_ = scaled;
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
-    comp_color_tx_ = GPU_texture_create_2d("sdf_comp_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
-    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
-    gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
-    gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    comp_color_tx_ = GPU_texture_create_2d("sdf_comp_color", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
+    gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
+    gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
   }
 
   void bind_ssbos(gpu::Shader *sh)
@@ -1291,6 +1436,12 @@ class Instance : public DrawEngine {
     if (modifier_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "sdf_modifiers");
       GPU_storagebuf_bind(modifier_ssbo_, slot);
+    }
+    if (polygon_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "polygon_points");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(polygon_ssbo_, slot);
+      }
     }
     if (group_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "groups");
@@ -1404,6 +1555,12 @@ class Instance : public DrawEngine {
     }
     if (modifier_ssbo_) {
       GPU_storagebuf_bind(modifier_ssbo_, GPU_shader_get_ssbo_binding(sh, "sdf_modifiers"));
+    }
+    if (polygon_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "polygon_points");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(polygon_ssbo_, slot);
+      }
     }
     if (group_ssbo_) {
       GPU_storagebuf_bind(group_ssbo_, GPU_shader_get_ssbo_binding(sh, "groups"));
@@ -1593,7 +1750,7 @@ class Instance : public DrawEngine {
       GPU_framebuffer_bind(dfbl->default_fb);
     }
 
-    GPU_depth_test(GPU_DEPTH_ALWAYS);
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(true);
     GPU_blend(GPU_BLEND_NONE);
     GPU_face_culling(GPU_CULL_NONE);
@@ -1601,9 +1758,19 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(blit_sh_);
     GPU_shader_uniform_1i(blit_sh_, "debug_bvh_views", debug_bvh_views_);
+
+    float bg[3] = {0.0f, 0.0f, 0.0f};
+    if (draw_ctx_->scene && draw_ctx_->v3d) {
+      ED_view3d_background_color_get(draw_ctx_->scene, draw_ctx_->v3d, bg);
+    }
+    GPU_shader_uniform_3fv(blit_sh_, "bg_color", bg);
+
+    bool upscaling = (render_size_ != viewport_size_);
     int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
+    GPU_texture_filter_mode(comp_color_tx_, upscaling);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh_, "depth_tx");
+    GPU_texture_filter_mode(comp_depth_tx_, upscaling);
     GPU_texture_bind(comp_depth_tx_, depth_slot);
 
     if (fullscreen_batch_ == nullptr) {
@@ -1622,7 +1789,7 @@ class Instance : public DrawEngine {
   void ensure_fxaa_target()
   {
     const int2 vp = int2(draw_ctx_->viewport_size_get());
-    if (march_color_tx_ != nullptr && render_size_ == vp) {
+    if (march_color_tx_ != nullptr && fxaa_size_ == vp) {
       return;
     }
 
@@ -1635,7 +1802,7 @@ class Instance : public DrawEngine {
       march_fb_ = nullptr;
     }
 
-    render_size_ = vp;
+    fxaa_size_ = vp;
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
     march_color_tx_ = GPU_texture_create_2d(
@@ -1672,7 +1839,7 @@ class Instance : public DrawEngine {
     GPU_texture_filter_mode(march_color_tx_, true);
     GPU_texture_bind(march_color_tx_, color_slot);
 
-    float2 rcp = float2(1.0f / float(render_size_.x), 1.0f / float(render_size_.y));
+    float2 rcp = float2(1.0f / float(viewport_size_.x), 1.0f / float(viewport_size_.y));
     GPU_shader_uniform_2fv(fxaa_sh_, "rcpFrame", rcp);
 
     if (fullscreen_batch_ == nullptr) {
@@ -1730,6 +1897,9 @@ class Instance : public DrawEngine {
     }
     if (modifier_ssbo_) {
       GPU_storagebuf_free(modifier_ssbo_);
+    }
+    if (polygon_ssbo_) {
+      GPU_storagebuf_free(polygon_ssbo_);
     }
     if (group_ssbo_) {
       GPU_storagebuf_free(group_ssbo_);

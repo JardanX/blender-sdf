@@ -18,6 +18,7 @@
 #include "draw_view.hh"
 
 #include "DNA_object_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_userdef_types.h"
 
 #include "GPU_batch.hh"
@@ -26,8 +27,6 @@
 #include "GPU_storage_buffer.hh"
 #include "GPU_texture.hh"
 #include "GPU_uniform_buffer.hh"
-
-#include "engines/sdf/sdf_engine.h"
 
 namespace blender::draw::overlay {
 
@@ -154,7 +153,7 @@ class Outline : Overlay {
 
   void object_sync(Manager &manager,
                    const ObjectRef &ob_ref,
-                   Resources & /*res*/,
+                   Resources &res,
                    const State &state) final
   {
     if (!enabled_) {
@@ -213,6 +212,63 @@ class Outline : Overlay {
           prepass_volume_ps_->draw(geom, manager.unique_handle(ob_ref));
         }
         break;
+      case OB_SDF: {
+        const SDF *sdf = static_cast<const SDF *>(ob_ref.object->data);
+        const float bev = sdf->bevel;
+        float3 scale;
+        gpu::Batch *sdf_geom = nullptr;
+        switch (sdf->sdf_type) {
+          case SDF_TYPE_BOX:
+            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.cube_solid.get());
+            break;
+          case SDF_TYPE_SPHERE:
+            scale = float3(sdf->size[0] + bev);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sphere_low_detail.get());
+            break;
+          case SDF_TYPE_CYLINDER:
+            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_cylinder_solid.get());
+            break;
+          case SDF_TYPE_CONE:
+            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[1] + bev);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_cone_solid.get());
+            break;
+          case SDF_TYPE_CAPSULE: {
+            float r = sdf->size[0] + bev;
+            float h = sdf->size[1] + bev;
+            scale = float3(r, r, math::max(h, r));
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_capsule_solid.get());
+            break;
+          }
+          case SDF_TYPE_TORUS: {
+            float major = sdf->size[0];
+            float minor = sdf->size[1] + bev;
+            float s = major + minor;
+            scale = float3(s, s, minor);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_torus_solid.get());
+            break;
+          }
+          case SDF_TYPE_NGON:
+            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_cylinder_solid.get());
+            break;
+          default:
+            scale = float3(sdf->size[0] + bev);
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sphere_low_detail.get());
+            break;
+        }
+        if (sdf_geom) {
+          float4x4 scaled_mat = float4x4(ob_ref.object->object_to_world()) *
+                                 math::from_scale<float4x4>(scale);
+          float3 bounds_center = float3(0.0f);
+          float3 bounds_half = scale;
+          ResourceHandleRange sdf_handle = manager.resource_handle(
+              ob_ref, &scaled_mat, &bounds_center, &bounds_half);
+          prepass_mesh_ps_->draw(sdf_geom, sdf_handle);
+        }
+        break;
+      }
       default:
         break;
     }

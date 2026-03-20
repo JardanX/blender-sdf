@@ -220,7 +220,6 @@ set(SRC
   engines/overlay/overlay_private.hh
   engines/overlay/overlay_relation.hh
   engines/overlay/overlay_sculpt.hh
-  engines/overlay/overlay_sdf.hh
   engines/overlay/overlay_speaker.hh
   engines/overlay/overlay_text.hh
   engines/overlay/overlay_wireframe.hh
@@ -229,6 +228,7 @@ set(SRC
   engines/select/select_engine.hh
   engines/select/select_instance.hh
   engines/sdf/sdf_engine.h
+  engines/sdf/sdf_marching_cubes.hh
   engines/sdf/sdf_private.hh
   engines/sdf/sdf_shader_shared.hh
   engines/workbench/workbench_defines.hh
@@ -284,7 +284,6 @@ set(GLSL_SRC
   engines/overlay/shaders/infos/overlay_outline_infos.hh
   engines/overlay/shaders/infos/overlay_paint_infos.hh
   engines/overlay/shaders/infos/overlay_sculpt_curves_infos.hh
-  engines/overlay/shaders/infos/overlay_sdf_infos.hh
   engines/overlay/shaders/infos/overlay_sculpt_infos.hh
   engines/overlay/shaders/infos/overlay_viewer_attribute_infos.hh
   engines/overlay/shaders/infos/overlay_volume_infos.hh
@@ -350,7 +349,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_blit_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
-  engines/sdf/shaders/sdf_select_march_frag.glsl
+  engines/sdf/shaders/sdf_grid_eval_comp.glsl
 
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/sdf_shader_shared.hh
@@ -530,8 +529,6 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_sculpt_curves_cage_vert.glsl
   engines/overlay/shaders/overlay_sculpt_curves_selection_frag.glsl
   engines/overlay/shaders/overlay_sculpt_curves_selection_vert.glsl
-  engines/overlay/shaders/overlay_sdf_pick_frag.glsl
-  engines/overlay/shaders/overlay_sdf_pick_vert.glsl
   engines/overlay/shaders/overlay_sculpt_mask_frag.glsl
   engines/overlay/shaders/overlay_sculpt_mask_vert.glsl
 

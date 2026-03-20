@@ -463,7 +463,6 @@ void Instance::begin_sync()
     layer.pointclouds.begin_sync(resources, state);
     layer.prepass.begin_sync(resources, state);
     layer.relations.begin_sync(resources, state);
-    layer.sdfs.begin_sync(resources, state);
     layer.speakers.begin_sync(resources, state);
     layer.sculpts.begin_sync(resources, state);
     layer.wireframe.begin_sync(resources, state);
@@ -583,12 +582,6 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
         manager, ob_ref, resources, state, in_edit_paint_mode, in_edit_mode);
   }
 
-  /* SDF selection must work even with overlays hidden.
-   * Sdfs::object_sync is a no-op outside selection draws (enabled_ is false). */
-  if (ob_ref.object->type == OB_SDF) {
-    layer.sdfs.object_sync(manager, ob_ref, resources, state);
-  }
-
   if (!state.hide_overlays) {
     switch (ob_ref.object->type) {
       case OB_EMPTY:
@@ -661,7 +654,6 @@ void Instance::end_sync()
     layer.light_probes.end_sync(resources, state);
     layer.mesh_uvs.end_sync(resources, state);
     layer.relations.end_sync(resources, state);
-    layer.sdfs.end_sync(resources, state);
     layer.fluids.end_sync(resources, state);
     layer.speakers.end_sync(resources, state);
   };
@@ -810,7 +802,6 @@ void Instance::draw_v3d(Manager &manager, View &view)
   auto draw = [&](OverlayLayer &layer, Framebuffer &framebuffer) {
     /* TODO(fclem): Depth aware outlines (see #130751). */
     // layer.facing.draw(framebuffer, manager, view);
-    layer.sdfs.draw(framebuffer, manager, view);
     layer.fade.draw(framebuffer, manager, view);
     layer.mode_transfer.draw(framebuffer, manager, view);
     layer.text.draw(framebuffer, manager, view);

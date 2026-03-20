@@ -46,6 +46,7 @@
 #include "BKE_editlattice.h"
 #include "BKE_editmesh.hh"
 #include "BKE_effect.h"
+#include "BKE_sdf.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
@@ -944,6 +945,7 @@ bool editmode_enter_ex(Main *bmain, Scene *scene, Object *ob, int flag)
     ok = true;
     WM_main_add_notifier(NC_SCENE | ND_MODE | NS_EDITMODE_POINTCLOUD, scene);
   }
+  /* MATHOPS: SDF edit mode removed — uses Python gizmos instead */
 
   if (ok) {
     DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);

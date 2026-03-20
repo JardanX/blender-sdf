@@ -1,10 +1,10 @@
-/* SPDX-FileCopyrightText: 2025 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /**
  * SDF FXAA post-processing fragment shader.
- * Quality preset 25 (8 search steps) with perceptual luma.
+ * Quality preset 29 (12 search steps) with sRGB-aware luma.
  */
 
 #include "infos/sdf_shader_infos.hh"
@@ -14,11 +14,10 @@
 void main()
 {
   out_color = FxaaPixelShader(
-      screen_uv,    /* UV from gpu_fullscreen vertex shader */
-      color_tx,     /* offscreen march result */
-      rcpFrame,     /* 1.0 / viewport size */
-      0.75,         /* subpix: default filtering amount */
-      0.125,        /* edgeThreshold: good default quality */
-      0.0312);      /* edgeThresholdMin: visible limit */
-  out_color.a = textureLod(color_tx, screen_uv, 0.0).a;
+      screen_uv,
+      color_tx,
+      rcpFrame,
+      0.75,
+      0.063,
+      0.0312);
 }

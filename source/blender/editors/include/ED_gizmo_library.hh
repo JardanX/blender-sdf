@@ -211,6 +211,7 @@ enum {
 enum {
   ED_GIZMO_MOVE_STYLE_RING_2D = 0,
   ED_GIZMO_MOVE_STYLE_CROSS_2D = 1,
+  ED_GIZMO_MOVE_STYLE_SQUARE_2D = 2,
 };
 
 /* -------------------------------------------------------------------- */
