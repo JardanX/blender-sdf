@@ -302,6 +302,8 @@ class Instance : public DrawEngine {
     gpu_obj.csg_operation = sdf_data->csg_operation;
     gpu_obj.shell_distance = sdf_data->shell_distance;
     gpu_obj.shell_mode = sdf_data->shell_mode;
+    gpu_obj.shell_blend_top = sdf_data->shell_blend_top;
+    gpu_obj.shell_blend_bottom = sdf_data->shell_blend_bottom;
     gpu_obj.chamfer_k2 = sdf_data->chamfer_k2;
     gpu_obj.chamfer_k3 = sdf_data->chamfer_k3;
 
@@ -334,13 +336,9 @@ class Instance : public DrawEngine {
       float poly_scale = math::min(scale.x, scale.y);
       Vector<float2> pts;
       Vector<float> crn;
-      Vector<float2> hdl;
-      Vector<int> smth;
       LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
         pts.append(float2(pt->co[0] * poly_scale, pt->co[1] * poly_scale));
         crn.append(pt->corner * poly_scale);
-        hdl.append(float2(pt->handle[0] * poly_scale, pt->handle[1] * poly_scale));
-        smth.append(pt->smooth);
       }
       int pc = int(pts.size());
 
@@ -349,46 +347,102 @@ class Instance : public DrawEngine {
         max_corner = math::max(max_corner, crn[i]);
       }
 
+      /* Radius clamping pre-pass */
+      Vector<float> half_angles(pc);
+      Vector<float> tan_halfs(pc);
+      for (int i = 0; i < pc; i++) {
+        int ip = (i - 1 + pc) % pc;
+        int j = (i + 1) % pc;
+        float2 to_prev = math::normalize(pts[ip] - pts[i]);
+        float2 to_next = math::normalize(pts[j] - pts[i]);
+        float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
+        half_angles[i] = acosf(cos_theta) * 0.5f;
+        tan_halfs[i] = tanf(half_angles[i]);
+      }
+
+      for (int i = 0; i < pc; i++) {
+        int j = (i + 1) % pc;
+        float edge_len = math::length(pts[j] - pts[i]);
+        if (edge_len < 1e-6f) {
+          continue;
+        }
+        float t_i = (tan_halfs[i] > 1e-6f) ? crn[i] / tan_halfs[i] : 0.0f;
+        float t_j = (tan_halfs[j] > 1e-6f) ? crn[j] / tan_halfs[j] : 0.0f;
+        if (t_i + t_j > edge_len) {
+          float scale = edge_len / (t_i + t_j);
+          crn[i] *= scale;
+          crn[j] *= scale;
+        }
+      }
+
       /* Precompute per-edge data */
       for (int i = 0; i < pc; i++) {
         int j = (i + 1) % pc;
         int ip = (i - 1 + pc) % pc;
 
+        float2 edge = pts[j] - pts[i];
+        float edge_len = math::length(edge);
+
         SDFPolygonPointGPU gpu_pt = {};
+        gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, edge.x, edge.y);
 
-        if (smth[i]) {
-          /* Bezier segment: start=pts[i], control=hdl[i], end=pts[j] */
-          gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, hdl[i].x, hdl[i].y);
-          gpu_pt.arc_data = float4(pts[j].x, pts[j].y, 0.0f, -1.0f);
-          gpu_pt.arc_normal = float4(0.0f);
-        }
-        else {
-          /* Straight segment */
-          float2 edge = pts[j] - pts[i];
-          gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, edge.x, edge.y);
+        float R_signed = 0.0f;
+        float2 C = pts[i];
+        float t_trim_start = 0.0f;
+        float t_trim_end = 1.0f;
+        float ang_mid = 0.0f;
+        float ang_half = 0.0f;
 
-          float2 inset_co = pts[i];
-          float inset_dist_sq = 0.0f;
-          if (crn[i] > 0.001f && pc >= 3) {
-            float2 to_prev = math::normalize(pts[ip] - pts[i]);
-            float2 to_next = math::normalize(pts[j] - pts[i]);
-            float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
-            float sin_half = sqrtf((1.0f - cos_theta) * 0.5f);
-            float2 bisector = math::normalize(to_prev + to_next);
-            float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
-            float inset_dist = crn[i] / math::max(sin_half, 0.01f);
-            inset_co = pts[i] + bisector * inset_dist;
-            inset_dist_sq = inset_dist * inset_dist;
-            if (cross_val > 0.0f) {
-              crn[i] = -crn[i];
-            }
+        /* Recompute half-angle/tan for clamped radii */
+        float2 to_prev = math::normalize(pts[ip] - pts[i]);
+        float2 to_next = math::normalize(pts[j] - pts[i]);
+        float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
+        float half = acosf(cos_theta) * 0.5f;
+        float sin_half = sinf(half);
+        float tan_half = tanf(half);
+
+        if (crn[i] > 0.001f && pc >= 3 && sin_half > 0.01f && tan_half > 1e-6f) {
+          float2 bisector = math::normalize(to_prev + to_next);
+          float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
+
+          float inset_dist = crn[i] / sin_half;
+          C = pts[i] + bisector * inset_dist;
+
+          R_signed = (cross_val > 0.0f) ? -crn[i] : crn[i];
+
+          /* Trim start on this edge */
+          if (edge_len > 1e-6f) {
+            t_trim_start = crn[i] / (tan_half * edge_len);
           }
-          gpu_pt.arc_data = float4(crn[i], inset_co.x, inset_co.y, inset_dist_sq);
 
-          float2 e_prev = pts[i] - pts[ip];
-          float2 e_next = pts[j] - pts[i];
-          gpu_pt.arc_normal = float4(e_prev.y, -e_prev.x, e_next.y, -e_next.x);
+          /* Arc angular bounds */
+          float2 tangent_start = pts[i] + math::normalize(edge) * (crn[i] / tan_half);
+          float2 dir_start = math::normalize(tangent_start - C);
+          float2 tangent_prev_end = pts[i] + to_prev * (crn[i] / tan_half);
+          float2 dir_prev_end = math::normalize(tangent_prev_end - C);
+
+          float a1 = atan2f(dir_prev_end.y, dir_prev_end.x);
+          float a2 = atan2f(dir_start.y, dir_start.x);
+
+          float diff = a2 - a1;
+          diff -= 6.2831853f * floorf((diff + 3.1415927f) / 6.2831853f);
+          ang_mid = a1 + diff * 0.5f;
+          ang_half = fabsf(diff) * 0.5f;
         }
+
+        /* Trim end on this edge (from next vertex's rounding) */
+        if (crn[j] > 0.001f && pc >= 3) {
+          float2 to_prev_j = math::normalize(pts[i] - pts[j]);
+          float2 to_next_j = math::normalize(pts[(j + 1) % pc] - pts[j]);
+          float cos_theta_j = math::clamp(math::dot(to_prev_j, to_next_j), -0.999f, 0.999f);
+          float tan_half_j = tanf(acosf(cos_theta_j) * 0.5f);
+          if (edge_len > 1e-6f && tan_half_j > 1e-6f) {
+            t_trim_end = 1.0f - crn[j] / (tan_half_j * edge_len);
+          }
+        }
+
+        gpu_pt.arc_data = float4(R_signed, C.x, C.y, t_trim_start);
+        gpu_pt.arc_bounds = float4(t_trim_end, ang_mid, ang_half, 0.0f);
 
         polygon_points_.append(gpu_pt);
         gpu_obj.polygon_point_count++;
@@ -490,10 +544,6 @@ class Instance : public DrawEngine {
         LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
           max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
           max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
-          if (pt->smooth) {
-            max_xy = math::max(max_xy, fabsf(pt->handle[0]) * ps);
-            max_xy = math::max(max_xy, fabsf(pt->handle[1]) * ps);
-          }
         }
         local_extent = float3(
             max_xy + bevel + pad, max_xy + bevel + pad, sz.z + bevel + pad);
@@ -1027,6 +1077,8 @@ class Instance : public DrawEngine {
       hash_bytes(objects_.data(), objects_.size() * sizeof(SDFObjectGPU));
       hash_bytes(modifiers_.data(), modifiers_.size() * sizeof(SDFModifierGPU));
       hash_bytes(groups_gpu_.data(), groups_gpu_.size() * sizeof(SDFGroupGPU));
+      hash_bytes(
+          polygon_points_.data(), polygon_points_.size() * sizeof(SDFPolygonPointGPU));
       scene_changed_ = (h != prev_data_hash_);
       prev_data_hash_ = h;
 
@@ -1802,12 +1854,11 @@ class Instance : public DrawEngine {
     }
     GPU_shader_uniform_3fv(blit_sh_, "bg_color", bg);
 
-    bool upscaling = (render_size_ != viewport_size_);
     int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
-    GPU_texture_filter_mode(comp_color_tx_, upscaling);
+    GPU_texture_filter_mode(comp_color_tx_, false);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh_, "depth_tx");
-    GPU_texture_filter_mode(comp_depth_tx_, upscaling);
+    GPU_texture_filter_mode(comp_depth_tx_, false);
     GPU_texture_bind(comp_depth_tx_, depth_slot);
 
     if (fullscreen_batch_ == nullptr) {

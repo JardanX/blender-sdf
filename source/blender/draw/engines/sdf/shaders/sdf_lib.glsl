@@ -482,10 +482,11 @@ float sdPolygon2D(float2 p, int ps, int pc)
   int winding = 0;
   for (int i = 0; i < pc; i++) {
     float4 ed = polygon_points[ps + i].vi_edge;
-    float4 ad = polygon_points[ps + i].arc_data;
+    float4 ab = polygon_points[ps + i].arc_bounds;
     float2 vi = ed.xy;
 
-    if (ad.w < 0.0f) {
+    if (ab.w < 0.0f) {
+      float4 ad = polygon_points[ps + i].arc_data;
       /* Bezier segment */
       float2 ctrl = ed.zw;
       float2 end_pt = ad.xy;
@@ -520,35 +521,79 @@ float sdPolygon2D(float2 p, int ps, int pc)
 
 float sdPolygon2DRounded(float2 p, int ps, int pc)
 {
-  float sd = sdPolygon2D(p, ps, pc);
+  float d = 1e20f;
+  int winding = 0;
 
   for (int i = 0; i < pc; i++) {
+    float4 ed = polygon_points[ps + i].vi_edge;
     float4 ad = polygon_points[ps + i].arc_data;
-    if (ad.w < 0.0f) continue; /* Skip bezier segments */
-    float R_signed = ad.x;
-    float R = abs(R_signed);
-    if (R < 0.001f) continue;
+    float4 ab = polygon_points[ps + i].arc_bounds;
+    if (ab.w < 0.0f) continue;
 
+    float2 vi = ed.xy, edge = ed.zw;
+    float R_signed = ad.x, R = abs(R_signed);
     float2 C = ad.yz;
-    float inset_dist_sq = ad.w;
-    float2 to_p = p - C;
-    float dist_sq = dot(to_p, to_p);
+    float t_start = ad.w, t_end = ab.x;
+    float ang_mid = ab.y, ang_half = ab.z;
 
-    if (dist_sq > inset_dist_sq * 1.44f) continue;
+    /* Trimmed edge: distance + winding */
+    float2 seg_a = vi + edge * t_start;
+    float2 seg_b = vi + edge * t_end;
+    float2 seg_dir = seg_b - seg_a;
+    float seg_len_sq = dot(seg_dir, seg_dir);
+    if (seg_len_sq > 1e-10f) {
+      float2 w = p - seg_a;
+      float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+      d = min(d, length(w - seg_dir * t));
 
-    float4 an = polygon_points[ps + i].arc_normal;
-    float2 n_prev = an.xy;
-    float2 n_next = an.zw;
+      float cross_val = seg_dir.x * w.y - seg_dir.y * w.x;
+      if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) winding++;
+      if (seg_a.y > p.y && seg_b.y <= p.y && cross_val < 0.0f) winding--;
+    }
 
-    float cross1 = n_prev.x * to_p.y - n_prev.y * to_p.x;
-    float cross2 = to_p.x * n_next.y - to_p.y * n_next.x;
+    /* Arc: distance + winding */
+    if (R > 0.001f) {
+      float2 to_p = p - C;
+      float dist_c = length(to_p);
+      float ang_p = atan(to_p.y, to_p.x);
+      float ang_diff = ang_p - ang_mid;
+      ang_diff -= 6.2831853f * floor((ang_diff + 3.1415927f) / 6.2831853f);
 
-    if (cross1 >= 0.0f && cross2 >= 0.0f) {
-      float d_arc = sqrt(dist_sq) - R;
-      sd = (R_signed > 0.0f) ? max(sd, d_arc) : min(sd, d_arc);
+      if (abs(ang_diff) <= ang_half) {
+        d = min(d, abs(dist_c - R));
+      }
+      else {
+        float2 ep1 = C + R * float2(cos(ang_mid - ang_half), sin(ang_mid - ang_half));
+        float2 ep2 = C + R * float2(cos(ang_mid + ang_half), sin(ang_mid + ang_half));
+        d = min(d, min(length(p - ep1), length(p - ep2)));
+      }
+
+      /* Arc winding: find crossings of arc with horizontal ray y=p.y, x>p.x */
+      float k = (p.y - C.y) / R;
+      if (abs(k) < 1.0f) {
+        float asin_k = asin(k);
+        int dir = (R_signed > 0.0f) ? 1 : -1;
+
+        /* Crossing at θ=asin(k), cos>0 (upward for CCW arc) */
+        float th = asin_k;
+        float td = th - ang_mid;
+        td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+        if (abs(td) <= ang_half && C.x + R * cos(th) > p.x) {
+          winding += dir;
+        }
+
+        /* Crossing at θ=π-asin(k), cos<0 (downward for CCW arc) */
+        th = 3.1415927f - asin_k;
+        td = th - ang_mid;
+        td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+        if (abs(td) <= ang_half && C.x + R * cos(th) > p.x) {
+          winding -= dir;
+        }
+      }
     }
   }
-  return sd;
+
+  return (winding != 0) ? -d : d;
 }
 
 float sdAdvancedPolygon(float3 p,
