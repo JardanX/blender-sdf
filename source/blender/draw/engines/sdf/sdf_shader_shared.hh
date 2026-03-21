@@ -22,6 +22,8 @@ struct SDFObjectGPU {
   int csg_operation;
   float shell_distance;
   int shell_mode;
+  float shell_blend_top;
+  float shell_blend_bottom;
   float chamfer_k2;
   float chamfer_k3;
   int modifier_start;
@@ -32,9 +34,11 @@ struct SDFObjectGPU {
   int original_index;
   int polygon_point_start;
   int polygon_point_count;
-  int _pad2;
-  int _pad3;
-  int _pad4; /* Align float4 color to 16 bytes (20 scalars × 4 = 80 = 5 × 16) */
+  int _pad2; /* scratch: visibility flag */
+  int _pad3; /* scratch: max group blend (intBitsToFloat) */
+  int _pad4;
+  int _pad5;
+  int _pad6; /* Align float4 color to 16 bytes (24 scalars × 4 = 96; 128+96=224=14×16) */
   float4 color;
   float4 box_corners;
   float4 box_edges;   /* x=top, y=bottom, z=tapTop, w=tapBot */
@@ -68,8 +72,8 @@ struct SDFModifierGPU {
 /* Per-edge precomputed polygon data (CPU → GPU) */
 struct SDFPolygonPointGPU {
   float4 vi_edge;    /* vi.x, vi.y, edge.x, edge.y  (edge = vj - vi) */
-  float4 arc_data;   /* corner, inset_co.x, inset_co.y, 0 */
-  float4 arc_normal; /* n_prev.x, n_prev.y, n_next.x, n_next.y */
+  float4 arc_data;   /* R_signed, C.x, C.y, t_trim_start */
+  float4 arc_bounds; /* t_trim_end, ang_mid, ang_half_span, flags */
 };
 
 struct BVHNodeGPU {

@@ -112,43 +112,11 @@ def _make_corner_setter(point_index):
     return setter
 
 
-def _make_handle_getter(point_index):
-    def getter():
-        ob = bpy.context.object
-        if not ob or ob.type != 'SDF' or not ob.data:
-            return (0.0, 0.0, 0.0)
-        sdf = ob.data
-        if point_index >= len(sdf.polygon_points):
-            return (0.0, 0.0, 0.0)
-        pt = sdf.polygon_points[point_index]
-        s = _poly_scale(ob)
-        return (pt.handle[0] * s, pt.handle[1] * s, 0.0)
-    return getter
-
-
-def _make_handle_setter(point_index):
-    def setter(value):
-        ob = bpy.context.object
-        if not ob or ob.type != 'SDF' or not ob.data:
-            return
-        sdf = ob.data
-        if point_index >= len(sdf.polygon_points):
-            return
-        pt = sdf.polygon_points[point_index]
-        s = _poly_scale(ob)
-        if s > 1e-6:
-            pt.handle[0] = value[0] / s
-            pt.handle[1] = value[1] / s
-        ob.data.update_tag()
-    return setter
-
-
 class SDF_GT_corner_line(bpy.types.Gizmo):
     bl_idname = "SDF_GT_corner_line"
 
     def setup(self):
         self._point_index = 0
-        self._is_handle_line = False
 
     def draw(self, context):
         ob = context.object
@@ -160,20 +128,13 @@ class SDF_GT_corner_line(bpy.types.Gizmo):
             return
         pt = sdf.polygon_points[i]
         s = _poly_scale(ob)
+        b = _bisector_for_point(sdf, i)
+        start = (pt.co[0] * s, pt.co[1] * s, 0.0)
+        offset = pt.corner * s + _CORNER_HANDLE_GAP
+        end = (pt.co[0] * s + b.x * offset, pt.co[1] * s + b.y * offset, 0.0)
 
-        if self._is_handle_line:
-            if not pt.smooth:
-                return
-            start = (pt.co[0] * s, pt.co[1] * s, 0.0)
-            end = (pt.handle[0] * s, pt.handle[1] * s, 0.0)
-        else:
-            if pt.smooth:
-                return
-            b = _bisector_for_point(sdf, i)
-            start = (pt.co[0] * s, pt.co[1] * s, 0.0)
-            offset = pt.corner * s + _CORNER_HANDLE_GAP
-            end = (pt.co[0] * s + b.x * offset, pt.co[1] * s + b.y * offset, 0.0)
-
+        gpu.matrix.push()
+        gpu.matrix.multiply_matrix(self.matrix_basis)
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
         batch = batch_for_shader(shader, 'LINES', {"pos": [start, end]})
         shader.bind()
@@ -182,6 +143,7 @@ class SDF_GT_corner_line(bpy.types.Gizmo):
         gpu.state.blend_set('ALPHA')
         batch.draw(shader)
         gpu.state.blend_set('NONE')
+        gpu.matrix.pop()
 
     def draw_select(self, context, select_id):
         pass
@@ -208,8 +170,6 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
         self.gizmos_list = []
         self.corner_gizmos = []
         self.line_gizmos = []
-        self.handle_gizmos = []
-        self.handle_line_gizmos = []
         self._rebuild(context)
 
     def _rebuild(self, context):
@@ -222,12 +182,6 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
         for gz in self.line_gizmos:
             self.gizmos.remove(gz)
         self.line_gizmos.clear()
-        for gz in self.handle_gizmos:
-            self.gizmos.remove(gz)
-        self.handle_gizmos.clear()
-        for gz in self.handle_line_gizmos:
-            self.gizmos.remove(gz)
-        self.handle_line_gizmos.clear()
 
         ob = context.object
         if not ob or ob.type != 'SDF' or not ob.data:
@@ -239,8 +193,7 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
         mat = _no_scale_matrix(ob)
         s = _poly_scale(ob)
 
-        for i, pt in enumerate(sdf.polygon_points):
-            # Position gizmo
+        for i, _pt in enumerate(sdf.polygon_points):
             gz = self.gizmos.new("GIZMO_GT_move_3d")
             gz.draw_style = 'SQUARE_2D'
             gz.draw_options = {'FILL', 'ALIGN_VIEW'}
@@ -257,7 +210,6 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
                                   set=_make_sdf_point_setter(i))
             self.gizmos_list.append(gz)
 
-            # Corner radius gizmo (only for straight edges)
             cgz = self.gizmos.new("GIZMO_GT_move_3d")
             cgz.draw_style = 'RING_2D'
             cgz.draw_options = {'ALIGN_VIEW'}
@@ -274,38 +226,12 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
                                    set=_make_corner_setter(i))
             self.corner_gizmos.append(cgz)
 
-            # Corner connecting line
             lgz = self.gizmos.new("SDF_GT_corner_line")
             lgz._point_index = i
             lgz.matrix_basis = mat
             self.line_gizmos.append(lgz)
 
-            # Bezier handle gizmo
-            hgz = self.gizmos.new("GIZMO_GT_move_3d")
-            hgz.draw_style = 'CROSS_2D'
-            hgz.draw_options = {'ALIGN_VIEW'}
-            hgz.use_draw_modal = True
-            hgz.use_draw_value = True
-            hgz.scale_basis = 0.07
-            hgz.color = 1.0, 0.6, 0.2
-            hgz.alpha = 0.9
-            hgz.color_highlight = 1.0, 0.9, 0.4
-            hgz.alpha_highlight = 1.0
-            hgz.matrix_basis = mat
-            hgz.target_set_handler("offset",
-                                   get=_make_handle_getter(i),
-                                   set=_make_handle_setter(i))
-            self.handle_gizmos.append(hgz)
-
-            # Handle connecting line
-            hlgz = self.gizmos.new("SDF_GT_corner_line")
-            hlgz._point_index = i
-            hlgz._is_handle_line = True
-            hlgz.matrix_basis = mat
-            self.handle_line_gizmos.append(hlgz)
-
         self._last_count = len(sdf.polygon_points)
-        self._last_smooth_state = [pt.smooth for pt in sdf.polygon_points]
 
     def refresh(self, context):
         ob = context.object
@@ -316,56 +242,41 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
             return
 
         count = len(sdf.polygon_points)
-        smooth_state = [pt.smooth for pt in sdf.polygon_points]
-        if (count != getattr(self, '_last_count', -1) or
-                smooth_state != getattr(self, '_last_smooth_state', [])):
+        if count != getattr(self, '_last_count', -1):
             self._rebuild(context)
             return
 
+        any_modal = any(gz.is_modal for gz in self.gizmos_list) or \
+                    any(gz.is_modal for gz in self.corner_gizmos)
+        was_modal = getattr(self, '_was_modal', False)
+        if was_modal and not any_modal:
+            bpy.app.timers.register(
+                lambda: bpy.ops.ed.undo_push(message="Edit SDF Polygon") or None,
+                first_interval=0.0)
+        self._was_modal = any_modal
+
         mat = _no_scale_matrix(ob)
         for i in range(count):
-            pt = sdf.polygon_points[i]
             gz = self.gizmos_list[i]
             cgz = self.corner_gizmos[i]
             lgz = self.line_gizmos[i]
-            hgz = self.handle_gizmos[i]
-            hlgz = self.handle_line_gizmos[i]
             gz.matrix_basis = mat
             cgz.matrix_basis = mat
             lgz.matrix_basis = mat
-            hgz.matrix_basis = mat
-            hlgz.matrix_basis = mat
 
-            is_smooth = pt.smooth
-            cgz.hide = is_smooth
-            lgz.hide = is_smooth
-            hgz.hide = not is_smooth
-            hlgz.hide = not is_smooth
-
-            active = gz.is_highlight or gz.is_modal
-            if not is_smooth:
-                active = active or cgz.is_highlight or cgz.is_modal
-            else:
-                active = active or hgz.is_highlight or hgz.is_modal
-
+            active = gz.is_highlight or gz.is_modal or cgz.is_highlight or cgz.is_modal
             if active:
                 gz.color = 1.0, 1.0, 1.0
                 gz.alpha = 1.0
                 cgz.color = 0.4, 0.7, 1.0
                 cgz.alpha = 0.9
                 lgz._color = (0.4, 0.7, 1.0, 0.9)
-                hgz.color = 1.0, 0.9, 0.4
-                hgz.alpha = 1.0
-                hlgz._color = (1.0, 0.6, 0.2, 0.9)
             else:
                 gz.color = 0.4, 0.7, 1.0
                 gz.alpha = 0.9
                 cgz.color = 0.25, 0.45, 0.7
                 cgz.alpha = 0.5
                 lgz._color = (0.25, 0.45, 0.7, 0.4)
-                hgz.color = 1.0, 0.6, 0.2
-                hgz.alpha = 0.9
-                hlgz._color = (0.8, 0.5, 0.15, 0.4)
 
 
 # Pie Menus
@@ -587,13 +498,7 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             row = layout.row(align=True)
             row.prop(pt, "co", index=0, text=f"P{i+1} X")
             row.prop(pt, "co", index=1, text="Y")
-            row.prop(pt, "smooth", text="", icon='SMOOTHCURVE')
-            if pt.smooth:
-                sub = layout.row(align=True)
-                sub.prop(pt, "handle", index=0, text="    H X")
-                sub.prop(pt, "handle", index=1, text="Y")
-            else:
-                row.prop(pt, "corner", text="R")
+            row.prop(pt, "corner", text="R")
 
         row = layout.row(align=True)
         row.operator("sdf.polygon_point_add", text="Add Point", icon='ADD')

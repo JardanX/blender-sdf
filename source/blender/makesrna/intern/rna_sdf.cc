@@ -235,23 +235,6 @@ static void rna_SDFModifier_bend_axis_set(PointerRNA *ptr, int value)
   mod->params[1] = (float)value;
 }
 
-static void rna_SDFPolygonPoint_smooth_set(PointerRNA *ptr, bool value)
-{
-  SDFPolygonPoint *pt = (SDFPolygonPoint *)ptr->data;
-  pt->smooth = value ? 1 : 0;
-  if (value && pt->handle[0] == 0.0f && pt->handle[1] == 0.0f) {
-    SDFPolygonPoint *next = pt->next ? pt->next : nullptr;
-    if (next) {
-      pt->handle[0] = (pt->co[0] + next->co[0]) * 0.5f;
-      pt->handle[1] = (pt->co[1] + next->co[1]) * 0.5f;
-    }
-    else {
-      pt->handle[0] = pt->co[0];
-      pt->handle[1] = pt->co[1] + 0.5f;
-    }
-  }
-}
-
 static SDFPolygonPoint *rna_SDF_polygon_point_new(SDF *sdf, float x, float y)
 {
   SDFPolygonPoint *pt = BKE_sdf_polygon_point_add(sdf, x, y, 0.0f);
@@ -643,20 +626,6 @@ static void rna_def_sdf_polygon_point(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.1f, 3);
   RNA_def_property_ui_text(prop, "Corner", "Corner smoothing radius");
-  RNA_def_property_update(prop, 0, "rna_SDF_update");
-
-  prop = RNA_def_property(srna, "handle", PROP_FLOAT, PROP_XYZ);
-  RNA_def_property_float_sdna(prop, nullptr, "handle");
-  RNA_def_property_array(prop, 2);
-  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
-  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
-  RNA_def_property_ui_text(prop, "Handle", "Bezier control point position");
-  RNA_def_property_update(prop, 0, "rna_SDF_update");
-
-  prop = RNA_def_property(srna, "smooth", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "smooth", 1);
-  RNA_def_property_boolean_funcs(prop, nullptr, "rna_SDFPolygonPoint_smooth_set");
-  RNA_def_property_ui_text(prop, "Smooth", "Use bezier curve for edge from this point");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 }
 
