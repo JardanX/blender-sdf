@@ -22,6 +22,8 @@ namespace blender::bke {
 
 struct SDFRuntime {
   BMEditMesh *edit_mesh = nullptr;
+  void *proxy_batch = nullptr;
+  uint64_t proxy_hash = 0;
 };
 
 }  // namespace blender::bke

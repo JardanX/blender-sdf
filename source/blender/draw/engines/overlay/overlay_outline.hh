@@ -8,7 +8,11 @@
 
 #pragma once
 
+#include <cfloat>
+#include <cstring>
+
 #include "BLI_assert.h"
+#include "BLI_listbase.h"
 
 #include "overlay_base.hh"
 /* MATHOPS: Removed — Grease Pencil overlay */
@@ -21,6 +25,8 @@
 #include "DNA_sdf_types.h"
 #include "DNA_userdef_types.h"
 
+#include "BKE_sdf.hh"
+
 #include "GPU_batch.hh"
 #include "GPU_shader.hh"
 #include "GPU_state.hh"
@@ -29,6 +35,106 @@
 #include "GPU_uniform_buffer.hh"
 
 namespace blender::draw::overlay {
+
+static inline uint64_t sdf_polygon_proxy_hash(const SDF *sdf)
+{
+  uint64_t h = uint64_t(sdf->totpolygon);
+  LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf->polygon_points) {
+    uint32_t bx, by, bc;
+    memcpy(&bx, &pt->co[0], 4);
+    memcpy(&by, &pt->co[1], 4);
+    memcpy(&bc, &pt->corner, 4);
+    h = h * 31 + bx;
+    h = h * 31 + by;
+    h = h * 31 + bc;
+  }
+  return h;
+}
+
+static inline gpu::Batch *sdf_polygon_proxy_ensure(const SDF *sdf)
+{
+  if (sdf->totpolygon < 3 || !sdf->runtime) {
+    return nullptr;
+  }
+
+  uint64_t hash = sdf_polygon_proxy_hash(sdf);
+  if (sdf->runtime->proxy_batch && sdf->runtime->proxy_hash == hash) {
+    return static_cast<gpu::Batch *>(sdf->runtime->proxy_batch);
+  }
+
+  if (sdf->runtime->proxy_batch) {
+    GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
+    sdf->runtime->proxy_batch = nullptr;
+  }
+
+  /* Compute 2D AABB of polygon points. */
+  float2 bb_min(FLT_MAX);
+  float2 bb_max(-FLT_MAX);
+  LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf->polygon_points) {
+    bb_min.x = math::min(bb_min.x, pt->co[0]);
+    bb_min.y = math::min(bb_min.y, pt->co[1]);
+    bb_max.x = math::max(bb_max.x, pt->co[0]);
+    bb_max.y = math::max(bb_max.y, pt->co[1]);
+  }
+
+  /* Box mesh from AABB, z in [-1, 1]. */
+  float x0 = bb_min.x, x1 = bb_max.x;
+  float y0 = bb_min.y, y1 = bb_max.y;
+
+  Vector<VertexPos> verts;
+  /* Front face (y = y1). */
+  verts.append({{x0, y1, -1.0f}});
+  verts.append({{x1, y1, -1.0f}});
+  verts.append({{x1, y1, 1.0f}});
+  verts.append({{x0, y1, -1.0f}});
+  verts.append({{x1, y1, 1.0f}});
+  verts.append({{x0, y1, 1.0f}});
+  /* Back face (y = y0). */
+  verts.append({{x1, y0, -1.0f}});
+  verts.append({{x0, y0, -1.0f}});
+  verts.append({{x0, y0, 1.0f}});
+  verts.append({{x1, y0, -1.0f}});
+  verts.append({{x0, y0, 1.0f}});
+  verts.append({{x1, y0, 1.0f}});
+  /* Right face (x = x1). */
+  verts.append({{x1, y0, -1.0f}});
+  verts.append({{x1, y1, -1.0f}});
+  verts.append({{x1, y1, 1.0f}});
+  verts.append({{x1, y0, -1.0f}});
+  verts.append({{x1, y1, 1.0f}});
+  verts.append({{x1, y0, 1.0f}});
+  /* Left face (x = x0). */
+  verts.append({{x0, y1, -1.0f}});
+  verts.append({{x0, y0, -1.0f}});
+  verts.append({{x0, y0, 1.0f}});
+  verts.append({{x0, y1, -1.0f}});
+  verts.append({{x0, y0, 1.0f}});
+  verts.append({{x0, y1, 1.0f}});
+  /* Top face (z = 1). */
+  verts.append({{x0, y0, 1.0f}});
+  verts.append({{x0, y1, 1.0f}});
+  verts.append({{x1, y1, 1.0f}});
+  verts.append({{x0, y0, 1.0f}});
+  verts.append({{x1, y1, 1.0f}});
+  verts.append({{x1, y0, 1.0f}});
+  /* Bottom face (z = -1). */
+  verts.append({{x0, y1, -1.0f}});
+  verts.append({{x0, y0, -1.0f}});
+  verts.append({{x1, y0, -1.0f}});
+  verts.append({{x0, y1, -1.0f}});
+  verts.append({{x1, y0, -1.0f}});
+  verts.append({{x1, y1, -1.0f}});
+
+  gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(VertexPos::format());
+  GPU_vertbuf_data_alloc(*vbo, verts.size());
+  vbo->data<VertexPos>().copy_from(verts);
+
+  gpu::Batch *batch = GPU_batch_create_ex(
+      GPU_PRIM_TRIS, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+  sdf->runtime->proxy_batch = batch;
+  sdf->runtime->proxy_hash = hash;
+  return batch;
+}
 
 /**
  * Display selected object outline.
@@ -224,7 +330,7 @@ class Outline : Overlay {
             break;
           case SDF_TYPE_SPHERE:
             scale = float3(sdf->size[0] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sphere_low_detail.get());
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
             break;
           case SDF_TYPE_CYLINDER:
             scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
@@ -249,13 +355,22 @@ class Outline : Overlay {
             sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_torus_solid.get());
             break;
           }
-          case SDF_TYPE_NGON:
+          case SDF_TYPE_NGON: {
+            int idx = math::clamp(sdf->ngon_sides - ShapeCache::sdf_ngon_min_sides,
+                                  0,
+                                  ShapeCache::sdf_ngon_max_sides - ShapeCache::sdf_ngon_min_sides);
             scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_cylinder_solid.get());
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_ngon_solids[idx].get());
             break;
+          }
+          case SDF_TYPE_POLYGON: {
+            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
+            sdf_geom = sdf_polygon_proxy_ensure(sdf);
+            break;
+          }
           default:
             scale = float3(sdf->size[0] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sphere_low_detail.get());
+            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
             break;
         }
         if (sdf_geom) {

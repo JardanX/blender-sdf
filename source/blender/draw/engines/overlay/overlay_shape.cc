@@ -924,9 +924,49 @@ ShapeCache::ShapeCache()
     sphere_low_detail = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
   }
+  /* SDF solid sphere: UV sphere, radius 1 (VertexPos format). */
+  {
+    constexpr int lat_seg = 32;
+    constexpr int lon_seg = 24;
+    const float pi = math::numbers::pi;
+    const float pi2 = 2.0f * pi;
+    Vector<VertexPos> verts;
+
+    for (int i = 0; i < lat_seg; i++) {
+      float u0 = pi2 * float(i) / float(lat_seg);
+      float u1 = pi2 * float(i + 1) / float(lat_seg);
+      float cu0 = math::cos(u0), su0 = math::sin(u0);
+      float cu1 = math::cos(u1), su1 = math::sin(u1);
+
+      for (int j = 0; j < lon_seg; j++) {
+        float v0 = pi * float(j) / float(lon_seg) - pi * 0.5f;
+        float v1 = pi * float(j + 1) / float(lon_seg) - pi * 0.5f;
+        float cv0 = math::cos(v0), sv0 = math::sin(v0);
+        float cv1 = math::cos(v1), sv1 = math::sin(v1);
+
+        float3 p00 = {cv0 * cu0, cv0 * su0, sv0};
+        float3 p10 = {cv0 * cu1, cv0 * su1, sv0};
+        float3 p01 = {cv1 * cu0, cv1 * su0, sv1};
+        float3 p11 = {cv1 * cu1, cv1 * su1, sv1};
+
+        if (j != 0) {
+          verts.append({p00});
+          verts.append({p10});
+          verts.append({p01});
+        }
+        if (j != lon_seg - 1) {
+          verts.append({p01});
+          verts.append({p10});
+          verts.append({p11});
+        }
+      }
+    }
+    sdf_sphere_solid = BatchPtr(
+        GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
   /* SDF solid cylinder: radius 1, z in [-1, 1], capped. */
   {
-    constexpr int segments = 24;
+    constexpr int segments = 32;
     const float pi2 = 2.0f * math::numbers::pi;
     Vector<VertexPos> verts;
 
@@ -936,7 +976,6 @@ ShapeCache::ShapeCache()
       float c0 = math::cos(a0), s0 = math::sin(a0);
       float c1 = math::cos(a1), s1 = math::sin(a1);
 
-      /* Side quad as two triangles. */
       verts.append({{c0, s0, -1.0f}});
       verts.append({{c1, s1, -1.0f}});
       verts.append({{c0, s0, 1.0f}});
@@ -944,12 +983,10 @@ ShapeCache::ShapeCache()
       verts.append({{c1, s1, -1.0f}});
       verts.append({{c1, s1, 1.0f}});
 
-      /* Top cap fan triangle. */
       verts.append({{0.0f, 0.0f, 1.0f}});
       verts.append({{c0, s0, 1.0f}});
       verts.append({{c1, s1, 1.0f}});
 
-      /* Bottom cap fan triangle. */
       verts.append({{0.0f, 0.0f, -1.0f}});
       verts.append({{c1, s1, -1.0f}});
       verts.append({{c0, s0, -1.0f}});
@@ -959,7 +996,7 @@ ShapeCache::ShapeCache()
   }
   /* SDF solid cone: base radius 1 at z=-1, apex at z=1. */
   {
-    constexpr int segments = 24;
+    constexpr int segments = 32;
     const float pi2 = 2.0f * math::numbers::pi;
     Vector<VertexPos> verts;
 
@@ -969,12 +1006,10 @@ ShapeCache::ShapeCache()
       float c0 = math::cos(a0), s0 = math::sin(a0);
       float c1 = math::cos(a1), s1 = math::sin(a1);
 
-      /* Side triangle to apex. */
       verts.append({{c0, s0, -1.0f}});
       verts.append({{c1, s1, -1.0f}});
       verts.append({{0.0f, 0.0f, 1.0f}});
 
-      /* Base cap fan triangle. */
       verts.append({{0.0f, 0.0f, -1.0f}});
       verts.append({{c1, s1, -1.0f}});
       verts.append({{c0, s0, -1.0f}});
@@ -984,8 +1019,8 @@ ShapeCache::ShapeCache()
   }
   /* SDF solid capsule: radius 1, cylinder z in [-1, 1], hemisphere caps. */
   {
-    constexpr int seg = 16;
-    constexpr int ring_count = 8;
+    constexpr int seg = 24;
+    constexpr int ring_count = 12;
     const float pi2 = 2.0f * math::numbers::pi;
     const float pi_half = math::numbers::pi * 0.5f;
     Vector<VertexPos> verts;
@@ -1049,8 +1084,8 @@ ShapeCache::ShapeCache()
   }
   /* SDF solid torus: major radius 1, minor radius 1 (scaled at draw time). */
   {
-    constexpr int major_seg = 24;
-    constexpr int minor_seg = 12;
+    constexpr int major_seg = 32;
+    constexpr int minor_seg = 16;
     const float pi2 = 2.0f * math::numbers::pi;
     Vector<VertexPos> verts;
 
@@ -1081,6 +1116,39 @@ ShapeCache::ShapeCache()
     }
     sdf_torus_solid = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
+  /* SDF N-Gon prisms: regular n-sided prisms for sides 3–32. */
+  {
+    const float pi2 = 2.0f * math::numbers::pi;
+    for (int sides = sdf_ngon_min_sides; sides <= sdf_ngon_max_sides; sides++) {
+      Vector<VertexPos> verts;
+      for (int i = 0; i < sides; i++) {
+        float a0 = pi2 * float(i) / float(sides);
+        float a1 = pi2 * float(i + 1) / float(sides);
+        float c0 = math::cos(a0), s0 = math::sin(a0);
+        float c1 = math::cos(a1), s1 = math::sin(a1);
+
+        /* Side quad. */
+        verts.append({{c0, s0, -1.0f}});
+        verts.append({{c1, s1, -1.0f}});
+        verts.append({{c0, s0, 1.0f}});
+        verts.append({{c0, s0, 1.0f}});
+        verts.append({{c1, s1, -1.0f}});
+        verts.append({{c1, s1, 1.0f}});
+
+        /* Top cap fan. */
+        verts.append({{0.0f, 0.0f, 1.0f}});
+        verts.append({{c0, s0, 1.0f}});
+        verts.append({{c1, s1, 1.0f}});
+
+        /* Bottom cap fan. */
+        verts.append({{0.0f, 0.0f, -1.0f}});
+        verts.append({{c1, s1, -1.0f}});
+        verts.append({{c0, s0, -1.0f}});
+      }
+      sdf_ngon_solids[sides - sdf_ngon_min_sides] = BatchPtr(GPU_batch_create_ex(
+          GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+    }
   }
   /* ground line */
   {

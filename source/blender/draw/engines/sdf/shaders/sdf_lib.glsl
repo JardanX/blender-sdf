@@ -718,7 +718,7 @@ float opChamferSubtraction(float d1, float d2, float r)
 
 float opSmoothChamferUnion(float d1, float d2, float k, float k2, float k3)
 {
-  float chamfer_plane = (d1 + d2 - k) * 0.70710678f;
+  float chamfer_plane = (d1 + d2 - k) * 0.5f;
   float term1 = opSmoothUnion(d1, chamfer_plane, k2);
   float term2 = opSmoothUnion(d2, chamfer_plane, k3);
   return min(term1, term2);
@@ -728,7 +728,7 @@ float opSmoothChamferSubtraction(float d1, float d2, float k, float k2, float k3
 {
   float A = -d1;
   float B = d2;
-  float chamfer_plane = (A + B + k) * 0.70710678f;
+  float chamfer_plane = (A + B + k) * 0.5f;
   float term1 = opSmoothIntersection(A, chamfer_plane, k2);
   float term2 = opSmoothIntersection(B, chamfer_plane, k3);
   return max(term1, term2);
@@ -736,7 +736,7 @@ float opSmoothChamferSubtraction(float d1, float d2, float k, float k2, float k3
 
 float opSmoothChamferIntersection(float d1, float d2, float k, float k2, float k3)
 {
-  float chamfer_plane = (d1 + d2 + k) * 0.70710678f;
+  float chamfer_plane = (d1 + d2 + k) * 0.5f;
   float term1 = opSmoothIntersection(d1, chamfer_plane, k2);
   float term2 = opSmoothIntersection(d2, chamfer_plane, k3);
   return max(term1, term2);

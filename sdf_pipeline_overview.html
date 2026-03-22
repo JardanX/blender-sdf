@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: landscape; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    color: #1a1a1a;
+    background: #fff;
+    padding: 30px 40px 20px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    letter-spacing: -0.3px;
+  }
+  .subtitle {
+    font-size: 11px;
+    color: #666;
+    margin-bottom: 16px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  th {
+    background: #1a1a1a;
+    color: #fff;
+    font-weight: 600;
+    font-size: 10.5px;
+    text-align: left;
+    padding: 6px 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #e0e0e0;
+    vertical-align: top;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  tr:last-child td { border-bottom: 2px solid #1a1a1a; }
+  col.pass { width: 12%; }
+  col.dispatch { width: 19%; }
+  col.workgroup { width: 10%; }
+  col.output { width: 22%; }
+  col.desc { width: 37%; }
+  .mono { font-family: 'Consolas', 'SF Mono', monospace; font-size: 10.5px; }
+  .note {
+    margin-top: 14px;
+    font-size: 10px;
+    color: #888;
+    line-height: 1.45;
+  }
+  .pass-num { font-weight: 600; }
+  .optional { color: #888; font-style: italic; font-size: 10px; }
+  .barrier {
+    text-align: center;
+    font-size: 9px;
+    color: #bbb;
+    letter-spacing: 1.5px;
+    padding: 2px 0;
+    border-bottom: 1px dashed #ddd;
+  }
+  .barrier td { padding: 2px 0; }
+</style>
+</head>
+<body>
+
+<h1>SDF Frame Pipeline Overview</h1>
+<div class="subtitle">MathOPS SDF Engine &mdash; Blender 5.0 Fork &mdash; GPU Compute Pipeline</div>
+
+<table>
+  <colgroup>
+    <col class="pass">
+    <col class="dispatch">
+    <col class="workgroup">
+    <col class="output">
+    <col class="desc">
+  </colgroup>
+  <thead>
+    <tr>
+      <th>Pass</th>
+      <th>Dispatch</th>
+      <th>Workgroup</th>
+      <th>Output</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="pass-num">1. Tile Cull</span></td>
+      <td class="mono">(tilesX, tilesY, 1)</td>
+      <td class="mono">(8, 8, 1)</td>
+      <td class="mono">tile_prim_counts[]<br>tile_prim_lists[]</td>
+      <td>Frustum-tests each SDF object's AABB against 8&times;8 screen tiles. Builds per-tile primitive lists so later passes skip irrelevant objects.</td>
+    </tr>
+    <tr class="barrier"><td colspan="5">&mdash; SHADER_STORAGE barrier &mdash;</td></tr>
+    <tr>
+      <td><span class="pass-num">2. Cone March</span><br><span class="optional">(optional)</span></td>
+      <td class="mono">(&lceil;tilesX/8&rceil;, &lceil;tilesY/8&rceil;, 1)</td>
+      <td class="mono">(8, 8, 1)</td>
+      <td class="mono">tile_hit_pos[]<br>tile_far_hint[]</td>
+      <td>Coarse cone trace per tile &mdash; wide aperture, few steps. Finds approximate hit distance so the fine trace can skip empty space.</td>
+    </tr>
+    <tr class="barrier"><td colspan="5">&mdash; SHADER_STORAGE barrier &mdash;</td></tr>
+    <tr>
+      <td><span class="pass-num">3. Sphere Trace</span></td>
+      <td class="mono">(W/8, H/8, 1)</td>
+      <td class="mono">(8, 8, 1)</td>
+      <td class="mono">gbuf_pos&nbsp;&nbsp;&nbsp;(f32&times;4)<br>gbuf_color (f16&times;4)</td>
+      <td>Per-pixel sphere tracing with over-relaxation. Evaluates SDF primitives, CSG ops, smooth blends, and modifiers. Reads tile lists + cone hints. Outputs G-buffer.</td>
+    </tr>
+    <tr class="barrier"><td colspan="5">&mdash; IMAGE_ACCESS barrier &mdash;</td></tr>
+    <tr>
+      <td><span class="pass-num">4. Shade</span></td>
+      <td class="mono">(W/8, H/8, 1)</td>
+      <td class="mono">(8, 8, 1)</td>
+      <td class="mono">out_color (f16&times;4)<br>out_depth (f32)</td>
+      <td>Reads G-buffer, computes best-fit triangle normals from neighbor positions (same-object-ID preference to avoid CSG bleed). Applies studio lighting (4-light rig), matcap, or flat shading. Writes final color + depth.</td>
+    </tr>
+    <tr class="barrier"><td colspan="5">&mdash; TEXTURE_FETCH barrier &mdash;</td></tr>
+    <tr>
+      <td><span class="pass-num">5. Blit</span></td>
+      <td class="mono">drawArrays(3)</td>
+      <td>N/A</td>
+      <td class="mono">Framebuffer</td>
+      <td>Full-screen triangle. Samples color + depth textures, composites into Blender's viewport with depth testing (SDF &harr; mesh occlusion).</td>
+    </tr>
+    <tr>
+      <td><span class="pass-num">6. FXAA</span><br><span class="optional">(optional)</span></td>
+      <td class="mono">drawArrays(3)</td>
+      <td>N/A</td>
+      <td class="mono">Framebuffer</td>
+      <td>Post-process anti-aliasing. Smooths per-pixel ray march jaggies via intermediate texture + alpha blit.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>W, H</strong> = render resolution (viewport &times; resolution scale). &nbsp;
+  <strong>tilesX, tilesY</strong> = &lceil;W/8&rceil;, &lceil;H/8&rceil;. &nbsp;
+  All compute shaders use 8&times;8 workgroups (64 threads). &nbsp;
+  BVH (SAH AABB tree) built on CPU, uploaded as SSBO &mdash; sphere trace uses it for O(log N) spatial queries. &nbsp;
+  Adaptive resolution renders at lower res during navigation, refines when stationary.
+</div>
+
+</body>
+</html>

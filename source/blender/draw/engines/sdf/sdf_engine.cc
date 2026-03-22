@@ -189,6 +189,9 @@ class Instance : public DrawEngine {
   float sdf_cone_aperture_ = 1.25f;
   int sdf_cone_steps_ = 16;
 
+  float4 frustum_planes_[6];
+  bool frustum_valid_ = false;
+
   float4 studio_light_dir_[4] = {};
   float4 studio_light_col_[4] = {};
   float4 studio_light_spec_[4] = {};
@@ -238,6 +241,7 @@ class Instance : public DrawEngine {
     max_blend_ = 0.0f;
     max_shell_distance_ = 0.0f;
     step_factor_ = 0.85f;
+    frustum_valid_ = false;
   }
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
@@ -255,6 +259,23 @@ class Instance : public DrawEngine {
     const SDF *sdf_data = static_cast<const SDF *>(ob->data);
     if (sdf_data == nullptr) {
       return;
+    }
+
+    if (!frustum_valid_) {
+      const View &view = View::default_get();
+      float4x4 vp = view.winmat() * view.viewmat();
+      for (int i = 0; i < 4; i++) {
+        frustum_planes_[0][i] = vp[i][3] + vp[i][0];
+        frustum_planes_[1][i] = vp[i][3] - vp[i][0];
+        frustum_planes_[2][i] = vp[i][3] + vp[i][1];
+        frustum_planes_[3][i] = vp[i][3] - vp[i][1];
+        frustum_planes_[4][i] = vp[i][3] + vp[i][2];
+        frustum_planes_[5][i] = vp[i][3] - vp[i][2];
+      }
+      for (int p = 0; p < 6; p++) {
+        frustum_planes_[p] /= math::length(float3(frustum_planes_[p]));
+      }
+      frustum_valid_ = true;
     }
 
     const float4x4 &mat = ob->object_to_world();
@@ -306,6 +327,235 @@ class Instance : public DrawEngine {
     gpu_obj.shell_blend_bottom = sdf_data->shell_blend_bottom;
     gpu_obj.chamfer_k2 = sdf_data->chamfer_k2;
     gpu_obj.chamfer_k3 = sdf_data->chamfer_k3;
+
+    /* Early AABB + frustum cull (before expensive polygon/modifier work) */
+    {
+      float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
+                               fabsf(sdf_data->shell_distance) :
+                               0.0f;
+      float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
+      float aabb_pad = blend_pad + shell_expand;
+      float3 local_extent;
+      float3 sz = float3(gpu_obj.sdf_size);
+      switch (sdf_data->sdf_type) {
+        case SDF_TYPE_CAPSULE: {
+          float r = sz.x;
+          float h = math::max(sz.y - bevel, 0.0f);
+          local_extent = float3(r + aabb_pad, r + aabb_pad, h + r + aabb_pad);
+          break;
+        }
+        case SDF_TYPE_CYLINDER:
+          local_extent = sz + float3(bevel + aabb_pad);
+          break;
+        case SDF_TYPE_CONE: {
+          float r = sz.x;
+          float h = sz.y;
+          local_extent = float3(r + bevel + aabb_pad, r + bevel + aabb_pad, h + bevel + aabb_pad);
+          break;
+        }
+        case SDF_TYPE_TORUS: {
+          float outer = sz.x + sz.y;
+          local_extent = float3(outer + aabb_pad, outer + aabb_pad, sz.y + aabb_pad);
+          break;
+        }
+        case SDF_TYPE_NGON: {
+          float r = sz.x;
+          local_extent = float3(r + bevel + aabb_pad, r + bevel + aabb_pad, sz.z + bevel + aabb_pad);
+          break;
+        }
+        case SDF_TYPE_POLYGON: {
+          float ps = math::min(scale.x, scale.y);
+          float max_xy = 0.0f;
+          LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+            max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
+            max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
+          }
+          local_extent = float3(
+              max_xy + bevel + aabb_pad, max_xy + bevel + aabb_pad, sz.z + bevel + aabb_pad);
+          break;
+        }
+        default:
+          local_extent = sz + float3(bevel + aabb_pad);
+          break;
+      }
+
+      LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+        if (!mod->show_viewport) {
+          continue;
+        }
+        switch (mod->type) {
+          case SDF_MOD_MIRROR: {
+            float offset = fabsf(mod->params[0]);
+            float3 world_org;
+            if (mod->mirror_ob != nullptr) {
+              const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
+              world_org = float3(mirror_mat[3]) - float3(mat[3]);
+            }
+            else {
+              world_org = float3(mod->params[1], mod->params[2], mod->params[3]);
+            }
+            float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
+            if ((mod->flag & SDF_MOD_MIRROR_X) != 0) {
+              float3 N = float3(inv_rot[0]);
+              float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+              local_extent += math::abs(N) * disp;
+            }
+            if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) {
+              float3 N = float3(inv_rot[1]);
+              float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+              local_extent += math::abs(N) * disp;
+            }
+            if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) {
+              float3 N = float3(inv_rot[2]);
+              float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+              local_extent += math::abs(N) * disp;
+            }
+            break;
+          }
+          case SDF_MOD_ELONGATE:
+            local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
+            break;
+          case SDF_MOD_HOLLOW:
+          case SDF_MOD_ONION:
+            local_extent += float3(mod->params[0]);
+            break;
+          case SDF_MOD_ROUND:
+            local_extent += float3(mod->params[0]);
+            break;
+          case SDF_MOD_TWIST: {
+            float xy = math::sqrt(local_extent.x * local_extent.x +
+                                  local_extent.y * local_extent.y);
+            local_extent.x = xy;
+            local_extent.y = xy;
+            break;
+          }
+          case SDF_MOD_BEND: {
+            float k = mod->params[0];
+            int axis = (int)mod->params[1];
+            if (fabsf(k) > 0.0001f) {
+              float R = 1.0f / k;
+              float3 new_ext = float3(0.0f);
+              for (int c = 0; c < 8; c++) {
+                float cx = (c & 1) ? local_extent.x : -local_extent.x;
+                float cy = (c & 2) ? local_extent.y : -local_extent.y;
+                float cz = (c & 4) ? local_extent.z : -local_extent.z;
+                float drive, curve, free_val;
+                if (axis == 1) {
+                  drive = cy; curve = cz; free_val = cx;
+                }
+                else if (axis == 2) {
+                  drive = cz; curve = cx; free_val = cy;
+                }
+                else {
+                  drive = cx; curve = cy; free_val = cz;
+                }
+                float theta = k * drive;
+                float bd = (R + curve) * sinf(theta);
+                float bc = -R + (R + curve) * cosf(theta);
+                float3 bent;
+                if (axis == 1) {
+                  bent = float3(fabsf(free_val), fabsf(bd), fabsf(bc));
+                }
+                else if (axis == 2) {
+                  bent = float3(fabsf(bc), fabsf(free_val), fabsf(bd));
+                }
+                else {
+                  bent = float3(fabsf(bd), fabsf(bc), fabsf(free_val));
+                }
+                new_ext = math::max(new_ext, bent);
+              }
+              float drive_ext = (axis == 0) ? local_extent.x :
+                                (axis == 1) ? local_extent.y :
+                                              local_extent.z;
+              float curve_ext = (axis == 0) ? local_extent.y :
+                                (axis == 1) ? local_extent.z :
+                                              local_extent.x;
+              float max_angle = fabsf(k) * drive_ext;
+              if (max_angle > float(M_PI_2)) {
+                float outer_r = fabsf(R) + curve_ext;
+                if (axis == 0) {
+                  new_ext.x = math::max(new_ext.x, outer_r);
+                }
+                else if (axis == 1) {
+                  new_ext.y = math::max(new_ext.y, outer_r);
+                }
+                else {
+                  new_ext.z = math::max(new_ext.z, outer_r);
+                }
+              }
+              local_extent = new_ext;
+            }
+            break;
+          }
+          case SDF_MOD_ARRAY: {
+            float count = mod->params[0];
+            if (count > 0.5f) {
+              if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
+                float3 offset = float3(mod->params[1], mod->params[2], mod->params[3]);
+                local_extent += math::abs(offset) * (count - 1.0f);
+              }
+              else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
+                float radius = mod->params[1];
+                local_extent.x += radius;
+                local_extent.y += radius;
+              }
+            }
+            break;
+          }
+          default:
+            break;
+        }
+      }
+
+      float3 world_min = float3(1e30f);
+      float3 world_max = float3(-1e30f);
+      for (int corner = 0; corner < 8; corner++) {
+        float3 lc = float3((corner & 1) ? local_extent.x : -local_extent.x,
+                           (corner & 2) ? local_extent.y : -local_extent.y,
+                           (corner & 4) ? local_extent.z : -local_extent.z);
+        float3 wc = float3(rot_mat * float4(lc, 0.0f)) +
+                     float3(mat[3].x, mat[3].y, mat[3].z);
+        world_min = math::min(world_min, wc);
+        world_max = math::max(world_max, wc);
+      }
+
+      gpu_obj.bbox_min = float4(world_min, 0.0f);
+      gpu_obj.bbox_max = float4(world_max, 0.0f);
+
+      float sphere_radius = math::length(local_extent);
+      float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
+      scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
+      scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
+
+      /* Frustum test — cull objects whose padded AABB is entirely outside */
+      {
+        float group_pad = 0.0f;
+        if (sdf_data->sdf_group != nullptr) {
+          const SDFGroup *grp = sdf_data->sdf_group;
+          float gb = (grp->csg_operation == SDF_CSG_SHELL)
+                         ? std::max(grp->shell_blend_top, grp->shell_blend_bottom)
+                         : grp->blend;
+          group_pad = gb + fabsf(grp->shell_distance);
+        }
+        float3 pad_min = world_min - float3(group_pad);
+        float3 pad_max = world_max + float3(group_pad);
+        bool outside = false;
+        for (int p = 0; p < 6; p++) {
+          float3 n(frustum_planes_[p]);
+          float d = frustum_planes_[p].w;
+          float3 pos_vertex(n.x > 0 ? pad_max.x : pad_min.x,
+                            n.y > 0 ? pad_max.y : pad_min.y,
+                            n.z > 0 ? pad_max.z : pad_min.z);
+          if (math::dot(n, pos_vertex) + d < 0.0f) {
+            outside = true;
+            break;
+          }
+        }
+        if (outside) {
+          return;
+        }
+      }
+    }
 
     gpu_obj.group_id = -1;
     gpu_obj.group_first = 0;
@@ -503,215 +753,10 @@ class Instance : public DrawEngine {
       gpu_obj.modifier_count++;
     }
 
-    /* Compute AABB */
-    float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
-                             fabsf(sdf_data->shell_distance) :
-                             0.0f;
-    float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
-    float pad = blend_pad + shell_expand;
-    float3 local_extent;
-    float3 sz = float3(gpu_obj.sdf_size);
-    switch (sdf_data->sdf_type) {
-      case SDF_TYPE_CAPSULE: {
-        float r = sz.x;
-        float h = math::max(sz.y - bevel, 0.0f);
-        local_extent = float3(r + pad, r + pad, h + r + pad);
-        break;
-      }
-      case SDF_TYPE_CYLINDER: {
-        local_extent = sz + float3(bevel + pad);
-        break;
-      }
-      case SDF_TYPE_CONE: {
-        float r = sz.x;
-        float h = sz.y;
-        local_extent = float3(r + bevel + pad, r + bevel + pad, h + bevel + pad);
-        break;
-      }
-      case SDF_TYPE_TORUS: {
-        float outer = sz.x + sz.y;
-        local_extent = float3(outer + pad, outer + pad, sz.y + pad);
-        break;
-      }
-      case SDF_TYPE_NGON: {
-        float r = sz.x;
-        local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
-        break;
-      }
-      case SDF_TYPE_POLYGON: {
-        float ps = math::min(scale.x, scale.y);
-        float max_xy = 0.0f;
-        LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
-          max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
-          max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
-        }
-        local_extent = float3(
-            max_xy + bevel + pad, max_xy + bevel + pad, sz.z + bevel + pad);
-        break;
-      }
-      default:
-        local_extent = sz + float3(bevel + pad);
-        break;
-    }
-
-    /* Expand for domain modifiers */
-    LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
-      if (!mod->show_viewport) {
-        continue;
-      }
-      switch (mod->type) {
-        case SDF_MOD_MIRROR: {
-          float offset = fabsf(mod->params[0]);
-          float3 world_org;
-          if (mod->mirror_ob != nullptr) {
-            const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
-            world_org = float3(mirror_mat[3]) - float3(mat[3]);
-          }
-          else {
-            world_org = float3(mod->params[1], mod->params[2], mod->params[3]);
-          }
-          float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
-          if ((mod->flag & SDF_MOD_MIRROR_X) != 0) {
-            float3 N = float3(inv_rot[0]);
-            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
-            local_extent += math::abs(N) * disp;
-          }
-          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) {
-            float3 N = float3(inv_rot[1]);
-            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
-            local_extent += math::abs(N) * disp;
-          }
-          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) {
-            float3 N = float3(inv_rot[2]);
-            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
-            local_extent += math::abs(N) * disp;
-          }
-          break;
-        }
-        case SDF_MOD_ELONGATE:
-          local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
-          break;
-        case SDF_MOD_HOLLOW:
-        case SDF_MOD_ONION:
-          local_extent += float3(mod->params[0]);
-          break;
-        case SDF_MOD_ROUND:
-          local_extent += float3(mod->params[0]);
-          break;
-        case SDF_MOD_TWIST: {
-          float xy = math::sqrt(local_extent.x * local_extent.x +
-                                local_extent.y * local_extent.y);
-          local_extent.x = xy;
-          local_extent.y = xy;
-          break;
-        }
-        case SDF_MOD_BEND: {
-          float k = mod->params[0];
-          int axis = (int)mod->params[1];
-          if (fabsf(k) > 0.0001f) {
-            float R = 1.0f / k;
-            float3 new_ext = float3(0.0f);
-            for (int c = 0; c < 8; c++) {
-              float cx = (c & 1) ? local_extent.x : -local_extent.x;
-              float cy = (c & 2) ? local_extent.y : -local_extent.y;
-              float cz = (c & 4) ? local_extent.z : -local_extent.z;
-              float drive, curve, free_val;
-              if (axis == 1) {
-                drive = cy;
-                curve = cz;
-                free_val = cx;
-              }
-              else if (axis == 2) {
-                drive = cz;
-                curve = cx;
-                free_val = cy;
-              }
-              else {
-                drive = cx;
-                curve = cy;
-                free_val = cz;
-              }
-              float theta = k * drive;
-              float bd = (R + curve) * sinf(theta);
-              float bc = -R + (R + curve) * cosf(theta);
-              float3 bent;
-              if (axis == 1) {
-                bent = float3(fabsf(free_val), fabsf(bd), fabsf(bc));
-              }
-              else if (axis == 2) {
-                bent = float3(fabsf(bc), fabsf(free_val), fabsf(bd));
-              }
-              else {
-                bent = float3(fabsf(bd), fabsf(bc), fabsf(free_val));
-              }
-              new_ext = math::max(new_ext, bent);
-            }
-            float drive_ext = (axis == 0) ? local_extent.x :
-                              (axis == 1) ? local_extent.y :
-                                            local_extent.z;
-            float curve_ext = (axis == 0) ? local_extent.y :
-                              (axis == 1) ? local_extent.z :
-                                            local_extent.x;
-            float max_angle = fabsf(k) * drive_ext;
-            if (max_angle > float(M_PI_2)) {
-              float outer_r = fabsf(R) + curve_ext;
-              if (axis == 0) {
-                new_ext.x = math::max(new_ext.x, outer_r);
-              }
-              else if (axis == 1) {
-                new_ext.y = math::max(new_ext.y, outer_r);
-              }
-              else {
-                new_ext.z = math::max(new_ext.z, outer_r);
-              }
-            }
-            local_extent = new_ext;
-          }
-          break;
-        }
-        case SDF_MOD_ARRAY: {
-          float count = mod->params[0];
-          if (count > 0.5f) {
-            if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
-              float3 offset = float3(mod->params[1], mod->params[2], mod->params[3]);
-              local_extent += math::abs(offset) * (count - 1.0f);
-            }
-            else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
-              float radius = mod->params[1];
-              local_extent.x += radius;
-              local_extent.y += radius;
-            }
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    }
-
-    /* Transform local AABB to world */
-    float3 world_min = float3(1e30f);
-    float3 world_max = float3(-1e30f);
-    for (int corner = 0; corner < 8; corner++) {
-      float3 local_corner = float3((corner & 1) ? local_extent.x : -local_extent.x,
-                                   (corner & 2) ? local_extent.y : -local_extent.y,
-                                   (corner & 4) ? local_extent.z : -local_extent.z);
-      float3 world_corner = float3(rot_mat * float4(local_corner, 0.0f)) +
-                            float3(mat[3].x, mat[3].y, mat[3].z);
-      world_min = math::min(world_min, world_corner);
-      world_max = math::max(world_max, world_corner);
-    }
-
-    gpu_obj.bbox_min = float4(world_min, 0.0f);
-    gpu_obj.bbox_max = float4(world_max, 0.0f);
-
-    float sphere_radius = math::length(local_extent);
-    float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
-    scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
-    scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
-
     max_blend_ = math::max(max_blend_, gpu_obj.blend);
-    if (gpu_obj.blend > 0.001f && gpu_obj.blend_type == SDF_BLEND_ROUND) {
+    if (gpu_obj.blend > 0.001f &&
+        (gpu_obj.blend_type == SDF_BLEND_ROUND || gpu_obj.blend_type == SDF_BLEND_CHAMFER))
+    {
       step_factor_ = min_ff(step_factor_, 0.65f);
     }
     if (sdf_data->csg_operation == SDF_CSG_SHELL) {
@@ -770,7 +815,9 @@ class Instance : public DrawEngine {
         float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
                                   ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
                                   : gpu_grp.blend;
-        if (grp_eff_blend > 0.001f && gpu_grp.blend_type == SDF_BLEND_ROUND) {
+        if (grp_eff_blend > 0.001f &&
+            (gpu_grp.blend_type == SDF_BLEND_ROUND || gpu_grp.blend_type == SDF_BLEND_CHAMFER))
+        {
           step_factor_ = min_ff(step_factor_, 0.65f);
         }
         groups_gpu_.append(gpu_grp);
@@ -871,7 +918,147 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Expand AABBs for blend-aware CSG */
+    /* Early frustum cull on pre-expansion AABBs with conservative padding */
+    {
+      float max_expansion = max_blend_ + max_shell_distance_;
+      for (int g = 0; g < int(groups_gpu_.size()); g++) {
+        float gb = (groups_gpu_[g].csg_operation == SDF_CSG_SHELL)
+                       ? std::max(groups_gpu_[g].shell_blend_top,
+                                  groups_gpu_[g].shell_blend_bottom)
+                       : groups_gpu_[g].blend;
+        max_expansion = std::max(max_expansion, gb + fabsf(groups_gpu_[g].shell_distance));
+      }
+
+      const View &view = View::default_get();
+      float4x4 vp = view.winmat() * view.viewmat();
+      float4 planes[6];
+      for (int i = 0; i < 4; i++) {
+        planes[0][i] = vp[i][3] + vp[i][0];
+        planes[1][i] = vp[i][3] - vp[i][0];
+        planes[2][i] = vp[i][3] + vp[i][1];
+        planes[3][i] = vp[i][3] - vp[i][1];
+        planes[4][i] = vp[i][3] + vp[i][2];
+        planes[5][i] = vp[i][3] - vp[i][2];
+      }
+      for (int p = 0; p < 6; p++) {
+        planes[p] /= math::length(float3(planes[p]));
+      }
+
+      for (int i = 0; i < int(objects_.size()); i++) {
+        float3 bmin = float3(objects_[i].bbox_min) - float3(max_expansion);
+        float3 bmax = float3(objects_[i].bbox_max) + float3(max_expansion);
+        bool visible = true;
+        for (int p = 0; p < 6; p++) {
+          float3 n(planes[p]);
+          float d = planes[p].w;
+          float3 pos_vertex(n.x > 0 ? bmax.x : bmin.x,
+                            n.y > 0 ? bmax.y : bmin.y,
+                            n.z > 0 ? bmax.z : bmin.z);
+          if (math::dot(n, pos_vertex) + d < 0.0f) {
+            visible = false;
+            break;
+          }
+        }
+        objects_[i]._pad2 = visible ? 1 : 0;
+      }
+
+      /* Group propagation: if any member visible, keep entire group */
+      for (int g = 0; g < int(groups_gpu_.size()); g++) {
+        int start = groups_gpu_[g].first_object;
+        int count = groups_gpu_[g].object_count;
+        bool any_visible = false;
+        for (int i = start; i < start + count; i++) {
+          if (objects_[i]._pad2 != 0) {
+            any_visible = true;
+            break;
+          }
+        }
+        if (any_visible) {
+          for (int i = start; i < start + count; i++) {
+            objects_[i]._pad2 = 1;
+          }
+        }
+      }
+
+      /* Compact visible objects */
+      int visible_count = 0;
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i]._pad2 != 0) {
+          visible_count++;
+        }
+      }
+
+      if (visible_count < int(objects_.size())) {
+        Vector<SDFObjectGPU> compact_objects;
+        Vector<SDFModifierGPU> compact_modifiers;
+        Vector<SDFPolygonPointGPU> compact_polygon_points;
+        Vector<int> obj_remap(objects_.size(), -1);
+        compact_objects.reserve(visible_count);
+
+        for (int i = 0; i < int(objects_.size()); i++) {
+          if (objects_[i]._pad2 == 0) {
+            continue;
+          }
+          obj_remap[i] = int(compact_objects.size());
+          SDFObjectGPU obj = objects_[i];
+
+          int new_mod_start = int(compact_modifiers.size());
+          for (int m = 0; m < obj.modifier_count; m++) {
+            compact_modifiers.append(modifiers_[obj.modifier_start + m]);
+          }
+          obj.modifier_start = new_mod_start;
+
+          int new_poly_start = int(compact_polygon_points.size());
+          for (int p = 0; p < obj.polygon_point_count; p++) {
+            compact_polygon_points.append(polygon_points_[obj.polygon_point_start + p]);
+          }
+          obj.polygon_point_start = new_poly_start;
+
+          compact_objects.append(obj);
+        }
+
+        Vector<SDFGroupGPU> compact_groups;
+        Vector<int> group_remap(groups_gpu_.size(), -1);
+        for (int g = 0; g < int(groups_gpu_.size()); g++) {
+          int old_start = groups_gpu_[g].first_object;
+          int old_count = groups_gpu_[g].object_count;
+          int new_first = -1;
+          int new_count = 0;
+          for (int i = old_start; i < old_start + old_count; i++) {
+            if (obj_remap[i] >= 0) {
+              if (new_first < 0) {
+                new_first = obj_remap[i];
+              }
+              new_count++;
+            }
+          }
+          if (new_count > 0) {
+            group_remap[g] = int(compact_groups.size());
+            SDFGroupGPU grp = groups_gpu_[g];
+            grp.first_object = new_first;
+            grp.object_count = new_count;
+            compact_groups.append(grp);
+          }
+        }
+
+        for (auto &obj : compact_objects) {
+          if (obj.group_id >= 0) {
+            obj.group_id = group_remap[obj.group_id];
+          }
+        }
+
+        for (int &idx : s_depsgraph_to_sorted) {
+          idx = (idx >= 0 && idx < int(obj_remap.size())) ? obj_remap[idx] : -1;
+        }
+
+        objects_ = std::move(compact_objects);
+        modifiers_ = std::move(compact_modifiers);
+        polygon_points_ = std::move(compact_polygon_points);
+        groups_gpu_ = std::move(compact_groups);
+      }
+    }
+
+    /* Expand AABBs for blend-aware CSG (now runs on visible set only) */
     Vector<float3> new_mins(objects_.size());
     Vector<float3> new_maxs(objects_.size());
     for (int i = 0; i < int(objects_.size()); i++) {
@@ -889,7 +1076,6 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Ungrouped objects */
     for (int i = int(objects_.size()) - 1; i >= ungrouped_start; i--) {
       SDFObjectGPU &obj = objects_[i];
       for (int j = i + 1; j < int(objects_.size()); j++) {
@@ -910,7 +1096,6 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Group bounding boxes */
     Vector<float3> group_mins(groups_gpu_.size(), float3(1e10f));
     Vector<float3> group_maxs(groups_gpu_.size(), float3(-1e10f));
 
@@ -988,26 +1173,25 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
-    /* Frustum culling: mark objects outside camera frustum via _pad0 flag */
+    /* Fine frustum cull on expanded AABBs */
     {
       const View &view = View::default_get();
       float4x4 vp = view.winmat() * view.viewmat();
       float4 planes[6];
-      /* Extract frustum planes from view-projection matrix */
       for (int i = 0; i < 4; i++) {
-        planes[0][i] = vp[i][3] + vp[i][0]; /* left */
-        planes[1][i] = vp[i][3] - vp[i][0]; /* right */
-        planes[2][i] = vp[i][3] + vp[i][1]; /* bottom */
-        planes[3][i] = vp[i][3] - vp[i][1]; /* top */
-        planes[4][i] = vp[i][3] + vp[i][2]; /* near */
-        planes[5][i] = vp[i][3] - vp[i][2]; /* far */
+        planes[0][i] = vp[i][3] + vp[i][0];
+        planes[1][i] = vp[i][3] - vp[i][0];
+        planes[2][i] = vp[i][3] + vp[i][1];
+        planes[3][i] = vp[i][3] - vp[i][1];
+        planes[4][i] = vp[i][3] + vp[i][2];
+        planes[5][i] = vp[i][3] - vp[i][2];
       }
       for (int p = 0; p < 6; p++) {
         planes[p] /= math::length(float3(planes[p]));
       }
       for (int i = 0; i < int(objects_.size()); i++) {
-        float3 bmin = new_mins[i];
-        float3 bmax = new_maxs[i];
+        float3 bmin = float3(objects_[i].bbox_min);
+        float3 bmax = float3(objects_[i].bbox_max);
         bool visible = true;
         for (int p = 0; p < 6; p++) {
           float3 n(planes[p]);
@@ -1024,19 +1208,17 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Recompute scene AABB from final expanded bounds */
+    /* Recompute scene AABB and build BVH from visible objects */
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
+    bvh_tree_.clear();
     for (int i = 0; i < int(objects_.size()); i++) {
       scene_min_ = math::min(scene_min_, float3(objects_[i].bbox_min));
       scene_max_ = math::max(scene_max_, float3(objects_[i].bbox_max));
-    }
 
-    bvh_tree_.clear();
-    for (int i = 0; i < int(objects_.size()); i++) {
       SdfAabb bounds;
-      bounds.min = new_mins[i];
-      bounds.max = new_maxs[i];
+      bounds.min = float3(objects_[i].bbox_min);
+      bounds.max = float3(objects_[i].bbox_max);
       bvh_tree_.create_proxy(bounds, i);
     }
 

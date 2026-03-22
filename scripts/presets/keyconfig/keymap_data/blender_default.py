@@ -1556,7 +1556,7 @@ def km_view3d(params):
             ("view3d.cursor3d", params.cursor_set_event, None),
         ])
 
-    # SDF polygon point placement
+    # SDF polygon point editing
     items.extend([
         ("sdf.polygon_point_add_click", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
     ])
@@ -4499,6 +4499,7 @@ def km_object_mode(params):
         op_menu("OBJECT_MT_link_to_collection", {"type": 'M', "value": 'PRESS', "shift": True}),
         *_template_items_hide_reveal_actions("object.hide_view_set", "object.hide_view_clear"),
         ("object.hide_collection", {"type": 'H', "value": 'PRESS', "ctrl": True}, None),
+        ("sdf.polygon_point_context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
         *_template_items_context_menu("VIEW3D_MT_object_context_menu", params.context_menu_event),
     ])
 

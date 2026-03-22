@@ -32,6 +32,8 @@
 #include "BKE_main.hh"
 #include "BKE_sdf.hh"
 
+#include "GPU_batch.hh"
+
 #include "BLT_translation.hh"
 
 #include "BLO_read_write.hh"
@@ -59,11 +61,8 @@ static void sdf_copy_data(Main *bmain,
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
   BLI_duplicatelist(&sdf_dst->polygon_points, &sdf_src->polygon_points);
   sdf_dst->runtime = new blender::bke::SDFRuntime();
-
-  if (bmain != nullptr && sdf_src->sdf_index > 0) {
-    sdf_dst->sdf_index = sdf_src->sdf_index + 1;
-    BKE_sdf_shift_indices_from(bmain, sdf_dst->sdf_index, sdf_dst);
-  }
+  sdf_dst->runtime->proxy_batch = nullptr;
+  sdf_dst->runtime->proxy_hash = 0;
 }
 
 static void sdf_free_data(ID *id)
@@ -74,6 +73,9 @@ static void sdf_free_data(ID *id)
   BLI_freelistN(&sdf->modifiers);
   BLI_freelistN(&sdf->polygon_points);
   MEM_SAFE_FREE(sdf->mat);
+  if (sdf->runtime && sdf->runtime->proxy_batch) {
+    GPU_batch_discard(static_cast<blender::gpu::Batch *>(sdf->runtime->proxy_batch));
+  }
   delete sdf->runtime;
 }
 
