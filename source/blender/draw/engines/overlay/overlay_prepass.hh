@@ -16,6 +16,8 @@
 
 #include "DNA_sdf_types.h"
 
+#include "BKE_sdf.hh"
+
 #include "overlay_base.hh"
 /* MATHOPS: Removed — Grease Pencil overlay */
 // #include "overlay_grease_pencil.hh"
@@ -285,7 +287,7 @@ class Prepass : Overlay {
             break;
           case SDF_TYPE_SPHERE:
             scale = float3(sdf->size[0] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sphere_low_detail.get());
+            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
             break;
           case SDF_TYPE_CYLINDER:
             scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
@@ -310,13 +312,22 @@ class Prepass : Overlay {
             geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_torus_solid.get());
             break;
           }
-          case SDF_TYPE_NGON:
+          case SDF_TYPE_NGON: {
+            int idx = math::clamp(sdf->ngon_sides - ShapeCache::sdf_ngon_min_sides,
+                                  0,
+                                  ShapeCache::sdf_ngon_max_sides - ShapeCache::sdf_ngon_min_sides);
             scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_cylinder_solid.get());
+            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_ngon_solids[idx].get());
             break;
+          }
+          case SDF_TYPE_POLYGON: {
+            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
+            geom_single = sdf_polygon_proxy_ensure(sdf);
+            break;
+          }
           default:
             scale = float3(sdf->size[0] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sphere_low_detail.get());
+            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
             break;
         }
         float4x4 scaled_mat = float4x4(ob_ref.object->object_to_world()) *

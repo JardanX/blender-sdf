@@ -10,6 +10,7 @@ from bpy.props import EnumProperty, IntProperty
 from mathutils import Matrix, Vector
 
 _CORNER_HANDLE_GAP = 0.15
+_context_point_index = -1
 
 def _no_scale_matrix(ob):
     loc, rot, _sca = ob.matrix_world.decompose()
@@ -251,7 +252,7 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
         was_modal = getattr(self, '_was_modal', False)
         if was_modal and not any_modal:
             bpy.app.timers.register(
-                lambda: bpy.ops.ed.undo_push(message="Edit SDF Polygon") or None,
+                lambda: (bpy.ops.ed.undo_push(message="Edit SDF Polygon"), None)[1],
                 first_interval=0.0)
         self._was_modal = any_modal
 
@@ -542,10 +543,55 @@ class SDF_OT_polygon_point_add(Operator):
         return {'FINISHED'}
 
 
+def _mouse_to_local_xy(context, event):
+    from bpy_extras import view3d_utils
+    region = context.region
+    rv3d = context.region_data
+    coord = (event.mouse_region_x, event.mouse_region_y)
+
+    ray_origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+    view_vector = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+
+    ob = context.object
+    mat_inv = ob.matrix_world.inverted()
+    local_origin = mat_inv @ ray_origin
+    local_dir = (mat_inv @ (ray_origin + view_vector) - local_origin).normalized()
+
+    if abs(local_dir.z) < 1e-6:
+        return None
+    t = -local_origin.z / local_dir.z
+    local_pos = local_origin + local_dir * t
+    return Vector((local_pos.x, local_pos.y))
+
+
+def _nearest_edge_index(sdf, local_xy):
+    pts = sdf.polygon_points
+    n = len(pts)
+    if n < 2:
+        return 0
+    best_dist = float('inf')
+    best_i = 0
+    for i in range(n):
+        a = Vector((pts[i].co[0], pts[i].co[1]))
+        b = Vector((pts[(i + 1) % n].co[0], pts[(i + 1) % n].co[1]))
+        ab = b - a
+        ab_sq = ab.dot(ab)
+        if ab_sq < 1e-12:
+            d = (local_xy - a).length
+        else:
+            t = max(0.0, min(1.0, (local_xy - a).dot(ab) / ab_sq))
+            closest = a + ab * t
+            d = (local_xy - closest).length
+        if d < best_dist:
+            best_dist = d
+            best_i = i
+    return best_i
+
+
 class SDF_OT_polygon_point_add_click(Operator):
-    """Add a polygon point at the clicked position"""
+    """Subdivide the nearest polygon edge at its midpoint"""
     bl_idname = "sdf.polygon_point_add_click"
-    bl_label = "Add Polygon Point at Click"
+    bl_label = "Subdivide Polygon Edge"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -554,27 +600,25 @@ class SDF_OT_polygon_point_add_click(Operator):
         return ob and ob.type == 'SDF' and ob.data and ob.data.sdf_type == 'POLYGON'
 
     def invoke(self, context, event):
-        from bpy_extras import view3d_utils
-        region = context.region
-        rv3d = context.region_data
-        coord = (event.mouse_region_x, event.mouse_region_y)
-
-        ray_origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
-        view_vector = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
-
         ob = context.object
-        mat_inv = ob.matrix_world.inverted()
-        local_origin = mat_inv @ ray_origin
-        local_dir = (mat_inv @ (ray_origin + view_vector) - local_origin).normalized()
-
-        if abs(local_dir.z) < 1e-6:
+        sdf = ob.data
+        local_xy = _mouse_to_local_xy(context, event)
+        if local_xy is None:
             return {'CANCELLED'}
 
-        t = -local_origin.z / local_dir.z
-        local_pos = local_origin + local_dir * t
+        pts = sdf.polygon_points
+        n = len(pts)
+        edge_i = _nearest_edge_index(sdf, local_xy)
 
-        sdf = ob.data
-        sdf.polygon_points.new(x=local_pos.x, y=local_pos.y)
+        a = Vector((pts[edge_i].co[0], pts[edge_i].co[1]))
+        b = Vector((pts[(edge_i + 1) % n].co[0], pts[(edge_i + 1) % n].co[1]))
+        mid = (a + b) * 0.5
+
+        sdf.polygon_points.new(x=mid.x, y=mid.y)
+        last = len(pts) - 1
+        target = edge_i + 1
+        sdf.polygon_points.move(last, target)
+
         ob.data.update_tag()
         return {'FINISHED'}
 
@@ -595,6 +639,82 @@ class SDF_OT_polygon_point_remove(Operator):
         pts = sdf.polygon_points
         if len(pts) > 3:
             pts.remove(pts[-1])
+        return {'FINISHED'}
+
+
+class SDF_OT_polygon_point_remove_index(Operator):
+    """Remove a specific polygon point by index"""
+    bl_idname = "sdf.polygon_point_remove_index"
+    bl_label = "Delete Point"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    index: IntProperty(default=-1)
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob and ob.type == 'SDF' and ob.data and ob.data.sdf_type == 'POLYGON' and len(ob.data.polygon_points) > 3
+
+    def execute(self, context):
+        sdf = context.object.data
+        pts = sdf.polygon_points
+        if len(pts) > 3 and 0 <= self.index < len(pts):
+            pts.remove(pts[self.index])
+            context.object.data.update_tag()
+        return {'FINISHED'}
+
+
+class SDF_MT_polygon_point_context(Menu):
+    bl_idname = "SDF_MT_polygon_point_context"
+    bl_label = "Polygon Point"
+
+    def draw(self, context):
+        layout = self.layout
+        idx = _context_point_index
+        if idx >= 0:
+            op = layout.operator("sdf.polygon_point_remove_index", icon='X')
+            op.index = idx
+
+
+class SDF_OT_polygon_point_context_menu(Operator):
+    """Right-click context menu for the nearest polygon point"""
+    bl_idname = "sdf.polygon_point_context_menu"
+    bl_label = "Polygon Point Context Menu"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob and ob.type == 'SDF' and ob.data and ob.data.sdf_type == 'POLYGON'
+
+    def invoke(self, context, event):
+        from bpy_extras import view3d_utils
+        region = context.region
+        rv3d = context.region_data
+        coord = (event.mouse_region_x, event.mouse_region_y)
+        ob = context.object
+        sdf = ob.data
+        pts = sdf.polygon_points
+        mat = ob.matrix_world
+
+        best_dist = 30.0  # pixel threshold
+        best_i = -1
+        for i, pt in enumerate(pts):
+            world = mat @ Vector((pt.co[0], pt.co[1], 0.0))
+            screen = view3d_utils.location_3d_to_region_2d(region, rv3d, world)
+            if screen is None:
+                continue
+            d = (Vector(coord) - screen).length
+            if d < best_dist:
+                best_dist = d
+                best_i = i
+
+        if best_i < 0:
+            bpy.ops.wm.call_menu(name="VIEW3D_MT_object_context_menu")
+            return {'FINISHED'}
+
+        global _context_point_index
+        _context_point_index = best_i
+        bpy.ops.wm.call_menu(name="SDF_MT_polygon_point_context")
         return {'FINISHED'}
 
 
@@ -876,6 +996,9 @@ classes = (
     SDF_OT_polygon_point_add,
     SDF_OT_polygon_point_add_click,
     SDF_OT_polygon_point_remove,
+    SDF_OT_polygon_point_remove_index,
+    SDF_MT_polygon_point_context,
+    SDF_OT_polygon_point_context_menu,
     VIEW3D_GGT_sdf_polygon,
     SDF_MT_modifier_add,
     DATA_PT_context_sdf,
