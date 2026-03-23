@@ -4771,6 +4771,7 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
       {3, "STEP_COUNT", 0, "Step Count", "Number of march steps per pixel"},
       {4, "STEP_COUNT_TILE", 0, "Step Count per Tile", "Maximum number of march steps in 8x8 tile"},
       {5, "CONE_HEATMAP", 0, "Cone Heatmap", "Steps saved by cone trace pre-pass (green=many, red=none)"},
+      {6, "OUTLINE_EDGE_MASK", 0, "Outline Edge Mask", "Edge mask for sparse outline resolve (white=SDF eval, black=copy)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

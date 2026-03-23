@@ -179,12 +179,28 @@ GPU_SHADER_CREATE_INFO(sdf_blit)
 DO_STATIC_COMPILATION()
 SAMPLER(0, sampler2D, color_tx)
 SAMPLER(1, sampler2D, depth_tx)
+SAMPLER(3, sampler2D, outline_mask_debug_tx)
 PUSH_CONSTANT(int, debug_bvh_views)
 PUSH_CONSTANT(float3, bg_color)
 FRAGMENT_OUT(0, float4, out_color)
 DEPTH_WRITE(DepthWrite::ANY)
 ADDITIONAL_INFO(gpu_fullscreen)
 FRAGMENT_SOURCE("sdf_blit_frag.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Outline Overlay (composited on top with no depth test)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_outline_overlay)
+DO_STATIC_COMPILATION()
+SAMPLER(0, sampler2D, outline_tx)
+PUSH_CONSTANT(float, outline_strength)
+FRAGMENT_OUT(0, float4, out_color)
+ADDITIONAL_INFO(gpu_fullscreen)
+FRAGMENT_SOURCE("sdf_outline_overlay_frag.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */
@@ -268,6 +284,23 @@ PUSH_CONSTANT(int, inner_end)
 PUSH_CONSTANT(int, max_tris)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_dc_triangulate_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Outline (full-res outline from low-res object ID via nearest sampling)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_outline_eval_comp)
+LOCAL_GROUP_SIZE(8, 8)
+DO_STATIC_COMPILATION()
+SAMPLER(0, sampler2D, gbuf_pos_tx)
+SAMPLER(1, sampler2D, gbuf_color_tx)
+IMAGE(0, SFLOAT_32, write, image2D, outline_img)
+PUSH_CONSTANT(int2, viewport_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_outline_eval_comp.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */
