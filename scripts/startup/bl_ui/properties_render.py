@@ -219,6 +219,7 @@ class RENDER_PT_proximity_raymarcher(Panel):
         col = layout.column()
         col.prop(shading, "sdf_resolution_scale", slider=True)
         col.prop(shading, "sdf_adaptive_resolution")
+        col.prop(shading, "sdf_frustum_cull")
         col.prop(shading, "sdf_max_steps")
         col.prop(shading, "sdf_ray_epsilon")
         col.prop(shading, "sdf_over_relaxation")

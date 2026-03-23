@@ -35,6 +35,7 @@ void sdf_atlas_params_get(float *voxel_size,
 int sdf_object_count_get();
 gpu::StorageBuf *sdf_objects_ssbo_get();
 gpu::StorageBuf *sdf_modifiers_ssbo_get();
+gpu::StorageBuf *sdf_polygon_ssbo_get();
 gpu::StorageBuf *sdf_groups_ssbo_get();
 int sdf_group_count_get();
 

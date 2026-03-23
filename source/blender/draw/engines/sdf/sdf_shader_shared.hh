@@ -89,3 +89,10 @@ struct SdfAabbNodeGPU {
   int child_b;
   int shape_index;
 };
+
+/* Dual Contouring output vertex */
+struct DCVertexGPU {
+  float4 position; /* xyz = position, w = unused */
+  float4 normal;   /* xyz = normal, w = unused */
+};
+

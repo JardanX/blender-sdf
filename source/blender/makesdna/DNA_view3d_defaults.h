@@ -46,6 +46,7 @@
     .sdf_cone_steps = 64, \
     .sdf_resolution_scale = 100.0f, \
     .sdf_adaptive_resolution = 0, \
+    .sdf_frustum_cull = 1, \
   }
 
 #define _DNA_DEFAULT_View3DOverlay \

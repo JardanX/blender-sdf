@@ -8,18 +8,25 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
+
+#include <string>
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
 #include "BKE_context.hh"
+#include "BKE_customdata.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_report.hh"
@@ -37,7 +44,12 @@
 #include "ED_object.hh"
 #include "ED_screen.hh"
 
+#include "BKE_mesh.h"
+#include "BKE_mesh.hh"
+
 #include "object_intern.hh"
+
+#include "sdf_meshing.hh"
 
 namespace blender::ed::object {
 
@@ -590,6 +602,74 @@ void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot)
 
   RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group to move");
   RNA_def_int(ot->srna, "direction", -1, -1, 1, "Direction", "Move direction (-1=up, 1=down)", -1, 1);
+}
+
+/* SDF to Mesh (Dual Contouring) */
+
+static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const int grid_res = RNA_int_get(op->ptr, "resolution");
+
+  Vector<float3> positions;
+  Vector<float3> normals;
+  Vector<int3> tris;
+  int vert_count = 0, tri_count = 0;
+
+  std::string err = draw::sdf::sdf_dual_contour_to_mesh(
+      grid_res, positions, normals, tris, &vert_count, &tri_count);
+
+  if (!err.empty()) {
+    BKE_reportf(op->reports, RPT_ERROR, "SDF to Mesh: %s", err.c_str());
+    return OPERATOR_CANCELLED;
+  }
+
+  Mesh *mesh_src = BKE_mesh_new_nomain(vert_count, 0, tri_count, tri_count * 3);
+  mesh_src->vert_positions_for_write().copy_from(positions.as_span());
+
+  MutableSpan<int> offsets = mesh_src->face_offsets_for_write();
+  for (int i = 0; i <= tri_count; i++) {
+    offsets[i] = i * 3;
+  }
+
+  MutableSpan<int> cverts = mesh_src->corner_verts_for_write();
+  for (int i = 0; i < tri_count; i++) {
+    cverts[i * 3 + 0] = tris[i].x;
+    cverts[i * 3 + 1] = tris[i].y;
+    cverts[i * 3 + 2] = tris[i].z;
+  }
+
+  Object *ob = add_type(C, OB_MESH, "SDF Mesh", nullptr, nullptr, false, 0);
+  Mesh *mesh_dst = static_cast<Mesh *>(ob->data);
+  BKE_mesh_nomain_to_mesh(mesh_src, mesh_dst, ob, false);
+  blender::bke::mesh_calc_edges(*mesh_dst, false, false);
+
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  BKE_reportf(op->reports, RPT_INFO, "Generated mesh: %d verts, %d tris", vert_count, tri_count);
+  return OPERATOR_FINISHED;
+}
+
+void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot)
+{
+  ot->name = "SDF to Mesh";
+  ot->description = "Convert SDF scene to triangle mesh via GPU Dual Contouring";
+  ot->idname = "OBJECT_OT_sdf_to_mesh";
+
+  ot->exec = object_sdf_to_mesh_exec;
+  ot->poll = ED_operator_objectmode;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "resolution",
+              64,
+              8,
+              512,
+              "Resolution",
+              "Voxels per Blender unit (uniform detail regardless of scene size)",
+              8,
+              512);
 }
 
 }  // namespace blender::ed::object

@@ -10,6 +10,8 @@ set(INC
   ../../nodes
   ../../python
   ../../shader_fx
+  ../../draw
+  ../../draw/engines/sdf
 
   # RNA_prototypes.hh
   ${CMAKE_BINARY_DIR}/source/blender/makesrna
