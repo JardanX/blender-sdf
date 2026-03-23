@@ -110,12 +110,6 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         if (obj.csg_operation == 0 && d < prev) {
           grp_winner_id = float(obj.original_index);
         }
-        else if (obj.csg_operation == 1 && -d > prev + obj.blend) {
-          grp_winner_id = float(obj.original_index);
-        }
-        else if (obj.csg_operation == 2 && d < prev - obj.blend) {
-          grp_winner_id = float(obj.original_index);
-        }
         if (obj.csg_operation == 0) {
           float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
           grp_color = mix(grp_color, obj.color.rgb, t);
@@ -145,12 +139,6 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
           grp.shell_blend_top, grp.shell_blend_bottom,
           grp.chamfer_k2, grp.chamfer_k3);
       if (grp.csg_operation == 0 && grp_dist < prev) {
-        out_obj_id = grp_winner_id;
-      }
-      else if (grp.csg_operation == 1 && -grp_dist > prev + grp.blend) {
-        out_obj_id = grp_winner_id;
-      }
-      else if (grp.csg_operation == 2 && grp_dist < prev - grp.blend) {
         out_obj_id = grp_winner_id;
       }
       if (grp.csg_operation == 0) {
@@ -188,12 +176,6 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
           scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
           obj.shell_distance, obj.shell_mode, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
       if (obj.csg_operation == 0 && d < prev) {
-        out_obj_id = float(obj.original_index);
-      }
-      else if (obj.csg_operation == 1 && -d > prev + obj.blend) {
-        out_obj_id = float(obj.original_index);
-      }
-      else if (obj.csg_operation == 2 && d < prev - obj.blend) {
         out_obj_id = float(obj.original_index);
       }
       if (obj.csg_operation == 0) {
@@ -285,12 +267,6 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
         if (obj.csg_operation == 0 && d < prev) {
           out_obj_id = float(obj.original_index);
         }
-        else if (obj.csg_operation == 1 && -d > prev + obj.blend) {
-          out_obj_id = float(obj.original_index);
-        }
-        else if (obj.csg_operation == 2 && d < prev - obj.blend) {
-          out_obj_id = float(obj.original_index);
-        }
         if (obj.csg_operation == 0) {
           float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
           out_color = mix(out_color, obj.color.rgb, t);
@@ -298,7 +274,7 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
       }
     }
     else {
-      /* Grouped: accumulate into group CSG chain */
+      /* Grouped: accumulate into group CSG chain, track per-object winner */
       if (!grp_has_hit) {
         if (obj.csg_operation == 0) {
           grp_dist = d;
@@ -313,12 +289,6 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
         if (obj.csg_operation == 0 && d < prev) {
-          grp_winner_id = float(obj.original_index);
-        }
-        else if (obj.csg_operation == 1 && -d > prev + obj.blend) {
-          grp_winner_id = float(obj.original_index);
-        }
-        else if (obj.csg_operation == 2 && d < prev - obj.blend) {
           grp_winner_id = float(obj.original_index);
         }
         if (obj.csg_operation == 0) {
