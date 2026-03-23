@@ -216,7 +216,8 @@ typedef struct View3DShading {
   char sdf_bvh_debug_view;
   char sdf_use_cone_trace;
   char sdf_adaptive_resolution;
-  char _pad_sdf_bvh[4];
+  char sdf_frustum_cull;
+  char _pad_sdf_bvh[3];
   
   int sdf_max_steps;
   float sdf_ray_epsilon;

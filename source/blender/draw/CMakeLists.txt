@@ -350,6 +350,8 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
   engines/sdf/shaders/sdf_grid_eval_comp.glsl
+  engines/sdf/shaders/sdf_dc_contour_comp.glsl
+  engines/sdf/shaders/sdf_dc_triangulate_comp.glsl
 
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/sdf_shader_shared.hh

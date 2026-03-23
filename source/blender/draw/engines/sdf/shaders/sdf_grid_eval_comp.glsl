@@ -2,8 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Grid evaluation: dispatch 33^3 threads, each evaluates the full scene SDF
- * (with CSG operations) at a grid vertex for proxy mesh generation. */
+/* Grid evaluation: samples SDF at grid vertices.
+ * Uses BVH to cull distant objects, then evaluates nearby objects in scene order. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -20,21 +20,79 @@ void main()
 
   float3 world_pos = grid_origin + float3(gid) * cell_size;
 
-  /* Full scene evaluation with CSG, matching the trace shader's logic.
-   * Objects are sorted by (group_id, group_order) in the SSBO. */
+  /* Phase 1: BVH cull — build bitmask of nearby objects (max 1024) */
+  uint obj_bits[32]; /* 1024 bits */
+  for (int w = 0; w < 32; w++) obj_bits[w] = 0u;
+
+  if (use_bvh != 0 && bvh_root >= 0 && object_count <= 1024) {
+    int stack[64];
+    int sp = 0;
+    stack[sp++] = bvh_root;
+    float margin = 0.5f;
+
+    while (sp > 0) {
+      int ni = stack[--sp];
+      SdfAabbNodeGPU node = aabb_nodes[ni];
+
+      if (world_pos.x < node.bounds_min.x - margin ||
+          world_pos.x > node.bounds_max.x + margin ||
+          world_pos.y < node.bounds_min.y - margin ||
+          world_pos.y > node.bounds_max.y + margin ||
+          world_pos.z < node.bounds_min.z - margin ||
+          world_pos.z > node.bounds_max.z + margin)
+      {
+        continue;
+      }
+
+      if (node.shape_index >= 0) {
+        int si = node.shape_index;
+        obj_bits[si >> 5] |= (1u << (si & 31));
+      }
+      else {
+        if (node.child_a >= 0 && sp < 63) stack[sp++] = node.child_a;
+        if (node.child_b >= 0 && sp < 63) stack[sp++] = node.child_b;
+      }
+    }
+  }
+  else {
+    /* No BVH: mark all objects, with per-object AABB cull */
+    for (int i = 0; i < min(object_count, 1024); i++) {
+      float3 bmin = objects[i].bbox_min.xyz;
+      float3 bmax = objects[i].bbox_max.xyz;
+      float margin = max(objects[i].blend, 0.1f);
+      if (world_pos.x >= bmin.x - margin && world_pos.x <= bmax.x + margin &&
+          world_pos.y >= bmin.y - margin && world_pos.y <= bmax.y + margin &&
+          world_pos.z >= bmin.z - margin && world_pos.z <= bmax.z + margin)
+      {
+        obj_bits[i >> 5] |= (1u << (i & 31));
+      }
+    }
+  }
+
+  /* Phase 2: evaluate in scene order (preserves CSG) */
   float scene_dist = 1e10f;
   float3 dummy_color = float3(0.5f);
-
   int cur_group = -2;
   float grp_dist = 1e10f;
   float3 grp_color = float3(0.5f);
   bool grp_has_hit = false;
 
   for (int i = 0; i < object_count; i++) {
+    /* Skip if not flagged by BVH cull */
+    if ((obj_bits[i >> 5] & (1u << (i & 31))) == 0u) {
+      int gid_obj = objects[i].group_id;
+      if (gid_obj != cur_group && grp_has_hit) {
+        flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
+        grp_has_hit = false;
+        grp_dist = 1e10f;
+      }
+      cur_group = gid_obj;
+      continue;
+    }
+
     SDFObjectGPU obj = objects[i];
     int gid_obj = obj.group_id;
 
-    /* Group boundary: flush previous group into scene */
     if (gid_obj != cur_group && grp_has_hit) {
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
       grp_has_hit = false;
@@ -46,20 +104,16 @@ void main()
     cur_group = gid_obj;
 
     if (gid_obj < 0) {
-      /* Ungrouped */
       if (scene_dist >= 1e9f) {
-        if (obj.csg_operation == 0) {
-          scene_dist = d;
-        }
+        if (obj.csg_operation == 0) scene_dist = d;
       }
       else {
-        scene_dist = combineCSG(
-            scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+        scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+                                obj.shell_distance, obj.shell_mode, obj.shell_blend_top,
+                                obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
       }
     }
     else {
-      /* Grouped */
       if (!grp_has_hit) {
         if (obj.csg_operation == 0) {
           grp_dist = d;
@@ -67,14 +121,13 @@ void main()
         }
       }
       else {
-        grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+        grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+                              obj.shell_distance, obj.shell_mode, obj.shell_blend_top,
+                              obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
       }
     }
   }
 
-  /* Flush final group */
   if (grp_has_hit) {
     flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
   }

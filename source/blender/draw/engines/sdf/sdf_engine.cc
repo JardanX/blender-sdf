@@ -57,6 +57,7 @@
 #include "sdf_private.hh"
 
 #include "sdf_engine.h"
+#include "sdf_meshing.hh"
 
 #include <cmath>
 #include <cstdio>
@@ -70,7 +71,10 @@ using namespace draw;
 static int s_object_count = 0;
 static gpu::StorageBuf *s_object_ssbo = nullptr;
 static gpu::StorageBuf *s_modifier_ssbo = nullptr;
+static gpu::StorageBuf *s_polygon_ssbo = nullptr;
 static gpu::StorageBuf *s_group_ssbo = nullptr;
+static gpu::StorageBuf *s_bvh_ssbo = nullptr;
+static int s_bvh_root = -1;
 static int s_group_count = 0;
 static Vector<int> s_depsgraph_to_sorted;
 
@@ -139,6 +143,8 @@ class Instance : public DrawEngine {
   bool view_changed_ = false;
   int scroll_cooldown_ = 0;
   uint64_t prev_data_hash_ = 0;
+  uint64_t prev_mesh_hash_ = 0;
+  Vector<float4x4> mesh_transforms_;
   float4x4 prev_viewmat_ = float4x4::identity();
 
   gpu::StorageBuf *object_ssbo_ = nullptr;
@@ -191,6 +197,7 @@ class Instance : public DrawEngine {
 
   float4 frustum_planes_[6];
   bool frustum_valid_ = false;
+  bool use_frustum_cull_ = true;
 
   float4 studio_light_dir_[4] = {};
   float4 studio_light_col_[4] = {};
@@ -236,6 +243,7 @@ class Instance : public DrawEngine {
     groups_gpu_.clear();
     s_depsgraph_to_sorted.clear();
     bvh_tree_.clear();
+    mesh_transforms_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
     max_blend_ = 0.0f;
@@ -251,6 +259,11 @@ class Instance : public DrawEngine {
     }
 
     Object *ob = ob_ref.object;
+
+    if (ob->type == OB_MESH) {
+      mesh_transforms_.append(ob->object_to_world());
+      return;
+    }
 
     if (ob->type != OB_SDF) {
       return;
@@ -561,8 +574,6 @@ class Instance : public DrawEngine {
     gpu_obj.group_first = 0;
     gpu_obj.group_order = sdf_data->group_order;
     gpu_obj.original_index = sdf_data->sdf_index;
-    object_group_ptrs_.append(sdf_data->sdf_group);
-    object_ptrs_.append(ob);
 
     gpu_obj.color = float4(
         sdf_data->color[0], sdf_data->color[1], sdf_data->color[2], sdf_data->color[3]);
@@ -753,6 +764,259 @@ class Instance : public DrawEngine {
       gpu_obj.modifier_count++;
     }
 
+    /* Compute AABB */
+    float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
+                             fabsf(sdf_data->shell_distance) :
+                             0.0f;
+    float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
+    float pad = blend_pad + shell_expand;
+    float3 local_extent;
+    float3 sz = float3(gpu_obj.sdf_size);
+    switch (sdf_data->sdf_type) {
+      case SDF_TYPE_CAPSULE: {
+        float r = sz.x;
+        float h = math::max(sz.y - bevel, 0.0f);
+        local_extent = float3(r + pad, r + pad, h + r + pad);
+        break;
+      }
+      case SDF_TYPE_CYLINDER: {
+        local_extent = sz + float3(bevel + pad);
+        break;
+      }
+      case SDF_TYPE_CONE: {
+        float r = sz.x;
+        float h = sz.y;
+        local_extent = float3(r + bevel + pad, r + bevel + pad, h + bevel + pad);
+        break;
+      }
+      case SDF_TYPE_TORUS: {
+        float outer = sz.x + sz.y;
+        local_extent = float3(outer + pad, outer + pad, sz.y + pad);
+        break;
+      }
+      case SDF_TYPE_NGON: {
+        float r = sz.x;
+        local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
+        break;
+      }
+      case SDF_TYPE_POLYGON: {
+        float ps = math::min(scale.x, scale.y);
+        float max_xy = 0.0f;
+        LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+          max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
+          max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
+        }
+        local_extent = float3(
+            max_xy + bevel + pad, max_xy + bevel + pad, sz.z + bevel + pad);
+        break;
+      }
+      default:
+        local_extent = sz + float3(bevel + pad);
+        break;
+    }
+
+    /* Expand for domain modifiers */
+    LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+      if (!mod->show_viewport) {
+        continue;
+      }
+      switch (mod->type) {
+        case SDF_MOD_MIRROR: {
+          float offset = fabsf(mod->params[0]);
+          float3 world_org;
+          if (mod->mirror_ob != nullptr) {
+            const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
+            world_org = float3(mirror_mat[3]) - float3(mat[3]);
+          }
+          else {
+            world_org = float3(mod->params[1], mod->params[2], mod->params[3]);
+          }
+          float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
+          if ((mod->flag & SDF_MOD_MIRROR_X) != 0) {
+            float3 N = float3(inv_rot[0]);
+            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+            local_extent += math::abs(N) * disp;
+          }
+          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) {
+            float3 N = float3(inv_rot[1]);
+            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+            local_extent += math::abs(N) * disp;
+          }
+          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) {
+            float3 N = float3(inv_rot[2]);
+            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+            local_extent += math::abs(N) * disp;
+          }
+          break;
+        }
+        case SDF_MOD_ELONGATE:
+          local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
+          break;
+        case SDF_MOD_HOLLOW:
+        case SDF_MOD_ONION:
+          local_extent += float3(mod->params[0]);
+          break;
+        case SDF_MOD_ROUND:
+          local_extent += float3(mod->params[0]);
+          break;
+        case SDF_MOD_TWIST: {
+          float xy = math::sqrt(local_extent.x * local_extent.x +
+                                local_extent.y * local_extent.y);
+          local_extent.x = xy;
+          local_extent.y = xy;
+          break;
+        }
+        case SDF_MOD_BEND: {
+          float k = mod->params[0];
+          int axis = (int)mod->params[1];
+          if (fabsf(k) > 0.0001f) {
+            float R = 1.0f / k;
+            float3 new_ext = float3(0.0f);
+            for (int c = 0; c < 8; c++) {
+              float cx = (c & 1) ? local_extent.x : -local_extent.x;
+              float cy = (c & 2) ? local_extent.y : -local_extent.y;
+              float cz = (c & 4) ? local_extent.z : -local_extent.z;
+              float drive, curve, free_val;
+              if (axis == 1) {
+                drive = cy;
+                curve = cz;
+                free_val = cx;
+              }
+              else if (axis == 2) {
+                drive = cz;
+                curve = cx;
+                free_val = cy;
+              }
+              else {
+                drive = cx;
+                curve = cy;
+                free_val = cz;
+              }
+              float theta = k * drive;
+              float bd = (R + curve) * sinf(theta);
+              float bc = -R + (R + curve) * cosf(theta);
+              float3 bent;
+              if (axis == 1) {
+                bent = float3(fabsf(free_val), fabsf(bd), fabsf(bc));
+              }
+              else if (axis == 2) {
+                bent = float3(fabsf(bc), fabsf(free_val), fabsf(bd));
+              }
+              else {
+                bent = float3(fabsf(bd), fabsf(bc), fabsf(free_val));
+              }
+              new_ext = math::max(new_ext, bent);
+            }
+            float drive_ext = (axis == 0) ? local_extent.x :
+                              (axis == 1) ? local_extent.y :
+                                            local_extent.z;
+            float curve_ext = (axis == 0) ? local_extent.y :
+                              (axis == 1) ? local_extent.z :
+                                            local_extent.x;
+            float max_angle = fabsf(k) * drive_ext;
+            if (max_angle > float(M_PI_2)) {
+              float outer_r = fabsf(R) + curve_ext;
+              if (axis == 0) {
+                new_ext.x = math::max(new_ext.x, outer_r);
+              }
+              else if (axis == 1) {
+                new_ext.y = math::max(new_ext.y, outer_r);
+              }
+              else {
+                new_ext.z = math::max(new_ext.z, outer_r);
+              }
+            }
+            local_extent = new_ext;
+          }
+          break;
+        }
+        case SDF_MOD_ARRAY: {
+          float count = mod->params[0];
+          if (count > 0.5f) {
+            if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
+              float3 offset = float3(mod->params[1], mod->params[2], mod->params[3]);
+              local_extent += math::abs(offset) * (count - 1.0f);
+            }
+            else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
+              float radius = mod->params[1];
+              local_extent.x += radius;
+              local_extent.y += radius;
+            }
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    /* Transform local AABB to world */
+    float3 world_min = float3(1e30f);
+    float3 world_max = float3(-1e30f);
+    for (int corner = 0; corner < 8; corner++) {
+      float3 local_corner = float3((corner & 1) ? local_extent.x : -local_extent.x,
+                                   (corner & 2) ? local_extent.y : -local_extent.y,
+                                   (corner & 4) ? local_extent.z : -local_extent.z);
+      float3 world_corner = float3(rot_mat * float4(local_corner, 0.0f)) +
+                            float3(mat[3].x, mat[3].y, mat[3].z);
+      world_min = math::min(world_min, world_corner);
+      world_max = math::max(world_max, world_corner);
+    }
+
+    gpu_obj.bbox_min = float4(world_min, 0.0f);
+    gpu_obj.bbox_max = float4(world_max, 0.0f);
+
+    /* Early frustum cull — skip objects entirely outside the viewport */
+    if (use_frustum_cull_) {
+      if (!frustum_valid_) {
+        const View &view = View::default_get();
+        float4x4 vp = view.winmat() * view.viewmat();
+        for (int i = 0; i < 4; i++) {
+          frustum_planes_[0][i] = vp[i][3] + vp[i][0];
+          frustum_planes_[1][i] = vp[i][3] - vp[i][0];
+          frustum_planes_[2][i] = vp[i][3] + vp[i][1];
+          frustum_planes_[3][i] = vp[i][3] - vp[i][1];
+          frustum_planes_[4][i] = vp[i][3] + vp[i][2];
+          frustum_planes_[5][i] = vp[i][3] - vp[i][2];
+        }
+        for (int p = 0; p < 6; p++) {
+          frustum_planes_[p] /= math::length(float3(frustum_planes_[p]));
+        }
+        frustum_valid_ = true;
+      }
+
+      float group_pad = 0.0f;
+      if (sdf_data->sdf_group != nullptr) {
+        const SDFGroup *grp = sdf_data->sdf_group;
+        float gb = (grp->csg_operation == SDF_CSG_SHELL)
+                       ? std::max(grp->shell_blend_top, grp->shell_blend_bottom)
+                       : grp->blend;
+        group_pad = gb + fabsf(grp->shell_distance);
+      }
+      float3 pad_min = world_min - float3(group_pad);
+      float3 pad_max = world_max + float3(group_pad);
+      bool outside = false;
+      for (int p = 0; p < 6; p++) {
+        float3 n(frustum_planes_[p]);
+        float d = frustum_planes_[p].w;
+        float3 pos_vertex(n.x > 0 ? pad_max.x : pad_min.x,
+                          n.y > 0 ? pad_max.y : pad_min.y,
+                          n.z > 0 ? pad_max.z : pad_min.z);
+        if (math::dot(n, pos_vertex) + d < 0.0f) {
+          outside = true;
+          break;
+        }
+      }
+      if (outside) {
+        return;
+      }
+    }
+
+    float sphere_radius = math::length(local_extent);
+    float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
+    scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
+    scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
+
     max_blend_ = math::max(max_blend_, gpu_obj.blend);
     if (gpu_obj.blend > 0.001f &&
         (gpu_obj.blend_type == SDF_BLEND_ROUND || gpu_obj.blend_type == SDF_BLEND_CHAMFER))
@@ -763,6 +1027,8 @@ class Instance : public DrawEngine {
       max_shell_distance_ = math::max(max_shell_distance_, fabsf(sdf_data->shell_distance));
     }
 
+    object_group_ptrs_.append(sdf_data->sdf_group);
+    object_ptrs_.append(ob);
     objects_.append(gpu_obj);
   }
 
@@ -1264,11 +1530,23 @@ class Instance : public DrawEngine {
       scene_changed_ = (h != prev_data_hash_);
       prev_data_hash_ = h;
 
+      uint64_t mh = 0xcbf29ce484222325ULL;
+      auto hash_mesh = [&](const void *data, size_t size) {
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < size; i++) {
+          mh ^= p[i];
+          mh *= 0x100000001b3ULL;
+        }
+      };
+      hash_mesh(mesh_transforms_.data(), mesh_transforms_.size() * sizeof(float4x4));
+      bool mesh_changed = (mh != prev_mesh_hash_);
+      prev_mesh_hash_ = mh;
+
       const float4x4 &cur_viewmat = View::default_get().viewmat();
       view_changed_ = (cur_viewmat != prev_viewmat_);
       prev_viewmat_ = cur_viewmat;
 
-      if (scene_changed_ || view_changed_) {
+      if (scene_changed_ || view_changed_ || mesh_changed) {
         scroll_cooldown_ = 3;
       }
       else if (scroll_cooldown_ > 0) {
@@ -1325,7 +1603,10 @@ class Instance : public DrawEngine {
     s_object_count = int(objects_.size());
     s_object_ssbo = object_ssbo_;
     s_modifier_ssbo = modifier_ssbo_;
+    s_polygon_ssbo = polygon_ssbo_;
     s_group_ssbo = group_ssbo_;
+    s_bvh_ssbo = bvh_nodes_ssbo_;
+    s_bvh_root = bvh_tree_.root();
     s_group_count = int(groups_gpu_.size());
   }
 
@@ -1351,7 +1632,7 @@ class Instance : public DrawEngine {
     float scale_pct = s.sdf_resolution_scale;
     resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
     adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
-
+    use_frustum_cull_ = s.sdf_frustum_cull != 0;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
@@ -1666,7 +1947,7 @@ class Instance : public DrawEngine {
     float scale = resolution_scale_;
     bool is_interacting = scroll_cooldown_ > 0;
     if (adaptive_resolution_ && is_interacting) {
-      scale *= 0.5f;
+      scale *= 0.25f;
       scale = math::max(scale, 0.1f);
     }
     int2 scaled = int2(math::max(int(vp.x * scale), 1),
@@ -2138,6 +2419,7 @@ class Instance : public DrawEngine {
 
     s_object_ssbo = nullptr;
     s_modifier_ssbo = nullptr;
+    s_polygon_ssbo = nullptr;
     s_group_ssbo = nullptr;
     s_group_count = 0;
 
@@ -2222,6 +2504,11 @@ gpu::StorageBuf *sdf_modifiers_ssbo_get()
   return s_modifier_ssbo;
 }
 
+gpu::StorageBuf *sdf_polygon_ssbo_get()
+{
+  return s_polygon_ssbo;
+}
+
 gpu::StorageBuf *sdf_groups_ssbo_get()
 {
   return s_group_ssbo;
@@ -2245,6 +2532,258 @@ const int *sdf_depsgraph_to_sorted_get(int *out_count)
 DrawEngine *Engine::create_instance()
 {
   return new Instance();
+}
+
+std::string sdf_dual_contour_to_mesh(int grid_res,
+                                      Vector<float3> &out_positions,
+                                      Vector<float3> &out_normals,
+                                      Vector<int3> &out_tris,
+                                      int *out_vert_count,
+                                      int *out_tri_count)
+{
+  *out_vert_count = 0;
+  *out_tri_count = 0;
+
+  if (s_object_count == 0 || !s_object_ssbo) {
+    return "No SDF data. Render viewport first.";
+  }
+
+  const float cell_size = 1.0f / float(grid_res);
+  const int CHUNK = 256;
+  const int PAD = 1;
+  const int PADDED = CHUNK + 2 * PAD;
+  const int PADDED_GV = PADDED + 1;
+
+  /* Scene AABB */
+  Vector<SDFObjectGPU> objs(s_object_count);
+  GPU_storagebuf_read(s_object_ssbo, objs.data());
+
+  float3 scene_min(1e30f), scene_max(-1e30f);
+  for (int i = 0; i < s_object_count; i++) {
+    scene_min = math::min(scene_min, float3(objs[i].bbox_min));
+    scene_max = math::max(scene_max, float3(objs[i].bbox_max));
+  }
+  scene_min -= float3(cell_size * 2.0f);
+  scene_max += float3(cell_size * 2.0f);
+
+  int3 grid_cells;
+  grid_cells.x = int(ceilf((scene_max.x - scene_min.x) / cell_size));
+  grid_cells.y = int(ceilf((scene_max.y - scene_min.y) / cell_size));
+  grid_cells.z = int(ceilf((scene_max.z - scene_min.z) / cell_size));
+  float3 grid_origin = scene_min;
+
+  int3 n_chunks;
+  n_chunks.x = (grid_cells.x + CHUNK - 1) / CHUNK;
+  n_chunks.y = (grid_cells.y + CHUNK - 1) / CHUNK;
+  n_chunks.z = (grid_cells.z + CHUNK - 1) / CHUNK;
+  int total_chunks = n_chunks.x * n_chunks.y * n_chunks.z;
+
+  fprintf(stderr,
+          "SDF DC: %d/unit, cell=%.4f, grid=%dx%dx%d, chunks=%d\n",
+          grid_res, cell_size,
+          grid_cells.x, grid_cells.y, grid_cells.z, total_chunks);
+  fflush(stderr);
+
+  /* Compile shaders (cached) */
+  static gpu::Shader *grid_sh = nullptr, *dc_sh = nullptr, *tri_sh = nullptr;
+  if (!grid_sh) grid_sh = GPU_shader_create_from_info_name("sdf_grid_eval_comp");
+  if (!dc_sh) dc_sh = GPU_shader_create_from_info_name("sdf_dc_contour_comp");
+  if (!tri_sh) tri_sh = GPU_shader_create_from_info_name("sdf_dc_triangulate_comp");
+  if (!grid_sh || !dc_sh || !tri_sh) return "Shader compile failed";
+
+  /* Global output buffers. Readback = verts + tris transferred from GPU→CPU.
+   * 4M verts (128 MB) + 8M tris (128 MB) = 256 MB. PCIe transfer ~20ms.
+   * The GPU sync (waiting for compute to finish) dominates readback time. */
+  const int global_max_verts = 4 * 1024 * 1024;
+  const int global_max_tris = 8 * 1024 * 1024;
+
+  gpu::StorageBuf *vert_ssbo = GPU_storagebuf_create_ex(
+      global_max_verts * sizeof(DCVertexGPU), nullptr, GPU_USAGE_DYNAMIC, "dc_vertices");
+  gpu::StorageBuf *counter_ssbo = GPU_storagebuf_create_ex(
+      2 * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "dc_counters");
+  GPU_storagebuf_clear_to_zero(counter_ssbo);
+  gpu::StorageBuf *tri_ssbo = GPU_storagebuf_create_ex(
+      global_max_tris * sizeof(int) * 4, nullptr, GPU_USAGE_DYNAMIC, "dc_triangles");
+
+  /* Per-chunk buffers (reused) */
+  int padded_grid_total = PADDED_GV * PADDED_GV * PADDED_GV;
+  int padded_cells_total = PADDED * PADDED * PADDED;
+  gpu::StorageBuf *grid_ssbo = GPU_storagebuf_create_ex(
+      padded_grid_total * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "dc_grid_values");
+  gpu::StorageBuf *cell_ssbo = GPU_storagebuf_create_ex(
+      padded_cells_total * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "dc_cell_verts");
+
+  auto cleanup = [&]() {
+    GPU_storagebuf_free(grid_ssbo);
+    GPU_storagebuf_free(vert_ssbo);
+    GPU_storagebuf_free(counter_ssbo);
+    GPU_storagebuf_free(cell_ssbo);
+    GPU_storagebuf_free(tri_ssbo);
+  };
+
+  /* Pre-bind SSBO slots that don't change between chunks */
+  int grid_obj_slot = GPU_shader_get_ssbo_binding(grid_sh, "objects");
+  int grid_mod_slot = GPU_shader_get_ssbo_binding(grid_sh, "sdf_modifiers");
+  int grid_grp_slot = GPU_shader_get_ssbo_binding(grid_sh, "groups");
+  int grid_poly_slot = s_polygon_ssbo ?
+                           GPU_shader_get_ssbo_binding(grid_sh, "polygon_points") :
+                           -1;
+  int grid_val_slot = GPU_shader_get_ssbo_binding(grid_sh, "grid_values");
+  int grid_bvh_slot = GPU_shader_get_ssbo_binding(grid_sh, "aabb_nodes");
+  int has_bvh = (s_bvh_ssbo && s_bvh_root >= 0) ? 1 : 0;
+
+  int dc_gv_slot = GPU_shader_get_ssbo_binding(dc_sh, "grid_values");
+  int dc_v_slot = GPU_shader_get_ssbo_binding(dc_sh, "dc_vertices");
+  int dc_c_slot = GPU_shader_get_ssbo_binding(dc_sh, "dc_counters");
+  int dc_cv_slot = GPU_shader_get_ssbo_binding(dc_sh, "dc_cell_verts");
+
+  int tr_gv_slot = GPU_shader_get_ssbo_binding(tri_sh, "grid_values");
+  int tr_t_slot = GPU_shader_get_ssbo_binding(tri_sh, "dc_triangles");
+  int tr_c_slot = GPU_shader_get_ssbo_binding(tri_sh, "dc_counters");
+  int tr_cv_slot = GPU_shader_get_ssbo_binding(tri_sh, "dc_cell_verts");
+
+  int gd = (PADDED_GV + 3) / 4;
+  int cd = (PADDED + 3) / 4;
+  int chunk_done = 0, chunk_skipped = 0;
+
+  for (int cz = 0; cz < n_chunks.z; cz++) {
+    for (int cy = 0; cy < n_chunks.y; cy++) {
+      for (int cx = 0; cx < n_chunks.x; cx++) {
+        int3 cell_start = int3(cx, cy, cz) * CHUNK - int3(PAD);
+        float3 chunk_origin = grid_origin + float3(cell_start) * cell_size;
+        float3 chunk_min = chunk_origin;
+        float3 chunk_max = chunk_origin + float3(float(PADDED_GV)) * cell_size;
+
+        /* AABB cull: skip chunks with no nearby SDF objects */
+        bool has_overlap = false;
+        for (int i = 0; i < s_object_count; i++) {
+          float3 obj_min = float3(objs[i].bbox_min);
+          float3 obj_max = float3(objs[i].bbox_max);
+          if (chunk_min.x <= obj_max.x && chunk_max.x >= obj_min.x &&
+              chunk_min.y <= obj_max.y && chunk_max.y >= obj_min.y &&
+              chunk_min.z <= obj_max.z && chunk_max.z >= obj_min.z)
+          {
+            has_overlap = true;
+            break;
+          }
+        }
+        if (!has_overlap) {
+          chunk_skipped++;
+          chunk_done++;
+          continue;
+        }
+
+        GPU_storagebuf_clear(cell_ssbo, 0xFFFFFFFFu);
+
+        /* Grid eval */
+        GPU_shader_bind(grid_sh);
+        GPU_storagebuf_bind(s_object_ssbo, grid_obj_slot);
+        GPU_storagebuf_bind(s_modifier_ssbo, grid_mod_slot);
+        GPU_storagebuf_bind(s_group_ssbo, grid_grp_slot);
+        if (grid_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, grid_poly_slot);
+        GPU_storagebuf_bind(grid_ssbo, grid_val_slot);
+        if (has_bvh && grid_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, grid_bvh_slot);
+        GPU_shader_uniform_1i(grid_sh, "object_count", s_object_count);
+        GPU_shader_uniform_1i(grid_sh, "group_count", s_group_count);
+        GPU_shader_uniform_1i(grid_sh, "grid_verts", PADDED_GV);
+        GPU_shader_uniform_3fv(grid_sh, "grid_origin", chunk_origin);
+        GPU_shader_uniform_1f(grid_sh, "cell_size", cell_size);
+        GPU_shader_uniform_1i(grid_sh, "use_bvh", has_bvh);
+        GPU_shader_uniform_1i(grid_sh, "bvh_root", s_bvh_root);
+        GPU_compute_dispatch(grid_sh, gd, gd, gd);
+        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+
+        /* DC contour → writes to GLOBAL vert buffer + local cell map */
+        GPU_shader_bind(dc_sh);
+        GPU_storagebuf_bind(grid_ssbo, dc_gv_slot);
+        GPU_storagebuf_bind(vert_ssbo, dc_v_slot);
+        GPU_storagebuf_bind(counter_ssbo, dc_c_slot);
+        GPU_storagebuf_bind(cell_ssbo, dc_cv_slot);
+        GPU_shader_uniform_1i(dc_sh, "grid_verts", PADDED_GV);
+        GPU_shader_uniform_3fv(dc_sh, "grid_origin", chunk_origin);
+        GPU_shader_uniform_1f(dc_sh, "cell_size", cell_size);
+        GPU_shader_uniform_1i(dc_sh, "max_verts", global_max_verts);
+        GPU_compute_dispatch(dc_sh, cd, cd, cd);
+        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+
+        /* Triangulation → only inner cells, writes to GLOBAL tri buffer */
+        GPU_shader_bind(tri_sh);
+        GPU_storagebuf_bind(grid_ssbo, tr_gv_slot);
+        GPU_storagebuf_bind(tri_ssbo, tr_t_slot);
+        GPU_storagebuf_bind(counter_ssbo, tr_c_slot);
+        GPU_storagebuf_bind(cell_ssbo, tr_cv_slot);
+        GPU_shader_uniform_1i(tri_sh, "grid_verts", PADDED_GV);
+        GPU_shader_uniform_1i(tri_sh, "inner_start", PAD);
+        GPU_shader_uniform_1i(tri_sh, "inner_end", PAD + CHUNK);
+        GPU_shader_uniform_1i(tri_sh, "max_tris", global_max_tris);
+        GPU_compute_dispatch(tri_sh, cd, cd, cd);
+        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+
+        chunk_done++;
+      }
+    }
+    fprintf(stderr,
+            "SDF DC: layer %d/%d, %d dispatched, %d skipped\r",
+            cz + 1, n_chunks.z, chunk_done - chunk_skipped, chunk_skipped);
+    fflush(stderr);
+  }
+  GPU_shader_unbind();
+
+  /* Single readback at end */
+  fprintf(stderr, "\nSDF DC: readback counters (8 bytes)...\n"); fflush(stderr);
+  Vector<int> counters(2);
+  GPU_storagebuf_read(counter_ssbo, counters.data());
+  int vert_count = math::min(counters[0], global_max_verts);
+  int tri_count = math::min(counters[1], global_max_tris);
+
+  fprintf(stderr, "SDF DC: %d verts, %d tris", vert_count, tri_count);
+  if (counters[0] > global_max_verts || counters[1] > global_max_tris) {
+    fprintf(stderr, " (TRUNCATED from %d/%d)", counters[0], counters[1]);
+  }
+  fprintf(stderr, "\n"); fflush(stderr);
+
+  if (vert_count == 0) {
+    cleanup();
+    return "DC produced 0 vertices";
+  }
+
+  fprintf(stderr, "SDF DC: reading vertices (%d, %zu MB)...\n",
+          global_max_verts, (size_t)global_max_verts * sizeof(DCVertexGPU) / (1024 * 1024));
+  fflush(stderr);
+  Vector<DCVertexGPU> gpu_verts(global_max_verts);
+  GPU_storagebuf_read(vert_ssbo, gpu_verts.data());
+  fprintf(stderr, "SDF DC: vertices done\n"); fflush(stderr);
+
+  out_positions.resize(vert_count);
+  out_normals.resize(vert_count);
+  for (int i = 0; i < vert_count; i++) {
+    out_positions[i] = float3(gpu_verts[i].position);
+    out_normals[i] = float3(gpu_verts[i].normal);
+  }
+
+  fprintf(stderr, "SDF DC: reading triangles (%d, %zu MB)...\n",
+          global_max_tris, (size_t)global_max_tris * sizeof(int) * 4 / (1024 * 1024));
+  fflush(stderr);
+  Vector<int4> gpu_tris(global_max_tris);
+  GPU_storagebuf_read(tri_ssbo, gpu_tris.data());
+  fprintf(stderr, "SDF DC: triangles done\n"); fflush(stderr);
+
+  out_tris.reserve(tri_count);
+  for (int i = 0; i < tri_count; i++) {
+    int a = gpu_tris[i].x, b = gpu_tris[i].y, c = gpu_tris[i].z;
+    if (a >= 0 && a < vert_count && b >= 0 && b < vert_count && c >= 0 && c < vert_count) {
+      out_tris.append(int3(a, b, c));
+    }
+  }
+
+  *out_vert_count = vert_count;
+  *out_tri_count = out_tris.size();
+
+  fprintf(stderr, "SDF DC: done — %d verts, %d tris\n", *out_vert_count, *out_tri_count);
+  fflush(stderr);
+
+  cleanup();
+  return "";
 }
 
 }  // namespace blender::draw::sdf

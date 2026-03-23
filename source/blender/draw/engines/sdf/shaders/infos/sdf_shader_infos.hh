@@ -204,5 +204,73 @@ GPU_SHADER_CREATE_END()
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name SDF Grid Evaluation (samples SDF at 3D grid vertices)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_grid_eval_comp)
+LOCAL_GROUP_SIZE(4, 4, 4)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(2, read, SDFGroupGPU, groups[])
+STORAGE_BUF(3, read, SDFPolygonPointGPU, polygon_points[])
+STORAGE_BUF(4, write, float, grid_values[])
+STORAGE_BUF(5, read, SdfAabbNodeGPU, aabb_nodes[])
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(int, grid_verts)
+PUSH_CONSTANT(float3, grid_origin)
+PUSH_CONSTANT(float, cell_size)
+PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, bvh_root)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_grid_eval_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Dual Contouring (generates vertices from grid sign changes)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_dc_contour_comp)
+LOCAL_GROUP_SIZE(4, 4, 4)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, float, grid_values[])
+STORAGE_BUF(1, write, float4, dc_vertices[])
+STORAGE_BUF(2, read_write, int, dc_counters[])
+STORAGE_BUF(3, write, int, dc_cell_verts[])
+PUSH_CONSTANT(int, grid_verts)
+PUSH_CONSTANT(float3, grid_origin)
+PUSH_CONSTANT(float, cell_size)
+PUSH_CONSTANT(int, max_verts)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_dc_contour_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF DC Triangulation (pass 2: emit triangles from cell vertex map)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_dc_triangulate_comp)
+LOCAL_GROUP_SIZE(4, 4, 4)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, float, grid_values[])
+STORAGE_BUF(1, write, int4, dc_triangles[])
+STORAGE_BUF(2, read_write, int, dc_counters[])
+STORAGE_BUF(3, read, int, dc_cell_verts[])
+PUSH_CONSTANT(int, grid_verts)
+PUSH_CONSTANT(int, inner_start)
+PUSH_CONSTANT(int, inner_end)
+PUSH_CONSTANT(int, max_tris)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_dc_triangulate_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
 /* MATHOPS: Removed — SDF Selection March (sdf_select_march_frag.glsl deleted) */
 

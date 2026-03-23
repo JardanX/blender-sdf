@@ -984,6 +984,27 @@ class SDF_MT_modifier_add(Menu):
         layout.operator("sdf.modifier_add", text="Array", icon='MOD_ARRAY').type = 'ARRAY'
 
 
+class DATA_PT_sdf_convert(SDFButtonsPanel, Panel):
+    bl_label = "Convert to Mesh"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.sdf is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="GPU Dual Contouring")
+        col = layout.column(align=True)
+        props = col.operator("object.sdf_to_mesh", text="Convert to Mesh", icon='MESH_DATA')
+        col.separator()
+        col.label(text="Resolution:")
+        row = col.row(align=True)
+        for res in [32, 64, 128, 256]:
+            op = row.operator("object.sdf_to_mesh", text=str(res))
+            op.resolution = res
+
+
 classes = (
     SDF_GT_corner_line,
     SDF_MT_csg_pie,
@@ -1006,6 +1027,7 @@ classes = (
     DATA_PT_sdf_operation,
     DATA_PT_sdf_property,
     DATA_PT_sdf_modifiers,
+    DATA_PT_sdf_convert,
 )
 
 
