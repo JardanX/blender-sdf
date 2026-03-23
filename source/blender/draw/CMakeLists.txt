@@ -346,9 +346,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_tile_cull_comp.glsl
   engines/sdf/shaders/sdf_cone_march_comp.glsl
   engines/sdf/shaders/sdf_shade_comp.glsl
-  engines/sdf/shaders/sdf_outline_eval_comp.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
-  engines/sdf/shaders/sdf_outline_overlay_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
   engines/sdf/shaders/sdf_grid_eval_comp.glsl
