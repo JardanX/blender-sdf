@@ -100,7 +100,9 @@ class Instance : public DrawEngine {
     SH_TILE_CULL_COMP,
     SH_CONE_MARCH_COMP,
     SH_SHADE_COMP,
+    SH_OUTLINE_EVAL_COMP,
     SH_BLIT,
+    SH_OUTLINE_OVERLAY,
     SH_FXAA,
     SH_COUNT,
   };
@@ -111,7 +113,9 @@ class Instance : public DrawEngine {
       "sdf_tile_cull_comp",
       "sdf_cone_march_comp",
       "sdf_shade_comp",
+      "sdf_outline_eval_comp",
       "sdf_blit",
+      "sdf_outline_overlay",
       "sdf_fxaa",
   };
 
@@ -122,7 +126,9 @@ class Instance : public DrawEngine {
   gpu::Shader *&tile_cull_sh_ = shaders_[SH_TILE_CULL_COMP];
   gpu::Shader *&cone_march_sh_ = shaders_[SH_CONE_MARCH_COMP];
   gpu::Shader *&shade_comp_sh_ = shaders_[SH_SHADE_COMP];
+  gpu::Shader *&outline_eval_sh_ = shaders_[SH_OUTLINE_EVAL_COMP];
   gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
+  gpu::Shader *&outline_overlay_sh_ = shaders_[SH_OUTLINE_OVERLAY];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
 
   BatchHandle shader_compile_batch_ = 0;
@@ -134,6 +140,8 @@ class Instance : public DrawEngine {
   gpu::Texture *gbuf_color_tx_ = nullptr;
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
+  gpu::Texture *outline_intensity_tx_ = nullptr;
+  int2 outline_size_ = int2(0);
   int2 render_size_ = int2(0);
   int2 viewport_size_ = int2(0);
   int2 fxaa_size_ = int2(0);
@@ -1583,10 +1591,22 @@ class Instance : public DrawEngine {
     draw_shade();
     GPU_debug_group_end();
 
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_TEXTURE_FETCH);
+
+    ensure_outline_targets();
+
+    GPU_debug_group_begin("SDF Outline");
+    draw_outline_eval();
+    GPU_debug_group_end();
+
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
 
     GPU_debug_group_begin("SDF Blit");
     draw_blit();
+    GPU_debug_group_end();
+
+    GPU_debug_group_begin("SDF Outline Overlay");
+    draw_outline_overlay();
     GPU_debug_group_end();
 
     GPU_debug_group_begin("SDF FXAA");
@@ -2200,7 +2220,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
     GPU_shader_uniform_1i(sh, "use_cone_trace", use_cone_trace_);
-    GPU_shader_uniform_1i(sh, "debug_bvh_views", debug_bvh_views_);
+    GPU_shader_uniform_1i(sh, "debug_bvh_views", debug_bvh_views_ == 6 ? 0 : debug_bvh_views_);
     GPU_shader_uniform_1i(sh, "sdf_max_steps", sdf_max_steps_);
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_1f(sh, "sdf_over_relaxation", sdf_over_relaxation_);
@@ -2227,7 +2247,7 @@ class Instance : public DrawEngine {
 
   void draw_shade()
   {
-    if (debug_bvh_views_ != 0) {
+    if (debug_bvh_views_ != 0 && debug_bvh_views_ != 6) {
       return;
     }
 
@@ -2286,6 +2306,53 @@ class Instance : public DrawEngine {
     GPU_shader_unbind();
   }
 
+  void ensure_outline_targets()
+  {
+    if (outline_intensity_tx_ != nullptr && outline_size_ == viewport_size_) {
+      return;
+    }
+    if (outline_intensity_tx_) {
+      GPU_texture_free(outline_intensity_tx_);
+    }
+    outline_size_ = viewport_size_;
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    outline_intensity_tx_ = GPU_texture_create_2d(
+        "sdf_outline_intensity", viewport_size_.x, viewport_size_.y, 1,
+        gpu::TextureFormat::SFLOAT_32, usage, nullptr);
+  }
+
+  void draw_outline_eval()
+  {
+    gpu::Shader *sh = outline_eval_sh_;
+    if (!sh || !outline_intensity_tx_) {
+      return;
+    }
+
+    GPU_shader_bind(sh);
+
+    int pos_slot = GPU_shader_get_sampler_binding(sh, "gbuf_pos_tx");
+    GPU_texture_filter_mode(gbuf_pos_tx_, false);
+    GPU_texture_bind(gbuf_pos_tx_, pos_slot);
+
+    int color_slot = GPU_shader_get_sampler_binding(sh, "gbuf_color_tx");
+    GPU_texture_filter_mode(gbuf_color_tx_, false);
+    GPU_texture_bind(gbuf_color_tx_, color_slot);
+
+    GPU_texture_image_bind(outline_intensity_tx_,
+                           GPU_shader_get_sampler_binding(sh, "outline_img"));
+
+    GPU_shader_uniform_2iv(sh, "viewport_size", &viewport_size_.x);
+
+    int dispatch_x = (viewport_size_.x + 7) / 8;
+    int dispatch_y = (viewport_size_.y + 7) / 8;
+    GPU_compute_dispatch(sh, dispatch_x, dispatch_y, 1);
+
+    GPU_texture_unbind(gbuf_pos_tx_);
+    GPU_texture_unbind(gbuf_color_tx_);
+    GPU_texture_image_unbind(outline_intensity_tx_);
+    GPU_shader_unbind();
+  }
+
   void draw_blit()
   {
     DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
@@ -2324,6 +2391,12 @@ class Instance : public DrawEngine {
     GPU_texture_filter_mode(comp_depth_tx_, false);
     GPU_texture_bind(comp_depth_tx_, depth_slot);
 
+    int mask_debug_slot = GPU_shader_get_sampler_binding(blit_sh_, "outline_mask_debug_tx");
+    if (outline_intensity_tx_) {
+      GPU_texture_filter_mode(outline_intensity_tx_, false);
+      GPU_texture_bind(outline_intensity_tx_, mask_debug_slot);
+    }
+
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
     }
@@ -2332,7 +2405,38 @@ class Instance : public DrawEngine {
 
     GPU_texture_unbind(comp_color_tx_);
     GPU_texture_unbind(comp_depth_tx_);
+    if (outline_intensity_tx_) {
+      GPU_texture_unbind(outline_intensity_tx_);
+    }
     GPU_shader_unbind();
+  }
+
+  void draw_outline_overlay()
+  {
+    if (!outline_overlay_sh_ || !outline_intensity_tx_) {
+      return;
+    }
+
+    GPU_depth_test(GPU_DEPTH_ALWAYS);
+    GPU_depth_mask(false);
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    GPU_shader_bind(outline_overlay_sh_);
+    GPU_shader_uniform_1f(outline_overlay_sh_, "outline_strength", 0.85f);
+
+    int slot = GPU_shader_get_sampler_binding(outline_overlay_sh_, "outline_tx");
+    GPU_texture_filter_mode(outline_intensity_tx_, false);
+    GPU_texture_bind(outline_intensity_tx_, slot);
+
+    GPU_batch_set_shader(fullscreen_batch_, outline_overlay_sh_);
+    GPU_batch_draw(fullscreen_batch_);
+
+    GPU_texture_unbind(outline_intensity_tx_);
+    GPU_shader_unbind();
+
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
   }
 
   /* FXAA post-process */
@@ -2434,6 +2538,9 @@ class Instance : public DrawEngine {
     }
     if (gbuf_color_tx_) {
       GPU_texture_free(gbuf_color_tx_);
+    }
+    if (outline_intensity_tx_) {
+      GPU_texture_free(outline_intensity_tx_);
     }
     if (march_color_tx_) {
       GPU_texture_free(march_color_tx_);
