@@ -22,6 +22,7 @@ struct SDFObjectGPU {
   int csg_operation;
   float shell_distance;
   int shell_mode;
+  int shell_op;
   float shell_blend_top;
   float shell_blend_bottom;
   float chamfer_k2;
@@ -38,7 +39,6 @@ struct SDFObjectGPU {
   int _pad3; /* scratch: max group blend (intBitsToFloat) */
   int _pad4;
   int _pad5;
-  int _pad6; /* Align float4 color to 16 bytes (24 scalars × 4 = 96; 128+96=224=14×16) */
   float4 color;
   float4 box_corners;
   float4 box_edges;   /* x=top, y=bottom, z=tapTop, w=tapBot */
@@ -52,13 +52,13 @@ struct SDFGroupGPU {
   float blend;
   float shell_distance;
   int shell_mode;
+  int shell_op;
   float shell_blend_top;
   float shell_blend_bottom;
   float chamfer_k2;
   float chamfer_k3;
   int first_object;
   int object_count;
-  int _pad0;
   float4 color;
 };
 

@@ -2317,6 +2317,9 @@ class Instance : public DrawEngine {
     }
     GPU_shader_uniform_3fv(blit_sh_, "bg_color", bg);
 
+    float uv_sc[2] = {1.0f, 1.0f};
+    GPU_shader_uniform_2fv(blit_sh_, "uv_scale", uv_sc);
+
     int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
     GPU_texture_filter_mode(comp_color_tx_, false);
     GPU_texture_bind(comp_color_tx_, color_slot);

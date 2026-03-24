@@ -65,6 +65,11 @@ typedef enum eSDFShellMode {
   SDF_SHELL_AVOID = 2,
 } eSDFShellMode;
 
+typedef enum eSDFShellOp {
+  SDF_SHELL_OP_UNION = 0,
+  SDF_SHELL_OP_SUBTRACTION = 1,
+} eSDFShellOp;
+
 /* Modifier types */
 typedef enum eSDFModifierType {
   SDF_MOD_MIRROR = 0,
@@ -112,7 +117,7 @@ typedef struct SDFModifier {
    * Hollow:   [0]=thickness
    * Round:    [0]=radius
    * Onion:    [0]=thickness
-   * Array:    [0]=count, [1..3]=offset/radius, [4]=blend */
+   * Array:    [0]=count, [1..3]=offset/radius, [4]=blend, [5..7]=rotation offset */
   float params[8];
 
   char name[64];
@@ -144,11 +149,11 @@ typedef struct SDF {
   int csg_operation; /* eSDFCSGOperation */
   float shell_distance;
   int shell_mode; /* eSDFShellMode */
+  int shell_op;   /* eSDFShellOp */
   float shell_blend_top;
   float shell_blend_bottom;
   float chamfer_k2;
   float chamfer_k3;
-  char _pad6[4];
 
   /* Box properties */
   float box_corners[4]; /* Per-corner bevel (normalized 0–1) */

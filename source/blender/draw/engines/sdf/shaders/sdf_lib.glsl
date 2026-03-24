@@ -1169,7 +1169,9 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
     return min(d1, carved);
   }
   else if (op == SDF_CSG_OP_SHELL) {
-    float h = abs(shell_dist);
+    /* Subtraction flips direction: positive dist carves inward instead of outward. */
+    float sd = (shell_op == SDF_SHELL_OP_SUBTRACTION) ? -shell_dist : shell_dist;
+    float h = abs(sd);
 
     if (shell_mode == SDF_SHELL_MODE_PUSH) {
       /* Standalone shell field around d2, then push into d1. */
@@ -1196,8 +1198,8 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
     float lk_top = min(shell_k_top, h);
     float lk_bot = min(shell_k_bot, h);
     float d_shell;
-    if (shell_dist < 0.0f) {
-      /* Inward: subtraction = bottom edge, union cap = top edge */
+    if (sd < 0.0f) {
+      /* Inward (or subtraction): subtract shape, cap at limit */
       float d_sub;
       if (shell_k_bot > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) d_sub = opSmoothSubtraction(d2, d1, shell_k_bot);

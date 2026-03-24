@@ -192,6 +192,12 @@ static const EnumPropertyItem rna_enum_sdf_group_shell_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_group_shell_op_items[] = {
+    {SDF_SHELL_OP_UNION, "UNION", 0, "Union", "Shell adds to the SDF field"},
+    {SDF_SHELL_OP_SUBTRACTION, "SUBTRACTION", 0, "Subtraction", "Shell subtracts from the SDF field"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_group_csg_items[] = {
     {SDF_CSG_UNION, "UNION", ICON_SDF_CSG_UNION, "Union", "Boolean union"},
     {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
@@ -359,6 +365,12 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   prop = RNA_def_property(srna, "shell_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_group_shell_mode_items);
   RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  /* Shell Op */
+  prop = RNA_def_property(srna, "shell_op", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_group_shell_op_items);
+  RNA_def_property_ui_text(prop, "Shell Op", "Whether the shell adds or subtracts from the SDF field");
   RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
 
   /* Shell Blend Top */
