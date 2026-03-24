@@ -962,6 +962,20 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
           float r = length(p.xy);
           p.x = r * cos(final_a) - radius;
           p.y = r * sin(final_a);
+
+          float3 rot = smod.params2.yzw;
+          if (abs(rot.x) > 0.0001f) {
+            float cx = cos(rot.x), sx = sin(rot.x);
+            p = float3(p.x, cx * p.y - sx * p.z, sx * p.y + cx * p.z);
+          }
+          if (abs(rot.y) > 0.0001f) {
+            float cy = cos(rot.y), sy = sin(rot.y);
+            p = float3(cy * p.x + sy * p.z, p.y, -sy * p.x + cy * p.z);
+          }
+          if (abs(rot.z) > 0.0001f) {
+            float cz = cos(rot.z), sz = sin(rot.z);
+            p = float3(cz * p.x - sz * p.y, sz * p.x + cz * p.y, p.z);
+          }
         }
       }
     }
@@ -1530,6 +1544,20 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
         float radius = fork_mod.params.y;
         cell_p.x = r * cos(final_a) - radius;
         cell_p.y = r * sin(final_a);
+
+        float3 rot = fork_mod.params2.yzw;
+        if (abs(rot.x) > 0.0001f) {
+          float cx = cos(rot.x), sx = sin(rot.x);
+          cell_p = float3(cell_p.x, cx * cell_p.y - sx * cell_p.z, sx * cell_p.y + cx * cell_p.z);
+        }
+        if (abs(rot.y) > 0.0001f) {
+          float cy = cos(rot.y), sy = sin(rot.y);
+          cell_p = float3(cy * cell_p.x + sy * cell_p.z, cell_p.y, -sy * cell_p.x + cy * cell_p.z);
+        }
+        if (abs(rot.z) > 0.0001f) {
+          float cz = cos(rot.z), sz = sin(rot.z);
+          cell_p = float3(cz * cell_p.x - sz * cell_p.y, sz * cell_p.x + cz * cell_p.y, cell_p.z);
+        }
       }
 
       float bot_scale = top_scale;
