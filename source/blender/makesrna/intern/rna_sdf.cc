@@ -15,9 +15,9 @@
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 
-namespace blender {
-
 #include "BLI_math_base.h"
+
+namespace blender {
 
 const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_BOX, "BOX", ICON_SDF_CUBE, "Cube", "Cube SDF primitive"},
@@ -44,6 +44,8 @@ extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+}  // namespace blender
+
 #ifdef RNA_RUNTIME
 
 #  include "MEM_guardedalloc.h"
@@ -64,6 +66,8 @@ extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
 
 #  include "WM_api.hh"
 #  include "WM_types.hh"
+
+using namespace blender;
 
 static void rna_SDF_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
@@ -364,6 +368,8 @@ static void rna_SDF_sdf_group_set(PointerRNA *ptr,
 }
 
 #else
+
+namespace blender {
 
 static const EnumPropertyItem rna_enum_sdf_blend_type_items[] = {
     {SDF_BLEND_LINEAR, "LINEAR", ICON_SDF_BLEND_LINEAR, "Linear", "Hard union/difference"},
@@ -1011,7 +1017,6 @@ void RNA_def_sdf(BlenderRNA *brna)
   rna_def_sdf(brna);
 }
 
-
-
 }  // namespace blender
+
 #endif

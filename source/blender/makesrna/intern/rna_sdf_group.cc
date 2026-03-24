@@ -11,13 +11,12 @@
 
 #include "rna_internal.hh"
 
-using namespace blender;
-
 #include "DNA_object_types.h"
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
-
 #include "BLI_math_base.h"
+
+using namespace blender;
 
 #ifdef RNA_RUNTIME
 
@@ -34,6 +33,7 @@ using namespace blender;
 
 #  include "WM_api.hh"
 #  include "WM_types.hh"
+nusing namespace blender;
 
 static void rna_SDFGroup_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
@@ -176,6 +176,8 @@ static bool rna_SDFGroupMember_object_poll(PointerRNA * /*ptr*/, PointerRNA valu
 }
 
 #else
+
+namespace blender {
 
 extern const EnumPropertyItem rna_enum_sdf_type_items[];
 
@@ -424,7 +426,6 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   rna_def_animdata_common(srna);
 }
 
-namespace blender {
 void RNA_def_sdf_group(BlenderRNA *brna)
 {
   rna_def_sdf_group_member(brna);
@@ -432,4 +433,5 @@ void RNA_def_sdf_group(BlenderRNA *brna)
 }
 
 }  // namespace blender
+
 #endif
