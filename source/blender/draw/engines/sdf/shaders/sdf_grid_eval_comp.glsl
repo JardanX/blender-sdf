@@ -115,7 +115,7 @@ void main()
     }
     else {
       if (!grp_has_hit) {
-        if (obj.csg_operation == 0) {
+        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL) {
           grp_dist = d;
           grp_has_hit = true;
         }
