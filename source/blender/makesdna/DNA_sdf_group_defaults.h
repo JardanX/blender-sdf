@@ -21,6 +21,7 @@
     .blend = 0.1f, \
     .shell_distance = 0.2f, \
     .shell_mode = 0, \
+    .shell_op = 0, \
     .shell_blend_top = 0.1f, \
     .shell_blend_bottom = 0.1f, \
     .chamfer_k2 = 0.01f, \

@@ -742,6 +742,8 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
             if sdf.csg_operation == 'SHELL':
                 layout.label(text="Shell Mode")
                 layout.prop(sdf, "shell_mode", text="")
+                layout.label(text="Shell Op")
+                layout.prop(sdf, "shell_op", text="")
 
             layout.label(text="Blend Type")
             row = layout.row(align=True)
@@ -952,7 +954,8 @@ class DATA_PT_sdf_modifiers(SDFButtonsPanel, Panel):
                     col.prop(mod, "offset")
                 elif mod.array_type == 'RADIAL':
                     col.prop(mod, "array_radius")
-                
+                    col.prop(mod, "rotation_offset")
+
                 box_csg = box.box()
                 box_csg.label(text="Array Blending:")
                 

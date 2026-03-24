@@ -199,6 +199,22 @@ static void rna_SDFModifier_offset_set(PointerRNA *ptr, const float *values)
   mod->params[3] = values[2];
 }
 
+static void rna_SDFModifier_rotation_offset_get(PointerRNA *ptr, float *values)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  values[0] = mod->params[5];
+  values[1] = mod->params[6];
+  values[2] = mod->params[7];
+}
+
+static void rna_SDFModifier_rotation_offset_set(PointerRNA *ptr, const float *values)
+{
+  SDFModifier *mod = (SDFModifier *)ptr->data;
+  mod->params[5] = values[0];
+  mod->params[6] = values[1];
+  mod->params[7] = values[2];
+}
+
 static int rna_SDFModifier_csg_operation_get(PointerRNA *ptr)
 {
   SDFModifier *mod = (SDFModifier *)ptr->data;
@@ -379,6 +395,12 @@ static const EnumPropertyItem rna_enum_sdf_shell_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_shell_op_items[] = {
+    {SDF_SHELL_OP_UNION, "UNION", 0, "Union", "Shell adds to the SDF field"},
+    {SDF_SHELL_OP_SUBTRACTION, "SUBTRACTION", 0, "Subtraction", "Shell subtracts from the SDF field"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_box_mode_items[] = {
     {SDF_BOX_MODE_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth rounding"},
     {SDF_BOX_MODE_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer (45-degree cut)"},
@@ -506,6 +528,19 @@ static void rna_def_sdf_modifier(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
   RNA_def_property_ui_text(prop, "Blend", "Smooth transition across array cells");
+  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
+
+  /* Array rotation offset */
+  prop = RNA_def_property(srna, "rotation_offset", PROP_FLOAT, PROP_EULER);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_SDFModifier_rotation_offset_get",
+                               "rna_SDFModifier_rotation_offset_set",
+                               nullptr);
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, DEG2RADF(-360.0f), DEG2RADF(360.0f), 10.0f, 3);
+  RNA_def_property_ui_text(
+      prop, "Rotation Offset", "Rotation offset for each array copy (radial array)");
   RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
 
   /* Modifier CSG Operation */
@@ -743,6 +778,12 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "shell_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_shell_mode_items);
   RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Shell Op */
+  prop = RNA_def_property(srna, "shell_op", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_shell_op_items);
+  RNA_def_property_ui_text(prop, "Shell Op", "Whether the shell adds or subtracts from the SDF field");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Shell Blend Top */

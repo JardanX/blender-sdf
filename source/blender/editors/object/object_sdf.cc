@@ -15,10 +15,14 @@
 #include "DNA_space_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
+#include "BLI_string.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include <cfloat>
+#include <cstdio>
 #include <string>
 
 #include "RNA_access.hh"
@@ -43,6 +47,8 @@
 
 #include "ED_object.hh"
 #include "ED_screen.hh"
+
+#include "UI_interface.hh"
 
 #include "BKE_mesh.h"
 #include "BKE_mesh.hh"
@@ -602,6 +608,145 @@ void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot)
 
   RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group to move");
   RNA_def_int(ot->srna, "direction", -1, -1, 1, "Direction", "Move direction (-1=up, 1=down)", -1, 1);
+}
+
+/* SDF Blend Adjust (Modal) */
+
+struct SDFBlendAdjustData {
+  float init_mval_x;
+  float init_blend;
+  float current_blend;
+  bool slow_mode;
+  float slow_mval_x;
+  float slow_blend;
+};
+
+static bool sdf_blend_adjust_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  return ob && ob->type == OB_SDF && ob->data && CTX_wm_region_view3d(C);
+}
+
+static void sdf_blend_adjust_update_header(bContext *C, SDFBlendAdjustData *data)
+{
+  WorkspaceStatus status(C);
+  status.item(IFACE_("Confirm"), ICON_EVENT_RETURN, ICON_MOUSE_LMB);
+  status.item(IFACE_("Cancel"), ICON_EVENT_ESC, ICON_MOUSE_RMB);
+  status.item(IFACE_("Adjust Blend"), ICON_MOUSE_MOVE);
+  status.item_bool(IFACE_("Precision"), data->slow_mode, ICON_EVENT_SHIFT);
+
+  char msg[128];
+  SNPRINTF(msg, "Blend: %.3f", data->current_blend);
+  ED_area_status_text(CTX_wm_area(C), msg);
+}
+
+static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
+  Object *ob = CTX_data_active_object(C);
+  SDF *sdf = static_cast<SDF *>(ob->data);
+
+  if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
+      (event->type == RIGHTMOUSE && event->val == KM_PRESS))
+  {
+    sdf->blend = data->init_blend;
+    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+    ED_area_status_text(CTX_wm_area(C), nullptr);
+    ED_workspace_status_text(C, nullptr);
+    MEM_freeN(data);
+    return OPERATOR_CANCELLED;
+  }
+
+  if ((event->type == LEFTMOUSE && event->val == KM_RELEASE) ||
+      (event->type == EVT_RETKEY && event->val == KM_PRESS) ||
+      (event->type == EVT_PADENTER && event->val == KM_PRESS))
+  {
+    sdf->blend = data->current_blend;
+    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+    ED_area_status_text(CTX_wm_area(C), nullptr);
+    ED_workspace_status_text(C, nullptr);
+    MEM_freeN(data);
+    return OPERATOR_FINISHED;
+  }
+
+  float mx = float(event->mval[0]);
+  float sensitivity = 0.01f;
+
+  if (event->type == EVT_LEFTSHIFTKEY && event->val == KM_PRESS) {
+    data->slow_mode = true;
+    data->slow_mval_x = mx;
+    data->slow_blend = data->current_blend;
+  }
+  if (event->type == EVT_LEFTSHIFTKEY && event->val == KM_RELEASE) {
+    data->slow_mode = false;
+  }
+
+  if (data->slow_mode) {
+    float d = (mx - data->slow_mval_x) * sensitivity * 0.1f;
+    data->current_blend = max_ff(data->slow_blend + d, 0.0f);
+  }
+  else {
+    float d = (mx - data->init_mval_x) * sensitivity;
+    data->current_blend = max_ff(data->init_blend + d, 0.0f);
+  }
+
+  sdf->blend = data->current_blend;
+  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+
+  sdf_blend_adjust_update_header(C, data);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C,
+                                                 wmOperator *op,
+                                                 const wmEvent *event)
+{
+  Object *ob = CTX_data_active_object(C);
+  SDF *sdf = static_cast<SDF *>(ob->data);
+
+  SDFBlendAdjustData *data = MEM_callocN<SDFBlendAdjustData>("SDF Blend Adjust Data");
+  data->init_mval_x = float(event->mval[0]);
+  data->init_blend = sdf->blend;
+  data->current_blend = sdf->blend;
+  data->slow_mode = false;
+  op->customdata = data;
+
+  WM_event_add_modal_handler(C, op);
+  sdf_blend_adjust_update_header(C, data);
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void sdf_blend_adjust_cancel(bContext *C, wmOperator *op)
+{
+  SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
+  Object *ob = CTX_data_active_object(C);
+  if (ob && ob->type == OB_SDF && ob->data) {
+    SDF *sdf = static_cast<SDF *>(ob->data);
+    sdf->blend = data->init_blend;
+    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  }
+  ED_area_status_text(CTX_wm_area(C), nullptr);
+  ED_workspace_status_text(C, nullptr);
+  MEM_freeN(data);
+}
+
+void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot)
+{
+  ot->name = "Adjust SDF Blend";
+  ot->description = "Interactively adjust blend amount by moving the mouse";
+  ot->idname = "OBJECT_OT_sdf_blend_adjust";
+
+  ot->invoke = sdf_blend_adjust_invoke;
+  ot->modal = sdf_blend_adjust_modal;
+  ot->cancel = sdf_blend_adjust_cancel;
+  ot->poll = sdf_blend_adjust_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_BLOCKING;
 }
 
 /* SDF to Mesh (Dual Contouring) */
