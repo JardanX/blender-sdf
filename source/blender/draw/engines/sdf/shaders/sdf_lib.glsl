@@ -1062,6 +1062,9 @@ struct SDFPrimitiveData {
 #define SDF_SHELL_MODE_PUSH 1
 #define SDF_SHELL_MODE_AVOID 2
 
+#define SDF_SHELL_OP_UNION 0
+#define SDF_SHELL_OP_SUBTRACTION 1
+
 /** Blend type IDs (must match eSDFBlendType in DNA_sdf_types.h). */
 #define SDF_BLEND_TYPE_LINEAR 0
 #define SDF_BLEND_TYPE_SMOOTH 1
@@ -1074,7 +1077,7 @@ struct SDFPrimitiveData {
  * \param k3: chamfer/round edge smoothness for shape 2 (0 = sharp).
  */
 float combineCSG(float d1, float d2, int op, int bt, float k,
-                 float shell_dist, int shell_mode,
+                 float shell_dist, int shell_mode, int shell_op,
                  float shell_k_top, float shell_k_bot,
                  float k2, float k3)
 {
@@ -1487,7 +1490,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0.0f, 0.0f, 0.0f, 0.0f);
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f);
     }
   }
   else if (mtype == SDF_MOD_ARRAY) {
@@ -1538,7 +1541,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0.0f, 0.0f, 0.0f, 0.0f);
+      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f);
     }
   }
 
@@ -1577,7 +1580,7 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
     float prev = scene_dist;
     scene_dist = combineCSG(
         scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-        grp.shell_distance, grp.shell_mode,
+        grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
         grp.chamfer_k2, grp.chamfer_k3);
     if (grp.csg_operation == 0) {

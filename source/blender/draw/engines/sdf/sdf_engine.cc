@@ -336,6 +336,7 @@ class Instance : public DrawEngine {
     gpu_obj.csg_operation = sdf_data->csg_operation;
     gpu_obj.shell_distance = sdf_data->shell_distance;
     gpu_obj.shell_mode = sdf_data->shell_mode;
+    gpu_obj.shell_op = sdf_data->shell_op;
     gpu_obj.shell_blend_top = sdf_data->shell_blend_top;
     gpu_obj.shell_blend_bottom = sdf_data->shell_blend_bottom;
     gpu_obj.chamfer_k2 = sdf_data->chamfer_k2;
@@ -1070,6 +1071,7 @@ class Instance : public DrawEngine {
         gpu_grp.blend = group->blend;
         gpu_grp.shell_distance = group->shell_distance;
         gpu_grp.shell_mode = group->shell_mode;
+        gpu_grp.shell_op = group->shell_op;
         gpu_grp.shell_blend_top = group->shell_blend_top;
         gpu_grp.shell_blend_bottom = group->shell_blend_bottom;
         gpu_grp.chamfer_k2 = group->chamfer_k2;
@@ -1437,6 +1439,21 @@ class Instance : public DrawEngine {
     for (int i = 0; i < int(objects_.size()); i++) {
       objects_[i].bbox_min = float4(new_mins[i], 0.0f);
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
+    }
+
+    /* Intersection: expand to scene bounds (must be evaluated everywhere). */
+    {
+      float3 smin = float3(1e30f), smax = float3(-1e30f);
+      for (int i = 0; i < int(objects_.size()); i++) {
+        smin = math::min(smin, new_mins[i]);
+        smax = math::max(smax, new_maxs[i]);
+      }
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i].csg_operation == SDF_CSG_INTERSECT) {
+          objects_[i].bbox_min = float4(smin, 0.0f);
+          objects_[i].bbox_max = float4(smax, 0.0f);
+        }
+      }
     }
 
     /* Fine frustum cull on expanded AABBs */
