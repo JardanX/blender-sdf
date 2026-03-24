@@ -603,11 +603,7 @@ void gpu_shader_create_info_init()
 #  include "glsl_osd_infos_list.hh"
 #endif
 
-  if (GPU_stencil_clasify_buffer_workaround()) {
-    /* WORKAROUND: Adding a dummy buffer that isn't used fixes a bug inside the Qualcomm driver. */
-    eevee_deferred_tile_classify.storage_buf(
-        12, Qualifier::read_write, "uint", "dummy_workaround_buf[]");
-  }
+  /* MATHOPS: Removed — EEVEE Qualcomm driver workaround */
 
   for (ShaderCreateInfo *info : g_create_infos->values()) {
     info->is_generated_ = false;

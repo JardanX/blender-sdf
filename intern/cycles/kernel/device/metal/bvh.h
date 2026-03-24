@@ -318,12 +318,7 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
   intersection = metalrt_intersect.intersect(
       r, metal_ancillaries->accel_struct, ray_mask, metal_ancillaries->ift_shadow, payload);
 #endif
-
-  if (intersection.type != intersection_type::none) {
-    return true;
-  }
-
-  return false;
+  return (intersection.type != intersection_type::none);
 }
 
 #ifdef __BVH_LOCAL__

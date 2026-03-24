@@ -264,22 +264,6 @@ if(WITH_CYCLES_DEVICE_HIP)
 endif()
 
 if(WITH_CYCLES_DEVICE_OPTIX)
-  # MATHOPS: Auto-detect OptiX SDK from common install locations if not set.
-  if(WIN32 AND NOT OPTIX_ROOT_DIR AND NOT DEFINED ENV{OPTIX_ROOT_DIR})
-    file(GLOB _optix_candidates
-      "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.*"
-      "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.*"
-    )
-    if(_optix_candidates)
-      list(SORT _optix_candidates)
-      list(GET _optix_candidates -1 _optix_best)
-      set(OPTIX_ROOT_DIR ${_optix_best} CACHE PATH "Path to OptiX SDK (auto-detected)" FORCE)
-      message(STATUS "Auto-detected OptiX SDK: ${_optix_best}")
-    endif()
-    unset(_optix_candidates)
-    unset(_optix_best)
-  endif()
-
   find_package(OptiX 8.0.0)
 
   if(OPTIX_FOUND)

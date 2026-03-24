@@ -184,6 +184,7 @@ set(SRC
   intern/mask_rasterize.cc
   intern/material.cc
   intern/mball.cc
+  intern/mball_tessellate.cc
   intern/mesh.cc
   intern/mesh_attributes.cc
   intern/mesh_calc_edges.cc
@@ -302,8 +303,8 @@ set(SRC
   intern/vfont.cc
   intern/vfont_curve.cc
   intern/vfontdata_freetype.cc
-  intern/sdf.cc
   intern/viewer_path.cc
+  intern/sdf.cc
   intern/volume.cc
   intern/volume_grid.cc
   intern/volume_grid_fields.cc
@@ -444,6 +445,8 @@ set(SRC
   BKE_main_namemap.hh
   BKE_mask.hh
   BKE_material.hh
+  BKE_mball.hh
+  BKE_mball_tessellate.hh
   BKE_mesh.h
   BKE_mesh.hh
   BKE_mesh_fair.hh
@@ -521,8 +524,8 @@ set(SRC
   BKE_uvproject.h
   BKE_vfont.hh
   BKE_vfontdata.hh
-  BKE_sdf.hh
   BKE_viewer_path.hh
+  BKE_sdf.hh
   BKE_volume.hh
   BKE_volume_enums.hh
   BKE_volume_grid.hh

@@ -428,9 +428,7 @@ short RNA_type_to_ID_code(const StructRNA *type)
   if (base_type == RNA_Material) {
     return ID_MA;
   }
-  if (base_type == RNA_MetaBall) {
-    return ID_MB;
-  }
+  /* MATHOPS: Removed — MetaBall RNA */
   if (base_type == RNA_MovieClip) {
     return ID_MC;
   }
@@ -538,7 +536,7 @@ StructRNA *ID_code_to_RNA_type(short idcode)
     case ID_MA:
       return RNA_Material;
     case ID_MB:
-      return RNA_MetaBall;
+      return RNA_ID; /* MATHOPS: MetaBall RNA removed, tombstone returns generic ID */
     case ID_MC:
       return RNA_MovieClip;
     case ID_ME:

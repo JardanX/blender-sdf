@@ -39,10 +39,6 @@ struct ImageSaveOptions {
   int orig_imtype;
   char orig_colorspace[/*MAX_COLORSPACE_NAME*/ 64];
 
-  /* Original values, so we can restore when type changes back .*/
-  int orig_imtype;
-  char orig_colorspace[/*MAX_COLORSPACE_NAME*/ 64];
-
   /* Keep track of previous values for auto updates in UI. */
   bool prev_save_as_render = false;
   int prev_imtype = false;

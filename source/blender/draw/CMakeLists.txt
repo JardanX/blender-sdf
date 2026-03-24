@@ -267,7 +267,7 @@ set(GLSL_SRC
   intern/shaders/subdiv_infos.hh
   intern/shaders/subdiv_patch_eval_infos.hh
 
-  /* MATHOPS: Removed — EEVEE shader infos */
+  # MATHOPS: Removed — EEVEE shader infos
 
   engines/image/shaders/infos/engine_image_infos.hh
 
@@ -305,7 +305,7 @@ set(GLSL_SRC
   engines/workbench/shaders/infos/workbench_shadow_infos.hh
   engines/workbench/shaders/infos/workbench_transparent_resolve_infos.hh
 
-  /* MATHOPS: Removed — EEVEE shaders */
+  # MATHOPS: Removed — EEVEE shaders
 
 
   engines/workbench/shaders/workbench_cavity.bsl.hh
@@ -565,12 +565,8 @@ set(GLSL_SRC
 )
 
 # These tests depend on gpu_shader_test, so they're only included when WITH_GPU_BACKEND_TESTS is enabled.
+# MATHOPS: Removed — EEVEE test shaders
 set(GLSL_SRC_TEST
-  engines/eevee/shaders/eevee_gbuffer_closure_test.glsl
-  engines/eevee/shaders/eevee_gbuffer_normal_test.glsl
-  engines/eevee/shaders/eevee_horizon_scan_test.glsl
-  engines/eevee/shaders/eevee_occupancy_test.glsl
-  engines/eevee/shaders/eevee_shadow_test.glsl
 )
 
 if(WITH_GTESTS)
@@ -592,9 +588,7 @@ set(GLSL_INC
   engines/workbench
   engines/workbench/shaders
   engines/workbench/shaders/infos
-  engines/eevee
-  engines/eevee/shaders
-  engines/eevee/shaders/infos
+  # MATHOPS: Removed — EEVEE include dirs
   engines/overlay
   engines/overlay/shaders
   engines/overlay/shaders/infos
@@ -604,6 +598,9 @@ set(GLSL_INC
   engines/image
   engines/image/shaders
   engines/image/shaders/infos
+  engines/sdf
+  engines/sdf/shaders
+  engines/sdf/shaders/infos
 
   intern
   intern/shaders
@@ -710,7 +707,7 @@ if(WITH_GTESTS)
     set(TEST_SRC
       tests/draw_curves_test.cc
       tests/draw_pass_test.cc
-      /* MATHOPS: Removed — eevee_test.cc */
+      # MATHOPS: Removed — eevee_test.cc
       tests/draw_testing.cc
 
       tests/draw_testing.hh

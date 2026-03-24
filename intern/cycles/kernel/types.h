@@ -636,11 +636,6 @@ enum PrimitiveType {
 
   PRIMITIVE_CURVE = (PRIMITIVE_CURVE_THICK | PRIMITIVE_CURVE_RIBBON),
 
-  /* SDF uses a high bit outside the shape/motion range.
-   * Not included in PRIMITIVE_ALL since that must fit in OptiX 7-bit hit kind. */
-  PRIMITIVE_SDF = (1 << 15),
-
-  /* Mask of primitive types that fit in OptiX hit kind (< 128). */
   PRIMITIVE_ALL = (PRIMITIVE_TRIANGLE | PRIMITIVE_CURVE | PRIMITIVE_POINT | PRIMITIVE_VOLUME |
                    PRIMITIVE_LAMP | PRIMITIVE_MOTION),
 
@@ -648,10 +643,6 @@ enum PrimitiveType {
   PRIMITIVE_NUM_BITS = PRIMITIVE_NUM_SHAPES + 1, /* All shapes + motion bit. */
   PRIMITIVE_NUM = PRIMITIVE_NUM_SHAPES * 2,      /* With and without motion. */
 };
-
-/* OptiX hit kind for SDF custom intersection.
- * Must be < 128 (OptiX 7-bit limit) and distinct from PRIMITIVE_ALL values. */
-#define SDF_OPTIX_HIT_KIND 64
 
 /* Convert type to index in range 0..PRIMITIVE_NUM-1. */
 #define PRIMITIVE_INDEX(type) \
@@ -1044,11 +1035,6 @@ struct ccl_align(16) ShaderData {
   Spectrum closure_emission_background;
   Spectrum closure_transparent_extinction;
 
-  /* SDF material blending: secondary shader ID and blend weight.
-   * Set by sdf_shader_setup when hit is in a smooth-union blend zone. */
-  int sdf_blend_shader;    /* Secondary shader ID (-1 = no blend). */
-  float sdf_blend_factor;  /* Weight of secondary shader (0 = primary only). */
-
   /* At the end so we can adjust size in ShaderDataTinyStorage. */
   struct ShaderClosure closure[MAX_CLOSURE];
 };
@@ -1351,12 +1337,7 @@ struct ccl_align(16) KernelData {
   int device_bvh, pad1;
 #  endif
 #endif
-
-  /* SDF parameters. */
-  int num_sdfs;
-  int num_sdf_bricks;
-  int num_sdf_shapes;     /* Per-shape TLAS/BLAS instancing (0 = world-space mode). */
-  int num_sdf_instances;
+  int pad2, pad3;
 };
 static_assert_align(KernelData, 16);
 
@@ -1408,59 +1389,6 @@ struct KernelObject {
   uint blocker_shadow_set;
 };
 static_assert_align(KernelObject, 16);
-
-struct KernelSDF {
-  /* Offsets into flat device arrays (sdf_indirection, sdf_atlas, sdf_matid). */
-  int indirection_offset;  /* Start index in sdf_indirection array. */
-  int atlas_offset;        /* Start index in sdf_atlas array. */
-  int matid_offset;        /* Start index in sdf_matid array. */
-  int grid_res;            /* Bricks per axis in the indirection grid. */
-
-  int bricks_per_axis;   /* ceil(cbrt(active_bricks)) for compact atlas layout. */
-  int num_objects;       /* Number of SDF Blender objects contributing to atlas. */
-  int shader_offset;     /* Offset into sdf_shader_map for per-object shader IDs. */
-  int object_id;         /* Cycles object index (for sd->object). */
-
-  float voxel_size;      /* World-space voxel size. */
-  packed_float3 origin;  /* World-space atlas origin. */
-
-  int blend_offset;      /* Offset into sdf_blend_id/sdf_blend_factor (-1 = none). */
-  int pad1;
-  int pad2;
-  int pad3;
-};
-static_assert_align(KernelSDF, 16);
-
-/* Per-shape atlas metadata for TLAS/BLAS instanced SDF rendering.
- * Each unique SDF shape has its own local-space brick atlas. */
-struct KernelSDFShape {
-  int indirection_offset; /* Start in sdf_shape_indirection array. */
-  int atlas_offset;       /* Start in sdf_shape_atlas array. */
-  int brick_map_offset;   /* Start in sdf_shape_brick_map array. */
-  int active_bricks;      /* Number of active bricks for this shape. */
-
-  int grid_res_x;         /* Bricks per axis (non-cubic). */
-  int grid_res_y;
-  int grid_res_z;
-  int bricks_per_axis;    /* ceil(cbrt(active_bricks)) for compact layout. */
-
-  float voxel_size;       /* Local-space voxel size. */
-  packed_float3 origin;   /* Local-space atlas origin. */
-};
-static_assert_align(KernelSDFShape, 16);
-
-/* Per-instance data for TLAS/BLAS instanced SDF rendering.
- * Stores transforms for CPU/CUDA ray transformation (OptiX uses hardware TLAS). */
-struct KernelSDFInstance {
-  int shape_id;   /* Index into sdf_shape_objects[]. */
-  int shader_id;  /* Cycles shader ID. */
-  int object_id;  /* Cycles object index (for sd->object). */
-  int pad;
-
-  Transform world_to_local; /* Maps world-space ray to shape's normalized local space. */
-  Transform local_to_world; /* Maps local-space hit back to world space. */
-};
-static_assert_align(KernelSDFInstance, 16);
 
 struct KernelCurve {
   int shader_id;

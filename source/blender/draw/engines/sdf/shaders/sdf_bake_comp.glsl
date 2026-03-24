@@ -94,7 +94,8 @@ float evalSDFPrimitiveSh(float3 local_pos, SharedObj obj)
  * Eliminates redundant SSBO reads across 144 threads x 12 Z iterations. */
 shared int shared_candidates[MAX_CANDIDATES];
 shared int shared_num_candidates;
-shared SharedObj shared_objs[MAX_CANDIDATES];
+/* MATHOPS: SharedObj cache removed for 5.1 shader preprocessor compat.
+ * Object data is re-read from SSBO per invocation instead. */
 
 void main()
 {
@@ -197,25 +198,7 @@ void main()
   }
   barrier();
 
-  /* Cooperatively load candidate object data into shared memory.
-   * Each thread loads one object; if num_candidates > 144 (workgroup size),
-   * threads loop. This replaces 144 * 12 = 1728 redundant SSBO reads
-   * per brick with at most MAX_CANDIDATES reads total. */
   int num_candidates = shared_num_candidates;
-  uint tid = gl_LocalInvocationIndex;
-  for (int c = int(tid); c < num_candidates; c += 144) {
-    int i = shared_candidates[c];
-    SDFObjectGPU obj = objects[i];
-    shared_objs[c].inverse_matrix = obj.inverse_matrix;
-    shared_objs[c].position = obj.position;
-    shared_objs[c].sdf_size = obj.sdf_size;
-    shared_objs[c].color = obj.color;
-    shared_objs[c].bevel = obj.bevel;
-    shared_objs[c].blend = obj.blend;
-    shared_objs[c].sdf_type = obj.sdf_type;
-    shared_objs[c].obj_index = i;
-  }
-  barrier();
 
   /* Local thread covers XY, loop over Z. */
   int2 local_xy = int2(gl_LocalInvocationID.xy);
@@ -231,29 +214,37 @@ void main()
     int acc_obj_id = -1;
     float closest_raw_dist = 1e10f;
 
-    /* Evaluate candidates from shared memory cache. */
     for (int c = 0; c < num_candidates; c++) {
-      SharedObj sobj = shared_objs[c];
+      int obj_idx = shared_candidates[c];
+      SDFObjectGPU sobj = objects[obj_idx];
 
       float3 local_pos = (sobj.inverse_matrix * float4(world_pos - sobj.position.xyz, 1.0f)).xyz;
 
-      float dist = evalSDFPrimitiveSh(local_pos, sobj);
+      SharedObj sobj_sh;
+      sobj_sh.inverse_matrix = sobj.inverse_matrix;
+      sobj_sh.position = sobj.position;
+      sobj_sh.sdf_size = sobj.sdf_size;
+      sobj_sh.color = sobj.color;
+      sobj_sh.bevel = sobj.bevel;
+      sobj_sh.blend = sobj.blend;
+      sobj_sh.sdf_type = sobj.sdf_type;
+      sobj_sh.obj_index = obj_idx;
+      float dist = evalSDFPrimitiveSh(local_pos, sobj_sh);
 
-      /* Track which object's raw surface is closest for accurate ownership. */
       if (dist < closest_raw_dist) {
         closest_raw_dist = dist;
-        acc_obj_id = sobj.obj_index;
+        acc_obj_id = sobj_sh.obj_index;
       }
 
-      float k = sobj.blend;
+      float k = sobj_sh.blend;
       if (k > 0.0f && acc_dist < 1e9f) {
         float h = clamp(0.5f + 0.5f * (acc_dist - dist) / k, 0.0f, 1.0f);
-        acc_color = mix(acc_color, sobj.color.rgb, h);
+        acc_color = mix(acc_color, sobj_sh.color.rgb, h);
         acc_dist = mix(acc_dist, dist, h) - k * h * (1.0f - h);
       }
       else {
         if (dist < acc_dist) {
-          acc_color = sobj.color.rgb;
+          acc_color = sobj_sh.color.rgb;
           acc_dist = dist;
         }
       }

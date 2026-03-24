@@ -65,7 +65,7 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
 
   Object *ob = add_type(C, OB_SDF, name, loc, rot, false, local_view_bits);
   if (ob && ob->data) {
-    SDF *sdf_data = static_cast<SDF *>(ob->data);
+    SDF *sdf_data = id_cast<SDF *>(ob->data);
     sdf_data->sdf_type = type;
   }
   return ob;

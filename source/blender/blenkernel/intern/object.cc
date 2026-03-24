@@ -3485,7 +3485,7 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
     case OB_GREASE_PENCIL:
       return id_cast<const GreasePencil *>(ob->data)->bounds_min_max_eval();
     case OB_SDF: {
-      const SDF *sdf = static_cast<const SDF *>(ob->data);
+      const SDF *sdf = id_cast<const SDF *>(ob->data);
       const blender::float3 half_size = blender::float3(sdf->size[0], sdf->size[1], sdf->size[2]) +
                                         blender::float3(sdf->bevel);
       return blender::Bounds<blender::float3>{-half_size, half_size};

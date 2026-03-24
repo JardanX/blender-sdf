@@ -367,7 +367,7 @@ Material ***BKE_object_material_array_p(Object *ob)
     return &(grease_pencil->material_array);
   }
   if (ob->type == OB_SDF) {
-    SDF *sdf = static_cast<SDF *>(ob->data);
+    SDF *sdf = id_cast<SDF *>(ob->data);
     return &(sdf->mat);
   }
   return nullptr;
@@ -404,7 +404,7 @@ short *BKE_object_material_len_p(Object *ob)
     return &(grease_pencil->material_array_num);
   }
   if (ob->type == OB_SDF) {
-    SDF *sdf = static_cast<SDF *>(ob->data);
+    SDF *sdf = id_cast<SDF *>(ob->data);
     return &(sdf->totcol);
   }
   return nullptr;

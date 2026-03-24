@@ -1597,7 +1597,7 @@ void DRW_draw_render_loop_offscreen(Depsgraph *depsgraph,
 }
 
 /* MATHOPS: Removed — Grease Pencil draw engine. Stub always returns false. */
-bool DRW_render_check_grease_pencil(Depsgraph * /*depsgraph*/)
+bool DRW_render_check_grease_pencil(Depsgraph * /*depsgraph*/, View3D * /*v3d*/)
 {
   return false;
 }

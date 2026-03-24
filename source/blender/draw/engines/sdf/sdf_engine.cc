@@ -433,7 +433,7 @@ class Instance : public DrawEngine {
       return;
     }
 
-    const SDF *sdf_data = static_cast<const SDF *>(ob->data);
+    const SDF *sdf_data = id_cast<const SDF *>(ob->data);
     if (sdf_data == nullptr) {
       return;
     }
@@ -2820,7 +2820,7 @@ class Instance : public DrawEngine {
 
     /* Read blend from the "Mesh to SDF Grid" modifier's IDProperties. */
     float blend_val = 0.0f;
-    LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+    for (ModifierData *md = static_cast<ModifierData *>(ob->modifiers.first); md; md = md->next) {
       if (md->type != eModifierType_Nodes) {
         continue;
       }

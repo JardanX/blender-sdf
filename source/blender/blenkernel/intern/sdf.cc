@@ -10,7 +10,7 @@
 
 #include "MEM_guardedalloc.h"
 
-#include "DNA_defaults.h"
+#include "DNA_ID.h"
 #include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
@@ -27,13 +27,12 @@
 
 #include "BLO_read_write.hh"
 
+namespace blender {
+
 static void sdf_init_data(ID *id)
 {
   SDF *sdf = (SDF *)id;
-  BLI_assert(MEMCMP_STRUCT_AFTER_IS_ZERO(sdf, id));
-
-  MEMCPY_STRUCT_AFTER(sdf, DNA_struct_default_get(SDF), id);
-
+  /* 5.1: C++ default member init handles defaults via DNA_sdf_types.h */
   sdf->runtime = new blender::bke::SDFRuntime();
 }
 
@@ -46,7 +45,7 @@ static void sdf_copy_data(Main * /*bmain*/,
   SDF *sdf_dst = (SDF *)id_dst;
   const SDF *sdf_src = (const SDF *)id_src;
 
-  sdf_dst->mat = static_cast<Material **>(MEM_dupallocN(sdf_src->mat));
+  sdf_dst->mat = MEM_dupalloc(sdf_src->mat);
   sdf_dst->runtime = new blender::bke::SDFRuntime();
 }
 
@@ -54,7 +53,8 @@ static void sdf_free_data(ID *id)
 {
   SDF *sdf = (SDF *)id;
   BKE_animdata_free(&sdf->id, false);
-  MEM_SAFE_FREE(sdf->mat);
+  MEM_delete(sdf->mat);
+  sdf->mat = nullptr;
   delete sdf->runtime;
 }
 
@@ -66,14 +66,12 @@ static void sdf_foreach_id(ID *id, LibraryForeachIDData *data)
   }
 }
 
-static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
+static void sdf_blend_write(BlendWriter *writer, ID *id, const void * /*id_address*/)
 {
-  SDF *sdf = (SDF *)id;
+  SDF *sdf = reinterpret_cast<SDF *>(id);
 
-  BLO_write_id_struct(writer, SDF, id_address, &sdf->id);
   BKE_id_blend_write(writer, &sdf->id);
 
-  /* Direct data */
   BLO_write_pointer_array(writer, sdf->totcol, sdf->mat);
 }
 
@@ -128,3 +126,5 @@ void BKE_sdf_data_update(Depsgraph * /*depsgraph*/, Scene * /*scene*/, Object * 
 {
   /* No-op for now — rendering is handled externally. */
 }
+
+}  // namespace blender

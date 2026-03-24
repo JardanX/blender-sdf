@@ -60,7 +60,9 @@ float sdTorus(float3 p, float2 t) {
 float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj) {
   float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
-  if (obj.sdf_type == SDF_TYPE_SPHERE) return sdSphere(local_pos, size.x - bevel) - bevel;
+  if (obj.sdf_type == SDF_TYPE_SPHERE) {
+    return sdSphere(local_pos, size.x - bevel) - bevel;
+  }
   if (obj.sdf_type == SDF_TYPE_CAPSULE) {
     float3 cap_size = max(size - float3(bevel), float3(0.001f));
     return sdCapsule(local_pos, cap_size) - bevel;
@@ -77,12 +79,10 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj) {
 shared int shared_candidates[MAX_CANDIDATES];
 shared int shared_num_candidates;
 
-struct BlockStatus {
-  int status; // 0: empty/inside, 1: subdivide, 2: allocated leaf
-  int slot;
-};
-shared BlockStatus lod0_status;
-shared BlockStatus lod1_status[8];
+shared int lod0_status_status;
+shared int lod0_status_slot;
+shared int lod1_status_status[8];
+shared int lod1_status_slot[8];
 
 /** Evaluate full SDF for a set of candidates. */
 float evalSDF(float3 pos, int num_candidates) {
@@ -128,13 +128,13 @@ void evaluateBlock(float3 center, float half_size, int num_candidates, float sca
 
   /* Thin feature detection: if all 7 points are far from the surface, it is empty. */
   int surf_count = 0;
-  if (abs(d_c)  < surf_t) surf_count++;
-  if (abs(dx_p) < surf_t) surf_count++;
-  if (abs(dx_m) < surf_t) surf_count++;
-  if (abs(dy_p) < surf_t) surf_count++;
-  if (abs(dy_m) < surf_t) surf_count++;
-  if (abs(dz_p) < surf_t) surf_count++;
-  if (abs(dz_m) < surf_t) surf_count++;
+  if (abs(d_c)  < surf_t) { surf_count++; }
+  if (abs(dx_p) < surf_t) { surf_count++; }
+  if (abs(dx_m) < surf_t) { surf_count++; }
+  if (abs(dy_p) < surf_t) { surf_count++; }
+  if (abs(dy_m) < surf_t) { surf_count++; }
+  if (abs(dz_p) < surf_t) { surf_count++; }
+  if (abs(dz_m) < surf_t) { surf_count++; }
 
   if (surf_count == 0) {
     is_empty = true;
@@ -164,7 +164,9 @@ void evaluateBlock(float3 center, float half_size, int num_candidates, float sca
 
 void main() {
   int chunk_idx = int(gl_WorkGroupID.y * uint(dispatch_width) + gl_WorkGroupID.x);
-  if (chunk_idx >= active_chunk_count) return;
+  if (chunk_idx >= active_chunk_count) {
+    return;
+  }
 
   int3 coarse_brick = active_coarse_chunks[chunk_idx].xyz;
   int3 local_id = int3(gl_LocalInvocationID);
@@ -190,11 +192,15 @@ void main() {
       while (sp > 0) {
         int node_idx = stack[--sp];
         BVHNodeGPU node = bvh_nodes[node_idx];
-        if (!aabb_overlap(brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz)) continue;
+        if (!aabb_overlap(brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz)) {
+          continue;
+        }
         int left = bvh_decode_int(node.min_and_left.w);
         int right = bvh_decode_int(node.max_and_right.w);
         if (left == -1) {
-          if (shared_num_candidates < MAX_CANDIDATES) shared_candidates[shared_num_candidates++] = right;
+          if (shared_num_candidates < MAX_CANDIDATES) {
+            shared_candidates[shared_num_candidates++] = right;
+          }
         } else {
           if (sp < BVH_MAX_STACK - 1) { stack[sp++] = left; stack[sp++] = right; }
         }
@@ -202,8 +208,12 @@ void main() {
     } else {
       for (int i = 0; i < object_count; i++) {
         SDFObjectGPU obj = objects[i];
-        if (any(greaterThan(brick_min, obj.bbox_max.xyz)) || any(lessThan(brick_max, obj.bbox_min.xyz))) continue;
-        if (shared_num_candidates < MAX_CANDIDATES) shared_candidates[shared_num_candidates++] = i;
+        if (any(greaterThan(brick_min, obj.bbox_max.xyz)) || any(lessThan(brick_max, obj.bbox_min.xyz))) {
+          continue;
+        }
+        if (shared_num_candidates < MAX_CANDIDATES) {
+          shared_candidates[shared_num_candidates++] = i;
+        }
       }
     }
   }
@@ -211,7 +221,9 @@ void main() {
 
   int num_cands = shared_num_candidates;
   if (num_cands == 0) {
-    if (is_valid_fine) hashInsert(fine_brick, -1);
+    if (is_valid_fine) {
+      hashInsert(fine_brick, -1);
+    }
     return;
   }
 
@@ -224,27 +236,35 @@ void main() {
     evaluateBlock(lod0_center, lod0_half_size, num_cands, threshold0, bound0, d_c, error, is_empty);
 
     if (is_empty) {
-      if (d_c > 0.0f) lod0_status.status = 0; // fully outside
-      else lod0_status.status = 0;            // fully inside (slot logic handled below)
-      lod0_status.slot = (d_c > 0.0f) ? -1 : -2;
+      if (d_c > 0.0f) {
+        lod0_status_status = 0;
+      }
+      else {
+        lod0_status_status = 0;
+      }
+      lod0_status_slot = (d_c > 0.0f) ? -1 : -2;
     } else {
       if (error < threshold0) {
-        lod0_status.status = 2; // flat: allocate
-        lod0_status.slot = int(atomicAdd(brick_counter.count, 1u));
-        active_bricks[lod0_status.slot].coord = int4(fine_brick, (lod0_status.slot << 2) | 0);
+        lod0_status_status = 2; // flat: allocate
+        lod0_status_slot = int(atomicAdd(brick_counter.count, 1u));
+        active_bricks[lod0_status_slot].coord = int4(fine_brick, (lod0_status_slot << 2) | 0);
       } else {
-        lod0_status.status = 1; // subdivide
+        lod0_status_status = 1; // subdivide
       }
     }
   }
   barrier();
 
-  if (lod0_status.status == 0) {
-    if (is_valid_fine) hashInsert(fine_brick, lod0_status.slot);
+  if (lod0_status_status == 0) {
+    if (is_valid_fine) {
+      hashInsert(fine_brick, lod0_status_slot);
+    }
     return;
   }
-  if (lod0_status.status == 2) {
-    if (is_valid_fine) hashInsert(fine_brick, (lod0_status.slot << 2) | 0);
+  if (lod0_status_status == 2) {
+    if (is_valid_fine) {
+      hashInsert(fine_brick, (lod0_status_slot << 2) | 0);
+    }
     return;
   }
 
@@ -261,29 +281,33 @@ void main() {
     evaluateBlock(lod1_center, lod1_half_size, num_cands, threshold1, bound1, d_c, error, is_empty);
 
     if (is_empty) {
-      lod1_status[tid].status = 0;
-      lod1_status[tid].slot = (d_c > 0.0f) ? -1 : -2;
+      lod1_status_status[tid] = 0;
+      lod1_status_slot[tid] = (d_c > 0.0f) ? -1 : -2;
     } else {
       if (error < threshold1) {
-        lod1_status[tid].status = 2;
+        lod1_status_status[tid] = 2;
         int slot = int(atomicAdd(brick_counter.count, 1u));
-        lod1_status[tid].slot = slot;
+        lod1_status_slot[tid] = slot;
         int3 l1_fine_brick = coarse_brick * 4 + l1_offset * 2;
         active_bricks[slot].coord = int4(l1_fine_brick, (slot << 2) | 1);
       } else {
-        lod1_status[tid].status = 1;
+        lod1_status_status[tid] = 1;
       }
     }
   }
   barrier();
 
   int l1_idx = local_id.x / 2 + (local_id.y / 2) * 2 + (local_id.z / 2) * 4;
-  if (lod1_status[l1_idx].status == 0) {
-    if (is_valid_fine) hashInsert(fine_brick, lod1_status[l1_idx].slot);
+  if (lod1_status_status[l1_idx] == 0) {
+    if (is_valid_fine) {
+      hashInsert(fine_brick, lod1_status_slot[l1_idx]);
+    }
     return;
   }
-  if (lod1_status[l1_idx].status == 2) {
-    if (is_valid_fine) hashInsert(fine_brick, (lod1_status[l1_idx].slot << 2) | 1);
+  if (lod1_status_status[l1_idx] == 2) {
+    if (is_valid_fine) {
+      hashInsert(fine_brick, (lod1_status_slot[l1_idx] << 2) | 1);
+    }
     return;
   }
 

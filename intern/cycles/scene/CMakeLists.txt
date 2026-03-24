@@ -40,7 +40,6 @@ set(SRC
   pass.cpp
   curves.cpp
   scene.cpp
-  sdf.cpp
   shader.cpp
   shader_graph.cpp
   shader_nodes.cpp
@@ -78,7 +77,6 @@ set(SRC_HEADERS
   pointcloud.h
   curves.h
   scene.h
-  sdf.h
   shader.h
   shader_graph.h
   shader_nodes.h

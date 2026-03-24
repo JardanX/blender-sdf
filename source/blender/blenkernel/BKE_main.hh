@@ -50,6 +50,7 @@ struct Object;
 struct Mesh;
 struct Curve;
 struct MetaBall;
+struct SDF;
 struct Material;
 struct Tex;
 struct Image;
@@ -409,7 +410,7 @@ struct Main : NonCopyable, NonMovable {
   ListBaseT<Curves> hair_curves = {};
   ListBaseT<PointCloud> pointclouds = {};
   ListBaseT<Volume> volumes = {};
-  ListBase sdfs = {};
+  ListBaseT<SDF> sdfs = {};
 
   /**
    * Must be generated, used and freed by same code - never assume this is valid data unless you

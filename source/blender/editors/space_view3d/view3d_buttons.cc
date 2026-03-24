@@ -2122,16 +2122,12 @@ static void v3d_editarmature_buts(ui::Layout &layout, Object *ob)
   col.prop(&eboneptr, "envelope_distance", UI_ITEM_NONE, IFACE_("Envelope"), ICON_NONE);
 }
 
-static void v3d_editmetaball_buts(ui::Layout &layout, Object *ob)
+static void v3d_editmetaball_buts(ui::Layout &layout, Object * /*ob*/)
 {
-  MetaBall *mball = id_cast<MetaBall *>(ob->data);
-
-  if (!mball || !(mball->lastelem)) {
-    layout.label(IFACE_("Nothing selected"), ICON_NONE);
-    return;
-  }
-
-  PointerRNA ptr = RNA_pointer_create_discrete(&mball->id, RNA_MetaElement, mball->lastelem);
+  /* MATHOPS: Removed — metaball edit UI */
+  layout.label(IFACE_("MetaBall editing removed"), ICON_NONE);
+  return;
+#if 0
 
   ui::Layout *col = &layout.column(false);
   col->prop(&ptr, "co", UI_ITEM_NONE, std::nullopt, ICON_NONE);
@@ -2167,6 +2163,7 @@ static void v3d_editmetaball_buts(ui::Layout &layout, Object *ob)
       col->prop(&ptr, "size_z", UI_ITEM_NONE, IFACE_("Z"), ICON_NONE);
       break;
   }
+#endif
 }
 
 static void do_view3d_region_buttons(bContext *C, void * /*index*/, int event)
