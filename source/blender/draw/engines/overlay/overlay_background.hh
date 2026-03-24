@@ -62,7 +62,7 @@ class Background : Overlay {
       color_override = float4(UNPACK3(state.v3d->shading.background_color), 1.0f);
     }
     else {
-      switch (UI_GetThemeValue(TH_BACKGROUND_TYPE)) {
+      switch (ui::theme::get_value(TH_BACKGROUND_TYPE)) {
         case TH_BACKGROUND_GRADIENT_LINEAR:
           background_type = BG_GRADIENT;
           break;
@@ -101,8 +101,7 @@ class Background : Overlay {
     bg_ps_.draw_procedural(GPU_PRIM_TRIS, 1, 3);
 
     if (state.vignette_enabled) {
-      const float vignette_aperture = state.v3d ? state.v3d->vignette_aperture : 1.0f;
-      const float vignette_falloff = 0.15f;
+      const float vignette_aperture = state.v3d ? state.v3d->xr_vignette_aperture : 1.0f;
 
       bg_vignette_ps_.init();
       bg_vignette_ps_.framebuffer_set(&framebuffer_ref_);
@@ -117,7 +116,6 @@ class Background : Overlay {
       bg_vignette_ps_.push_constant("bg_type", background_type);
       bg_vignette_ps_.push_constant("vignette_enabled", true);
       bg_vignette_ps_.push_constant("vignette_aperture", vignette_aperture);
-      bg_vignette_ps_.push_constant("vignette_falloff", vignette_falloff);
       bg_vignette_ps_.draw_procedural(GPU_PRIM_TRIS, 1, 3);
     }
   }

@@ -9,7 +9,9 @@
 #ifdef GPU_SHADER
 #  pragma once
 #  include "gpu_shader_compat.hh"
+#endif
 
+#ifdef GLSL_CPP_STUBS
 #  define widgetID 0
 #endif
 
@@ -52,6 +54,7 @@ GPU_SHADER_CREATE_END()
 GPU_SHADER_CREATE_INFO(gpu_shader_2D_node_socket_inst)
 DO_STATIC_COMPILATION()
 DEFINE_VALUE("widgetID", "gl_InstanceID")
+BUILTINS(BuiltinBits::INSTANCE_ID)
 PUSH_CONSTANT_ARRAY(float4, parameters, (MAX_SOCKET_PARAMETERS * MAX_SOCKET_INSTANCE))
 ADDITIONAL_INFO(gpu_shader_2D_node_socket_shared)
 GPU_SHADER_CREATE_END()

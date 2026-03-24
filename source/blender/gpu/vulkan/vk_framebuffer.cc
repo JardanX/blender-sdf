@@ -69,6 +69,11 @@ void VKFrameBuffer::bind(bool enabled_srgb)
   attachment_states_.fill(GPU_ATTACHMENT_WRITE);
 }
 
+uint32_t VKFrameBuffer::viewport_size() const
+{
+  return this->multi_viewport_ ? GPU_MAX_VIEWPORTS : 1;
+}
+
 void VKFrameBuffer::vk_viewports_append(Vector<VkViewport> &r_viewports) const
 {
   BLI_assert(r_viewports.is_empty());
@@ -315,6 +320,7 @@ void VKFrameBuffer::subpass_transition_impl(const GPUAttachmentState depth_attac
 
   if (supports_local_read) {
     VKContext &context = *VKContext::get();
+    rendering_ensure(context);
 
     for (int index : IndexRange(color_attachment_states.size())) {
       if (color_attachment_states[index] == GPU_ATTACHMENT_READ) {
@@ -324,22 +330,11 @@ void VKFrameBuffer::subpass_transition_impl(const GPUAttachmentState depth_attac
         }
       }
     }
-    if (is_rendering_) {
-      is_rendering_ = false;
-      load_stores.fill(default_load_store());
-    }
+    is_rendering_ = false;
   }
   else {
     VKContext &context = *VKContext::get();
-    if (is_rendering_) {
-      rendering_end(context);
-
-      /* TODO: this might need a better implementation:
-       * READ -> DONTCARE
-       * WRITE -> LOAD, STORE based on previous value.
-       * IGNORE -> DONTCARE -> IGNORE */
-      load_stores.fill(default_load_store());
-    }
+    rendering_end(context);
 
     for (int index : IndexRange(color_attachment_states.size())) {
       if (color_attachment_states[index] == GPU_ATTACHMENT_READ) {
@@ -449,6 +444,16 @@ static void blit_aspect(VKContext &context,
   region.dstOffsets[1].y = clamp_i(
       dst_offset_y + src_texture.height_get(), 0, dst_texture.height_get());
   region.dstOffsets[1].z = 1;
+
+  /* Early exit when no pixels needs to be blitted. This should never occur, but has happened
+   * during development as retina displays are not yet detected and the intermediate back-buffer
+   * would be to small, resulting in cropping the full blit source image. */
+  if (region.dstOffsets[0].x == region.dstOffsets[1].x ||
+      region.dstOffsets[0].y == region.dstOffsets[1].y ||
+      region.dstOffsets[0].z == region.dstOffsets[1].z)
+  {
+    return;
+  }
 
   context.render_graph().add_node(blit_image);
 }
@@ -652,7 +657,9 @@ void VKFrameBuffer::rendering_ensure_dynamic_rendering(VKContext &context,
             VK_FORMAT_UNDEFINED :
             vk_format);
   }
-  color_attachment_size = uint32_t(max_filled_slot_index + 1);
+  uint32_t color_attachment_size = uint32_t(max_filled_slot_index + 1);
+  color_attachment_formats_.resize(color_attachment_size);
+
   begin_rendering.node_data.vk_rendering_info.colorAttachmentCount = color_attachment_size;
   begin_rendering.node_data.vk_rendering_info.pColorAttachments =
       begin_rendering.node_data.color_attachments;
@@ -747,6 +754,8 @@ void VKFrameBuffer::rendering_ensure(VKContext &context)
   rendering_ensure_dynamic_rendering(context, extensions);
   dirty_attachments_ = false;
   dirty_state_ = false;
+  use_explicit_load_store_ = false;
+  load_stores.fill(default_load_store());
 }
 
 VkFormat VKFrameBuffer::depth_attachment_format_get() const
@@ -759,7 +768,7 @@ VkFormat VKFrameBuffer::stencil_attachment_format_get() const
 };
 Span<VkFormat> VKFrameBuffer::color_attachment_formats_get() const
 {
-  return color_attachment_formats_;
+  return color_attachment_formats_.as_span();
 }
 
 void VKFrameBuffer::rendering_end(VKContext &context)

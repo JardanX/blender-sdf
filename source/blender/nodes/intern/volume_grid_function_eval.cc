@@ -7,6 +7,7 @@
 #include "FN_multi_function.hh"
 
 #include "BKE_anonymous_attribute_make.hh"
+#include "BKE_attribute_legacy_convert.hh"
 #include "BKE_node.hh"
 #include "BKE_node_socket_value.hh"
 #include "BKE_volume_grid.hh"
@@ -112,7 +113,7 @@ BLI_NOINLINE static void process_leaf_node(const mf::MultiFunction &fn,
             const Span<openvdb::Coord> voxels = ensure_voxel_coords();
             MutableSpan<bool> values = scope.allocator().allocate_array<bool>(
                 index_mask.min_array_size());
-            index_mask.foreach_index([&](const int64_t i) {
+            index_mask.foreach_index_optimized<int64_t>([&](const int64_t i) {
               const openvdb::Coord &coord = voxels[i];
               values[i] = tree.getValue(coord);
             });

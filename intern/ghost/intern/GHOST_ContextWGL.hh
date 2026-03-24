@@ -12,6 +12,8 @@
 
 #include <epoxy/wgl.h>
 
+#include <list>
+
 #ifndef GHOST_OPENGL_WGL_RESET_NOTIFICATION_STRATEGY
 #  define GHOST_OPENGL_WGL_RESET_NOTIFICATION_STRATEGY 0
 #endif
@@ -114,4 +116,18 @@ class GHOST_ContextWGL : public GHOST_Context {
 
   static HGLRC s_sharedHGLRC;
   static int s_sharedCount;
+
+  /* Offscreen window handles are cached to ensure they are created and freed on the
+   * main thread, as required by the Windows API. */
+  struct OffscreenWindowHandle {
+    OffscreenWindowHandle();
+    ~OffscreenWindowHandle();
+
+    HWND h_wnd = nullptr;
+    HDC h_DC = nullptr;
+    bool used = false;
+  };
+
+  static std::list<OffscreenWindowHandle> s_sharedOffscreenWindowHandles;
+  OffscreenWindowHandle *offscreen_window_handle_;
 };

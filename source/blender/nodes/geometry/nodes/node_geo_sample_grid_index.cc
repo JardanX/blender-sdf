@@ -6,6 +6,7 @@
 
 #include "BKE_type_conversions.hh"
 #include "BKE_volume_grid.hh"
+#include "BKE_volume_grid_process.hh"
 #include "BKE_volume_openvdb.hh"
 
 #include "NOD_rna_define.hh"
@@ -91,57 +92,12 @@ static void node_gather_link_search_ops(GatherLinkSearchOpParams &params)
   }
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 #ifdef WITH_OPENVDB
-
-template<typename T>
-void sample_grid(const bke::OpenvdbGridType<T> &grid,
-                 const Span<int> x,
-                 const Span<int> y,
-                 const Span<int> z,
-                 const IndexMask &mask,
-                 MutableSpan<T> dst)
-{
-  using GridType = bke::OpenvdbGridType<T>;
-  using GridValueT = typename GridType::ValueType;
-  using AccessorT = typename GridType::ConstUnsafeAccessor;
-  using TraitsT = typename bke::VolumeGridTraits<T>;
-  /* Can use unsafe accessor because we know that the tree topology is not modified while we access
-   * it here. This reduces a significant amount of overhead. */
-  AccessorT accessor = grid.getConstUnsafeAccessor();
-
-  mask.foreach_index([&](const int64_t i) {
-    GridValueT value = accessor.getValue(openvdb::Coord(x[i], y[i], z[i]));
-    dst[i] = TraitsT::to_blender(value);
-  });
-}
-
-template<typename Fn> void convert_to_static_type(const VolumeGridType type, const Fn &fn)
-{
-  switch (type) {
-    case VOLUME_GRID_BOOLEAN:
-      fn(bool());
-      break;
-    case VOLUME_GRID_FLOAT:
-      fn(float());
-      break;
-    case VOLUME_GRID_INT:
-      fn(int());
-      break;
-    case VOLUME_GRID_MASK:
-      fn(bool());
-      break;
-    case VOLUME_GRID_VECTOR_FLOAT:
-      fn(float3());
-      break;
-    default:
-      break;
-  }
-}
 
 class SampleGridIndexFunction : public mf::MultiFunction {
   bke::GVolumeGrid grid_;
@@ -177,15 +133,7 @@ class SampleGridIndexFunction : public mf::MultiFunction {
     const VArraySpan<int> z = params.readonly_single_input<int>(2, "Z");
     GMutableSpan dst = params.uninitialized_single_output(3, "Value");
 
-    convert_to_static_type(grid_type_, [&](auto dummy) {
-      using T = decltype(dummy);
-      sample_grid<T>(static_cast<const bke::OpenvdbGridType<T> &>(*grid_base_),
-                     x,
-                     y,
-                     z,
-                     mask,
-                     dst.typed<T>());
-    });
+    bke::volume_grid::sample_tree_indices(grid_type_, grid_base_->baseTree(), x, y, z, mask, dst);
   }
 };
 
@@ -243,7 +191,7 @@ static void node_rna(StructRNA *srna)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_node_type_base(&ntype, "GeometryNodeSampleGridIndex", GEO_NODE_SAMPLE_GRID_INDEX);
   ntype.ui_name = "Sample Grid Index";
@@ -256,7 +204,7 @@ static void node_register()
   ntype.geometry_node_execute = node_geo_exec;
   ntype.draw_buttons = node_layout;
   ntype.geometry_node_execute = node_geo_exec;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 
   node_rna(ntype.rna_ext.srna);
 }

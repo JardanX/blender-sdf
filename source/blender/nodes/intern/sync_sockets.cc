@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "DNA_node_types.h"
 #include "DNA_space_types.h"
@@ -680,17 +681,14 @@ bool node_can_sync_sockets(const bContext &C, const bNodeTree & /*tree*/, const 
 void node_can_sync_cache_clear(Main &bmain)
 {
   if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first)) {
-    LISTBASE_FOREACH (wmWindow *, window, &wm->windows) {
-      bScreen *screen = BKE_workspace_active_screen_get(window->workspace_hook);
-      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
-        SpaceLink *sl = static_cast<SpaceLink *>(area->spacedata.first);
+    for (wmWindow &window : wm->windows) {
+      bScreen *screen = BKE_workspace_active_screen_get(window.workspace_hook);
+      for (ScrArea &area : screen->areabase) {
+        SpaceLink *sl = static_cast<SpaceLink *>(area.spacedata.first);
         if (sl->spacetype == SPACE_NODE) {
           SpaceNode *snode = reinterpret_cast<SpaceNode *>(sl);
-          /* This may be called before runtime data is initialized currently. */
-          if (snode->runtime) {
-            Map<int, bool> &cache = ed::space_node::node_can_sync_cache_get(*snode);
-            cache.clear();
-          }
+          Map<int, bool> &cache = ed::space_node::node_can_sync_cache_get(*snode);
+          cache.clear();
         }
       }
     }

@@ -381,6 +381,7 @@ class RENDER_PT_color_management_white_balance(Panel):
         col.prop(view, "white_balance_tint")
 
 
+# MATHOPS: Removed — EEVEE render panels
 def draw_curves_settings(self, context):
     layout = self.layout
     scene = context.scene

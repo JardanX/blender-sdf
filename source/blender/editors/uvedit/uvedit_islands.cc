@@ -22,6 +22,8 @@
 
 #include "ED_uvedit.hh" /* Own include. */
 
+namespace blender {
+
 /* -------------------------------------------------------------------- */
 /** \name UDIM packing helper functions
  * \{ */
@@ -36,8 +38,8 @@ bool uv_coords_isect_udim(const Image *image, const int udim_grid[2], const floa
   }
   /* Check if selection lies on a valid UDIM image tile. */
   if (is_tiled_image) {
-    LISTBASE_FOREACH (const ImageTile *, tile, &image->tiles) {
-      const int tile_index = tile->tile_number - 1001;
+    for (const ImageTile &tile : image->tiles) {
+      const int tile_index = tile.tile_number - 1001;
       const int target_x = (tile_index % 10);
       const int target_y = (tile_index / 10);
       if (coords_floor[0] == target_x && coords_floor[1] == target_y) {
@@ -76,7 +78,8 @@ static bool bm_loop_uv_shared_edge_check(const BMLoop *l_a, const BMLoop *l_b, v
     }
   }
 
-  return BM_loop_uv_share_edge_check((BMLoop *)l_a, (BMLoop *)l_b, data->offsets.uv);
+  return BM_loop_uv_share_edge_check(
+      const_cast<BMLoop *>(l_a), const_cast<BMLoop *>(l_b), data->offsets.uv);
 }
 
 /**
@@ -108,7 +111,7 @@ static bool uvedit_is_face_affected_for_calc_uv_islands(const Scene *scene,
 
 int bm_mesh_calc_uv_islands(const Scene *scene,
                             BMesh *bm,
-                            ListBase *island_list,
+                            ListBaseT<FaceIsland> *island_list,
                             const bool only_selected_faces,
                             const bool only_selected_uvs,
                             const bool use_seams,
@@ -119,7 +122,7 @@ int bm_mesh_calc_uv_islands(const Scene *scene,
   int island_added = 0;
   BM_mesh_elem_table_ensure(bm, BM_FACE);
 
-  int *groups_array = MEM_malloc_arrayN<int>(bm->totface, __func__);
+  int *groups_array = MEM_new_array_uninitialized<int>(bm->totface, __func__);
 
   int (*group_index)[2];
 
@@ -148,13 +151,13 @@ int bm_mesh_calc_uv_islands(const Scene *scene,
   for (int i = 0; i < group_len; i++) {
     const int faces_start = group_index[i][0];
     const int faces_len = group_index[i][1];
-    BMFace **faces = MEM_malloc_arrayN<BMFace *>(faces_len, __func__);
+    BMFace **faces = MEM_new_array_uninitialized<BMFace *>(faces_len, __func__);
 
     for (int j = 0; j < faces_len; j++) {
       faces[j] = BM_face_at_index(bm, groups_array[faces_start + j]);
     }
 
-    FaceIsland *island = MEM_callocN<FaceIsland>(__func__);
+    FaceIsland *island = MEM_new_zeroed<FaceIsland>(__func__);
     island->faces = faces;
     island->faces_len = faces_len;
     island->offsets = uv_offsets;
@@ -163,9 +166,11 @@ int bm_mesh_calc_uv_islands(const Scene *scene,
     island_added += 1;
   }
 
-  MEM_freeN(groups_array);
-  MEM_freeN(group_index);
+  MEM_delete(groups_array);
+  MEM_delete(group_index);
   return island_added;
 }
 
 /** \} */
+
+}  // namespace blender

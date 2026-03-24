@@ -8,8 +8,6 @@
 
 #include <sstream>
 
-#include "GHOST_C-api.h"
-
 #include "BLI_path_utils.hh"
 #include "BLI_threads.h"
 
@@ -31,14 +29,17 @@
 #include "vk_state_manager.hh"
 #include "vk_storage_buffer.hh"
 #include "vk_texture.hh"
+#include "vk_texture_pool.hh"
 #include "vk_uniform_buffer.hh"
 #include "vk_vertex_buffer.hh"
 
 #include "vk_backend.hh"
 
+namespace blender {
+
 static CLG_LogRef LOG = {"gpu.vulkan"};
 
-namespace blender::gpu {
+namespace gpu {
 
 static const char *vk_extension_get(int index)
 {
@@ -147,13 +148,26 @@ static Vector<StringRefNull> missing_capabilities_get(VkPhysicalDevice vk_physic
   vkGetPhysicalDeviceFeatures2(vk_physical_device, &features);
 
 #ifndef __APPLE__
+  /* Features currently not supported by Mesa KosmicKrisp. */
   if (features.features.geometryShader == VK_FALSE) {
     missing_capabilities.append("geometry shaders");
+  }
+#endif
+  if (features.features.vertexPipelineStoresAndAtomics == VK_FALSE) {
+    missing_capabilities.append("vertex pipeline stores and atomics");
+  }
+  if (features.features.multiViewport == VK_FALSE) {
+    missing_capabilities.append("multi viewport");
+  }
+  if (features.features.shaderClipDistance == VK_FALSE) {
+    missing_capabilities.append("shader clip distance");
+  }
+  if (features.features.fragmentStoresAndAtomics == VK_FALSE) {
+    missing_capabilities.append("fragment stores and atomics");
   }
   if (features.features.logicOp == VK_FALSE) {
     missing_capabilities.append("logical operations");
   }
-#endif
   if (features.features.dualSrcBlend == VK_FALSE) {
     missing_capabilities.append("dual source blending");
   }
@@ -163,17 +177,8 @@ static Vector<StringRefNull> missing_capabilities_get(VkPhysicalDevice vk_physic
   if (features.features.multiDrawIndirect == VK_FALSE) {
     missing_capabilities.append("multi draw indirect");
   }
-  if (features.features.multiViewport == VK_FALSE) {
-    missing_capabilities.append("multi viewport");
-  }
-  if (features.features.shaderClipDistance == VK_FALSE) {
-    missing_capabilities.append("shader clip distance");
-  }
   if (features.features.drawIndirectFirstInstance == VK_FALSE) {
     missing_capabilities.append("draw indirect first instance");
-  }
-  if (features.features.fragmentStoresAndAtomics == VK_FALSE) {
-    missing_capabilities.append("fragment stores and atomics");
   }
   if (features_11.shaderDrawParameters == VK_FALSE) {
     missing_capabilities.append("shader draw parameters");
@@ -330,10 +335,10 @@ void VKBackend::platform_init()
            GPU_ARCHITECTURE_IMR);
 }
 
-static void init_device_list(GHOST_ContextHandle ghost_context)
+static void init_device_list(GHOST_IContext *ghost_context)
 {
   GHOST_VulkanHandles vulkan_handles = {};
-  GHOST_GetVulkanHandles(ghost_context, &vulkan_handles);
+  ghost_context->getVulkanHandles(vulkan_handles);
 
   uint32_t physical_devices_count = 0;
   vkEnumeratePhysicalDevices(vulkan_handles.instance, &physical_devices_count, nullptr);
@@ -359,7 +364,7 @@ static void init_device_list(GHOST_ContextHandle ghost_context)
     index++;
   }
 
-  std::sort(GPG.devices.begin(), GPG.devices.end(), [&](const GPUDevice &a, const GPUDevice &b) {
+  std::ranges::sort(GPG.devices, [&](const GPUDevice &a, const GPUDevice &b) {
     if (a.name == b.name) {
       return a.index < b.index;
     }
@@ -420,22 +425,19 @@ void VKBackend::detect_workarounds(VKDevice &device)
   VKExtensions extensions;
 
   if (G.debug & G_DEBUG_GPU_FORCE_WORKAROUNDS) {
-    printf("\n");
-    printf("VK: Forcing workaround usage and disabling features and extensions.\n");
-    printf("    Vendor: %s\n", device.vendor_name().c_str());
-    printf("    Device: %s\n", device.physical_device_properties_get().deviceName);
-    printf("    Driver: %s\n", device.driver_version().c_str());
+    CLOG_WARN(&LOG, "Forcing workarounds and disabling features and extensions");
+
     /* Force workarounds and disable extensions. */
     workarounds.not_aligned_pixel_formats = true;
-    workarounds.vertex_formats.r8g8b8 = true;
     extensions.shader_output_layer = false;
     extensions.shader_output_viewport_index = false;
     extensions.fragment_shader_barycentric = false;
     extensions.dynamic_rendering_local_read = false;
     extensions.dynamic_rendering_unused_attachments = false;
-    extensions.descriptor_buffer = false;
     extensions.pageable_device_local_memory = false;
     extensions.wide_lines = false;
+    extensions.line_rasterization = false;
+    extensions.extended_dynamic_state = false;
     GCaps.stencil_export_support = false;
 
     device.workarounds_ = workarounds;
@@ -455,15 +457,21 @@ void VKBackend::detect_workarounds(VKDevice &device)
   extensions.dynamic_rendering_unused_attachments = device.supports_extension(
       VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME);
   extensions.logic_ops = device.physical_device_features_get().logicOp;
-  /* For stability reasons descriptor buffers have been disabled. */
-#if 0
-  extensions.descriptor_buffer = device.supports_extension(
-      VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
-#endif
   extensions.maintenance4 = device.supports_extension(VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
   extensions.memory_priority = device.supports_extension(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
   extensions.pageable_device_local_memory = device.supports_extension(
       VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+  extensions.graphics_pipeline_library = device.supports_extension(
+      VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+  extensions.line_rasterization = device.supports_extension(
+      VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME);
+  extensions.extended_dynamic_state = device.supports_extension(
+      VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+  extensions.vertex_input_dynamic_state = device.supports_extension(
+      VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+#if 0
+  extensions.host_image_copy = device.supports_extension(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
+#endif
 #ifdef _WIN32
   extensions.external_memory = device.supports_extension(
       VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
@@ -473,34 +481,31 @@ void VKBackend::detect_workarounds(VKDevice &device)
   extensions.external_memory = false;
 #endif
 
-  /* Descriptor buffers are disabled on the NVIDIA platform due to performance regressions. Both
-   * still seem to be faster than OpenGL.
-   *
-   * See #140125
-   */
-  if (device.vk_physical_device_driver_properties_.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) {
-    extensions.descriptor_buffer = false;
-  }
-
-  /* Running render tests fails consistently in some scenes. The cause is that too many descriptor
-   * sets are required for rendering resulting in failing allocations of the descriptor buffer. We
-   * work around this issue by not using descriptor buffers on these platforms.
-   *
-   * TODO: recheck when the backed memory gets freed and how to improve it.
-   *
-   * See #141476
-   */
-  if (device.vk_physical_device_driver_properties_.driverID ==
-      VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS)
-  {
-    extensions.descriptor_buffer = false;
-  }
-
   /* AMD GPUs don't support texture formats that use are aligned to 24 or 48 bits. */
   if (GPU_type_matches(GPU_DEVICE_ATI, GPU_OS_ANY, GPU_DRIVER_ANY) ||
       GPU_type_matches(GPU_DEVICE_APPLE, GPU_OS_MAC, GPU_DRIVER_ANY))
   {
     workarounds.not_aligned_pixel_formats = true;
+  }
+
+  /* During testing graphics pipeline library feature it was detected that it would crash on
+   * official AMD drivers.
+   */
+  if (GPU_type_matches(GPU_DEVICE_ATI, GPU_OS_ANY, GPU_DRIVER_OFFICIAL) &&
+      bool(G.debug & G_DEBUG_GPU))
+  {
+    extensions.graphics_pipeline_library = false;
+    extensions.vertex_input_dynamic_state = false;
+  }
+
+  /* Disable vertex input dynamic state for Qualcomm devices (#153414).
+   *
+   * TODO: We should re-validate vertex input dynamic state as there are multiple vendors with
+   * similar issues. It might be an oversight. Will wait for feedback from the driver developers
+   * and perfrom some out of bounds error checks.
+   */
+  if (GPU_type_matches(GPU_DEVICE_QUALCOMM, GPU_OS_WIN, GPU_DRIVER_ANY)) {
+    extensions.vertex_input_dynamic_state = false;
   }
 
   /* Only enable by default dynamic rendering local read on Qualcomm devices. NVIDIA, AMD and Intel
@@ -519,11 +524,20 @@ void VKBackend::detect_workarounds(VKDevice &device)
     extensions.dynamic_rendering_local_read = false;
   }
 
-  VkFormatProperties format_properties = {};
-  vkGetPhysicalDeviceFormatProperties(
-      device.physical_device_get(), VK_FORMAT_R8G8B8_UNORM, &format_properties);
-  workarounds.vertex_formats.r8g8b8 = (format_properties.bufferFeatures &
-                                       VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) == 0;
+  /* When using host image copy on certain NVIDIA platforms the allocation of textures that only
+   * use GPU_TEXTURE_USAGE_SHADER_READ/WRITE will fail to allocate the memory. This needs some more
+   * research as this might just be a missing flag when allocating. Another solution is to not
+   * allow host_imag_copy when only these two flags are set as the rest seems to work as expected.
+   *
+   * See #151826
+   */
+  if (GPU_type_matches(GPU_DEVICE_NVIDIA, GPU_OS_ANY, GPU_DRIVER_OFFICIAL)) {
+    extensions.host_image_copy = false;
+  }
+
+#ifdef __APPLE__
+  extensions.extended_dynamic_state = false;
+#endif
 
   device.workarounds_ = workarounds;
   device.extensions_ = extensions;
@@ -582,27 +596,28 @@ void VKBackend::compute_dispatch_indirect(StorageBuf *indirect_buf)
   context.render_graph().add_node(dispatch_indirect_info);
 }
 
-Context *VKBackend::context_alloc(void *ghost_window, void *ghost_context)
+Context *VKBackend::context_alloc(GHOST_IWindow *ghost_window, GHOST_IContext *ghost_context)
 {
   if (ghost_window) {
     BLI_assert(ghost_context == nullptr);
-    ghost_context = GHOST_GetDrawingContext((GHOST_WindowHandle)ghost_window);
+    ghost_context = ghost_window->getDrawingContext();
   }
 
   BLI_assert(ghost_context != nullptr);
   if (!device.is_initialized()) {
     device.init(ghost_context);
     device.extensions_get().log();
-    init_device_list((GHOST_ContextHandle)ghost_context);
+    device.workarounds_get().log();
+    init_device_list(ghost_context);
   }
 
   VKContext *context = new VKContext(ghost_window, ghost_context);
   device.context_register(*context);
-  GHOST_SetVulkanSwapBuffersCallbacks((GHOST_ContextHandle)ghost_context,
-                                      VKContext::swap_buffer_draw_callback,
-                                      VKContext::swap_buffer_acquired_callback,
-                                      VKContext::openxr_acquire_framebuffer_image_callback,
-                                      VKContext::openxr_release_framebuffer_image_callback);
+  ghost_context->setVulkanSwapBuffersCallbacks(
+      VKContext::swap_buffer_draw_callback,
+      VKContext::swap_buffer_acquired_callback,
+      VKContext::openxr_acquire_framebuffer_image_callback,
+      VKContext::openxr_release_framebuffer_image_callback);
 
   return context;
 }
@@ -645,6 +660,16 @@ Shader *VKBackend::shader_alloc(const char *name)
 Texture *VKBackend::texture_alloc(const char *name)
 {
   return new VKTexture(name);
+}
+
+TexturePool *VKBackend::texturepool_alloc()
+{
+  if (G.debug & G_DEBUG_GPU_NO_TEXTURE_POOL) {
+    CLOG_TRACE(&LOG, "Using texture pool \"TexturePoolImpl\".");
+    return new TexturePoolImpl();
+  }
+  CLOG_TRACE(&LOG, "Using texture pool \"VKTexturePool\".");
+  return new VKTexturePool();
 }
 
 UniformBuf *VKBackend::uniformbuf_alloc(size_t size, const char *name)
@@ -753,4 +778,5 @@ void VKBackend::capabilities_init(VKDevice &device)
   detect_workarounds(device);
 }
 
-}  // namespace blender::gpu
+}  // namespace gpu
+}  // namespace blender

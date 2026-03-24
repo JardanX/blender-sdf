@@ -5,6 +5,7 @@
 #include "scene/object.h"
 
 #include "device/device.h"
+#include "kernel/types.h"
 #include "scene/camera.h"
 #include "scene/curves.h"
 #include "scene/hair.h"
@@ -14,6 +15,7 @@
 #include "scene/particles.h"
 #include "scene/pointcloud.h"
 #include "scene/scene.h"
+#include "scene/shader.h"
 #include "scene/stats.h"
 #include "scene/volume.h"
 
@@ -24,6 +26,8 @@
 #include "util/set.h"
 #include "util/tbb.h"
 #include "util/vector.h"
+
+#include "kernel/geom/attribute.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -345,7 +349,7 @@ float Object::compute_volume_step_size() const
       if (attr.element == ATTR_ELEMENT_VOXEL) {
         ImageHandle &handle = attr.data_voxel();
         const ImageMetaData &metadata = handle.metadata();
-        if (metadata.byte_size == 0) {
+        if (metadata.nanovdb_byte_size == 0) {
           continue;
         }
 
@@ -446,6 +450,42 @@ bool Object::has_shadow_linking() const
   return false;
 }
 
+void Object::adjust_volume_tfm(Transform &tfm)
+{
+  if (geometry) {
+    if (geometry->is_volume()) {
+      /* Slightly offset vertex coordinates to avoid overlapping faces with other volumes or
+       * meshes. The proper solution would be to improve intersection in the kernel to support
+       * robust handling of multiple overlapping faces or use an all-hit intersection similar to
+       * shadows. */
+      const float3 offset = transform_direction(
+          &tfm, make_float3(hash_uint_to_float(hash_string(name.c_str())) * 0.001f));
+      transform_translate(tfm, offset);
+    }
+  }
+}
+
+void Object::set_tfm(Transform tfm)
+{
+  adjust_volume_tfm(tfm);
+  const SocketType *socket = get_tfm_socket();
+  set(*socket, tfm);
+}
+
+bool Object::tfm_equals(Transform tfm)
+{
+  adjust_volume_tfm(tfm);
+  return tfm == get_tfm();
+}
+
+void Object::set_motion_tfm(Transform tfm, const int step_index)
+{
+  adjust_volume_tfm(tfm);
+  array<Transform> motion = get_motion();
+  motion[step_index] = tfm;
+  set_motion(motion);
+}
+
 /* Object Manager */
 
 ObjectManager::ObjectManager()
@@ -510,6 +550,7 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.random_number = random_number;
   kobject.particle_index = particle_index;
   kobject.motion_offset = 0;
+  kobject.normal_attr_offset = ATTR_STD_NOT_FOUND;
   kobject.ao_distance = ob->ao_distance;
   kobject.receiver_light_set = ob->receiver_light_set >= LIGHT_LINK_SET_MAX ?
                                    0 :
@@ -541,6 +582,9 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
          mesh->subd_attributes.find(ATTR_STD_MOTION_VERTEX_POSITION)))
     {
       flag |= SD_OBJECT_HAS_VERTEX_MOTION;
+    }
+    else if (mesh->attributes.find(ATTR_STD_CORNER_NORMAL)) {
+      flag |= SD_OBJECT_HAS_CORNER_NORMALS;
     }
   }
   else if (geom->is_volume()) {
@@ -604,6 +648,9 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.num_geom_steps = (geom->get_motion_steps() - 1) / 2;
   kobject.num_tfm_steps = ob->motion.size();
   kobject.numverts = object_num_motion_verts(geom);
+  kobject.numprims = (geom->is_mesh() || geom->is_volume()) ?
+                         static_cast<Mesh *>(geom)->num_triangles() :
+                         0;
   kobject.attribute_map_offset = 0;
 
   if (ob->asset_name_is_modified() || update_all) {
@@ -930,6 +977,14 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
       object_flag[object->index] &= ~SD_OBJECT_SHADOW_CATCHER;
     }
 
+    /* Corner normals might get removed by subdivision and displacement. */
+    if (object->geometry->attributes.find(ATTR_STD_CORNER_NORMAL)) {
+      object_flag[object->index] |= SD_OBJECT_HAS_CORNER_NORMALS;
+    }
+    else {
+      object_flag[object->index] &= ~SD_OBJECT_HAS_CORNER_NORMALS;
+    }
+
     if (bounds_valid) {
       object->intersects_volume = false;
       for (Object *volume_object : volume_objects) {
@@ -971,17 +1026,39 @@ void ObjectManager::device_update_geom_offsets(Device * /*unused*/,
   for (Object *object : scene->objects) {
     Geometry *geom = object->geometry;
 
-    size_t attr_map_offset = object->attr_map_offset;
+    KernelObject &kobject = kobjects[object->index];
 
     /* An object attribute map cannot have a zero offset because mesh maps come first. */
+    size_t attr_map_offset = object->attr_map_offset;
     if (attr_map_offset == 0) {
       attr_map_offset = geom->attr_map_offset;
     }
 
-    KernelObject &kobject = kobjects[object->index];
-
     if (kobject.attribute_map_offset != attr_map_offset) {
       kobject.attribute_map_offset = attr_map_offset;
+      update = true;
+    }
+
+    /* Cached normal offset for quick lookup. */
+    int normal_attr_offset = ATTR_STD_NOT_FOUND;
+    if (geom->is_mesh()) {
+      normal_attr_offset = find_attribute(dscene->attributes_map.data(),
+                                          attr_map_offset,
+                                          PRIMITIVE_TRIANGLE,
+                                          ATTR_STD_CORNER_NORMAL)
+                               .offset;
+      if (normal_attr_offset == ATTR_STD_NOT_FOUND) {
+        normal_attr_offset = find_attribute(dscene->attributes_map.data(),
+                                            attr_map_offset,
+                                            PRIMITIVE_TRIANGLE,
+                                            ATTR_STD_VERTEX_NORMAL)
+                                 .offset;
+      }
+      assert(normal_attr_offset != ATTR_STD_NOT_FOUND ||
+             static_cast<Mesh *>(geom)->num_triangles() == 0);
+    }
+    if (kobject.normal_attr_offset != normal_attr_offset) {
+      kobject.normal_attr_offset = normal_attr_offset;
       update = true;
     }
 

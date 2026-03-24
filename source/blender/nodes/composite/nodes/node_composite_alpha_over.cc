@@ -13,6 +13,8 @@
 
 #include "GPU_material.hh"
 
+#include "COM_result.hh"
+
 #include "node_composite_util.hh"
 
 namespace blender::nodes::node_composite_alpha_over_cc {
@@ -144,22 +146,27 @@ static float4 alpha_over_conjoint(const float4 &background,
   return math::interpolate(background, mix_result, factor);
 }
 
-static void node_build_multi_function(blender::nodes::NodeMultiFunctionBuilder &builder)
+using compositor::Color;
+
+static void node_build_multi_function(nodes::NodeMultiFunctionBuilder &builder)
 {
-  static auto function = mf::build::SI5_SO<float4, float4, float, MenuValue, bool, float4>(
+  static auto function = mf::build::SI5_SO<Color, Color, float, MenuValue, bool, Color>(
       "Alpha Over",
-      [=](const float4 &background,
-          const float4 &foreground,
+      [=](const Color &background,
+          const Color &foreground,
           const float factor,
           const MenuValue type,
-          const bool straight_alpha) -> float4 {
+          const bool straight_alpha) -> Color {
         switch (CMPNodeAlphaOverOperationType(type.value)) {
           case CMP_NODE_ALPHA_OVER_OPERATION_TYPE_OVER:
-            return alpha_over(background, foreground, factor, straight_alpha);
+            return Color(
+                alpha_over(float4(background), float4(foreground), factor, straight_alpha));
           case CMP_NODE_ALPHA_OVER_OPERATION_TYPE_DISJOINT_OVER:
-            return alpha_over_disjoint(background, foreground, factor, straight_alpha);
+            return Color(alpha_over_disjoint(
+                float4(background), float4(foreground), factor, straight_alpha));
           case CMP_NODE_ALPHA_OVER_OPERATION_TYPE_CONJOINT_OVER:
-            return alpha_over_conjoint(background, foreground, factor, straight_alpha);
+            return Color(alpha_over_conjoint(
+                float4(background), float4(foreground), factor, straight_alpha));
         }
         return background;
       },
@@ -168,9 +175,9 @@ static void node_build_multi_function(blender::nodes::NodeMultiFunctionBuilder &
   builder.set_matching_fn(function);
 }
 
-static void register_node_type_cmp_alphaover()
+static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   cmp_node_type_base(&ntype, "CompositorNodeAlphaOver", CMP_NODE_ALPHAOVER);
   ntype.ui_name = "Alpha Over";
@@ -181,8 +188,8 @@ static void register_node_type_cmp_alphaover()
   ntype.gpu_fn = node_gpu_material;
   ntype.build_multi_function = node_build_multi_function;
 
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 }
-NOD_REGISTER_NODE(register_node_type_cmp_alphaover)
+NOD_REGISTER_NODE(node_register)
 
 }  // namespace blender::nodes::node_composite_alpha_over_cc

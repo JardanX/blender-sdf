@@ -78,23 +78,23 @@ void GLStateManager::set_state(const GPUState &state)
   GPUState changed = state ^ current_;
 
   if (changed.blend != 0) {
-    set_blend((GPUBlend)state.blend);
+    set_blend(GPUBlend(state.blend));
   }
   if (changed.write_mask != 0) {
-    set_write_mask((GPUWriteMask)state.write_mask);
+    set_write_mask(GPUWriteMask(state.write_mask));
   }
   if (changed.depth_test != 0) {
-    set_depth_test((GPUDepthTest)state.depth_test);
+    set_depth_test(GPUDepthTest(state.depth_test));
   }
   if (changed.stencil_test != 0 || changed.stencil_op != 0) {
-    set_stencil_test((GPUStencilTest)state.stencil_test, (GPUStencilOp)state.stencil_op);
-    set_stencil_mask((GPUStencilTest)state.stencil_test, mutable_state);
+    set_stencil_test(GPUStencilTest(state.stencil_test), GPUStencilOp(state.stencil_op));
+    set_stencil_mask(GPUStencilTest(state.stencil_test), mutable_state);
   }
   if (changed.clip_distances != 0) {
     set_clip_distances(state.clip_distances, current_.clip_distances);
   }
   if (changed.culling_test != 0) {
-    set_backface_culling((GPUFaceCullTest)state.culling_test);
+    set_backface_culling(GPUFaceCullTest(state.culling_test));
   }
   if (changed.logic_op_xor != 0) {
     set_logic_op(state.logic_op_xor);
@@ -103,10 +103,7 @@ void GLStateManager::set_state(const GPUState &state)
     set_facing(state.invert_facing);
   }
   if (changed.provoking_vert != 0) {
-    set_provoking_vert((GPUProvokingVertex)state.provoking_vert);
-  }
-  if (changed.shadow_bias != 0) {
-    set_shadow_bias(state.shadow_bias);
+    set_provoking_vert(GPUProvokingVertex(state.provoking_vert));
   }
   if (changed.clip_control != 0) {
     set_clip_control(state.clip_control);
@@ -153,15 +150,10 @@ void GLStateManager::set_mutable_state(const GPUStateMutable &state)
     glLineWidth(clamp_f(state.line_width, line_width_range_[0], line_width_range_[1]));
   }
 
-  if (float_as_uint(changed.depth_range[0]) != 0 || float_as_uint(changed.depth_range[1]) != 0) {
-    /* TODO: remove, should modify the projection matrix instead. */
-    glDepthRange(UNPACK2(state.depth_range));
-  }
-
   if (changed.stencil_compare_mask != 0 || changed.stencil_reference != 0 ||
       changed.stencil_write_mask != 0)
   {
-    set_stencil_mask((GPUStencilTest)current_.stencil_test, state);
+    set_stencil_mask(GPUStencilTest(current_.stencil_test), state);
   }
 
   current_mutable_ = state;
@@ -318,20 +310,6 @@ void GLStateManager::set_provoking_vert(const GPUProvokingVertex vert)
   glProvokingVertex(value);
 }
 
-void GLStateManager::set_shadow_bias(const bool enable)
-{
-  if (enable) {
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glEnable(GL_POLYGON_OFFSET_LINE);
-    /* 2.0 Seems to be the lowest possible slope bias that works in every case. */
-    glPolygonOffset(2.0f, 1.0f);
-  }
-  else {
-    glDisable(GL_POLYGON_OFFSET_FILL);
-    glDisable(GL_POLYGON_OFFSET_LINE);
-  }
-}
-
 void GLStateManager::set_clip_control(const bool enable)
 {
   if (enable) {
@@ -377,6 +355,9 @@ void GLStateManager::set_blend(const GPUBlend value)
       dst_alpha = GL_ONE;
       break;
     }
+    /* Factors are not use in min or max mode, but avoid uninitialized values. */;
+    case GPU_BLEND_MIN:
+    case GPU_BLEND_MAX:
     case GPU_BLEND_SUBTRACT:
     case GPU_BLEND_ADDITIVE_PREMULT: {
       /* Let alpha accumulate. */
@@ -435,9 +416,22 @@ void GLStateManager::set_blend(const GPUBlend value)
       dst_alpha = GL_ONE_MINUS_SRC_ALPHA;
       break;
     }
+    case GPU_BLEND_TRANSPARENCY: {
+      src_rgb = GL_ONE;
+      dst_rgb = GL_SRC_ALPHA;
+      src_alpha = GL_ZERO;
+      dst_alpha = GL_SRC_ALPHA;
+      break;
+    }
   }
 
-  if (value == GPU_BLEND_SUBTRACT) {
+  if (value == GPU_BLEND_MIN) {
+    glBlendEquation(GL_MIN);
+  }
+  else if (value == GPU_BLEND_MAX) {
+    glBlendEquation(GL_MAX);
+  }
+  else if (value == GPU_BLEND_SUBTRACT) {
     glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
   }
   else {
@@ -548,16 +542,6 @@ void GLStateManager::texture_bind_apply()
       }
     }
   }
-}
-
-void GLStateManager::texture_unpack_row_length_set(uint len)
-{
-  texture_unpack_row_length_ = len;
-}
-
-uint GLStateManager::texture_unpack_row_length_get() const
-{
-  return texture_unpack_row_length_;
 }
 
 uint64_t GLStateManager::bound_texture_slots()

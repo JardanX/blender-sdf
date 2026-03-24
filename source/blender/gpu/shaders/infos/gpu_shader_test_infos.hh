@@ -11,19 +11,20 @@
 #  include "gpu_shader_compat.hh"
 
 #  include "GPU_shader_shared.hh"
+
+#  include "gpu_shader_fullscreen_infos.hh"
 #endif
 
-#include "gpu_interface_infos.hh"
 #include "gpu_shader_create_info.hh"
 
 GPU_SHADER_CREATE_INFO(gpu_shader_test)
+LOCAL_GROUP_SIZE(1)
 TYPEDEF_SOURCE("GPU_shader_shared.hh")
-FRAGMENT_OUT(0, uint4, out_test)
-ADDITIONAL_INFO(gpu_fullscreen)
+STORAGE_BUF(0, write, TestOutput, out_test[])
 GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(gpu_math_test)
-FRAGMENT_SOURCE("gpu_math_test.glsl")
+COMPUTE_SOURCE("gpu_math_test.glsl")
 ADDITIONAL_INFO(gpu_shader_test)
 DO_STATIC_COMPILATION()
 GPU_SHADER_CREATE_END()
@@ -51,7 +52,7 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(gpu_compute_vbo_test)
 LOCAL_GROUP_SIZE(1)
-STORAGE_BUF(0, write, vec4, out_positions[])
+STORAGE_BUF(0, write, float4, out_positions[])
 COMPUTE_SOURCE("gpu_compute_vbo_test.glsl")
 DO_STATIC_COMPILATION()
 GPU_SHADER_CREATE_END()
@@ -120,6 +121,44 @@ COMPUTE_SOURCE("gpu_buffer_texture_test.glsl")
 DO_STATIC_COMPILATION()
 GPU_SHADER_CREATE_END()
 
+GPU_SHADER_CREATE_INFO(gpu_sampler_arg_buf_test)
+/* Leave sampler 0 empty to cover the case of empty slot. */
+SAMPLER(1, sampler2D, tex_1)
+SAMPLER(2, sampler2D, tex_2)
+SAMPLER(3, sampler2D, tex_3)
+SAMPLER(4, sampler2D, tex_4)
+SAMPLER(5, sampler2D, tex_5)
+SAMPLER(6, sampler2D, tex_6)
+SAMPLER(7, sampler2D, tex_7)
+SAMPLER(8, sampler2D, tex_8)
+SAMPLER(9, sampler2D, tex_9)
+SAMPLER(10, sampler2D, tex_10)
+SAMPLER(11, sampler2D, tex_11)
+SAMPLER(12, sampler2D, tex_12)
+SAMPLER(13, sampler2D, tex_13)
+SAMPLER(14, sampler2D, tex_14)
+SAMPLER(15, sampler2D, tex_15)
+SAMPLER(16, sampler2D, tex_16)
+SAMPLER(17, sampler2D, tex_17)
+SAMPLER(18, sampler2D, tex_18)
+STORAGE_BUF(0, write, float4, data_out[])
+VERTEX_SOURCE("gpu_texture_test.glsl")
+FRAGMENT_SOURCE("gpu_texture_test.glsl")
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
+GPU_SHADER_CREATE_INFO(gpu_texture_atomic_test)
+LOCAL_GROUP_SIZE(32)
+BUILTINS(BuiltinBits::TEXTURE_ATOMIC)
+IMAGE(1, UINT_32, read_write, uimage2DAtomic, img_atomic_2D)
+IMAGE(3, UINT_32, read_write, uimage2DArrayAtomic, img_atomic_2D_array)
+IMAGE(5, UINT_32, read_write, uimage3DAtomic, img_atomic_3D)
+STORAGE_BUF(0, write, int, data_out[])
+PUSH_CONSTANT(bool, write_phase)
+COMPUTE_SOURCE("gpu_texture_atomic_test.glsl")
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
 /* Specialization constants. */
 
 GPU_SHADER_CREATE_INFO(gpu_specialization_constants_base_test)
@@ -139,8 +178,49 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(gpu_graphic_specialization_test)
 ADDITIONAL_INFO(gpu_specialization_constants_base_test)
+BUILTINS(BuiltinBits::POINT_SIZE)
 VERTEX_SOURCE("gpu_specialization_test.glsl")
 FRAGMENT_SOURCE("gpu_specialization_test.glsl")
 DO_STATIC_COMPILATION()
 GPU_SHADER_CREATE_END()
 
+/* EEVEE test. */
+
+GPU_SHADER_CREATE_INFO(eevee_shadow_test)
+COMPUTE_SOURCE("eevee_shadow_test.glsl")
+TYPEDEF_SOURCE("eevee_defines.hh")
+TYPEDEF_SOURCE("eevee_shadow_shared.hh")
+ADDITIONAL_INFO(gpu_shader_test)
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
+GPU_SHADER_CREATE_INFO(eevee_occupancy_test)
+COMPUTE_SOURCE("eevee_occupancy_test.glsl")
+TYPEDEF_SOURCE("eevee_defines.hh")
+ADDITIONAL_INFO(gpu_shader_test)
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
+GPU_SHADER_CREATE_INFO(eevee_gbuffer_normal_test)
+COMPUTE_SOURCE("eevee_gbuffer_normal_test.glsl")
+TYPEDEF_SOURCE("eevee_defines.hh")
+ADDITIONAL_INFO(gpu_shader_test)
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
+GPU_SHADER_CREATE_INFO(eevee_gbuffer_closure_test)
+COMPUTE_SOURCE("eevee_gbuffer_closure_test.glsl")
+TYPEDEF_SOURCE("eevee_defines.hh")
+ADDITIONAL_INFO(gpu_shader_test)
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
+/* Runtime create info. */
+GPU_SHADER_CREATE_INFO(gpu_framebuffer_subpass_input_test)
+FRAGMENT_OUT(0, int, out_value)
+GPU_SHADER_CREATE_END()
+
+/* Runtime create info. */
+GPU_SHADER_CREATE_INFO(gpu_framebuffer_layer_viewport_test)
+FRAGMENT_OUT(0, int2, out_value)
+GPU_SHADER_CREATE_END()

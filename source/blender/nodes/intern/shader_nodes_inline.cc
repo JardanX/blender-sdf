@@ -13,6 +13,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_stack.hh"
+#include "BLI_string.h"
 
 #include "NOD_menu_value.hh"
 #include "NOD_multi_function.hh"
@@ -23,6 +24,7 @@
 namespace blender::nodes {
 namespace {
 
+struct SocketValue;
 struct BundleSocketValue;
 using BundleSocketValuePtr = std::shared_ptr<BundleSocketValue>;
 
@@ -91,6 +93,10 @@ struct ClosureZoneValue {
   const ComputeContext *closure_creation_context = nullptr;
 };
 
+struct MultiInputValue {
+  Vector<SocketValue, 0> values;
+};
+
 struct SocketValue {
   /**
    * The value of an arbitrary socket value can have one of many different types. At a high level
@@ -103,7 +109,8 @@ struct SocketValue {
                InputSocketValue,
                PrimitiveSocketValue,
                ClosureZoneValue,
-               BundleSocketValuePtr>
+               BundleSocketValuePtr,
+               MultiInputValue>
       value;
 
   /** Try to get the value as a primitive value. */
@@ -128,7 +135,7 @@ struct SocketValue {
           return PrimitiveSocketValue{socket.default_value_typed<bNodeSocketValueInt>()->value};
         case SOCK_BOOLEAN:
           return PrimitiveSocketValue{
-              socket.default_value_typed<bNodeSocketValueBoolean>()->value};
+              bool(socket.default_value_typed<bNodeSocketValueBoolean>()->value)};
         case SOCK_VECTOR:
           return PrimitiveSocketValue{
               float3(socket.default_value_typed<bNodeSocketValueVector>()->value)};
@@ -281,11 +288,25 @@ class ShaderNodesInliner {
     Vector<TreeInContext> trees;
     this->find_trees_potentially_containing_shader_outputs_recursive(nullptr, src_tree_, trees);
 
+    auto get_engine_target = [](const bNode *output_node) {
+      if (STR_ELEM(output_node->idname,
+                   "ShaderNodeOutputMaterial",
+                   "ShaderNodeOutputLight",
+                   "ShaderNodeOutputWorld"))
+      {
+        return NodeShaderOutputTarget(output_node->custom1);
+      }
+      return SHD_OUTPUT_ALL;
+    };
+
     Vector<SocketInContext> output_sockets;
     auto add_output_type = [&](const char *output_type) {
       for (const TreeInContext &tree : trees) {
         const bke::bNodeTreeZones &zones = *tree->zones();
         for (const bNode *node : tree->nodes_by_type(output_type)) {
+          if (!ELEM(get_engine_target(node), SHD_OUTPUT_ALL, params_.target_engine_)) {
+            continue;
+          }
           const bke::bNodeTreeZone *zone = zones.get_zone_by_node(node->identifier);
           if (zone) {
             params_.r_error_messages.append({node, TIP_("Output node must not be in zone")});
@@ -304,8 +325,8 @@ class ShaderNodesInliner {
     switch (tree_type) {
       case ID_MA:
         add_output_type("ShaderNodeOutputMaterial");
-        add_output_type("ShaderNodeOutputAOV");
         add_output_type("ShaderNodeOutputLight");
+        add_output_type("ShaderNodeOutputAOV");
         break;
       case ID_WO:
         add_output_type("ShaderNodeOutputWorld");
@@ -373,8 +394,10 @@ class ShaderNodesInliner {
 
   void handle_input_socket(const SocketInContext &socket)
   {
-    /* Multi-inputs are not supported in shader nodes currently. */
-    BLI_assert(!socket->is_multi_input());
+    if (socket->is_multi_input()) {
+      this->handle_multi_input_socket(socket);
+      return;
+    }
 
     const bNodeLink *used_link = nullptr;
     for (const bNodeLink *link : socket->directly_linked_links()) {
@@ -417,6 +440,30 @@ class ShaderNodesInliner {
     }
     /* If the origin socket does not have a value yet, only schedule it for evaluation for now.*/
     this->schedule_socket(origin_socket);
+  }
+
+  void handle_multi_input_socket(const SocketInContext &socket)
+  {
+    bool all_links_ready = true;
+    Vector<SocketValue, 0> values;
+    for (const bNodeLink *link : socket->directly_linked_links()) {
+      if (!link->is_used()) {
+        continue;
+      }
+      const ComputeContext *from_context = this->get_link_source_context(*link, socket);
+      const SocketInContext origin_socket = {from_context, link->fromsock};
+      const SocketValue *value = value_by_socket_.lookup_ptr(origin_socket);
+      if (!value) {
+        this->schedule_socket(origin_socket);
+        all_links_ready = false;
+        continue;
+      }
+      values.append(*value);
+    }
+    if (!all_links_ready) {
+      return;
+    }
+    this->store_socket_value(socket, {MultiInputValue{std::move(values)}});
   }
 
   /**
@@ -517,6 +564,10 @@ class ShaderNodesInliner {
       this->handle_output_socket__menu_switch(socket);
       return;
     }
+    if (node->is_type("NodeJoinBundle")) {
+      this->handle_output_socket__join_bundle(socket);
+      return;
+    }
     this->handle_output_socket__eval(socket);
   }
 
@@ -534,6 +585,23 @@ class ShaderNodesInliner {
     for (const bNodeLink &internal_link : node->internal_links()) {
       if (internal_link.tosock == socket.socket) {
         const SocketInContext src_socket = {socket.context, internal_link.fromsock};
+        if (src_socket->is_multi_input()) {
+          const bNodeLink *src_link = nullptr;
+          for (const bNodeLink *link : src_socket->directly_linked_links()) {
+            if (link->is_used()) {
+              src_link = link;
+              break;
+            }
+          }
+          if (!src_link) {
+            return false;
+          }
+          const ComputeContext *from_context = this->get_link_source_context(*src_link,
+                                                                             src_socket);
+          const SocketInContext origin_socket = {from_context, src_link->fromsock};
+          this->forward_value_or_schedule(socket, origin_socket);
+          return true;
+        }
         if (const SocketValue *value = value_by_socket_.lookup_ptr(src_socket)) {
           /* Pass the value of the internally linked input socket, with an implicit conversion if
            * necessary. */
@@ -932,6 +1000,40 @@ class ShaderNodesInliner {
     this->store_socket_value_fallback(socket);
   }
 
+  void handle_output_socket__join_bundle(const SocketInContext &socket)
+  {
+    const NodeInContext node = socket.owner_node();
+    const SocketInContext input_socket = node.input_socket(0);
+    const SocketValue *socket_value = value_by_socket_.lookup_ptr(input_socket);
+    if (!socket_value) {
+      /* The input bundles are not known yet, so schedule them for now. */
+      this->schedule_socket(input_socket);
+      return;
+    }
+    const auto &multi_input_value = *std::get_if<MultiInputValue>(&socket_value->value);
+    if (multi_input_value.values.is_empty()) {
+      /* The input is empty, so use the fallback value. */
+      this->store_socket_value_fallback(socket);
+      return;
+    }
+
+    Set<StringRef> existing_keys;
+    auto joined_bundle = std::make_shared<BundleSocketValue>();
+    for (const SocketValue &value : multi_input_value.values) {
+      const auto *bundle_value = std::get_if<BundleSocketValuePtr>(&value.value);
+      if (!bundle_value || !*bundle_value) {
+        /* Ignore invalid values. */
+        continue;
+      }
+      for (const BundleSocketValue::Item &item : (*bundle_value)->items) {
+        if (existing_keys.add(item.key)) {
+          joined_bundle->items.append(item);
+        }
+      }
+    }
+    this->store_socket_value(socket, {BundleSocketValuePtr{joined_bundle}});
+  }
+
   void handle_output_socket__menu_switch(const SocketInContext &socket)
   {
     const NodeInContext node = socket.owner_node();
@@ -1232,6 +1334,11 @@ class ShaderNodesInliner {
       BLI_assert_unreachable();
       return;
     }
+    if (std::get_if<MultiInputValue>(&value.value)) {
+      /* This type can't be assigned to a socket. */
+      BLI_assert_unreachable();
+      return;
+    }
     if (const auto *src_socket_value = std::get_if<LinkedSocketValue>(&value.value)) {
       if (dst_tree_.typeinfo->validate_link(src_socket_value->socket->typeinfo->type,
                                             dst_socket.typeinfo->type))
@@ -1424,19 +1531,19 @@ bool inline_shader_node_tree(const bNodeTree &src_tree,
 
   if (inliner.do_inline()) {
     /* Update deprecated bNodeSocket.link pointers because some code still depends on it. */
-    LISTBASE_FOREACH (bNode *, node, &dst_tree.nodes) {
-      LISTBASE_FOREACH (bNodeSocket *, sock, &node->inputs) {
-        sock->link = nullptr;
+    for (bNode &node : dst_tree.nodes) {
+      for (bNodeSocket &sock : node.inputs) {
+        sock.link = nullptr;
       }
-      LISTBASE_FOREACH (bNodeSocket *, sock, &node->outputs) {
-        sock->link = nullptr;
+      for (bNodeSocket &sock : node.outputs) {
+        sock.link = nullptr;
       }
     }
-    LISTBASE_FOREACH (bNodeLink *, link, &dst_tree.links) {
-      link->tosock->link = link;
-      BLI_assert(dst_tree.typeinfo->validate_link(link->fromsock->typeinfo->type,
-                                                  link->tosock->typeinfo->type));
-      link->flag |= NODE_LINK_VALID;
+    for (bNodeLink &link : dst_tree.links) {
+      link.tosock->link = &link;
+      BLI_assert(dst_tree.typeinfo->validate_link(link.fromsock->typeinfo->type,
+                                                  link.tosock->typeinfo->type));
+      link.flag |= NODE_LINK_VALID;
     }
     return true;
   }

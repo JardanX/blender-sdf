@@ -28,15 +28,28 @@ set(SRC
   filesel.cc
   folder_history.cc
   fsmenu.cc
-  fsmenu_system.cc
   space_file.cc
 
   file_indexer.hh
   file_intern.hh
   filelist.hh
   filelist/filelist_intern.hh
-  fsmenu.h
+  fsmenu.hh
 )
+
+if(WIN32)
+  list(APPEND SRC
+    fsmenu_system_win32.cc
+  )
+elseif(APPLE)
+  list(APPEND SRC
+    fsmenu_system_macos.mm
+  )
+else() # Generic UNIX
+  list(APPEND SRC
+    fsmenu_system_unix.cc
+  )
+endif()
 
 set(LIB
   PRIVATE bf::asset_system
@@ -51,7 +64,6 @@ set(LIB
   PRIVATE bf::imbuf::movie
   PRIVATE bf::intern::clog
   PRIVATE bf::intern::guardedalloc
-  PRIVATE bf::extern::fmtlib
   PRIVATE bf::intern::atomic
   PRIVATE bf::render
   PRIVATE bf::windowmanager

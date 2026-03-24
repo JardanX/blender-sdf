@@ -75,7 +75,7 @@ class VIEW3D_AST_pose_library(bpy.types.AssetShelf):
         layout.operator("poselib.asset_delete")
 
         layout.separator()
-        layout.operator("asset.open_containing_blend_file")
+        layout.operator("asset.open_containing_blend_file", icon='FILE_BLEND')
 
 
 def pose_library_asset_browser_context_menu(self: UIList, context: Context) -> None:
@@ -158,7 +158,7 @@ class ASSETBROWSER_MT_asset(Menu):
         layout.operator("poselib.create_pose_asset")
 
 
-# Messagebus subscription to monitor asset library changes.
+# MessageBus subscription to monitor asset library changes.
 _msgbus_owner = object()
 
 

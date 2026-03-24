@@ -10,8 +10,8 @@
  * Euler rotations are represented as a triple of angle representing a rotation around each basis
  * vector. The order in which the three rotations are applied changes the resulting orientation.
  *
- * A `blender::math::EulerXYZ` represent an Euler triple with fixed axis order (XYZ).
- * A `blender::math::Euler3` represents an Euler triple with arbitrary axis order.
+ * A `math::EulerXYZ` represent an Euler triple with fixed axis order (XYZ).
+ * A `math::Euler3` represents an Euler triple with arbitrary axis order.
  *
  * They are prone to gimbal lock and are not suited for many applications. However they are more
  * intuitive than other rotation types. Their main use is for converting user facing rotation
@@ -31,7 +31,6 @@
 #include "BLI_math_angle_types.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_basis_types.hh"
-#include "BLI_struct_equality_utils.hh"
 
 namespace blender::math {
 
@@ -187,7 +186,7 @@ template<typename T> struct EulerXYZBase : public EulerBase<T> {
     return {-a.xyz_.x, -a.xyz_.y, -a.xyz_.z};
   }
 
-  BLI_STRUCT_EQUALITY_OPERATORS_1(EulerXYZBase, xyz_)
+  friend bool operator==(const EulerXYZBase &a, const EulerXYZBase &b) = default;
 
   friend std::ostream &operator<<(std::ostream &stream, const EulerXYZBase &rot)
   {
@@ -334,7 +333,7 @@ template<typename T> struct Euler3Base : public EulerBase<T> {
     return {-a.xyz_, a.order_};
   }
 
-  BLI_STRUCT_EQUALITY_OPERATORS_2(Euler3Base, xyz_, order_)
+  friend bool operator==(const Euler3Base &a, const Euler3Base &b) = default;
 
   friend std::ostream &operator<<(std::ostream &stream, const Euler3Base &rot)
   {

@@ -4,6 +4,7 @@
 
 #include "node_geometry_util.hh"
 
+#include "BKE_node_runtime.hh"
 #include "BKE_volume_grid_process.hh"
 
 #include "NOD_rna_define.hh"
@@ -34,13 +35,15 @@ static void node_declare(NodeDeclarationBuilder &b)
       .is_default_link_socket();
   b.add_output(data_type, "Grid").structure_type(StructureType::Grid).align_with_previous();
   b.add_input(data_type, "Background").structure_type(StructureType::Single);
+  b.add_input<decl::Bool>("Update Inactive")
+      .description("Override all values stored for inactive voxels as well");
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->use_property_split_set(true);
-  layout->use_property_decorate_set(false);
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.use_property_split_set(true);
+  layout.use_property_decorate_set(false);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 static std::optional<eNodeSocketDatatype> node_type_for_socket_type(const bNodeSocket &socket)
@@ -106,11 +109,19 @@ static void node_geo_exec(GeoNodeExecParams params)
     return;
   }
 
-  const auto background = params.extract_input<bke::SocketValueVariant>("Background");
+  auto background_variant = params.extract_input<bke::SocketValueVariant>("Background");
+  background_variant.convert_to_single();
+  const GPointer background = background_variant.get_single_ptr();
+
+  const bool update_inactive = params.get_input<bool>("Update Inactive");
 
   bke::VolumeTreeAccessToken tree_token;
   openvdb::GridBase &grid_base = grid.get_for_write().grid_for_write(tree_token);
-  bke::volume_grid::set_grid_background(grid_base, background.get_single_ptr());
+  bke::volume_grid::set_grid_background(grid_base, background);
+
+  if (update_inactive) {
+    bke::volume_grid::set_inactive_values(grid_base, background);
+  }
 
   params.set_output("Grid", std::move(grid));
 #else
@@ -137,7 +148,7 @@ static void node_rna(StructRNA *srna)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_node_type_base(&ntype, "GeometryNodeSetGridBackground");
   ntype.ui_name = "Set Grid Background";
@@ -148,7 +159,7 @@ static void node_register()
   ntype.geometry_node_execute = node_geo_exec;
   ntype.draw_buttons = node_layout;
   ntype.declare = node_declare;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 
   node_rna(ntype.rna_ext.srna);
 }

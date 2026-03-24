@@ -63,7 +63,7 @@
 #include "text_format.hh"
 #include "text_intern.hh"
 
-using blender::VectorSet;
+namespace blender {
 
 static void space_text_screen_clamp(SpaceText *st, const ARegion *region);
 
@@ -181,7 +181,7 @@ static char *buf_tabs_to_spaces(const char *in_buf, const int tab_size, int *r_o
 
   /* Allocate output before with extra space for expanded tabs. */
   const int out_size = strlen(in_buf) + num_tabs * (tab_size - 1) + 1;
-  char *out_buf = MEM_malloc_arrayN<char>(out_size, __func__);
+  char *out_buf = MEM_new_array_uninitialized<char>(out_size, __func__);
 
   /* Fill output buffer. */
   int spaces_until_tab = 0;
@@ -237,7 +237,7 @@ static void text_select_update_primary_clipboard(const Text *text)
     return;
   }
   WM_clipboard_text_set(buf, true);
-  MEM_freeN(buf);
+  MEM_delete(buf);
 }
 
 /** \} */
@@ -328,13 +328,13 @@ void text_update_line_edited(TextLine *line)
   }
 
   /* We just free format here, and let it rebuild during draw. */
-  MEM_SAFE_FREE(line->format);
+  MEM_SAFE_DELETE(line->format);
 }
 
 void text_update_edited(Text *text)
 {
-  LISTBASE_FOREACH (TextLine *, line, &text->lines) {
-    text_update_line_edited(line);
+  for (TextLine &line : text->lines) {
+    text_update_line_edited(&line);
   }
 }
 
@@ -355,7 +355,7 @@ static wmOperatorStatus text_new_exec(bContext *C, wmOperator * /*op*/)
   text = BKE_text_add(bmain, DATA_("Text"));
 
   /* Hook into UI. */
-  UI_context_active_but_prop_get_templateID(C, &ptr, &prop);
+  ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
 
   if (prop) {
     PointerRNA idptr = RNA_id_pointer_create(&text->id);
@@ -402,7 +402,7 @@ static void text_open_init(bContext *C, wmOperator *op)
   PropertyPointerRNA *pprop = MEM_new<PropertyPointerRNA>(__func__);
 
   op->customdata = pprop;
-  UI_context_active_but_prop_get_templateID(C, &pprop->ptr, &pprop->prop);
+  ui::context_active_but_prop_get_templateID(C, &pprop->ptr, &pprop->prop);
 }
 
 static void text_open_cancel(bContext * /*C*/, wmOperator *op)
@@ -574,7 +574,7 @@ static wmOperatorStatus text_reload_invoke(bContext *C, wmOperator *op, const wm
                                 IFACE_("Reload active text file?"),
                                 nullptr,
                                 IFACE_("Reload"),
-                                ALERT_ICON_NONE,
+                                ui::AlertIcon::None,
                                 false);
 }
 
@@ -636,7 +636,7 @@ static wmOperatorStatus text_unlink_invoke(bContext *C, wmOperator *op, const wm
                                 IFACE_("Delete active text file?"),
                                 nullptr,
                                 IFACE_("Delete"),
-                                ALERT_ICON_NONE,
+                                ui::AlertIcon::None,
                                 false);
 }
 
@@ -668,7 +668,7 @@ static wmOperatorStatus text_make_internal_exec(bContext *C, wmOperator * /*op*/
 
   text->flags |= TXT_ISMEM | TXT_ISDIRTY;
 
-  MEM_SAFE_FREE(text->filepath);
+  MEM_SAFE_DELETE(text->filepath);
 
   space_text_update_cursor_moved(C);
   WM_event_add_notifier(C, NC_TEXT | NA_EDITED, text);
@@ -728,9 +728,9 @@ static void txt_write_file(Main *bmain, Text *text, ReportList *reports)
     return;
   }
 
-  LISTBASE_FOREACH (TextLine *, tmp, &text->lines) {
-    fputs(tmp->line, fp);
-    if (tmp->next) {
+  for (TextLine &tmp : text->lines) {
+    fputs(tmp.line, fp);
+    if (tmp.next) {
       fputc('\n', fp);
     }
   }
@@ -774,8 +774,7 @@ static wmOperatorStatus text_save_invoke(bContext *C, wmOperator *op, const wmEv
 
   /* Internal and texts without a filepath will go to "Save As". */
   if (text->filepath == nullptr || (text->flags & TXT_ISMEM)) {
-    WM_operator_name_call(
-        C, "TEXT_OT_save_as", blender::wm::OpCallContext::InvokeDefault, nullptr, event);
+    WM_operator_name_call(C, "TEXT_OT_save_as", wm::OpCallContext::InvokeDefault, nullptr, event);
     return OPERATOR_CANCELLED;
   }
   return text_save_exec(C, op);
@@ -813,7 +812,7 @@ static wmOperatorStatus text_save_as_exec(bContext *C, wmOperator *op)
   RNA_string_get(op->ptr, "filepath", filepath);
 
   if (text->filepath) {
-    MEM_freeN(text->filepath);
+    MEM_delete(text->filepath);
   }
   text->filepath = BLI_strdup(filepath);
   text->flags &= ~TXT_ISMEM;
@@ -986,14 +985,14 @@ static wmOperatorStatus text_paste_exec(bContext *C, wmOperator *op)
   /* Convert clipboard content indentation to spaces if specified. */
   if (text->flags & TXT_TABSTOSPACES) {
     char *new_buf = buf_tabs_to_spaces(buf, TXT_TABSIZE, &buf_len);
-    MEM_freeN(buf);
+    MEM_delete(buf);
     buf = new_buf;
   }
 
   txt_insert_buf(text, buf, buf_len);
   text_update_edited(text);
 
-  MEM_freeN(buf);
+  MEM_delete(buf);
 
   space_text_update_cursor_moved(C);
   WM_event_add_notifier(C, NC_TEXT | NA_EDITED, text);
@@ -1087,7 +1086,7 @@ static void txt_copy_clipboard(const Text *text)
 
   if (buf) {
     WM_clipboard_text_set(buf, false);
-    MEM_freeN(buf);
+    MEM_delete(buf);
   }
 }
 
@@ -1169,11 +1168,10 @@ static wmOperatorStatus text_indent_or_autocomplete_exec(bContext *C, wmOperator
   bool text_before_cursor = text->curc != 0 && !ELEM(line->line[text->curc - 1], ' ', '\t');
   if (text_before_cursor && (txt_has_sel(text) == false)) {
     WM_operator_name_call(
-        C, "TEXT_OT_autocomplete", blender::wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+        C, "TEXT_OT_autocomplete", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
   }
   else {
-    WM_operator_name_call(
-        C, "TEXT_OT_indent", blender::wm::OpCallContext::ExecDefault, nullptr, nullptr);
+    WM_operator_name_call(C, "TEXT_OT_indent", wm::OpCallContext::ExecDefault, nullptr, nullptr);
   }
   return OPERATOR_FINISHED;
 }
@@ -1438,33 +1436,33 @@ static wmOperatorStatus text_convert_whitespace_exec(bContext *C, wmOperator *op
 
   /* First convert to all space, this make it a lot easier to convert to tabs
    * because there is no mixtures of ` ` && `\t`. */
-  LISTBASE_FOREACH (TextLine *, tmp, &text->lines) {
+  for (TextLine &tmp : text->lines) {
     char *new_line;
 
-    BLI_assert(tmp->line);
+    BLI_assert(tmp.line);
 
-    flatten_string(st, &fs, tmp->line);
+    flatten_string(st, &fs, tmp.line);
     new_line = BLI_strdup(fs.buf);
     flatten_string_free(&fs);
 
-    MEM_freeN(tmp->line);
-    if (tmp->format) {
-      MEM_freeN(tmp->format);
+    MEM_delete(tmp.line);
+    if (tmp.format) {
+      MEM_delete(tmp.format);
     }
 
     /* Put new_line in the tmp->line spot still need to try and set the curc correctly. */
-    tmp->line = new_line;
-    tmp->len = strlen(new_line);
-    tmp->format = nullptr;
-    max_len = std::max<size_t>(tmp->len, max_len);
+    tmp.line = new_line;
+    tmp.len = strlen(new_line);
+    tmp.format = nullptr;
+    max_len = std::max<size_t>(tmp.len, max_len);
   }
 
   if (type == TO_TABS) {
-    char *tmp_line = MEM_malloc_arrayN<char>(max_len + 1, __func__);
+    char *tmp_line = MEM_new_array_uninitialized<char>(max_len + 1, __func__);
 
-    LISTBASE_FOREACH (TextLine *, tmp, &text->lines) {
-      const char *text_check_line = tmp->line;
-      const int text_check_line_len = tmp->len;
+    for (TextLine &tmp : text->lines) {
+      const char *text_check_line = tmp.line;
+      const int text_check_line_len = tmp.len;
       char *tmp_line_cur = tmp_line;
       const size_t tab_len = st->tabnumber;
 
@@ -1517,23 +1515,23 @@ static wmOperatorStatus text_convert_whitespace_exec(bContext *C, wmOperator *op
         BLI_assert(tmp_line_cur - tmp_line <= max_len);
 
         flatten_string(st, &fs, tmp_line);
-        BLI_assert(STREQ(fs.buf, tmp->line));
+        BLI_assert(STREQ(fs.buf, tmp.line));
         flatten_string_free(&fs);
 #endif
 
-        MEM_freeN(tmp->line);
-        if (tmp->format) {
-          MEM_freeN(tmp->format);
+        MEM_delete(tmp.line);
+        if (tmp.format) {
+          MEM_delete(tmp.format);
         }
 
         /* Put new_line in the `tmp->line` spot. */
-        tmp->len = strlen(tmp_line);
-        tmp->line = BLI_strdupn(tmp_line, tmp->len);
-        tmp->format = nullptr;
+        tmp.len = strlen(tmp_line);
+        tmp.line = BLI_strdupn(tmp_line, tmp.len);
+        tmp.format = nullptr;
       }
     }
 
-    MEM_freeN(tmp_line);
+    MEM_delete(tmp_line);
   }
 
   if (curc_column != -1) {
@@ -2824,7 +2822,7 @@ static void scroll_exit(bContext *C, wmOperator *op)
   st->runtime->scroll_ofs_px[1] = 0;
   ED_area_tag_redraw(CTX_wm_area(C));
 
-  MEM_freeN(tsc);
+  MEM_delete(tsc);
   op->customdata = nullptr;
 }
 
@@ -2879,7 +2877,7 @@ static wmOperatorStatus text_scroll_invoke(bContext *C, wmOperator *op, const wm
     return text_scroll_exec(C, op);
   }
 
-  tsc = MEM_callocN<TextScroll>("TextScroll");
+  tsc = MEM_new_zeroed<TextScroll>("TextScroll");
   tsc->is_first = true;
   tsc->zone = SCROLLHANDLE_BAR;
 
@@ -2994,7 +2992,7 @@ static wmOperatorStatus text_scroll_bar_invoke(bContext *C, wmOperator *op, cons
     return OPERATOR_PASS_THROUGH;
   }
 
-  tsc = MEM_callocN<TextScroll>("TextScroll");
+  tsc = MEM_new_zeroed<TextScroll>("TextScroll");
   tsc->is_first = true;
   tsc->is_scrollbar = true;
   tsc->zone = zone;
@@ -3364,7 +3362,7 @@ static void text_cursor_set_exit(bContext *C, wmOperator *op)
   WM_event_add_notifier(C, NC_TEXT | ND_CURSOR, st->text);
 
   text_cursor_timer_remove(C, ssel);
-  MEM_freeN(ssel);
+  MEM_delete(ssel);
 }
 
 static wmOperatorStatus text_selection_set_invoke(bContext *C,
@@ -3378,7 +3376,7 @@ static wmOperatorStatus text_selection_set_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
-  op->customdata = MEM_callocN(sizeof(SetSelection), "SetCursor");
+  op->customdata = MEM_new_zeroed<SetSelection>("SetCursor");
   ssel = static_cast<SetSelection *>(op->customdata);
 
   ssel->mval_prev[0] = event->mval[0];
@@ -3585,7 +3583,7 @@ static wmOperatorStatus text_insert_exec(bContext *C, wmOperator *op)
     }
   }
 
-  MEM_freeN(str);
+  MEM_delete(str);
 
   if (!done) {
     return OPERATOR_CANCELLED;
@@ -3791,7 +3789,7 @@ static wmOperatorStatus text_find_and_replace(bContext *C, wmOperator *op, short
         ED_text_undo_push_init(C);
         txt_insert_buf(text, st->replacestr, strlen(st->replacestr));
         if (text->curl && text->curl->format) {
-          MEM_freeN(text->curl->format);
+          MEM_delete(text->curl->format);
           text->curl->format = nullptr;
         }
         space_text_update_cursor_moved(C);
@@ -3799,7 +3797,7 @@ static wmOperatorStatus text_find_and_replace(bContext *C, wmOperator *op, short
         space_text_drawcache_tag_update(st, true);
       }
     }
-    MEM_freeN(tmp);
+    MEM_delete(tmp);
     tmp = nullptr;
   }
 
@@ -3875,7 +3873,7 @@ static wmOperatorStatus text_replace_all(bContext *C)
     do {
       txt_insert_buf(text, st->replacestr, strlen(st->replacestr));
       if (text->curl && text->curl->format) {
-        MEM_freeN(text->curl->format);
+        MEM_delete(text->curl->format);
         text->curl->format = nullptr;
       }
       found = txt_find_string(text, st->findstr, 0, flags & ST_MATCH_CASE);
@@ -3936,7 +3934,7 @@ static wmOperatorStatus text_find_set_selected_exec(bContext *C, wmOperator *op)
 
   tmp = txt_sel_to_buf(text, nullptr);
   STRNCPY_UTF8(st->findstr, tmp);
-  MEM_freeN(tmp);
+  MEM_delete(tmp);
 
   if (!st->findstr[0]) {
     return OPERATOR_FINISHED;
@@ -3971,7 +3969,7 @@ static wmOperatorStatus text_replace_set_selected_exec(bContext *C, wmOperator *
 
   tmp = txt_sel_to_buf(text, nullptr);
   STRNCPY_UTF8(st->replacestr, tmp);
-  MEM_freeN(tmp);
+  MEM_delete(tmp);
 
   return OPERATOR_FINISHED;
 }
@@ -4032,7 +4030,7 @@ static bool text_jump_to_file_at_point_external(bContext *C,
     else {
       BKE_report(reports, RPT_ERROR, expr_result);
     }
-    MEM_freeN(expr_result);
+    MEM_delete(expr_result);
   }
 #else
   UNUSED_VARS(C, reports, filepath, line_index, column_index);
@@ -4050,23 +4048,23 @@ static bool text_jump_to_file_at_point_internal(bContext *C,
   Text *text = nullptr;
   BLI_assert(!BLI_path_is_rel(filepath));
 
-  LISTBASE_FOREACH (Text *, text_iter, &bmain->texts) {
-    if (text_iter->filepath == nullptr) {
+  for (Text &text_iter : bmain->texts) {
+    if (text_iter.filepath == nullptr) {
       continue;
     }
     const char *filepath_iter;
     char filepath_iter_buf[FILE_MAX];
-    if (BLI_path_is_rel(text_iter->filepath)) {
-      STRNCPY(filepath_iter_buf, text_iter->filepath);
-      BLI_path_abs(filepath_iter_buf, ID_BLEND_PATH(bmain, &text_iter->id));
+    if (BLI_path_is_rel(text_iter.filepath)) {
+      STRNCPY(filepath_iter_buf, text_iter.filepath);
+      BLI_path_abs(filepath_iter_buf, ID_BLEND_PATH(bmain, &text_iter.id));
       filepath_iter = filepath_iter_buf;
     }
     else {
-      filepath_iter = text_iter->filepath;
+      filepath_iter = text_iter.filepath;
     }
 
     if (BLI_path_cmp(filepath, filepath_iter) == 0) {
-      text = text_iter;
+      text = &text_iter;
       break;
     }
   }
@@ -4222,45 +4220,45 @@ static wmOperatorStatus text_resolve_conflict_invoke(bContext *C,
                                                      const wmEvent * /*event*/)
 {
   Text *text = CTX_data_edit_text(C);
-  uiPopupMenu *pup;
-  uiLayout *layout;
 
   switch (BKE_text_file_modified_check(text)) {
     case 1:
       if (text->flags & TXT_ISDIRTY) {
         /* Modified locally and externally, ah. offer more possibilities. */
-        pup = UI_popup_menu_begin(
+        ui::PopupMenu *pup = ui::popup_menu_begin(
             C, IFACE_("File Modified Outside and Inside Blender"), ICON_NONE);
-        layout = UI_popup_menu_layout(pup);
-        PointerRNA op_ptr = layout->op(
+        ui::Layout &layout = *popup_menu_layout(pup);
+        PointerRNA op_ptr = layout.op(
             op->type, IFACE_("Reload from disk (ignore local changes)"), ICON_NONE);
         RNA_enum_set(&op_ptr, "resolution", RESOLVE_RELOAD);
-        op_ptr = layout->op(op->type, IFACE_("Save to disk (ignore outside changes)"), ICON_NONE);
+        op_ptr = layout.op(op->type, IFACE_("Save to disk (ignore outside changes)"), ICON_NONE);
         RNA_enum_set(&op_ptr, "resolution", RESOLVE_SAVE);
-        op_ptr = layout->op(op->type, IFACE_("Make text internal (separate copy)"), ICON_NONE);
+        op_ptr = layout.op(op->type, IFACE_("Make text internal (separate copy)"), ICON_NONE);
         RNA_enum_set(&op_ptr, "resolution", RESOLVE_MAKE_INTERNAL);
-        UI_popup_menu_end(C, pup);
+        popup_menu_end(C, pup);
       }
       else {
-        pup = UI_popup_menu_begin(C, IFACE_("File Modified Outside Blender"), ICON_NONE);
-        layout = UI_popup_menu_layout(pup);
-        PointerRNA op_ptr = layout->op(op->type, IFACE_("Reload from disk"), ICON_NONE);
+        ui::PopupMenu *pup = ui::popup_menu_begin(
+            C, IFACE_("File Modified Outside Blender"), ICON_NONE);
+        ui::Layout &layout = *popup_menu_layout(pup);
+        PointerRNA op_ptr = layout.op(op->type, IFACE_("Reload from disk"), ICON_NONE);
         RNA_enum_set(&op_ptr, "resolution", RESOLVE_RELOAD);
-        op_ptr = layout->op(op->type, IFACE_("Make text internal (separate copy)"), ICON_NONE);
+        op_ptr = layout.op(op->type, IFACE_("Make text internal (separate copy)"), ICON_NONE);
         RNA_enum_set(&op_ptr, "resolution", RESOLVE_MAKE_INTERNAL);
-        op_ptr = layout->op(op->type, IFACE_("Ignore"), ICON_NONE);
+        op_ptr = layout.op(op->type, IFACE_("Ignore"), ICON_NONE);
         RNA_enum_set(&op_ptr, "resolution", RESOLVE_IGNORE);
-        UI_popup_menu_end(C, pup);
+        popup_menu_end(C, pup);
       }
       break;
     case 2:
-      pup = UI_popup_menu_begin(C, IFACE_("File Deleted Outside Blender"), ICON_NONE);
-      layout = UI_popup_menu_layout(pup);
-      PointerRNA op_ptr = layout->op(op->type, IFACE_("Make text internal"), ICON_NONE);
+      ui::PopupMenu *pup = ui::popup_menu_begin(
+          C, IFACE_("File Deleted Outside Blender"), ICON_NONE);
+      ui::Layout &layout = *popup_menu_layout(pup);
+      PointerRNA op_ptr = layout.op(op->type, IFACE_("Make text internal"), ICON_NONE);
       RNA_enum_set(&op_ptr, "resolution", RESOLVE_MAKE_INTERNAL);
-      op_ptr = layout->op(op->type, IFACE_("Recreate file"), ICON_NONE);
+      op_ptr = layout.op(op->type, IFACE_("Recreate file"), ICON_NONE);
       RNA_enum_set(&op_ptr, "resolution", RESOLVE_SAVE);
-      UI_popup_menu_end(C, pup);
+      popup_menu_end(C, pup);
       break;
   }
 
@@ -4362,7 +4360,7 @@ static bool text_update_shader_text_recursive(RenderEngine *engine,
   /* Update each script that is using this text datablock. */
   for (bNode *node : ntree->all_nodes()) {
     if (node->type_legacy == NODE_GROUP) {
-      bNodeTree *ngroup = (bNodeTree *)node->id;
+      bNodeTree *ngroup = id_cast<bNodeTree *>(node->id);
       if (ngroup && !done_trees.contains(ngroup)) {
         found |= text_update_shader_text_recursive(engine, type, ngroup, text, done_trees);
       }
@@ -4402,9 +4400,9 @@ static wmOperatorStatus text_update_shader_exec(bContext *C, wmOperator *op)
 
   /* Update all cameras using text data-block. */
   if (type->update_custom_camera != nullptr) {
-    LISTBASE_FOREACH (Camera *, cam, &bmain->cameras) {
-      if (cam->custom_shader == text) {
-        type->update_custom_camera(engine, cam);
+    for (Camera &cam : bmain->cameras) {
+      if (cam.custom_shader == text) {
+        type->update_custom_camera(engine, &cam);
         found = true;
       }
     }
@@ -4437,3 +4435,5 @@ void TEXT_OT_update_shader(wmOperatorType *ot)
 }
 
 /** \} */
+
+}  // namespace blender

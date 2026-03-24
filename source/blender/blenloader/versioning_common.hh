@@ -17,7 +17,10 @@
 #include "RNA_define.hh"
 
 #include "DNA_anim_types.h"
+#include "DNA_listBase.h"
 #include "DNA_node_types.h"
+
+namespace blender {
 
 struct ARegion;
 struct bNode;
@@ -25,12 +28,9 @@ struct bNodeSocket;
 struct bNodeTree;
 struct ID;
 struct IDProperty;
-struct ListBase;
 struct Main;
 struct ViewLayer;
 struct SceneRenderLayer;
-
-using blender::FunctionRef;
 
 /**
  * Mapping from new ID types to old converted ID types.
@@ -53,7 +53,7 @@ short do_versions_new_to_old_idcode_get(short id_code_new);
  * first region of type \a link_after_region_type.
  * \returns null if a region of the given type already existed, otherwise the newly added region.
  */
-ARegion *do_versions_add_region_if_not_found(ListBase *regionbase,
+ARegion *do_versions_add_region_if_not_found(ListBaseT<ARegion> *regionbase,
                                              int region_type,
                                              const char *allocname,
                                              int link_after_region_type);
@@ -62,7 +62,7 @@ ARegion *do_versions_add_region_if_not_found(ListBase *regionbase,
  * first region of type \a link_after_region_type.
  * \returns either a new, or already existing region.
  */
-ARegion *do_versions_ensure_region(ListBase *regionbase,
+ARegion *do_versions_ensure_region(ListBaseT<ARegion> *regionbase,
                                    int region_type,
                                    const char *allocname,
                                    int link_after_region_type);
@@ -92,7 +92,7 @@ void version_node_output_socket_name(bNodeTree *ntree,
 /**
  * Find the base socket name for an idname that may include a subtype.
  */
-blender::StringRef legacy_socket_idname_to_socket_type(blender::StringRef idname);
+StringRef legacy_socket_idname_to_socket_type(StringRef idname);
 
 /**
  * Adds a new node for versioning purposes. This is intended to be used to create raw DNA that
@@ -126,7 +126,7 @@ bNode &version_node_add_empty(bNodeTree &ntree, const char *idname);
  * See also #bNodeType for more details.
  */
 bNode &version_node_add_unknown(bNodeTree &ntree,
-                                blender::bke::bNodeType &node_type,
+                                bke::bNodeType &node_type,
                                 const char *idname,
                                 const int16_t legacy_type,
                                 const std::string &ui_name,
@@ -151,6 +151,16 @@ bNodeSocket &version_node_add_socket(bNodeTree &ntree,
                                      const char *identifier);
 bNodeLink &version_node_add_link(
     bNodeTree &ntree, bNode &node_a, bNodeSocket &socket_a, bNode &node_b, bNodeSocket &socket_b);
+
+/**
+ * Returns true if the node has valid storage data.
+ * If the node does not have storage data then the node type is set to "Undefined" to prevent
+ * further access and the function returns false.
+ *
+ * Storage can get lost when saving nodes in older versions and then loading such files may contain
+ * nodes where storage is expected but does not exist (#154086).
+ */
+bool version_node_ensure_storage_or_invalidate(bNode &node);
 
 /**
  * Adjust animation data for newly added node sockets.
@@ -228,7 +238,7 @@ void version_cycles_property_boolean_set(IDProperty *idprop, const char *name, b
 void node_tree_relink_with_socket_id_map(bNodeTree &ntree,
                                          bNode &old_node,
                                          bNode &new_node,
-                                         const blender::Map<std::string, std::string> &map);
+                                         const Map<std::string, std::string> &map);
 void version_update_node_input(
     bNodeTree *ntree,
     FunctionRef<bool(bNode *)> check_node,
@@ -239,13 +249,13 @@ void version_update_node_input(
 bNode *version_eevee_output_node_get(bNodeTree *ntree, int16_t node_type);
 
 /**
- * Allow 5.0+ to 'convert' older blendfiles' system properties storage.
+ * Allow 5.0+ to 'convert' older blend-files' system properties storage.
  */
 void version_system_idprops_generate(Main *bmain);
 void version_system_idprops_nodes_generate(Main *bmain);
 void version_system_idprops_children_bones_generate(Main *bmain);
 
-bool all_scenes_use(Main *bmain, const blender::Span<const char *> engines);
+bool all_scenes_use(Main *bmain, const Span<const char *> engines);
 
 /**
  * Adjust the values of the given FCurve key frames by applying the given function. The function is
@@ -287,10 +297,12 @@ static void adjust_fcurve_key_frame_values(FCurve *fcurve,
   }
 
   /* Recalculate the automatic handles of the FCurve after adjustments. */
-  BKE_fcurve_handles_recalc(fcurve);
+  BKE_fcurve_handles_recalc(*fcurve);
 }
 
 /* Gets the compositing node tree of the given scene. The deprecated node-tree member is returned
  * for older versions before reusable node trees were introduced in bd61e69be5, while the new
  * compositing_node_group is returned otherwise. */
 bNodeTree *version_get_scene_compositor_node_tree(Main *bmain, Scene *scene);
+
+}  // namespace blender

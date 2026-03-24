@@ -100,7 +100,6 @@ set(LIB
   PRIVATE bf::draw
   bf_editor_screen
   bf_editor_undo
-  PRIVATE bf::extern::fmtlib
   PRIVATE bf::gpu
   PRIVATE bf::imbuf
   PRIVATE bf::imbuf::movie
@@ -112,6 +111,8 @@ set(LIB
   PRIVATE bf::sequencer
   bf_intern_ghost
   bf_compositor
+  PRIVATE bf::dependencies::optional::ffmpeg
+  PRIVATE bf::dependencies::optional::audaspace
 )
 
 if(WIN32)
@@ -128,17 +129,12 @@ else()
   )
 endif()
 
-if(WITH_AUDASPACE)
-  list(APPEND INC_SYS
-    ${AUDASPACE_C_INCLUDE_DIRS}
+if(WITH_GHOST_CSD)
+  list(APPEND SRC
+    intern/wm_window_csd_draw.cc
+    intern/wm_window_csd_layout.cc
   )
-  if(WITH_SYSTEM_AUDASPACE)
-    list(APPEND LIB
-      ${AUDASPACE_C_LIBRARIES}
-      ${AUDASPACE_PY_LIBRARIES}
-    )
-  endif()
-  add_definitions(-DWITH_AUDASPACE)
+  add_definitions(-DWITH_GHOST_CSD)
 endif()
 
 if(WITH_CYCLES)
@@ -151,22 +147,6 @@ endif()
 
 if(WITH_VULKAN_BACKEND)
   add_definitions(-DWITH_VULKAN_BACKEND)
-endif()
-
-if(WITH_CODEC_FFMPEG)
-  list(APPEND INC_SYS
-    ${FFMPEG_INCLUDE_DIRS}
-  )
-  list(APPEND LIB
-    ${FFMPEG_LIBRARIES}
-  )
-  add_definitions(-DWITH_FFMPEG)
-endif()
-
-if(WITH_HEADLESS)
-  add_definitions(-DWITH_HEADLESS)
-elseif(WITH_GHOST_X11)
-  add_definitions(-DWITH_GHOST_X11)
 endif()
 
 if(WITH_PYTHON)

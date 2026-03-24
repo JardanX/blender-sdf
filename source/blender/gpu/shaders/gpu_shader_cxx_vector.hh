@@ -31,7 +31,15 @@ template<typename T, int Sz> struct VecOp {
   {
     return *reinterpret_cast<const T *>(this);
   }
+  const T &operator[](unsigned int) const
+  {
+    return *reinterpret_cast<const T *>(this);
+  }
   T &operator[](int)
+  {
+    return *reinterpret_cast<T *>(this);
+  }
+  T &operator[](unsigned int)
   {
     return *reinterpret_cast<T *>(this);
   }
@@ -125,6 +133,7 @@ template<typename T, int Sz> struct SwizzleBase : VecOp<T, Sz> {
 
   constexpr VecT operator=(const VecT &) RET;
   operator VecT() const RET;
+  VecT operator()() const RET;
 };
 
 #define SWIZZLE_XY(T) \

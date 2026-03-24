@@ -8,20 +8,23 @@
  * \ingroup sequencer
  */
 
+#include "BKE_sound_types.hh"
+
 #include "BLI_function_ref.hh"
 
 #include "DNA_sequence_types.h"
+
+namespace blender {
 
 struct ARegionType;
 struct BlendDataReader;
 struct BlendWriter;
 struct ImBuf;
-struct ListBase;
 struct Strip;
 struct StripModifierData;
 struct ID;
 
-namespace blender::seq {
+namespace seq {
 
 struct ModifierApplyContext;
 
@@ -66,6 +69,21 @@ struct StripModifierTypeInfo {
   void (*blend_read)(BlendDataReader *reader, StripModifierData *smd);
 };
 
+struct StripModifierDataRuntime {
+  /* Reference parameters for optimizing updates. Sound modifiers can store parameters, sound
+   * inputs and outputs. When all existing parameters do match new ones, the update can be skipped
+   * and old sound handle may be returned. This is to prevent audio glitches, see #141595 */
+
+  /* Reference sound handles (may be used by any sound modifier). */
+  AUD_Sound last_sound_in;
+  AUD_Sound last_sound_out;
+
+  /* Hash to detect change in modifier state. */
+  uint64_t params_hash = 0;
+
+  eStripModifierFlag flag = STRIP_MODIFIER_FLAG_NONE;
+};
+
 void modifiers_init();
 
 const StripModifierTypeInfo *modifier_type_info_get(int type);
@@ -79,8 +97,8 @@ StripModifierData *modifier_copy(Strip &strip_dst, StripModifierData *mod_src);
 void modifier_list_copy(Strip *strip_new, Strip *strip);
 int sequence_supports_modifiers(Strip *strip);
 
-void modifier_blend_write(BlendWriter *writer, ListBase *modbase);
-void modifier_blend_read_data(BlendDataReader *reader, ListBase *lb);
+void modifier_blend_write(BlendWriter *writer, ListBaseT<StripModifierData> *modbase);
+void modifier_blend_read_data(BlendDataReader *reader, ListBaseT<StripModifierData> *lb);
 void modifier_persistent_uid_init(const Strip &strip, StripModifierData &smd);
 
 bool modifier_move_to_index(Strip *strip, StripModifierData *smd, int new_index);
@@ -94,4 +112,5 @@ void modifier_type_panel_id(eStripModifierType type, char *r_idname);
 /* Iterate over all the modifiers and call the callback function for every referenced ID. */
 void foreach_strip_modifier_id(Strip *strip, const FunctionRef<void(ID *)> fn);
 
-}  // namespace blender::seq
+}  // namespace seq
+}  // namespace blender

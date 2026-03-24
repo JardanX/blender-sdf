@@ -7,11 +7,14 @@
  * \ingroup bke
  */
 
+#include "BLI_function_ref.hh"
 #include "BLI_sys_types.h"
 
 #include "BKE_duplilist.hh"
 
 #include "DNA_userdef_enums.h"
+
+namespace blender {
 
 struct Base;
 struct Collection;
@@ -129,12 +132,33 @@ Scene *BKE_scene_duplicate(Main *bmain,
                            /*eLibIDDuplicateFlags*/ uint duplicate_options);
 void BKE_scene_groups_relink(Scene *sce);
 
+/**
+ * Check if the given scene can be deleted, i.e. if there is at least one other local Scene in the
+ * given Main.
+ */
 bool BKE_scene_can_be_removed(const Main *bmain, const Scene *scene);
+/**
+ * Find a replacement scene for the given one (typically when the given scene is going to be
+ * deleted).
+ *
+ * By default, it will simply return one of its nearest neighbors in Main (the previous one if
+ * possible).
+ *
+ * If a validation callback is provided, only a scene which returns `true` when passed to this
+ * callback will be returned. Scenes before the given one are checked first, in reversed order (so
+ * starting from the given one).
+ *
+ * \returns A valid replacement scene, or nullptr if no suitable replacement scene was found.
+ */
+Scene *BKE_scene_find_replacement(
+    const Main &bmain,
+    const Scene &scene,
+    FunctionRef<bool(const Scene &scene)> scene_validate_cb = nullptr);
 
 bool BKE_scene_has_view_layer(const Scene *scene, const ViewLayer *layer);
 Scene *BKE_scene_find_from_collection(const Main *bmain, const Collection *collection);
 
-Object *BKE_scene_camera_switch_find(Scene *scene);
+Object *BKE_scene_camera_switch_find(const Scene *scene, const int time);
 bool BKE_scene_camera_switch_update(Scene *scene);
 
 const char *BKE_scene_find_marker_name(const Scene *scene, int frame);
@@ -273,7 +297,7 @@ void BKE_scene_multiview_view_filepath_get(const RenderData *rd,
                                            char *r_filepath);
 const char *BKE_scene_multiview_view_suffix_get(const RenderData *rd, const char *viewname);
 const char *BKE_scene_multiview_view_id_suffix_get(const RenderData *rd, int view_id);
-void BKE_scene_multiview_view_prefix_get(Scene *scene,
+void BKE_scene_multiview_view_prefix_get(const Scene *scene,
                                          const char *filepath,
                                          char *r_prefix,
                                          const char **r_ext);
@@ -315,3 +339,5 @@ TransformOrientation *BKE_scene_transform_orientation_find(const Scene *scene, i
  */
 int BKE_scene_transform_orientation_get_index(const Scene *scene,
                                               const TransformOrientation *orientation);
+
+}  // namespace blender

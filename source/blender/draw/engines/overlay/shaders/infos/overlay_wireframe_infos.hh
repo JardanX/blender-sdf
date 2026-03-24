@@ -10,7 +10,9 @@
 #  include "draw_view_infos.hh"
 #  include "gpu_index_load_infos.hh"
 #  include "overlay_common_infos.hh"
+#endif
 
+#ifdef GLSL_CPP_STUBS
 #  define CUSTOM_DEPTH_BIAS_CONST
 #endif
 
@@ -48,7 +50,12 @@ ADDITIONAL_INFO(draw_object_infos)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_VARIATIONS_MODELMAT(overlay_wireframe, overlay_wireframe_base)
+/* clang-format off */
+CREATE_INFO_VARIANT(overlay_wireframe, overlay_wireframe_base, draw_modelmat)
+CREATE_INFO_VARIANT(overlay_wireframe_selectable, overlay_wireframe_base, draw_modelmat_with_custom_id, overlay_select)
+CREATE_INFO_VARIANT(overlay_wireframe_clipped, overlay_wireframe, drw_clipped)
+CREATE_INFO_VARIANT(overlay_wireframe_selectable_clipped, overlay_wireframe_selectable, drw_clipped)
+/* clang-format on */
 
 GPU_SHADER_CREATE_INFO(overlay_wireframe_curve_base)
 DEFINE("CURVES")
@@ -68,20 +75,24 @@ ADDITIONAL_INFO(draw_object_infos)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_VARIATIONS_MODELMAT(overlay_wireframe_curve, overlay_wireframe_curve_base)
+/* clang-format off */
+CREATE_INFO_VARIANT(overlay_wireframe_curve, overlay_wireframe_curve_base, draw_modelmat)
+CREATE_INFO_VARIANT(overlay_wireframe_curve_selectable, overlay_wireframe_curve_base, draw_modelmat_with_custom_id, overlay_select)
+CREATE_INFO_VARIANT(overlay_wireframe_curve_clipped, overlay_wireframe_curve, drw_clipped)
+CREATE_INFO_VARIANT(overlay_wireframe_curve_selectable_clipped, overlay_wireframe_curve_selectable, drw_clipped)
+/* clang-format on */
 
 GPU_SHADER_INTERFACE_INFO(overlay_wireframe_points_iface)
 FLAT(float4, final_color)
 FLAT(float4, final_color_inner)
 GPU_SHADER_INTERFACE_END()
 
-GPU_SHADER_CREATE_INFO(overlay_wireframe_points_base)
+GPU_SHADER_CREATE_INFO(overlay_wireframe_points_common)
 DEFINE("POINTS")
 PUSH_CONSTANT(float, ndc_offset_factor)
 PUSH_CONSTANT(bool, use_coloring)
 PUSH_CONSTANT(bool, is_transform)
 PUSH_CONSTANT(int, color_type)
-VERTEX_IN(0, float3, pos)
 VERTEX_OUT(overlay_wireframe_points_iface)
 VERTEX_SOURCE("overlay_wireframe_vert.glsl")
 FRAGMENT_SOURCE("overlay_wireframe_frag.glsl")
@@ -92,7 +103,30 @@ ADDITIONAL_INFO(draw_object_infos)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_VARIATIONS_MODELMAT(overlay_wireframe_points, overlay_wireframe_points_base)
+GPU_SHADER_CREATE_INFO(overlay_wireframe_points_base)
+VERTEX_IN(0, float3, pos)
+ADDITIONAL_INFO(overlay_wireframe_points_common)
+GPU_SHADER_CREATE_END()
+
+/* clang-format off */
+CREATE_INFO_VARIANT(overlay_wireframe_points, overlay_wireframe_points_base, draw_modelmat)
+CREATE_INFO_VARIANT(overlay_wireframe_points_selectable, overlay_wireframe_points_base, draw_modelmat_with_custom_id, overlay_select)
+CREATE_INFO_VARIANT(overlay_wireframe_points_clipped, overlay_wireframe_points, drw_clipped)
+CREATE_INFO_VARIANT(overlay_wireframe_points_selectable_clipped, overlay_wireframe_points_selectable, drw_clipped)
+/* clang-format on */
+
+GPU_SHADER_CREATE_INFO(overlay_wireframe_points_with_radius_base)
+DEFINE("WITH_RADIUS")
+VERTEX_IN(0, float4, pos_rad)
+ADDITIONAL_INFO(overlay_wireframe_points_common)
+GPU_SHADER_CREATE_END()
+
+/* clang-format off */
+CREATE_INFO_VARIANT(overlay_wireframe_points_with_radius, overlay_wireframe_points_with_radius_base, draw_modelmat)
+CREATE_INFO_VARIANT(overlay_wireframe_points_with_radius_selectable, overlay_wireframe_points_with_radius_base, draw_modelmat_with_custom_id, overlay_select)
+CREATE_INFO_VARIANT(overlay_wireframe_points_with_radius_clipped, overlay_wireframe_points_with_radius, drw_clipped)
+CREATE_INFO_VARIANT(overlay_wireframe_points_with_radius_selectable_clipped, overlay_wireframe_points_with_radius_selectable, drw_clipped)
+/* clang-format on */
 
 GPU_SHADER_INTERFACE_INFO(overlay_edit_uv_iface_wireframe)
 SMOOTH(float, selection_fac)
@@ -106,9 +140,9 @@ DO_STATIC_COMPILATION()
 DEFINE("WIREFRAME")
 STORAGE_BUF_FREQ(0, read, float, au[], GEOMETRY)
 PUSH_CONSTANT(int2, gpu_attr_0)
-DEFINE_VALUE("line_style", "4u" /* OVERLAY_UV_LINE_STYLE_SHADOW */)
-DEFINE_VALUE("dash_length", "1" /* Not used by this line style */)
-DEFINE_VALUE("use_edge_select", "false")
+COMPILATION_CONSTANT(uint, line_style, 4u /* OVERLAY_UV_LINE_STYLE_SHADOW */)
+COMPILATION_CONSTANT(uint, dash_length, 1 /* Not use by this style. */)
+COMPILATION_CONSTANT(bool, use_edge_select, false)
 PUSH_CONSTANT(bool, do_smooth_wire)
 PUSH_CONSTANT(float, alpha)
 VERTEX_OUT(overlay_edit_uv_iface_wireframe)

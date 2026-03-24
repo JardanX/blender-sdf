@@ -57,7 +57,7 @@ OneapiDevice::OneapiDevice(const DeviceInfo &info, Stats &stats, Profiler &profi
   static_assert(sizeof(arrayMemObject) ==
                 sizeof(sycl::ext::oneapi::experimental::image_mem_handle));
 
-  need_texture_info = false;
+  need_image_info = false;
   use_hardware_raytracing = info.use_hardware_raytracing;
 
   oneapi_set_error_cb(queue_error_cb, &oneapi_error_string_);
@@ -116,7 +116,7 @@ OneapiDevice::OneapiDevice(const DeviceInfo &info, Stats &stats, Profiler &profi
   if (headroom_str != nullptr) {
     const long long override_headroom = (float)atoll(headroom_str);
     device_working_headroom = override_headroom;
-    device_texture_headroom = override_headroom;
+    device_image_headroom = override_headroom;
   }
   LOG_TRACE << "oneAPI memory headroom size: "
             << string_human_readable_size(device_working_headroom);
@@ -130,7 +130,7 @@ OneapiDevice::~OneapiDevice()
   }
 #  endif
 
-  texture_info.free();
+  image_info.free();
   usm_free(device_queue_, kg_memory_);
   usm_free(device_queue_, kg_memory_device_);
 
@@ -421,8 +421,8 @@ void OneapiDevice::host_free(const MemoryType type, void *host_pointer, const si
 
 void OneapiDevice::mem_alloc(device_memory &mem)
 {
-  if (mem.type == MEM_TEXTURE) {
-    assert(!"mem_alloc not supported for textures.");
+  if (mem.type == MEM_IMAGE_TEXTURE) {
+    assert(!"mem_alloc not supported for images.");
   }
   else if (mem.type == MEM_GLOBAL) {
     assert(!"mem_alloc not supported for global memory.");
@@ -454,8 +454,8 @@ void OneapiDevice::mem_copy_to(device_memory &mem)
   if (mem.type == MEM_GLOBAL) {
     global_copy_to(mem);
   }
-  else if (mem.type == MEM_TEXTURE) {
-    tex_copy_to((device_texture &)mem);
+  else if (mem.type == MEM_IMAGE_TEXTURE) {
+    image_copy_to((device_image &)mem);
   }
   else {
     if (!mem.device_pointer) {
@@ -483,9 +483,9 @@ void OneapiDevice::mem_move_to_host(device_memory &mem)
     global_free(mem);
     global_alloc(mem);
   }
-  else if (mem.type == MEM_TEXTURE) {
-    tex_free((device_texture &)mem);
-    tex_alloc((device_texture &)mem);
+  else if (mem.type == MEM_IMAGE_TEXTURE) {
+    image_free((device_image &)mem);
+    image_alloc((device_image &)mem);
   }
   else {
     assert(0);
@@ -495,8 +495,8 @@ void OneapiDevice::mem_move_to_host(device_memory &mem)
 void OneapiDevice::mem_copy_from(
     device_memory &mem, const size_t y, size_t w, const size_t h, size_t elem)
 {
-  if (mem.type == MEM_TEXTURE || mem.type == MEM_GLOBAL) {
-    assert(!"mem_copy_from not supported for textures.");
+  if (mem.type == MEM_IMAGE_TEXTURE) {
+    assert(!"mem_copy_from not supported for images.");
   }
   else if (mem.host_pointer) {
     const size_t size = (w > 0 || h > 0 || elem > 0) ? (elem * w * h) : mem.memory_size();
@@ -571,8 +571,8 @@ void OneapiDevice::mem_free(device_memory &mem)
   if (mem.type == MEM_GLOBAL) {
     global_free(mem);
   }
-  else if (mem.type == MEM_TEXTURE) {
-    tex_free((device_texture &)mem);
+  else if (mem.type == MEM_IMAGE_TEXTURE) {
+    image_free((device_image &)mem);
   }
   else {
     generic_free(mem);
@@ -670,7 +670,7 @@ void OneapiDevice::global_free(device_memory &mem)
   }
 }
 
-static sycl::ext::oneapi::experimental::image_descriptor image_desc(const device_texture &mem)
+static sycl::ext::oneapi::experimental::image_descriptor image_desc(const device_image &mem)
 {
   /* Image Texture Storage */
   sycl::image_channel_type channel_type;
@@ -689,7 +689,9 @@ static sycl::ext::oneapi::experimental::image_descriptor image_desc(const device
       channel_type = sycl::image_channel_type::fp16;
       break;
     default:
+      channel_type = sycl::image_channel_type::unorm_int8;
       assert(0);
+      break;
   }
 
   sycl::ext::oneapi::experimental::image_descriptor param;
@@ -703,7 +705,7 @@ static sycl::ext::oneapi::experimental::image_descriptor image_desc(const device
   return param;
 }
 
-void OneapiDevice::tex_alloc(device_texture &mem)
+void OneapiDevice::image_alloc(device_image &mem)
 {
   assert(device_queue_);
 
@@ -765,6 +767,7 @@ void OneapiDevice::tex_alloc(device_texture &mem)
     sycl::ext::oneapi::experimental::image_descriptor desc{};
 
     if (mem.data_height > 0) {
+      /* 2D/3D image -- Tile optimized */
       const sycl::device &device = reinterpret_cast<sycl::queue *>(queue)->get_device();
       const size_t max_width = device.get_info<sycl::info::device::image2d_max_width>();
       const size_t max_height = device.get_info<sycl::info::device::image2d_max_height>();
@@ -790,11 +793,11 @@ void OneapiDevice::tex_alloc(device_texture &mem)
       sycl::ext::oneapi::experimental::image_mem_handle memHandle =
           sycl::ext::oneapi::experimental::alloc_image_mem(desc, *queue);
       if (!memHandle.raw_handle) {
-        set_error("GPU texture allocation failed: Raw handle is null");
+        set_error("GPU image allocation failed: Raw handle is null");
         return;
       }
 
-      /* Copy data from host to the texture properly based on the texture description */
+      /* Copy data from host to the image properly based on the image description */
       queue->ext_oneapi_copy(mem.host_pointer, memHandle, desc);
 
       mem.device_pointer = (device_ptr)memHandle.raw_handle;
@@ -807,7 +810,7 @@ void OneapiDevice::tex_alloc(device_texture &mem)
       cmem->array = (arrayMemObject)(memHandle.raw_handle);
     }
     else {
-      /* 1D texture -- Linear memory */
+      /* 1D image -- Linear memory */
       desc = sycl::ext::oneapi::experimental::image_descriptor(
           {mem.data_width}, mem.data_elements, channel_type);
       cmem = generic_alloc(mem);
@@ -821,7 +824,7 @@ void OneapiDevice::tex_alloc(device_texture &mem)
     queue->wait_and_throw();
 
     /* Set Mapping and tag that we need to (re-)upload to device */
-    TextureInfo tex_info = mem.info;
+    KernelImageInfo tex_info = mem.info;
 
     sycl::ext::oneapi::experimental::bindless_image_sampler samp(
         address_mode, sycl::coordinate_normalization_mode::normalized, filter_mode);
@@ -830,11 +833,11 @@ void OneapiDevice::tex_alloc(device_texture &mem)
       sycl::ext::oneapi::experimental::sampled_image_handle imgHandle;
 
       if (memHandle.raw_handle) {
-        /* Create 2D/3D texture handle */
+        /* Create 2D/3D image handle */
         imgHandle = sycl::ext::oneapi::experimental::create_image(memHandle, samp, desc, *queue);
       }
       else {
-        /* Create 1D texture */
+        /* Create 1D image */
         imgHandle = sycl::ext::oneapi::experimental::create_image(
             (void *)mem.device_pointer, 0, samp, desc, *queue);
       }
@@ -850,36 +853,36 @@ void OneapiDevice::tex_alloc(device_texture &mem)
     }
 
     {
-      /* Update texture info. */
-      thread_scoped_lock lock(texture_info_mutex);
+      /* Update image info. */
+      thread_scoped_lock lock(image_info_mutex);
       const uint slot = mem.slot;
-      if (slot >= texture_info.size()) {
+      if (slot >= image_info.size()) {
         /* Allocate some slots in advance, to reduce amount of re-allocations. */
-        texture_info.resize(slot + 128);
+        image_info.resize(slot + 128);
       }
-      texture_info[slot] = tex_info;
-      need_texture_info = true;
+      image_info[slot] = tex_info;
+      need_image_info = true;
     }
   }
   catch (sycl::exception const &e) {
-    set_error("GPU texture allocation failed: runtime exception \"" + string(e.what()) + "\"");
+    set_error("GPU image allocation failed: runtime exception \"" + string(e.what()) + "\"");
   }
 }
 
-void OneapiDevice::tex_copy_to(device_texture &mem)
+void OneapiDevice::image_copy_to(device_image &mem)
 {
   if (!mem.device_pointer) {
-    tex_alloc(mem);
+    image_alloc(mem);
   }
   else {
     if (mem.data_height > 0) {
-      /* 2D/3D texture -- Tile optimized */
+      /* 2D/3D image -- Tile optimized */
       sycl::ext::oneapi::experimental::image_descriptor desc = image_desc(mem);
 
       sycl::queue *queue = reinterpret_cast<sycl::queue *>(device_queue_);
 
       try {
-        /* Copy data from host to the texture properly based on the texture description */
+        /* Copy data from host to the image properly based on the image description */
         thread_scoped_lock lock(device_mem_map_mutex);
         const Mem &cmem = device_mem_map[&mem];
         sycl::ext::oneapi::experimental::image_mem_handle image_handle{
@@ -891,7 +894,7 @@ void OneapiDevice::tex_copy_to(device_texture &mem)
 #  endif
       }
       catch (sycl::exception const &e) {
-        set_error("oneAPI texture copy error: got runtime exception \"" + string(e.what()) + "\"");
+        set_error("oneAPI image copy error: got runtime exception \"" + string(e.what()) + "\"");
       }
     }
     else {
@@ -900,7 +903,7 @@ void OneapiDevice::tex_copy_to(device_texture &mem)
   }
 }
 
-void OneapiDevice::tex_free(device_texture &mem)
+void OneapiDevice::image_free(device_image &mem)
 {
   if (mem.device_pointer) {
     thread_scoped_lock lock(device_mem_map_mutex);
@@ -910,24 +913,24 @@ void OneapiDevice::tex_free(device_texture &mem)
     sycl::queue *queue = reinterpret_cast<sycl::queue *>(device_queue_);
 
     if (cmem.texobject) {
-      /* Free bindless texture itself. */
+      /* Free bindless image itself. */
       sycl::ext::oneapi::experimental::sampled_image_handle image(cmem.texobject);
       sycl::ext::oneapi::experimental::destroy_image_handle(image, *queue);
     }
 
     if (cmem.array) {
-      /* Free texture memory. */
+      /* Free image memory. */
       sycl::ext::oneapi::experimental::image_mem_handle imgHandle{
           (sycl::ext::oneapi::experimental::image_mem_handle::raw_handle_type)cmem.array};
 
       try {
-        /* We have allocated only standard textures, so we also deallocate only them. */
+        /* We have allocated only standard image, so we also deallocate only them. */
         sycl::ext::oneapi::experimental::free_image_mem(
             imgHandle, sycl::ext::oneapi::experimental::image_type::standard, *queue);
       }
       catch (sycl::exception const &e) {
-        set_error("oneAPI texture deallocation error: got runtime exception \"" +
-                  string(e.what()) + "\"");
+        set_error("oneAPI image deallocation error: got runtime exception \"" + string(e.what()) +
+                  "\"");
       }
 
       stats.mem_free(mem.memory_size());
@@ -1010,11 +1013,7 @@ void OneapiDevice::check_usm(SyclQueue *queue_, const void *usm_ptr, bool allow_
       queue->get_device().get_info<sycl::info::device::device_type>();
   sycl::usm::alloc usm_type = get_pointer_type(usm_ptr, queue->get_context());
   (void)usm_type;
-#    ifndef WITH_ONEAPI_SYCL_HOST_TASK
   const sycl::usm::alloc main_memory_type = sycl::usm::alloc::device;
-#    else
-  const sycl::usm::alloc main_memory_type = sycl::usm::alloc::host;
-#    endif
   assert(usm_type == main_memory_type ||
          (usm_type == sycl::usm::alloc::host &&
           (allow_host || device_type == sycl::info::device_type::cpu)) ||
@@ -1110,11 +1109,7 @@ void *OneapiDevice::usm_alloc_device(SyclQueue *queue_, size_t memory_size)
    * two different pointer for host activity and device activity, and also has to perform all
    * needed memory transfer operations. So, USM device memory type has been used for oneAPI device
    * in order to better fit in Cycles architecture. */
-#  ifndef WITH_ONEAPI_SYCL_HOST_TASK
   return sycl::malloc_device(memory_size, *queue);
-#  else
-  return sycl::malloc_host(memory_size, *queue);
-#  endif
 }
 
 void OneapiDevice::usm_free(SyclQueue *queue_, void *usm_ptr)
@@ -1316,7 +1311,8 @@ void OneapiDevice::get_adjusted_global_and_local_sizes(SyclQueue *queue,
       break;
 
     case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND:
-    case DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT:
+    case DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_NEE:
+    case DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_FORWARD:
     case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE:
     case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE:
     case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE:
@@ -1364,33 +1360,22 @@ void OneapiDevice::get_adjusted_global_and_local_sizes(SyclQueue *queue,
    * we extend work size to fit uniformity requirements. */
   kernel_global_size = round_up(kernel_global_size, kernel_local_size);
 
-#  ifdef WITH_ONEAPI_SYCL_HOST_TASK
-  /* Kernels listed below need a specific number of work groups. */
-  if (kernel == DEVICE_KERNEL_INTEGRATOR_ACTIVE_PATHS_ARRAY ||
-      kernel == DEVICE_KERNEL_INTEGRATOR_QUEUED_PATHS_ARRAY ||
-      kernel == DEVICE_KERNEL_INTEGRATOR_QUEUED_SHADOW_PATHS_ARRAY ||
-      kernel == DEVICE_KERNEL_INTEGRATOR_TERMINATED_PATHS_ARRAY ||
-      kernel == DEVICE_KERNEL_INTEGRATOR_TERMINATED_SHADOW_PATHS_ARRAY ||
-      kernel == DEVICE_KERNEL_INTEGRATOR_COMPACT_PATHS_ARRAY ||
-      kernel == DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_PATHS_ARRAY)
-  {
-    /* Path array implementation is serial in case of SYCL Host Task execution. */
-    kernel_global_size = 1;
-    kernel_local_size = 1;
-  }
-#  endif
-
   assert(kernel_global_size % kernel_local_size == 0);
 }
 
 /* Compute-runtime (ie. NEO) version is what gets returned by sycl/L0 on Windows
  * since Windows driver 101.3268. */
-static const int lowest_supported_driver_version_win = 1018132;
+/* IMPORTANT: ocloc 101.8424 (compute-runtime version 36246) generates
+ * AoT binaries that have been manually verified compatible down to
+ * driver 101.8306 by Intel, matching lowest_supported_driver_version_win.
+ * If ocloc is upgraded again in future, this compatibility must be re-verified
+ * or the minimum version bumped. */
+static const int lowest_supported_driver_version_win = 1018306;
 #  ifdef _WIN32
-/* For Windows driver 101.8132, compute-runtime version is 34938.
- * And for Windows Workstation driver 32.0.101.6979 Q3.25, it is 34177.
+/* For Windows driver 101.8331, compute-runtime version is 35716.
+ * And for Windows Workstation driver 32.0.101.8306 Q4.25, it is also 35716.
  * This information is returned by `ocloc query OCL_DRIVER_VERSION`. */
-static const int lowest_supported_driver_version_neo = 34177;
+static const int lowest_supported_driver_version_neo = 35716;
 #  else
 static const int lowest_supported_driver_version_neo = 34666;
 #  endif
@@ -1623,31 +1608,43 @@ void OneapiDevice::architecture_information(const SyclDevice *device,
     FILL_ARCH_INFO(intel_gpu_kbl, false)
     FILL_ARCH_INFO(intel_gpu_cfl, false)
     FILL_ARCH_INFO(intel_gpu_apl, false)
+    /* intel_gpu_bxt == intel_gpu_apl */
     FILL_ARCH_INFO(intel_gpu_glk, false)
     FILL_ARCH_INFO(intel_gpu_whl, false)
     FILL_ARCH_INFO(intel_gpu_aml, false)
     FILL_ARCH_INFO(intel_gpu_cml, false)
     FILL_ARCH_INFO(intel_gpu_icllp, false)
+    /* intel_gpu_icl == intel_gpu_icllp */
     FILL_ARCH_INFO(intel_gpu_ehl, false)
+    /* intel_gpu_jsl == intel_gpu_ehl */
     FILL_ARCH_INFO(intel_gpu_tgllp, false)
+    /* intel_gpu_tgl == intel_gpu_tgllp */
     FILL_ARCH_INFO(intel_gpu_rkl, false)
     FILL_ARCH_INFO(intel_gpu_adl_s, false)
+    /* intel_gpu_rpl_s == intel_gpu_adl_s */
     FILL_ARCH_INFO(intel_gpu_adl_p, false)
     FILL_ARCH_INFO(intel_gpu_adl_n, false)
     FILL_ARCH_INFO(intel_gpu_dg1, false)
-    FILL_ARCH_INFO(intel_gpu_dg2_g10, true)
-    FILL_ARCH_INFO(intel_gpu_dg2_g11, true)
-    FILL_ARCH_INFO(intel_gpu_dg2_g12, true)
+    FILL_ARCH_INFO(intel_gpu_acm_g10, true)
+    /* intel_gpu_dg2_g10 == intel_gpu_acm_g10 */
+    FILL_ARCH_INFO(intel_gpu_acm_g11, true)
+    /* intel_gpu_dg2_g11 == intel_gpu_acm_g11 */
+    FILL_ARCH_INFO(intel_gpu_acm_g12, true)
+    /* intel_gpu_dg2_g12 == intel_gpu_acm_g12 */
     FILL_ARCH_INFO(intel_gpu_pvc, false)
     FILL_ARCH_INFO(intel_gpu_pvc_vg, false)
-    /* intel_gpu_mtl_u == intel_gpu_mtl_s == intel_gpu_arl_u == intel_gpu_arl_s */
     FILL_ARCH_INFO(intel_gpu_mtl_u, true)
+    /* intel_gpu_mtl_s == intel_gpu_mtl_u */
+    /* intel_gpu_arl_u == intel_gpu_mtl_u */
+    /* intel_gpu_arl_s == intel_gpu_mtl_u */
     FILL_ARCH_INFO(intel_gpu_mtl_h, true)
+    FILL_ARCH_INFO(intel_gpu_arl_h, true)
     FILL_ARCH_INFO(intel_gpu_bmg_g21, true)
     FILL_ARCH_INFO(intel_gpu_bmg_g31, true)
     FILL_ARCH_INFO(intel_gpu_lnl_m, true)
     FILL_ARCH_INFO(intel_gpu_ptl_h, true)
     FILL_ARCH_INFO(intel_gpu_ptl_u, true)
+    FILL_ARCH_INFO(intel_gpu_wcl, true)
 
     default:
       name = "unknown";
@@ -1662,11 +1659,7 @@ char *OneapiDevice::device_capabilities()
 
   const std::vector<sycl::device> &oneapi_devices = available_sycl_devices();
   for (const sycl::device &device : oneapi_devices) {
-#  ifndef WITH_ONEAPI_SYCL_HOST_TASK
     const std::string &name = device.get_info<sycl::info::device::name>();
-#  else
-    const std::string &name = "SYCL Host Task (Debug)";
-#  endif
 
     capabilities << std::string("\t") << name << "\n";
     capabilities << "\t\tsycl::info::platform::name\t\t\t"
@@ -1783,11 +1776,7 @@ void OneapiDevice::iterate_devices(OneAPIDeviceIteratorCallback cb, void *user_p
   for (sycl::device &device : devices) {
     const std::string &platform_name =
         device.get_platform().get_info<sycl::info::platform::name>();
-#  ifndef WITH_ONEAPI_SYCL_HOST_TASK
     std::string name = device.get_info<sycl::info::device::name>();
-#  else
-    std::string name = "SYCL Host Task (Debug)";
-#  endif
 #  ifdef WITH_EMBREE_GPU
     bool hwrt_support = rtcIsSYCLDeviceSupported(device);
 #  else

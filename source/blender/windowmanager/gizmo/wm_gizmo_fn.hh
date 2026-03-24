@@ -12,6 +12,8 @@
 
 #include "DNA_windowmanager_enums.h" /* For `wmOperatorStatus`. */
 
+namespace blender {
+
 struct bContext;
 struct rcti;
 struct wmEvent;
@@ -51,7 +53,7 @@ using wmGizmoFnMatrixBasisGet = void (*)(const wmGizmo *, float[4][4]);
 using wmGizmoFnInvoke = wmOperatorStatus (*)(bContext *, wmGizmo *, const wmEvent *);
 using wmGizmoFnExit = void (*)(bContext *, wmGizmo *, const bool);
 using wmGizmoFnCursorGet = int (*)(wmGizmo *);
-using wmGizmoFnScreenBoundsGet = bool (*)(bContext *, wmGizmo *, rcti *r_bounding_box);
+using wmGizmoFnScreenBoundsGet = bool (*)(const bContext *, wmGizmo *, rcti *r_bounding_box);
 using wmGizmoFnSelectRefresh = void (*)(wmGizmo *);
 using wmGizmoFnFree = void (*)(wmGizmo *);
 
@@ -68,11 +70,13 @@ using wmGizmoPropertyFnRangeGet = void (*)(const wmGizmo *,
                                            wmGizmoProperty *,
                                            /* Typically `float[2]`. */
                                            void *range);
-/* To inspect the RNA properties gizmos are manipulating (can be multiple). Used e.g. for
- * autokeying. */
-using wmGizmoPropertyFnForeachRNAProp = void (*)(
-    wmGizmoProperty *,
-    const blender::FunctionRef<void(PointerRNA &ptr, PropertyRNA *prop, int index)> callback);
+/**
+ * To inspect the RNA properties gizmos are manipulating (can be multiple).
+ * Used e.g. for auto-keying.
+ */
+using wmGizmoPropertyFnForeachRNAProp =
+    void (*)(wmGizmoProperty *,
+             const FunctionRef<void(PointerRNA &ptr, PropertyRNA *prop, int index)> callback);
 
 using wmGizmoPropertyFnFree = void (*)(const wmGizmo *, wmGizmoProperty *);
 
@@ -84,3 +88,5 @@ struct wmGizmoPropertyFnParams {
   wmGizmoPropertyFnForeachRNAProp foreach_rna_prop_fn;
   void *user_data;
 };
+
+}  // namespace blender

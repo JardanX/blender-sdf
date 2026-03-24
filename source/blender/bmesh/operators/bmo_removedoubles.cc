@@ -10,12 +10,13 @@
 
 #include "MEM_guardedalloc.h"
 
-#include "BLI_alloca.h"
-#include "BLI_kdtree.h"
+#include "BLI_array.hh"
+#include "BLI_kdtree.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_vector.h"
+#include "BLI_multi_value_map.hh"
 #include "BLI_stack.h"
 #include "BLI_stack.hh"
 #include "BLI_utildefines_stack.h"
@@ -24,6 +25,8 @@
 
 #include "bmesh.hh"
 #include "intern/bmesh_operators_private.hh"
+
+namespace blender {
 
 static void remdoubles_splitface(BMFace *f, BMesh *bm, BMOperator *op, BMOpSlot *slot_targetmap)
 {
@@ -72,11 +75,14 @@ static BMFace *remdoubles_createface(BMesh *bm,
   BMEdge *e_new;
 
   /* New ordered edges. */
-  BMEdge **edges = BLI_array_alloca(edges, f->len);
+  Array<BMEdge *, BM_DEFAULT_NGON_STACK_SIZE> edges_buf(f->len);
+  BMEdge **edges = edges_buf.data();
   /* New ordered verts. */
-  BMVert **verts = BLI_array_alloca(verts, f->len);
+  Array<BMVert *, BM_DEFAULT_NGON_STACK_SIZE> verts_buf(f->len);
+  BMVert **verts = verts_buf.data();
   /* Original ordered loops to copy attributes into the new face. */
-  BMLoop **loops = BLI_array_alloca(loops, f->len);
+  Array<BMLoop *, BM_DEFAULT_NGON_STACK_SIZE> loops_buf(f->len);
+  BMLoop **loops = loops_buf.data();
 
   STACK_DECLARE(edges);
   STACK_DECLARE(loops);
@@ -192,13 +198,10 @@ void bmo_weld_verts_exec(BMesh *bm, BMOperator *op)
   /* Maintain selection history. */
   const bool has_selected = !BLI_listbase_is_empty(&bm->selected);
   const bool use_targetmap_all = has_selected;
-  GHash *targetmap_all = nullptr;
-  if (use_targetmap_all) {
-    /* Map deleted to keep elem. */
-    targetmap_all = BLI_ghash_ptr_new(__func__);
-  }
+  Map<void *, void *> targetmap_all;
 
-  GHash *clusters = use_centroid ? BLI_ghash_ptr_new(__func__) : nullptr;
+  /* Used when use_centroid is true. */
+  MultiValueMap<BMVert *, BMVert *> clusters;
 
   /* Mark merge verts for deletion. */
   BM_ITER_MESH (v, &iter, bm, BM_VERTS_OF_MESH) {
@@ -214,45 +217,33 @@ void bmo_weld_verts_exec(BMesh *bm, BMOperator *op)
 
     if (use_targetmap_all) {
       BLI_assert(v != v_dst);
-      BLI_ghash_insert(targetmap_all, v, v_dst);
+      targetmap_all.add(v, v_dst);
     }
 
     /* Group vertices by their survivor. */
     if (use_centroid && LIKELY(v_dst != v)) {
-      void **cluster_p;
-      if (!BLI_ghash_ensure_p(clusters, v_dst, &cluster_p)) {
-        *cluster_p = MEM_new<blender::Vector<BMVert *>>(__func__);
-      }
-      blender::Vector<BMVert *> *cluster = static_cast<blender::Vector<BMVert *> *>(*cluster_p);
-      cluster->append(v);
+      clusters.add(v_dst, v);
     }
   }
 
   if (use_centroid) {
     /* Compute centroid for each survivor. */
-    GHashIterator gh_iter;
-    GHASH_ITER (gh_iter, clusters) {
-      BMVert *v_dst = static_cast<BMVert *>(BLI_ghashIterator_getKey(&gh_iter));
-      blender::Vector<BMVert *> *cluster = static_cast<blender::Vector<BMVert *> *>(
-          BLI_ghashIterator_getValue(&gh_iter));
+    for (const auto &item : clusters.items()) {
+      BMVert *v_dst = item.key;
+      Span<BMVert *> cluster = item.value;
 
       float centroid[3];
       copy_v3_v3(centroid, v_dst->co);
       int count = 1; /* Include `v_dst`. */
 
-      for (BMVert *v_duplicate : *cluster) {
+      for (BMVert *v_duplicate : cluster) {
         add_v3_v3(centroid, v_duplicate->co);
         count++;
       }
 
       mul_v3_fl(centroid, 1.0f / float(count));
       copy_v3_v3(v_dst->co, centroid);
-
-      /* Free temporary cluster storage. */
-      MEM_delete(cluster);
     }
-    BLI_ghash_free(clusters, nullptr, nullptr);
-    clusters = nullptr;
   }
 
   /* Check if any faces are getting their own corners merged
@@ -286,7 +277,7 @@ void bmo_weld_verts_exec(BMesh *bm, BMOperator *op)
         BM_elem_flag_merge_ex(e_new, e, BM_ELEM_HIDDEN);
         if (use_targetmap_all) {
           BLI_assert(e != e_new);
-          BLI_ghash_insert(targetmap_all, e, e_new);
+          targetmap_all.add(e, e_new);
         }
       }
 
@@ -323,7 +314,8 @@ void bmo_weld_verts_exec(BMesh *bm, BMOperator *op)
             bmesh_face_swap_data(f_new, f);
 
             if (bm->use_toolflags) {
-              std::swap(((BMFace_OFlag *)f)->oflags, ((BMFace_OFlag *)f_new)->oflags);
+              std::swap((reinterpret_cast<BMFace_OFlag *>(f))->oflags,
+                        (reinterpret_cast<BMFace_OFlag *>(f_new))->oflags);
             }
 
             BMO_face_flag_disable(bm, f, ELE_DEL);
@@ -339,7 +331,7 @@ void bmo_weld_verts_exec(BMesh *bm, BMOperator *op)
       if ((use_in_place == false) && (f_new != nullptr)) {
         BLI_assert(f != f_new);
         if (use_targetmap_all) {
-          BLI_ghash_insert(targetmap_all, f, f_new);
+          targetmap_all.add(f, f_new);
         }
         if (bm->act_face && (f == bm->act_face)) {
           bm->act_face = f_new;
@@ -349,11 +341,8 @@ void bmo_weld_verts_exec(BMesh *bm, BMOperator *op)
   }
 
   if (has_selected) {
-    BM_select_history_merge_from_targetmap(bm, targetmap_all, targetmap_all, targetmap_all, true);
-  }
-
-  if (use_targetmap_all) {
-    BLI_ghash_free(targetmap_all, nullptr, nullptr);
+    BM_select_history_merge_from_targetmap(
+        bm, &targetmap_all, &targetmap_all, &targetmap_all, true);
   }
 
   BMO_mesh_delete_oflag_context(bm, ELE_DEL, DEL_ONLYTAGGED, nullptr);
@@ -508,7 +497,8 @@ void bmo_collapse_exec(BMesh *bm, BMOperator *op)
            EDGE_MARK,
            BMW_MASK_NOP,
            BMW_FLAG_NOP, /* No need to use #BMW_FLAG_TEST_HIDDEN, already marked data. */
-           BMW_NIL_LAY);
+           BMW_NIL_LAY,
+           BMW_DELIMIT_NONE);
 
   edge_stack = BLI_stack_new(sizeof(BMEdge *), __func__);
 
@@ -544,7 +534,7 @@ void bmo_collapse_exec(BMesh *bm, BMOperator *op)
       mul_v3_fl(center, 1.0f / count);
 
       /* Snap edges to a point.  for initial testing purposes anyway. */
-      e = *(BMEdge **)BLI_stack_peek(edge_stack);
+      e = *static_cast<BMEdge **>(BLI_stack_peek(edge_stack));
       v_tar = e->v1;
 
       while (!BLI_stack_is_empty(edge_stack)) {
@@ -591,7 +581,8 @@ static void bmo_collapsecon_do_layer(BMesh *bm, const int layer, const short ofl
            oflag,
            BMW_MASK_NOP,
            BMW_FLAG_NOP, /* No need to use #BMW_FLAG_TEST_HIDDEN, already marked data. */
-           layer);
+           layer,
+           BMW_DELIMIT_NONE);
 
   block_stack = BLI_stack_new(sizeof(void *), __func__);
 
@@ -675,13 +666,13 @@ static int *bmesh_find_doubles_by_distance_impl(BMesh *bm,
                                                 const float dist,
                                                 const bool has_keep_vert)
 {
-  int *duplicates = MEM_malloc_arrayN<int>(verts_len, __func__);
+  int *duplicates = MEM_new_array_uninitialized<int>(verts_len, __func__);
   bool found_duplicates = false;
   bool has_self_index = false;
 
-  KDTree_3d *tree = BLI_kdtree_3d_new(verts_len);
+  KDTree_3d *tree = kdtree_3d_new(verts_len);
   for (int i = 0; i < verts_len; i++) {
-    BLI_kdtree_3d_insert(tree, i, verts[i]->co);
+    kdtree_3d_insert(tree, i, verts[i]->co);
     if (has_keep_vert && BMO_vert_flag_test(bm, verts[i], VERT_KEEP)) {
       duplicates[i] = i;
       has_self_index = true;
@@ -691,7 +682,7 @@ static int *bmesh_find_doubles_by_distance_impl(BMesh *bm,
     }
   }
 
-  BLI_kdtree_3d_balance(tree);
+  kdtree_3d_balance(tree);
 
   /* Given a cluster of duplicates, pick the index to keep. */
   auto deduplicate_target_calc_fn = [&verts](const int *cluster, const int cluster_num) -> int {
@@ -702,9 +693,9 @@ static int *bmesh_find_doubles_by_distance_impl(BMesh *bm,
     }
     BLI_assert(cluster_num > 2);
 
-    blender::float3 centroid{0.0f};
+    float3 centroid{0.0f};
     for (int i = 0; i < cluster_num; i++) {
-      centroid += blender::float3(verts[cluster[i]]->co);
+      centroid += float3(verts[cluster[i]]->co);
     }
     centroid /= float(cluster_num);
 
@@ -731,13 +722,13 @@ static int *bmesh_find_doubles_by_distance_impl(BMesh *bm,
     return i_best;
   };
 
-  found_duplicates = BLI_kdtree_3d_calc_duplicates_cb_cpp(
+  found_duplicates = kdtree_calc_duplicates_cb_cpp<float3>(
                          tree, dist, duplicates, has_self_index, deduplicate_target_calc_fn) != 0;
 
-  BLI_kdtree_3d_free(tree);
+  kdtree_3d_free(tree);
 
   if (!found_duplicates) {
-    MEM_freeN(duplicates);
+    MEM_delete(duplicates);
     duplicates = nullptr;
   }
   return duplicates;
@@ -750,11 +741,11 @@ static int *bmesh_find_doubles_by_distance_connected_impl(BMesh *bm,
                                                           const float dist,
                                                           const bool has_keep_vert)
 {
-  int *duplicates = MEM_malloc_arrayN<int>(verts_len, __func__);
+  int *duplicates = MEM_new_array_uninitialized<int>(verts_len, __func__);
   bool found_duplicates = false;
 
-  blender::Stack<int> vert_stack;
-  blender::Map<BMVert *, int> vert_to_index_map;
+  Stack<int> vert_stack;
+  Map<BMVert *, int> vert_to_index_map;
 
   for (int i = 0; i < verts_len; i++) {
     if (has_keep_vert && BMO_vert_flag_test(bm, verts[i], VERT_KEEP)) {
@@ -766,7 +757,7 @@ static int *bmesh_find_doubles_by_distance_connected_impl(BMesh *bm,
     vert_to_index_map.add(verts[i], i);
   }
 
-  const float dist_sq = blender::math::square(dist);
+  const float dist_sq = math::square(dist);
 
   for (int i = 0; i < verts_len; i++) {
     if (!ELEM(duplicates[i], -1, i)) {
@@ -830,7 +821,7 @@ static int *bmesh_find_doubles_by_distance_connected_impl(BMesh *bm,
   }
 
   if (!found_duplicates) {
-    MEM_freeN(duplicates);
+    MEM_delete(duplicates);
     duplicates = nullptr;
   }
   return duplicates;
@@ -844,7 +835,7 @@ static void bmesh_find_doubles_common(BMesh *bm,
   const bool use_connected = BMO_slot_bool_get(op->slots_in, "use_connected");
 
   const BMOpSlot *slot_verts = BMO_slot_get(op->slots_in, "verts");
-  BMVert *const *verts = (BMVert **)slot_verts->data.buf;
+  BMVert *const *verts = reinterpret_cast<BMVert **>(slot_verts->data.buf);
   const int verts_len = slot_verts->len;
 
   bool has_keep_vert = false;
@@ -887,7 +878,7 @@ static void bmesh_find_doubles_common(BMesh *bm,
         BMO_slot_map_elem_insert(optarget, optarget_slot, v_check, v_other);
       }
     }
-    MEM_freeN(duplicates);
+    MEM_delete(duplicates);
   }
 }
 
@@ -909,3 +900,5 @@ void bmo_find_doubles_exec(BMesh *bm, BMOperator *op)
   slot_targetmap_out = BMO_slot_get(op->slots_out, "targetmap.out");
   bmesh_find_doubles_common(bm, op, op, slot_targetmap_out);
 }
+
+}  // namespace blender

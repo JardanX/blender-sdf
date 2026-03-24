@@ -8,8 +8,11 @@
 
 #pragma once
 
+#include "BLI_enum_flags.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
+
+namespace blender {
 
 /**
  * Describes the load operation of a frame-buffer attachment at the start of a render pass.
@@ -74,7 +77,19 @@ enum GPUFrontFace {
   GPU_COUNTERCLOCKWISE,
 };
 
-namespace blender::gpu::shader {
+namespace gpu {
+
+enum class ShaderStage : uint8_t {
+  VERTEX = 1 << 0,
+  FRAGMENT = 1 << 1,
+  COMPUTE = 2 << 1,
+  ANY = (ShaderStage::VERTEX | ShaderStage::FRAGMENT | ShaderStage::COMPUTE),
+};
+ENUM_OPERATORS(ShaderStage);
+
+}  // namespace gpu
+
+namespace gpu::shader {
 
 enum class Type : int8_t {
   /* Types supported natively across all GPU back-ends. */
@@ -273,4 +288,5 @@ struct CompilationConstant {
   }
 };
 
-}  // namespace blender::gpu::shader
+}  // namespace gpu::shader
+}  // namespace blender

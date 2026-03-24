@@ -102,6 +102,8 @@
 #include "IMB_metadata.hh"
 #include "IMB_openexr.hh"
 
+namespace blender {
+
 static CLG_LogRef LOG = {"image.openexr"};
 
 using namespace Imf;
@@ -135,19 +137,6 @@ class IMemStream : public Imf::IStream {
       memcpy(c, (void *)(&_exrbuf[_exrpos]), n);
       _exrpos += n;
       return true;
-    }
-
-    /* OpenEXR requests chunks of 4096 bytes even if the file is smaller than that. Return
-     * zeros when reading up to 2x that amount past the end of the file.
-     * This was fixed after the OpenEXR 3.3.2 release, but not in an official release yet. */
-    if (n + _exrpos < _exrsize + 8192) {
-      const size_t remainder = _exrsize - _exrpos;
-      if (remainder > 0) {
-        memcpy(c, (void *)(&_exrbuf[_exrpos]), remainder);
-        memset(c + remainder, 0, n - remainder);
-        _exrpos += n;
-        return true;
-      }
     }
 
     return false;
@@ -195,9 +184,10 @@ class IMMapStream : public Imf::IStream {
     BLI_mmap_free(_mmap_file);
   }
 
-  /* This is implementing regular `read`, not `readMemoryMapped`, because DWAA and DWAB
-   * decompressors load on unaligned offsets. Therefore we can't avoid the memory copy. */
-
+  /**
+   * This is implementing regular `read`, not `readMemoryMapped`, because DWAA and DWAB
+   * decompressors load on unaligned offsets. Therefore we can't avoid the memory copy.
+   */
   bool read(char c[], int n) override
   {
     if (_exrpos + n > _exrsize) {
@@ -396,9 +386,9 @@ struct _RGBAZ {
 
 using RGBAZ = _RGBAZ;
 
-static half float_to_half_safe(const float value)
+static half float_to_half_safe(const float value, const float max_val = HALF_MAX)
 {
-  return half(clamp_f(value, -HALF_MAX, HALF_MAX));
+  return half(clamp_f(value, -max_val, max_val));
 }
 
 bool imb_is_a_openexr(const uchar *mem, const size_t size)
@@ -410,9 +400,9 @@ bool imb_is_a_openexr(const uchar *mem, const size_t size)
   return Imf::isImfMagic((const char *)mem);
 }
 
-static int openexr_jpg_like_quality_to_dwa_quality(int q)
+static int openexr_jpg_like_quality_to_dwa_compression_level(int q)
 {
-  q = blender::math::clamp(q, 0, 100);
+  q = math::clamp(q, 0, 100);
 
   /* Map default JPG quality of 90 to default DWA level of 45,
    * "lossless" JPG quality of 100 to DWA level of 0, and everything else
@@ -421,6 +411,24 @@ static int openexr_jpg_like_quality_to_dwa_quality(int q)
   constexpr int x1 = 90, y1 = 45;
   q = y0 + (q - x0) * (y1 - y0) / (x1 - x0);
   return q;
+}
+
+static float compression_half_max(const int compression, const int quality)
+{
+  if (ELEM(compression, R_IMF_EXR_CODEC_DWAA, R_IMF_EXR_CODEC_DWAB)) {
+    /* Empirically determined margin to prevent DWAA/DWAB lossy compression
+     * from overshooting to infinity. The DWA compression uses log2-luminance
+     * DCT, and overshoot increases with the compression level.
+     *
+     * Tested with randomized pixel patterns across various compression levels
+     * to find a tight bound. */
+    const int level = openexr_jpg_like_quality_to_dwa_compression_level(quality);
+    const float margin = (level <= 50) ? (2048.0f + 32.0f * level) :
+                                         (3624.0f + 128.0f * (level - 50));
+    return HALF_MAX - margin;
+  }
+
+  return HALF_MAX;
 }
 
 static void openexr_header_compression(Header *header, int compression, int quality)
@@ -453,11 +461,18 @@ static void openexr_header_compression(Header *header, int compression, int qual
 #if OPENEXR_VERSION_MAJOR > 2 || (OPENEXR_VERSION_MAJOR >= 2 && OPENEXR_VERSION_MINOR >= 2)
     case R_IMF_EXR_CODEC_DWAA:
       header->compression() = DWAA_COMPRESSION;
-      header->dwaCompressionLevel() = openexr_jpg_like_quality_to_dwa_quality(quality);
+      header->dwaCompressionLevel() = openexr_jpg_like_quality_to_dwa_compression_level(quality);
       break;
     case R_IMF_EXR_CODEC_DWAB:
       header->compression() = DWAB_COMPRESSION;
-      header->dwaCompressionLevel() = openexr_jpg_like_quality_to_dwa_quality(quality);
+      header->dwaCompressionLevel() = openexr_jpg_like_quality_to_dwa_compression_level(quality);
+      break;
+#endif
+#if COMBINED_OPENEXR_VERSION >= 30400
+      /* Always writing 32 scan-lines for now, could add an option for 256 scan-lines
+       * for slightly smaller files if there is demand for it. */
+    case R_IMF_EXR_CODEC_HTJ2K:
+      header->compression() = HTJ2K32_COMPRESSION;
       break;
 #endif
     default:
@@ -489,6 +504,11 @@ static int openexr_header_get_compression(const Header &header)
       return R_IMF_EXR_CODEC_DWAA;
     case DWAB_COMPRESSION:
       return R_IMF_EXR_CODEC_DWAB;
+#if COMBINED_OPENEXR_VERSION >= 30400
+    case HTJ2K256_COMPRESSION:
+    case HTJ2K32_COMPRESSION:
+      return R_IMF_EXR_CODEC_HTJ2K;
+#endif
     case NUM_COMPRESSION_METHODS:
       return R_IMF_EXR_CODEC_NONE;
   }
@@ -504,11 +524,11 @@ static void openexr_header_metadata_global(Header *header,
       TypedAttribute<std::string>(std::string("Blender ") + BKE_blender_version_string()));
 
   if (metadata) {
-    LISTBASE_FOREACH (IDProperty *, prop, &metadata->data.group) {
+    for (IDProperty &prop : metadata->data.group) {
       /* Do not blindly pass along compression or colorInteropID, as they might have
        * changed and will already be written when appropriate. */
-      if ((prop->type == IDP_STRING) && !STR_ELEM(prop->name, "compression", "colorInteropID")) {
-        header->insert(prop->name, StringAttribute(IDP_string_get(prop)));
+      if ((prop.type == IDP_STRING) && !STR_ELEM(prop.name, "compression", "colorInteropID")) {
+        header->insert(prop.name, StringAttribute(IDP_string_get(&prop)));
       }
     }
   }
@@ -516,7 +536,7 @@ static void openexr_header_metadata_global(Header *header,
   if (ppm[0] > 0.0 && ppm[1] > 0.0) {
     /* Convert meters to inches. */
     addXDensity(*header, ppm[0] * 0.0254);
-    header->pixelAspectRatio() = blender::math::safe_divide(ppm[1], ppm[0]);
+    header->pixelAspectRatio() = math::safe_divide(ppm[1], ppm[0]);
   }
 }
 
@@ -537,7 +557,7 @@ static void openexr_header_metadata_colorspace(Header *header, const ColorSpace 
   }
 
   /* Write interop ID if available. */
-  blender::StringRefNull interop_id = IMB_colormanagement_space_get_interop_id(colorspace);
+  StringRefNull interop_id = IMB_colormanagement_space_get_interop_id(colorspace);
   if (!interop_id.is_empty()) {
     header->insert("colorInteropID", TypedAttribute<std::string>(interop_id));
   }
@@ -581,10 +601,12 @@ static bool imb_save_openexr_half(ImBuf *ibuf, const char *filepath, const int f
   try {
     Header header(width, height);
 
-    openexr_header_compression(
-        &header, ibuf->foptions.flag & OPENEXR_CODEC_MASK, ibuf->foptions.quality);
+    const int compression = ibuf->foptions.flag & OPENEXR_CODEC_MASK;
+    openexr_header_compression(&header, compression, ibuf->foptions.quality);
     openexr_header_metadata_global(&header, ibuf->metadata, ibuf->ppm);
     openexr_header_metadata_colorspace(&header, ibuf);
+
+    const float half_max_val = compression_half_max(compression, ibuf->foptions.quality);
 
     /* create channels */
     header.channels().insert("R", Channel(HALF));
@@ -625,10 +647,10 @@ static bool imb_save_openexr_half(ImBuf *ibuf, const char *filepath, const int f
         from = ibuf->float_buffer.data + int64_t(channels) * i * width;
 
         for (int j = ibuf->x; j > 0; j--) {
-          to->r = float_to_half_safe(from[0]);
-          to->g = float_to_half_safe((channels >= 2) ? from[1] : from[0]);
-          to->b = float_to_half_safe((channels >= 3) ? from[2] : from[0]);
-          to->a = float_to_half_safe((channels >= 4) ? from[3] : 1.0f);
+          to->r = float_to_half_safe(from[0], half_max_val);
+          to->g = float_to_half_safe((channels >= 2) ? from[1] : from[0], half_max_val);
+          to->b = float_to_half_safe((channels >= 3) ? from[2] : from[0], half_max_val);
+          to->a = float_to_half_safe((channels >= 4) ? from[3] : 1.0f, half_max_val);
           to++;
           from += channels;
         }
@@ -773,34 +795,40 @@ bool imb_save_openexr(ImBuf *ibuf, const char *filepath, int flags)
  * - separated with a dot: the Layer name (like "Light1" or "Walls" or "Characters")
  */
 
-/* flattened out channel */
+/** Flattened out channel. */
 struct ExrChannel {
-  /* Name and number of the part. */
+  /** Name and number of the part. */
   std::string part_name;
   int part_number = 0;
 
-  /* Full name of the chanel. */
+  /** Full name of the channel. */
   std::string name;
-  /* Name as stored in the header. */
+  /** Name as stored in the header. */
   std::string internal_name;
-  /* Channel view. */
+  /** Channel view. */
   std::string view;
 
-  /* Colorspace. */
+  /** Color-space. */
   const ColorSpace *colorspace;
 
-  int xstride = 0, ystride = 0; /* step to next pixel, to next scan-line. */
-  float *rect = nullptr;        /* first pointer to write in */
-  char chan_id = 0;             /* quick lookup of channel char */
-  bool use_half_float = false;  /* when saving use half float for file storage */
+  /** Step to next pixel. */
+  int xstride = 0;
+  /** Step to next scan-line. */
+  int ystride = 0;
+  /** First pointer to write in */
+  float *rect = nullptr;
+  /** Quick lookup of channel char */
+  char chan_id = 0;
+  /** When saving use half float for file storage. */
+  bool use_half_float = false;
 };
 
-/* hierarchical; layers -> passes -> channels[] */
+/** Hierarchical; layers -> passes -> channels[]. */
 struct ExrPass {
   ~ExrPass()
   {
     if (rect) {
-      MEM_freeN(rect);
+      MEM_delete(rect);
     }
   }
 
@@ -810,13 +838,14 @@ struct ExrPass {
   ExrChannel *chan[EXR_PASS_MAXCHAN] = {};
   char chan_id[EXR_PASS_MAXCHAN] = {};
 
-  std::string internal_name; /* Name with no view. */
+  /** Name with no view. */
+  std::string internal_name;
   std::string view;
 };
 
 struct ExrLayer {
   std::string name;
-  blender::Vector<ExrPass> passes;
+  Vector<ExrPass> passes;
 };
 
 struct ExrHandle {
@@ -831,6 +860,7 @@ struct ExrHandle {
 
   bool write_multipart = false;
   bool has_layer_pass_names = false;
+  float half_max_val = HALF_MAX;
 
   int tilex = 0, tiley = 0;
   int width = 0, height = 0;
@@ -838,13 +868,15 @@ struct ExrHandle {
 
   StringVector views;
 
-  blender::Vector<ExrChannel> channels; /* flattened out channels. */
-  blender::Vector<ExrLayer> layers;     /* layers and passes. */
+  /** Flattened out channels. */
+  Vector<ExrChannel> channels;
+  /** Layers and passes. */
+  Vector<ExrLayer> layers;
 };
 
 static bool imb_exr_multilayer_parse_channels_from_file(ExrHandle *handle);
-static blender::Vector<ExrChannel> exr_channels_in_multi_part_file(const MultiPartInputFile &file,
-                                                                   const bool parse_layers);
+static Vector<ExrChannel> exr_channels_in_multi_part_file(const MultiPartInputFile &file,
+                                                          const bool parse_layers);
 
 /* ********************** */
 
@@ -905,10 +937,10 @@ static StringVector imb_exr_get_views(MultiPartInputFile &file)
 }
 
 void IMB_exr_add_channels(ExrHandle *handle,
-                          blender::StringRefNull layerpassname,
-                          blender::StringRefNull channelnames,
-                          blender::StringRefNull viewname,
-                          blender::StringRefNull colorspace,
+                          StringRefNull layerpassname,
+                          StringRefNull channelnames,
+                          StringRefNull viewname,
+                          StringRefNull colorspace,
                           size_t xstride,
                           size_t ystride,
                           float *rect,
@@ -1005,6 +1037,7 @@ bool IMB_exr_begin_write(ExrHandle *handle,
   handle->height = height;
 
   openexr_header_compression(&header, compress, quality);
+  handle->half_max_val = compression_half_max(compress, quality);
 
   if (!handle->write_multipart) {
     /* If we're writing single part, we can only add one colorspace even if there are
@@ -1026,9 +1059,9 @@ bool IMB_exr_begin_write(ExrHandle *handle,
     }
   }
 
-  blender::Vector<Header> part_headers;
+  Vector<Header> part_headers;
 
-  blender::StringRefNull last_part_name;
+  StringRefNull last_part_name;
 
   for (const ExrChannel &echan : handle->channels) {
     if (part_headers.is_empty() || last_part_name != echan.part_name) {
@@ -1143,7 +1176,7 @@ bool IMB_exr_begin_read(
 }
 
 bool IMB_exr_set_channel(
-    ExrHandle *handle, blender::StringRefNull full_name, int xstride, int ystride, float *rect)
+    ExrHandle *handle, StringRefNull full_name, int xstride, int ystride, float *rect)
 {
   for (ExrChannel &echan : handle->channels) {
     if (echan.name == full_name) {
@@ -1177,7 +1210,7 @@ void IMB_exr_write_channels(ExrHandle *handle)
       }
     }
 
-    blender::Vector<half> rect_half;
+    Vector<half> rect_half;
     half *current_rect_half = nullptr;
     if (num_half_channels > 0) {
       rect_half.resize(size_t(num_half_channels) * num_pixels);
@@ -1196,7 +1229,7 @@ void IMB_exr_write_channels(ExrHandle *handle)
         const float *rect = echan.rect;
         half *cur = current_rect_half;
         for (size_t i = 0; i < num_pixels; i++, cur++) {
-          *cur = float_to_half_safe(rect[i * echan.xstride]);
+          *cur = float_to_half_safe(rect[i * echan.xstride], handle->half_max_val);
         }
         half *rect_to_write = current_rect_half + (handle->height - 1L) * handle->width;
         frameBuffer.insert(
@@ -1578,26 +1611,28 @@ static bool exr_has_xyz_channels(ExrHandle *exr_handle)
   return x_found && y_found && z_found;
 }
 
-/* Replacement for OpenEXR GetChannelsInMultiPartFile, that also handles the
- * case where parts are used for passes instead of multiview. */
-static blender::Vector<ExrChannel> exr_channels_in_multi_part_file(const MultiPartInputFile &file,
-                                                                   const bool parse_layers)
+/**
+ * Replacement for OpenEXR GetChannelsInMultiPartFile, that also handles the
+ * case where parts are used for passes instead of multi-view.
+ */
+static Vector<ExrChannel> exr_channels_in_multi_part_file(const MultiPartInputFile &file,
+                                                          const bool parse_layers)
 {
-  blender::Vector<ExrChannel> channels;
+  Vector<ExrChannel> channels;
   const ColorSpace *global_colorspace = imb_exr_part_colorspace(file.header(0));
 
   /* Get channels from each part. */
   for (int p = 0; p < file.parts(); p++) {
     const ChannelList &c = file.header(p).channels();
 
-    /* Parse colorspace. Per part colorspaces are not currently used, but
+    /* Parse color-space. Per part color-spaces are not currently used, but
      * might as well populate them for consistency with writing. */
     const ColorSpace *colorspace = imb_exr_part_colorspace(file.header(p));
     if (colorspace == nullptr) {
       colorspace = global_colorspace;
     }
 
-    /* There are two ways of storing multiview EXRs:
+    /* There are two ways of storing multi-view EXRs:
      * - Multiple views in part with multiView attribute.
      * - Each view in its own part with view attribute. */
     const bool has_multiple_views_in_part = hasMultiView(file.header(p));
@@ -1605,13 +1640,13 @@ static blender::Vector<ExrChannel> exr_channels_in_multi_part_file(const MultiPa
     if (has_multiple_views_in_part) {
       views_in_part = multiView(file.header(p));
     }
-    blender::StringRef part_view;
+    StringRef part_view;
     if (file.header(p).hasView()) {
       part_view = file.header(p).view();
     }
 
     /* Parse part name. */
-    blender::StringRef part_name;
+    StringRef part_name;
     if (parse_layers && file.header(p).hasName()) {
       part_name = file.header(p).name();
 
@@ -1644,7 +1679,7 @@ static blender::Vector<ExrChannel> exr_channels_in_multi_part_file(const MultiPa
       if (parse_layers) {
         /* Prepend part name as potential layer or pass name. According to OpenEXR docs
          * this should not be needed, but Houdini writes files like this. */
-        if (!part_name.is_empty() && !blender::StringRef(echan.name).startswith(part_name + ".")) {
+        if (!part_name.is_empty() && !StringRef(echan.name).startswith(part_name + ".")) {
           echan.name = part_name + "." + echan.name;
         }
       }
@@ -1698,7 +1733,7 @@ static bool imb_exr_multilayer_parse_channels_from_file(ExrHandle *handle)
   for (ExrLayer &lay : handle->layers) {
     for (ExrPass &pass : lay.passes) {
       if (pass.totchan) {
-        pass.rect = MEM_calloc_arrayN<float>(
+        pass.rect = MEM_new_array_zeroed<float>(
             size_t(handle->width) * size_t(handle->height) * size_t(pass.totchan), "pass rect");
         if (pass.totchan == 1) {
           ExrChannel &echan = *pass.chan[0];
@@ -1760,7 +1795,7 @@ static bool imb_exr_multilayer_parse_channels_from_file(ExrHandle *handle)
   return true;
 }
 
-/* creates channels, makes a hierarchy and assigns memory to channels */
+/** Creates channels, makes a hierarchy and assigns memory to channels. */
 static ExrHandle *imb_exr_begin_read_mem(IStream &file_stream,
                                          MultiPartInputFile &file,
                                          int width,
@@ -1813,7 +1848,7 @@ static void exr_print_filecontents(MultiPartInputFile &file)
   }
 }
 
-/* For non-multi-layer, map R G B A channel names to something that's in this file. */
+/** For non-multi-layer, map R G B A channel names to something that's in this file. */
 static const char *exr_rgba_channelname(MultiPartInputFile &file, const char *chan)
 {
   const ChannelList &channels = file.header(0).channels();
@@ -1935,7 +1970,7 @@ static bool exr_has_multipart_file(MultiPartInputFile &file)
   return file.parts() > 1;
 }
 
-/* it returns true if the file is multilayer or multiview */
+/** It returns true if the file is multi-layer or multi-view. */
 static bool imb_exr_is_multi(MultiPartInputFile &file)
 {
   /* Multipart files are treated as multilayer in blender -
@@ -2048,6 +2083,30 @@ bool IMB_exr_get_ppm(ExrHandle *handle, double ppm[2])
   return exr_get_ppm(*handle->ifile, ppm);
 }
 
+static void get_exr_display_window(const MultiPartInputFile &file,
+                                   int display_size[2],
+                                   int display_offset[2],
+                                   int data_offset[2])
+{
+  const Header &header = file.header(0);
+  const Box2i data_window = header.dataWindow();
+  const Box2i display_window = header.displayWindow();
+  display_size[0] = display_window.size()[0] + 1;
+  display_size[1] = display_window.size()[1] + 1;
+  display_offset[0] = display_window.min[0];
+  display_offset[1] = display_window.min[1];
+  data_offset[0] = data_window.min[0] - display_window.min[0];
+  data_offset[1] = data_window.min[1] - display_window.min[1];
+}
+
+void IMB_exr_get_display_window(ExrHandle *handle,
+                                int display_size[2],
+                                int display_offset[2],
+                                int data_offset[2])
+{
+  get_exr_display_window(*handle->ifile, display_size, display_offset, data_offset);
+}
+
 ImBuf *imb_load_openexr(const uchar *mem, size_t size, int flags, ImFileColorSpace &r_colorspace)
 {
   ImBuf *ibuf = nullptr;
@@ -2061,7 +2120,7 @@ ImBuf *imb_load_openexr(const uchar *mem, size_t size, int flags, ImFileColorSpa
   try {
     bool is_multi;
 
-    membuf = new IMemStream((uchar *)mem, size);
+    membuf = new IMemStream(const_cast<uchar *>(mem), size);
     file = new MultiPartInputFile(*membuf);
 
     const Header &file_header = file->header(0);
@@ -2087,6 +2146,9 @@ ImBuf *imb_load_openexr(const uchar *mem, size_t size, int flags, ImFileColorSpa
       ibuf = IMB_allocImBuf(width, height, is_alpha ? 32 : 24, 0);
       ibuf->foptions.flag |= exr_is_half_float(*file) ? OPENEXR_HALF : 0;
       ibuf->foptions.flag |= openexr_header_get_compression(file_header);
+
+      ibuf->flags |= IB_has_display_window;
+      get_exr_display_window(*file, ibuf->display_size, ibuf->display_offset, ibuf->data_offset);
 
       exr_get_ppm(*file, ibuf->ppm);
 
@@ -2379,3 +2441,5 @@ void imb_exitopenexr()
   /* Tells OpenEXR to free thread pool, also ensures there is no running tasks. */
   Imf::setGlobalThreadCount(0);
 }
+
+}  // namespace blender

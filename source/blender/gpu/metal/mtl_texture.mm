@@ -19,6 +19,7 @@
 #include "GPU_platform.hh"
 #include "GPU_state.hh"
 
+#include "MEM_guardedalloc.h"
 #include "mtl_backend.hh"
 #include "mtl_common.hh"
 #include "mtl_context.hh"
@@ -26,8 +27,6 @@
 #include "mtl_storage_buffer.hh"
 #include "mtl_texture.hh"
 #include "mtl_vertex_buffer.hh"
-
-#include "GHOST_C-api.h"
 
 namespace blender::gpu {
 
@@ -48,9 +47,6 @@ void gpu::MTLTexture::mtl_texture_init()
   /* Metal properties. */
   texture_ = nil;
   mip_swizzle_view_ = nil;
-
-  /* Binding information. */
-  is_bound_ = false;
 
   /* VBO. */
   vert_buffer_ = nullptr;
@@ -101,11 +97,9 @@ gpu::MTLTexture::MTLTexture(const char *name,
 gpu::MTLTexture::~MTLTexture()
 {
   /* Unbind if bound. */
-  if (is_bound_) {
-    MTLContext *ctx = MTLContext::get();
-    if (ctx != nullptr) {
-      ctx->state_manager->texture_unbind(this);
-    }
+  MTLContext *ctx = MTLContext::get();
+  if (ctx != nullptr) {
+    ctx->state_manager->texture_unbind(this);
   }
 
   /* Free memory. */
@@ -443,7 +437,8 @@ gpu::FrameBuffer *gpu::MTLTexture::get_blit_framebuffer(int dst_slice, uint dst_
   /* Check if layer has changed. */
   bool update_attachments = false;
   if (!blit_fb_) {
-    blit_fb_ = GPU_framebuffer_create("gpu_blit");
+    std::string fb_name = this->name_ + "_blit_fb";
+    blit_fb_ = GPU_framebuffer_create(fb_name.c_str());
     update_attachments = true;
   }
 
@@ -485,8 +480,12 @@ MTLSamplerState gpu::MTLTexture::get_sampler_state()
   return sampler_state;
 }
 
-void gpu::MTLTexture::update_sub(
-    int mip, int offset[3], int extent[3], eGPUDataFormat type, const void *data)
+void gpu::MTLTexture::update_sub(int mip,
+                                 int offset[3],
+                                 int extent[3],
+                                 eGPUDataFormat type,
+                                 const void *data,
+                                 const uint unpack_row_length)
 {
   /* Fetch active context. */
   MTLContext *ctx = MTLContext::get();
@@ -506,25 +505,24 @@ void gpu::MTLTexture::update_sub(
   BLI_assert(mip < texture_.mipmapLevelCount);
   BLI_assert(texture_.mipmapLevelCount >= mip_max_);
 
-  /* If `texture_unpack_row_length` is 0, rows are sequentially stored. Otherwise we unpack data
+  /* If `unpack_row_length` is 0, rows are sequentially stored. Otherwise we unpack data
    * into a staging block, so the half conversion below doesn't happen on the full input. */
-  const uint texture_unpack_row_length = ctx->pipeline_state.unpack_row_length;
-  const bool do_texture_unpack = !ELEM(texture_unpack_row_length, 0, extent[0]);
+  const bool do_texture_unpack = !ELEM(unpack_row_length, 0, extent[0]);
 
-  /* Unpack `data` if `texture_unpack_row_length` is set. */
-  std::unique_ptr<uint8_t, MEM_freeN_smart_ptr_deleter> unpack_buffer = nullptr;
+  /* Unpack `data` if `unpack_row_length` is set. */
+  std::unique_ptr<uint8_t, MEM_smart_ptr_deleter<uint8_t>> unpack_buffer = nullptr;
   if (do_texture_unpack) {
     BLI_assert_msg(!(format_flag_ & GPU_FORMAT_COMPRESSED),
-                   "Compressed data with texture_unpack_row_length != 0 is not supported.");
+                   "Compressed data with unpack_row_length != 0 is not supported.");
     BLI_assert_msg(extent[2] <= 1,
-                   "3D texture data with texture_unpack_row_length != 0 is not supported.");
+                   "3D texture data with unpack_row_length != 0 is not supported.");
 
-    size_t src_row_stride = texture_unpack_row_length * to_bytesize(format_, type);
+    size_t src_row_stride = unpack_row_length * to_bytesize(format_, type);
     size_t dst_row_stride = max_ii(extent[0], 1) * to_bytesize(format_, type);
     size_t dst_total_count = dst_row_stride * max_ii(extent[1], 1) * max_ii(extent[2], 1);
 
     /* Allocate buffer to size necessary for gather */
-    unpack_buffer.reset((uint8_t *)MEM_mallocN_aligned(dst_total_count, 128, __func__));
+    unpack_buffer.reset((uint8_t *)MEM_new_uninitialized_aligned(dst_total_count, 128, __func__));
 
     /* Strided loop; we advance source and destination pointers separately during a gather. */
     const uint8_t *src_ptr = static_cast<const uint8_t *>(data);
@@ -540,14 +538,14 @@ void gpu::MTLTexture::update_sub(
     data = unpack_buffer.get();
   }
 
-  std::unique_ptr<uint16_t, MEM_freeN_smart_ptr_deleter> clamped_half_buffer = nullptr;
+  std::unique_ptr<uint16_t, MEM_smart_ptr_deleter<uint16_t>> clamped_half_buffer = nullptr;
 
   if (data != nullptr && type == GPU_DATA_FLOAT && is_half_float(format_)) {
     size_t pixel_count = max_ii(extent[0], 1) * max_ii(extent[1], 1) * max_ii(extent[2], 1);
     size_t total_component_count = to_component_len(format_) * pixel_count;
 
-    clamped_half_buffer.reset(
-        (uint16_t *)MEM_mallocN_aligned(sizeof(uint16_t) * total_component_count, 128, __func__));
+    clamped_half_buffer.reset(static_cast<uint16_t *>(
+        MEM_new_uninitialized_aligned(sizeof(uint16_t) * total_component_count, 128, __func__)));
 
     Span<float> src(static_cast<const float *>(data), total_component_count);
     MutableSpan<uint16_t> dst(static_cast<uint16_t *>(clamped_half_buffer.get()),
@@ -672,7 +670,7 @@ void gpu::MTLTexture::update_sub(
       MTL_LOG_WARNING(
           "SRGB data upload does not work correctly using compute upload. "
           "texname '%s'",
-          name_);
+          name_.c_str());
     }
 
     /* Safety Checks. */
@@ -1564,7 +1562,7 @@ void *gpu::MTLTexture::read(int mip, eGPUDataFormat type)
   size_t texture_size = sample_len * sample_size;
   int num_channels = to_component_len(format_);
 
-  void *data = MEM_mallocN(texture_size + 8, "GPU_texture_read");
+  void *data = MEM_new_uninitialized(texture_size + 8, "GPU_texture_read");
 
   /* Ensure texture is baked. */
   if (is_baked_) {

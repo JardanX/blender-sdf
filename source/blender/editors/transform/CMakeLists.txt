@@ -108,7 +108,6 @@ set(LIB
   PRIVATE bf::animrig
   PRIVATE bf::blenfont
   PRIVATE bf::blentranslation
-  PRIVATE bf::extern::fmtlib
   PRIVATE bf::blenkernel
   PRIVATE bf::blenlib
   PRIVATE bf::bmesh

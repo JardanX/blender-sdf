@@ -10,7 +10,7 @@ from bpy.app.translations import (
 )
 
 
-tab_list = [
+tabs_attr_infos = (
     ("show_properties_tool", "Tool", 'TOOL_SETTINGS'),
     ("show_properties_render", "Render", 'SCENE'),
     ("show_properties_output", "Output", 'OUTPUT'),
@@ -31,7 +31,7 @@ tab_list = [
     ("show_properties_texture", "Texture", 'TEXTURE'),
     ("show_properties_strip", "Strip", 'SEQ_SEQUENCER'),
     ("show_properties_strip_modifier", "Strip Modifiers", 'SEQ_STRIP_MODIFIER'),
-]
+)
 
 
 class PROPERTIES_HT_header(Header):
@@ -39,7 +39,7 @@ class PROPERTIES_HT_header(Header):
 
     @staticmethod
     def _search_poll(space):
-        return any(getattr(space, tab_info[0]) for tab_info in tab_list)
+        return any(getattr(space, tab_info[0]) for tab_info in tabs_attr_infos)
 
     def draw(self, context):
         layout = self.layout
@@ -69,7 +69,7 @@ class PROPERTIES_HT_header(Header):
 
 
 def has_hidden_tabs(space):
-    return not all(getattr(space, tab_info[0]) for tab_info in tab_list)
+    return not all(getattr(space, tab_info[0]) for tab_info in tabs_attr_infos)
 
 
 class PROPERTIES_PT_navigation_bar(Panel):
@@ -101,7 +101,7 @@ class PROPERTIES_PT_navigation_bar(Panel):
         sub.scale_x = 0.8
         sub.scale_y = 0.8
         sub.separator(factor=0.7)
-        sub.popover(panel="PROPERTIES_PT_visibility", text="")
+        sub.popover(panel="PROPERTIES_PT_visibility", text="", direction='HORIZONTAL')
         sub.active = has_hidden_tabs(view)
 
 
@@ -186,7 +186,7 @@ class PROPERTIES_PT_visibility(Panel):
 
         col = layout.column(align=True)
         col.label(text="Visible Tabs")
-        for prop, name, icon in tab_list:
+        for prop, name, icon in tabs_attr_infos:
             row = col.row(align=True)
             row.label(text=iface_(name), icon=icon)
             row.prop(space, prop, text="")
