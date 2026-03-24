@@ -10,7 +10,9 @@
 
 #  include "draw_command_shared.hh"
 #  include "draw_shader_shared.hh"
+#endif
 
+#ifdef GLSL_CPP_STUBS
 /* Define stub defines for C++ test compilation. */
 #  define DRAW_VIEW_CREATE_INFO
 #  define DRW_VIEW_CULLING_INFO
@@ -37,6 +39,7 @@ GPU_SHADER_NAMED_INTERFACE_END(drw_ResourceID_iface)
 GPU_SHADER_CREATE_INFO(draw_resource_id_varying)
 VERTEX_OUT(draw_resource_id_iface)
 GEOMETRY_OUT(draw_resource_id_iface)
+DEFINE("RESOURCE_ID_VARYING")
 GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(draw_resource_id)
@@ -97,6 +100,7 @@ GPU_SHADER_CREATE_END()
 GPU_SHADER_CREATE_INFO(drw_clipped)
 /* TODO(fclem): Move to engine side. */
 UNIFORM_BUF_FREQ(DRW_CLIPPING_UBO_SLOT, float4, drw_clipping_[6], PASS)
+BUILTINS(BuiltinBits::CLIP_DISTANCES)
 DEFINE("USE_WORLD_CLIP_PLANES")
 GPU_SHADER_CREATE_END()
 
@@ -162,7 +166,7 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* Stub needs to be after all definitions to avoid conflict with legacy definitions. */
-#ifdef GPU_SHADER
+#ifdef GLSL_CPP_STUBS
 /* Make it work for both draw_resource_id and draw_resource_with_custom_id. */
-#  define resource_id_buf float2(0)
+#  define resource_id_buf uint2(0)
 #endif

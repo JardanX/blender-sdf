@@ -682,7 +682,7 @@ static void pack_gobel(const Span<std::unique_ptr<UVAABBIsland>> aabbs,
                        MutableSpan<UVPhi> r_phis)
 {
   for (const int64_t i : aabbs.index_range()) {
-    UVPhi &phi = *(UVPhi *)&r_phis[aabbs[i]->index];
+    UVPhi &phi = *static_cast<UVPhi *>(&r_phis[aabbs[i]->index]);
     phi.rotation = 0.0f;
     if (i == 0) {
       phi.translation.x = 0.5f * scale;
@@ -1081,7 +1081,7 @@ static void pack_island_box_pack_2d(const Span<std::unique_ptr<UVAABBIsland>> aa
                                     rctf *r_extent)
 {
   /* Allocate storage. */
-  BoxPack *box_array = MEM_malloc_arrayN<BoxPack>(size_t(aabbs.size()), __func__);
+  BoxPack *box_array = MEM_new_array_uninitialized<BoxPack>(size_t(aabbs.size()), __func__);
 
   /* Prepare for box_pack_2d. */
   for (const int64_t i : aabbs.index_range()) {
@@ -1103,7 +1103,7 @@ static void pack_island_box_pack_2d(const Span<std::unique_ptr<UVAABBIsland>> aa
     /* Write back box_pack UVs. */
     for (const int64_t i : aabbs.index_range()) {
       BoxPack *box = box_array + i;
-      UVPhi &phi = *(UVPhi *)&r_phis[aabbs[i]->index];
+      UVPhi &phi = *static_cast<UVPhi *>(&r_phis[aabbs[i]->index]);
       phi.rotation = 0.0f; /* #BLI_box_pack_2d never rotates. */
       phi.translation.x = (box->x + box->w * 0.5f) * params.target_aspect_y;
       phi.translation.y = (box->y + box->h * 0.5f);
@@ -1111,7 +1111,7 @@ static void pack_island_box_pack_2d(const Span<std::unique_ptr<UVAABBIsland>> aa
   }
 
   /* Housekeeping. */
-  MEM_freeN(box_array);
+  MEM_delete(box_array);
 }
 
 /**

@@ -15,7 +15,6 @@
 #include "DNA_sequence_types.h"
 
 #include "SEQ_modifier.hh"
-#include "SEQ_render.hh"
 #include "SEQ_transform.hh"
 
 #include "UI_interface.hh"
@@ -71,8 +70,8 @@ static void maskmodifier_apply(ModifierApplyContext &context,
 
 static void maskmodifier_panel_draw(const bContext *C, Panel *panel)
 {
-  uiLayout *layout = panel->layout;
-  PointerRNA *ptr = UI_panel_custom_data_get(panel);
+  ui::Layout &layout = *panel->layout;
+  PointerRNA *ptr = ui::panel_custom_data_get(panel);
 
   draw_mask_input_type_settings(C, layout, ptr);
 }

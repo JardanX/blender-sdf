@@ -13,9 +13,11 @@
 
 #include "CLG_log.h"
 
+namespace blender {
+
 static CLG_LogRef LOG = {"gpu.vulkan"};
 
-namespace blender::gpu {
+namespace gpu {
 
 VKBuffer::~VKBuffer()
 {
@@ -89,11 +91,6 @@ bool VKBuffer::create(size_t size_in_bytes,
     vma_create_info.pool = device.vma_pools.external_memory_pixel_buffer.pool;
   }
 
-  const bool use_descriptor_buffer = device.extensions_get().descriptor_buffer;
-  if (use_descriptor_buffer) {
-    create_info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-  }
-
   VkResult result = vmaCreateBuffer(
       allocator, &create_info, &vma_create_info, &vk_buffer_, &allocation_, nullptr);
   if (result != VK_SUCCESS) {
@@ -105,15 +102,16 @@ bool VKBuffer::create(size_t size_in_bytes,
 
   device.resources.add_buffer(vk_buffer_);
 
-  if (use_descriptor_buffer) {
-    VkBufferDeviceAddressInfo vk_buffer_device_address_info = {
-        VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, vk_buffer_};
-    vk_device_address = vkGetBufferDeviceAddress(device.vk_handle(),
-                                                 &vk_buffer_device_address_info);
-  }
-
-  vmaGetAllocationMemoryProperties(allocator, allocation_, &vk_memory_property_flags_);
-  if (vk_memory_property_flags_ & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+  /* Check if the memory is mappable. Although the Vulkan specs allow to map any memory that is
+   * host visible, VMA checks for specific host access flags.
+   *
+   * Source:
+   * https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/memory_mapping.html
+   */
+  const bool is_mappable = bool(allocation_flags &
+                                (VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT));
+  if (is_mappable) {
     return map();
   }
 
@@ -254,4 +252,5 @@ void VKBuffer::free_immediately(VKDevice &device)
   vk_buffer_ = VK_NULL_HANDLE;
 }
 
-}  // namespace blender::gpu
+}  // namespace gpu
+}  // namespace blender

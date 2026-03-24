@@ -184,8 +184,12 @@ class GreasePencilBrushFalloff:
                 col.prop(brush, "curve_distance_falloff_preset", text="")
 
             if brush.curve_distance_falloff_preset == 'CUSTOM':
-                layout.template_curve_mapping(brush, "curve_distance_falloff", brush=True,
-                                              use_negative_slope=True, show_presets=True)
+                layout.template_curve_mapping(
+                    brush, "curve_distance_falloff",
+                    brush=True,
+                    use_negative_slope=True,
+                    show_presets=True,
+                )
 
 
 class GREASE_PENCIL_MT_move_to_layer(Menu):
@@ -193,6 +197,13 @@ class GREASE_PENCIL_MT_move_to_layer(Menu):
 
     def draw(self, context):
         layout = self.layout
+
+        if layout.operator_context == 'EXEC_REGION_WIN':
+            layout.operator_context = 'INVOKE_REGION_WIN'
+            layout.operator("WM_OT_search_single_menu", text="Search...",
+                            icon='VIEWZOOM').menu_idname = "GREASE_PENCIL_MT_move_to_layer"
+            layout.separator()
+
         layout.operator_context = 'INVOKE_REGION_WIN'
         grease_pencil = context.active_object.data
 
@@ -469,7 +480,7 @@ class GreasePencilMaterialsPanel:
                     row.operator("grease_pencil.stroke_material_set", text="Assign")
                     row.operator("grease_pencil.material_select", text="Select").deselect = False
                     row.operator("grease_pencil.material_select", text="Deselect").deselect = True
-        # stroke color
+
             ma = None
             if is_view3d and brush is not None:
                 gp_settings = brush.gpencil_settings
@@ -485,9 +496,9 @@ class GreasePencilMaterialsPanel:
             if is_view3d and ma is not None and ma.grease_pencil is not None:
                 gpcolor = ma.grease_pencil
                 col = layout.column(align=True)
-                if gpcolor.show_stroke and gpcolor.stroke_style == 'SOLID':
+                if gpcolor.stroke_style == 'SOLID':
                     col.prop(gpcolor, "color", text="Stroke Color")
-                if gpcolor.show_fill and gpcolor.fill_style == 'SOLID':
+                if gpcolor.fill_style == 'SOLID':
                     col.prop(gpcolor, "fill_color", text="Fill Color")
 
         else:

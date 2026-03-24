@@ -22,6 +22,8 @@
 #include "bmesh.hh"
 #include "intern/bmesh_operators_private.hh"
 
+namespace blender {
+
 /* ************************ primitives ******************* */
 
 static const float icovert[12][3] = {
@@ -738,7 +740,7 @@ void bmo_create_grid_exec(BMesh *bm, BMOperator *op)
   BMO_slot_mat4_get(op->slots_in, "matrix", mat);
 
   BMO_slot_buffer_alloc(op, op->slots_out, "verts.out", (xtot + 1) * (ytot + 1));
-  varr = (BMVert **)slot_verts_out->data.buf;
+  varr = reinterpret_cast<BMVert **>(slot_verts_out->data.buf);
 
   i = 0;
   vec[2] = 0.0f;
@@ -1162,7 +1164,7 @@ void BM_mesh_calc_uvs_sphere(BMesh *bm, const short oflag, const int cd_loop_uv_
 
 void bmo_create_monkey_exec(BMesh *bm, BMOperator *op)
 {
-  BMVert **tv = MEM_malloc_arrayN<BMVert *>(monkeynv * 2, "tv");
+  BMVert **tv = MEM_new_array_uninitialized<BMVert *>(monkeynv * 2, "tv");
   float mat[4][4];
   int i;
 
@@ -1236,7 +1238,7 @@ void bmo_create_monkey_exec(BMesh *bm, BMOperator *op)
     }
   }
 
-  MEM_freeN(tv);
+  MEM_delete(tv);
 
   BMO_slot_buffer_from_enabled_flag(bm, op, op->slots_out, "verts.out", BM_VERT, VERT_MARK);
 }
@@ -1397,8 +1399,7 @@ void bmo_create_cone_exec(BMesh *bm, BMOperator *op)
   }
 
   const int side_faces_len = segs - 1;
-  BMFace **side_faces = static_cast<BMFace **>(
-      MEM_mallocN(sizeof(*side_faces) * side_faces_len, __func__));
+  BMFace **side_faces = MEM_new_array_uninitialized<BMFace *>(side_faces_len, __func__);
 
   for (int i = 0; i < segs; i++) {
     /* Calculate with higher precision, see: #87779. */
@@ -1502,7 +1503,7 @@ void bmo_create_cone_exec(BMesh *bm, BMOperator *op)
   }
 
   if (side_faces != nullptr) {
-    MEM_freeN(side_faces);
+    MEM_delete(side_faces);
   }
 
   BMO_slot_buffer_from_enabled_flag(bm, op, op->slots_out, "verts.out", BM_VERT, VERT_MARK);
@@ -1731,3 +1732,5 @@ void BM_mesh_calc_uvs_cube(BMesh *bm, const short oflag)
     }
   }
 }
+
+}  // namespace blender

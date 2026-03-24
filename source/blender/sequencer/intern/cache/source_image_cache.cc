@@ -8,7 +8,6 @@
 
 #include "BLI_map.hh"
 #include "BLI_mutex.hh"
-#include "BLI_struct_equality_utils.hh"
 #include "BLI_vector.hh"
 
 #include "DNA_scene_types.h"
@@ -48,7 +47,8 @@ struct SourceImageCache {
     {
       return get_default_hash(source_frame, view_id, scene_draw_type);
     }
-    BLI_STRUCT_EQUALITY_OPERATORS_3(Key, source_frame, view_id, scene_draw_type);
+
+    friend bool operator==(const Key &a, const Key &b) = default;
   };
 
   struct StripEntry {
@@ -131,7 +131,7 @@ static SourceImageCache::Key get_key(const RenderData *context,
 
 ImBuf *source_image_cache_get(const RenderData *context, const Strip *strip, float timeline_frame)
 {
-  if (context->skip_cache || context->is_proxy_render || strip == nullptr) {
+  if (context->skip_cache || strip == nullptr) {
     return nullptr;
   }
 
@@ -179,7 +179,7 @@ void source_image_cache_put(const RenderData *context,
                             float timeline_frame,
                             ImBuf *image)
 {
-  if (context->skip_cache || context->is_proxy_render || strip == nullptr || image == nullptr) {
+  if (context->skip_cache || strip == nullptr || image == nullptr) {
     return;
   }
 

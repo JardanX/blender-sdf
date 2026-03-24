@@ -1,9 +1,9 @@
 
 msgid ""
 msgstr ""
-"Project-Id-Version: Blender 5.0.0 Beta (b'd29f9f6118e5')\n"
+"Project-Id-Version: Blender 5.1.0 Beta (b'5a04f1d246f1')\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-11-10 09:45+0000\n"
+"POT-Creation-Date: 2026-03-11 11:01+0000\n"
 "PO-Revision-Date: 2025-07-23 15:34+0000\n"
 "Last-Translator: Just Adam <adam.abbas2009@gmail.com>\n"
 "Language-Team: Bulgarian <https://translate.blender.org/projects/blender-ui/ui/bg/>\n"
@@ -164,6 +164,46 @@ msgid "Space Type"
 msgstr "Тип на Пространството"
 
 
+msgid "Cache Files"
+msgstr "Кешови файлове"
+
+
+msgid "Palettes"
+msgstr "Палитри"
+
+
+msgid "Scenes"
+msgstr "Сцени"
+
+
+msgid "Sounds"
+msgstr "Звуци"
+
+
+msgid "Speakers"
+msgstr "Високоговорители"
+
+
+msgid "Texts"
+msgstr "Текстове"
+
+
+msgid "Textures"
+msgstr "Текстури"
+
+
+msgid "Volumes"
+msgstr "Обеми"
+
+
+msgid "Workspaces"
+msgstr "Работни пространства"
+
+
+msgid "Worlds"
+msgstr "Светове"
+
+
 msgid "Point"
 msgstr "Точка"
 
@@ -192,14 +232,6 @@ msgid "Tilt"
 msgstr "Наклон"
 
 
-msgid "Cache Files"
-msgstr "Кешови файлове"
-
-
-msgid "Palettes"
-msgstr "Палитри"
-
-
 msgid "Palette data-blocks"
 msgstr "Блокове данни на палитрите"
 
@@ -210,10 +242,6 @@ msgstr "Частици"
 
 msgid "Particle data-blocks"
 msgstr "Блокове данни на частиците"
-
-
-msgid "Scenes"
-msgstr "Сцени"
 
 
 msgid "Scene data-blocks"
@@ -228,32 +256,16 @@ msgid "Screen data-blocks"
 msgstr "Блокове данни на екраните"
 
 
-msgid "Sounds"
-msgstr "Звуци"
-
-
 msgid "Sound data-blocks"
 msgstr "Блокове данни на звуците"
-
-
-msgid "Speakers"
-msgstr "Високоговорители"
 
 
 msgid "Speaker data-blocks"
 msgstr "Блокове данни на високоговорителите"
 
 
-msgid "Texts"
-msgstr "Текстове"
-
-
 msgid "Text data-blocks"
 msgstr "Блокове данни на текстовете"
-
-
-msgid "Textures"
-msgstr "Текстури"
 
 
 msgid "Texture data-blocks"
@@ -272,10 +284,6 @@ msgid "File format version the .blend file was saved with"
 msgstr "Версия на файлов формат, в който .blend файла е бил запазен"
 
 
-msgid "Volumes"
-msgstr "Обеми"
-
-
 msgid "Volume data-blocks"
 msgstr "Блокове данни на обемите"
 
@@ -288,16 +296,8 @@ msgid "Window manager data-blocks"
 msgstr "Блокове данни на оправителите на прозорци"
 
 
-msgid "Workspaces"
-msgstr "Работни пространства"
-
-
 msgid "Workspace data-blocks"
 msgstr "Блокове данни на работните пространства"
-
-
-msgid "Worlds"
-msgstr "Светове"
 
 
 msgid "World data-blocks"
@@ -652,22 +652,6 @@ msgid "View"
 msgstr "Изглед"
 
 
-msgid "Mix"
-msgstr "Смесване"
-
-
-msgid "Screen"
-msgstr "Екран"
-
-
-msgid "Difference"
-msgstr "Разлика"
-
-
-msgid "Divide"
-msgstr "Делене"
-
-
 msgid "RGB"
 msgstr "ЧЗС"
 
@@ -872,6 +856,22 @@ msgid "Collection"
 msgstr "Колекция"
 
 
+msgid "Font"
+msgstr "Шрифт"
+
+
+msgid "Text"
+msgstr "Текст"
+
+
+msgid "Mask"
+msgstr "Маскиране"
+
+
+msgid "Sound"
+msgstr "Звук"
+
+
 msgid "Exclusive"
 msgstr "Изключващ"
 
@@ -886,6 +886,10 @@ msgstr "Мрежа"
 
 msgid "Region Type"
 msgstr "Тип на Региона"
+
+
+msgid "Divide"
+msgstr "Делене"
 
 
 msgid "Library"
@@ -926,10 +930,6 @@ msgstr "Ортографиране"
 
 msgid "Extrude"
 msgstr "Изтегляне"
-
-
-msgid "Font"
-msgstr "Шрифт"
 
 
 msgid "Small Caps"
@@ -1010,10 +1010,6 @@ msgstr "Неродени"
 
 msgid "3D Cursor"
 msgstr "3D Курсор"
-
-
-msgid "Sound"
-msgstr "Звук"
 
 
 msgid "Blend"
@@ -1132,12 +1128,36 @@ msgid "Click"
 msgstr "Клик"
 
 
+msgid "Mix"
+msgstr "Смесване"
+
+
+msgid "Difference"
+msgstr "Разлика"
+
+
+msgid "Screen"
+msgstr "Екран"
+
+
 msgid "ID Type"
 msgstr "ID тип"
 
 
-msgid "Mask"
-msgstr "Маскиране"
+msgid "UV Mapping"
+msgstr "UV Картиране"
+
+
+msgid "Light"
+msgstr "Светлина"
+
+
+msgid "Rigid Body"
+msgstr "Твърдо тяло"
+
+
+msgid "Apply"
+msgstr "Прилагане"
 
 
 msgid "Make Single User"
@@ -1152,36 +1172,12 @@ msgid "In-Betweens"
 msgstr "Междинни Кадри"
 
 
-msgid "Apply"
-msgstr "Прилагане"
-
-
-msgid "Merge"
-msgstr "Слей"
-
-
-msgid "Text"
-msgstr "Текст"
-
-
-msgid "UV Mapping"
-msgstr "UV Картиране"
-
-
 msgid "Import"
 msgstr "Внеси"
 
 
-msgid "Light"
-msgstr "Светлина"
-
-
-msgid "Rigid Body"
-msgstr "Твърдо тяло"
-
-
-msgid "Languages..."
-msgstr "Езици..."
+msgid "Merge"
+msgstr "Слей"
 
 
 msgid "Cache"
@@ -1602,10 +1598,6 @@ msgid "X-Ray"
 msgstr "Рентген"
 
 
-msgid "Ring"
-msgstr "Прстн"
-
-
 msgctxt "Operator"
 msgid "Loop Cut and Slide"
 msgstr "Режи Примка и Плъзгай"
@@ -1843,21 +1835,9 @@ msgid "Add Surface Circle"
 msgstr "Добави Повърхностен Кръг"
 
 
-msgid "Construct a Nurbs surface Circle"
-msgstr "Конструира Nurbs-повърхностен Кръг"
-
-
-msgid "Construct a Nurbs surface Curve"
-msgstr "Конструира Nurbs-повърхностна Крива"
-
-
 msgctxt "Operator"
 msgid "Add Surface Cylinder"
 msgstr "Добави Повърхностен Цилиндър"
-
-
-msgid "Construct a Nurbs surface Cylinder"
-msgstr "Конструира Nurbs-повърхностен Цилиндър"
 
 
 msgctxt "Operator"
@@ -1865,26 +1845,14 @@ msgid "Add Surface Sphere"
 msgstr "Добави Повърхностна Сфера"
 
 
-msgid "Construct a Nurbs surface Sphere"
-msgstr "Конструира Nurbs-повърхностна Сфера"
-
-
 msgctxt "Operator"
 msgid "Add Surface Patch"
 msgstr "Добави Повърхностно Парче"
 
 
-msgid "Construct a Nurbs surface Patch"
-msgstr "Конструира Nurbs-повърхностно Парче"
-
-
 msgctxt "Operator"
 msgid "Add Surface Torus"
 msgstr "Добави Nurbs-повърхностен Тороид"
-
-
-msgid "Construct a Nurbs surface Torus"
-msgstr "Конструира Nurbs-повърхностен Тороид"
 
 
 msgctxt "Operator"

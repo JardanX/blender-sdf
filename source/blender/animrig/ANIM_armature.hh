@@ -16,6 +16,8 @@
 
 namespace blender::animrig {
 
+constexpr char bone_default_name[] = "Bone";
+
 /**
  * Returns true if the given Bone is visible. This includes bone collection visibility.
  */
@@ -64,6 +66,21 @@ inline bool bone_is_selectable(const bArmature *armature, const bPoseChannel *pc
 inline bool bone_is_selectable(const bArmature *armature, const Bone *bone)
 {
   return bone_is_visible(armature, bone) && !(bone->flag & BONE_UNSELECTABLE);
+}
+
+/**
+ * Selection and deselection happens with the POSE_SELECTED_ALL flag which includes body tip and
+ * root. While tip and root are not individually selectable in pose mode, these flags carry over to
+ * edit mode.
+ */
+inline void bone_select(bPoseChannel *pchan)
+{
+  pchan->flag |= POSE_SELECTED_ALL;
+}
+
+inline void bone_deselect(bPoseChannel *pchan)
+{
+  pchan->flag &= ~POSE_SELECTED_ALL;
 }
 
 /**

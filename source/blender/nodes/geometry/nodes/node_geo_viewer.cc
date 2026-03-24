@@ -31,40 +31,42 @@
 
 #include "node_geometry_util.hh"
 
-namespace blender::nodes::node_geo_viewer_cc {
+namespace blender {
+
+namespace nodes::node_geo_viewer_cc {
 
 NODE_STORAGE_FUNCS(NodeGeometryViewer)
 
-static void draw_float(uiLayout &layout, const float value)
+static void draw_float(ui::Layout &layout, const float value)
 {
   const std::string label = fmt::format("{:.5f}", value);
   layout.label(label, ICON_NONE);
 }
-static void draw_int(uiLayout &layout, const int value)
+static void draw_int(ui::Layout &layout, const int value)
 {
   const std::string label = fmt::format("{}", value);
   layout.label(label, ICON_NONE);
 }
-static void draw_bool(uiLayout &layout, const bool value)
+static void draw_bool(ui::Layout &layout, const bool value)
 {
   layout.label(value ? IFACE_("True") : IFACE_("False"), ICON_NONE);
 }
-static void draw_vector(uiLayout &layout, const float3 &value)
+static void draw_vector(ui::Layout &layout, const float3 &value)
 {
-  uiLayout &col = layout.column(true);
+  ui::Layout &col = layout.column(true);
   col.label(fmt::format("{}: {:.5f}", IFACE_("X"), value.x), ICON_NONE);
   col.label(fmt::format("{}: {:.5f}", IFACE_("Y"), value.y), ICON_NONE);
   col.label(fmt::format("{}: {:.5f}", IFACE_("Z"), value.z), ICON_NONE);
 }
-static void draw_color(uiLayout &layout, const ColorGeometry4f &value)
+static void draw_color(ui::Layout &layout, const ColorGeometry4f &value)
 {
-  uiLayout &col = layout.column(true);
+  ui::Layout &col = layout.column(true);
   col.label(fmt::format("{}: {:.5f}", CTX_IFACE_(BLT_I18NCONTEXT_COLOR, "R"), value.r), ICON_NONE);
   col.label(fmt::format("{}: {:.5f}", CTX_IFACE_(BLT_I18NCONTEXT_COLOR, "G"), value.g), ICON_NONE);
   col.label(fmt::format("{}: {:.5f}", CTX_IFACE_(BLT_I18NCONTEXT_COLOR, "B"), value.b), ICON_NONE);
   col.label(fmt::format("{}: {:.5f}", CTX_IFACE_(BLT_I18NCONTEXT_COLOR, "A"), value.a), ICON_NONE);
 }
-static void draw_string(uiLayout &layout, const StringRef value)
+static void draw_string(ui::Layout &layout, const StringRef value)
 {
   /* The node doesn't get wider than that anyway. */
   const int max_display_length = 200;
@@ -223,7 +225,7 @@ static void node_declare(NodeDeclarationBuilder &b)
     const std::string identifier = GeoViewerItemsAccessor::socket_identifier_for_item(item);
     auto &input_decl = b.add_input(socket_type, name, identifier)
                            .socket_name_ptr(
-                               &tree->id, GeoViewerItemsAccessor::item_srna, &item, "name");
+                               &tree->id, *GeoViewerItemsAccessor::item_srna, &item, "name");
     if (socket_type_supports_fields(socket_type)) {
       input_decl.field_on_all();
     }
@@ -236,13 +238,13 @@ static void node_declare(NodeDeclarationBuilder &b)
 
 static void node_init(bNodeTree * /*tree*/, bNode *node)
 {
-  NodeGeometryViewer *data = MEM_callocN<NodeGeometryViewer>(__func__);
+  NodeGeometryViewer *data = MEM_new<NodeGeometryViewer>(__func__);
   data->data_type_legacy = CD_PROP_FLOAT;
   data->domain = int8_t(AttrDomain::Auto);
   node->storage = data;
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
   const bNode &node = *ptr->data_as<bNode>();
   const NodeGeometryViewer &storage = node_storage(node);
@@ -261,16 +263,16 @@ static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
   }
 
   if (has_geometry_input && has_potential_field_input) {
-    layout->prop(ptr, "domain", UI_ITEM_NONE, "", ICON_NONE);
+    layout.prop(ptr, "domain", UI_ITEM_NONE, "", ICON_NONE);
   }
 }
 
-static void node_layout_ex(uiLayout *layout, bContext *C, PointerRNA *ptr)
+static void node_layout_ex(ui::Layout &layout, bContext *C, PointerRNA *ptr)
 {
   bNode &node = *ptr->data_as<bNode>();
   bNodeTree &ntree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
 
-  if (uiLayout *panel = layout->panel(C, "viewer_items", false, IFACE_("Viewer Items"))) {
+  if (ui::Layout *panel = layout.panel(C, "viewer_items", false, IFACE_("Viewer Items"))) {
     socket_items::ui::draw_items_list_with_operators<GeoViewerItemsAccessor>(
         C, panel, ntree, node);
     socket_items::ui::draw_active_item_props<GeoViewerItemsAccessor>(
@@ -330,7 +332,7 @@ static void log_viewer_attribute(const bNode &node, geo_eval_log::ViewerNodeLog 
                                        .get_single_ptr();
     GeometrySet &geometry = *geometry_ptr.get<GeometrySet>();
     const bke::SocketValueVariant &value = r_log.items.lookup_key_as(item.identifier).value;
-    if (!(value.is_single() || value.is_context_dependent_field())) {
+    if (!(value.is_single() || value.is_field())) {
       continue;
     }
     const GField field = value.get<GField>();
@@ -441,15 +443,13 @@ static void node_operators()
 static void node_free_storage(bNode *node)
 {
   socket_items::destruct_array<GeoViewerItemsAccessor>(*node);
-  MEM_freeN(node->storage);
+  MEM_delete(static_cast<NodeGeometryViewer *>(node->storage));
 }
 
 static void node_copy_storage(bNodeTree * /*dst_tree*/, bNode *dst_node, const bNode *src_node)
 {
   const NodeGeometryViewer &src_storage = node_storage(*src_node);
-  auto *dst_storage = MEM_mallocN<NodeGeometryViewer>(__func__);
-  *dst_storage = src_storage;
-  dst_node->storage = dst_storage;
+  dst_node->storage = MEM_new<NodeGeometryViewer>(__func__, dna::shallow_copy(src_storage));
 
   socket_items::copy_array<GeoViewerItemsAccessor>(*src_node, *dst_node);
 }
@@ -477,15 +477,14 @@ static void node_blend_read(bNodeTree & /*tree*/, bNode &node, BlendDataReader &
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_node_type_base(&ntype, "GeometryNodeViewer", GEO_NODE_VIEWER);
   ntype.ui_name = "Viewer";
   ntype.ui_description = "Display the input data in the Spreadsheet Editor";
   ntype.enum_name_legacy = "VIEWER";
   ntype.nclass = NODE_CLASS_OUTPUT;
-  blender::bke::node_type_storage(
-      ntype, "NodeGeometryViewer", node_free_storage, node_copy_storage);
+  bke::node_type_storage(ntype, "NodeGeometryViewer", node_free_storage, node_copy_storage);
   ntype.declare = node_declare;
   ntype.initfunc = node_init;
   ntype.draw_buttons = node_layout;
@@ -497,15 +496,15 @@ static void node_register()
   ntype.get_extra_info = node_extra_info;
   ntype.blend_write_storage_content = node_blend_write;
   ntype.blend_data_read_storage_content = node_blend_read;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 }
 NOD_REGISTER_NODE(node_register)
 
-}  // namespace blender::nodes::node_geo_viewer_cc
+}  // namespace nodes::node_geo_viewer_cc
 
-namespace blender::nodes {
+namespace nodes {
 
-StructRNA *GeoViewerItemsAccessor::item_srna = &RNA_NodeGeometryViewerItem;
+StructRNA **GeoViewerItemsAccessor::item_srna = &RNA_NodeGeometryViewerItem;
 
 void GeoViewerItemsAccessor::blend_write_item(BlendWriter *writer,
                                               const NodeGeometryViewerItem &item)
@@ -526,4 +525,5 @@ void geo_viewer_node_log(const bNode &node,
   node_geo_viewer_cc::geo_viewer_node_log_impl(node, input_values, r_log);
 }
 
-}  // namespace blender::nodes
+}  // namespace nodes
+}  // namespace blender

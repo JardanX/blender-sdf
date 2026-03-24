@@ -67,7 +67,7 @@ def RKS_POLL_selected_bones(_ksi, context):
     # nothing selected
     return False
 
-# selected vse strip
+# Selected sequencer strip.
 
 
 def RKS_POLL_selected_strip(_ksi, context):
@@ -175,9 +175,9 @@ def get_transform_generators_base_info(data):
         # no path in this case
         path = ""
 
-        # transform data on ID-blocks directly should get grouped under a
-        # hardcoded label ("Object Transforms") so that they get grouped
-        # consistently when keyframed directly
+        # Transform data on ID-blocks directly should get grouped under a
+        # hard-coded label ("Object Transforms") so that they get grouped
+        # consistently when key-framed directly.
         grouping = "Object Transforms"
     else:
         # get the path to the ID-block
@@ -319,9 +319,9 @@ def RKS_GEN_custom_props(_ksi, _context, ks, data):
 # Property identifiers for Bendy Bones
 bbone_property_ids = (
     "bbone_curveinx",
-    "bbone_curveiny",
+    "bbone_curveinz",
     "bbone_curveoutx",
-    "bbone_curveouty",
+    "bbone_curveoutz",
 
     "bbone_rollin",
     "bbone_rollout",
@@ -329,11 +329,8 @@ bbone_property_ids = (
     "bbone_scalein",
     "bbone_scaleout",
 
-    # NOTE: These are in the nested bone struct
-    # Do it this way to force them to be included
-    # in whatever actions are being keyed here
-    "bone.bbone_in",
-    "bone.bbone_out",
+    "bbone_easein",
+    "bbone_easeout",
 )
 
 

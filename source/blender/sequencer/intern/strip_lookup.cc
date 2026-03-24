@@ -26,12 +26,12 @@ namespace blender::seq {
 static Mutex lookup_lock;
 
 struct StripLookup {
-  blender::Map<std::string, Strip *> strip_by_name;
-  blender::Map<const Scene *, VectorSet<Strip *>> strips_by_scene;
-  blender::Map<const bNodeTree *, VectorSet<Strip *>> strips_by_compositor_node_group;
-  blender::Map<const Strip *, Strip *> meta_by_strip;
-  blender::Map<const Strip *, blender::VectorSet<Strip *>> effects_by_strip;
-  blender::Map<const SeqTimelineChannel *, Strip *> owner_by_channel;
+  Map<std::string, Strip *> strip_by_name;
+  Map<const Scene *, VectorSet<Strip *>> strips_by_scene;
+  Map<const bNodeTree *, VectorSet<Strip *>> strips_by_compositor_node_group;
+  Map<const Strip *, Strip *> meta_by_strip;
+  Map<const Strip *, VectorSet<Strip *>> effects_by_strip;
+  Map<const SeqTimelineChannel *, Strip *> owner_by_channel;
   bool is_valid = false;
 };
 
@@ -41,7 +41,7 @@ static void strip_lookup_append_effect(const Strip *input, Strip *effect, StripL
     return;
   }
 
-  blender::VectorSet<Strip *> &effects = lookup->effects_by_strip.lookup_or_add_default(input);
+  VectorSet<Strip *> &effects = lookup->effects_by_strip.lookup_or_add_default(input);
 
   effects.add(effect);
 }
@@ -57,13 +57,13 @@ static void strip_by_scene_lookup_build(Strip *strip, StripLookup *lookup)
 
 static void strip_by_compositor_node_group_lookup_build(Strip *strip, StripLookup *lookup)
 {
-  LISTBASE_FOREACH (StripModifierData *, modifier, &strip->modifiers) {
-    if (modifier->type != eSeqModifierType_Compositor) {
+  for (StripModifierData &modifier : strip->modifiers) {
+    if (modifier.type != eSeqModifierType_Compositor) {
       continue;
     }
 
     const SequencerCompositorModifierData *modifier_data =
-        reinterpret_cast<SequencerCompositorModifierData *>(modifier);
+        reinterpret_cast<SequencerCompositorModifierData *>(&modifier);
     if (!modifier_data->node_group) {
       continue;
     }
@@ -85,24 +85,24 @@ static void strip_lookup_build_effect(Strip *strip, StripLookup *lookup)
 }
 
 static void strip_lookup_build_from_seqbase(Strip *parent_meta,
-                                            const ListBase *seqbase,
+                                            const ListBaseT<Strip> *seqbase,
                                             StripLookup *lookup)
 {
   if (parent_meta != nullptr) {
-    LISTBASE_FOREACH (SeqTimelineChannel *, channel, &parent_meta->channels) {
-      lookup->owner_by_channel.add(channel, parent_meta);
+    for (SeqTimelineChannel &channel : parent_meta->channels) {
+      lookup->owner_by_channel.add(&channel, parent_meta);
     }
   }
 
-  LISTBASE_FOREACH (Strip *, strip, seqbase) {
-    lookup->strip_by_name.add(strip->name + 2, strip);
-    lookup->meta_by_strip.add(strip, parent_meta);
-    strip_lookup_build_effect(strip, lookup);
-    strip_by_scene_lookup_build(strip, lookup);
-    strip_by_compositor_node_group_lookup_build(strip, lookup);
+  for (Strip &strip : *seqbase) {
+    lookup->strip_by_name.add(strip.name + 2, &strip);
+    lookup->meta_by_strip.add(&strip, parent_meta);
+    strip_lookup_build_effect(&strip, lookup);
+    strip_by_scene_lookup_build(&strip, lookup);
+    strip_by_compositor_node_group_lookup_build(&strip, lookup);
 
-    if (strip->type == STRIP_TYPE_META) {
-      strip_lookup_build_from_seqbase(strip, &strip->seqbase, lookup);
+    if (strip.type == STRIP_TYPE_META) {
+      strip_lookup_build_from_seqbase(&strip, &strip.seqbase, lookup);
     }
   }
 }
@@ -170,7 +170,7 @@ Span<Strip *> lookup_strips_by_scene(Editing *ed, const Scene *key)
   return strips.as_span();
 }
 
-blender::Map<const Scene *, VectorSet<Strip *>> &lookup_strips_by_scene_map_get(Editing *ed)
+Map<const Scene *, VectorSet<Strip *>> &lookup_strips_by_scene_map_get(Editing *ed)
 {
   BLI_assert(ed != nullptr);
   std::lock_guard lock(lookup_lock);
@@ -200,13 +200,13 @@ Strip *lookup_meta_by_strip(Editing *ed, const Strip *key)
   return lookup->meta_by_strip.lookup_default(key, nullptr);
 }
 
-blender::Span<Strip *> SEQ_lookup_effects_by_strip(Editing *ed, const Strip *key)
+Span<Strip *> SEQ_lookup_effects_by_strip(Editing *ed, const Strip *key)
 {
   BLI_assert(ed != nullptr);
   std::lock_guard lock(lookup_lock);
   strip_lookup_update_if_needed(ed, &ed->runtime.strip_lookup);
   StripLookup *lookup = ed->runtime.strip_lookup;
-  blender::VectorSet<Strip *> &effects = lookup->effects_by_strip.lookup_or_add_default(key);
+  VectorSet<Strip *> &effects = lookup->effects_by_strip.lookup_or_add_default(key);
   return effects.as_span();
 }
 

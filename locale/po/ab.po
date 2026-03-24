@@ -1,7 +1,7 @@
 
 msgid ""
 msgstr ""
-"Project-Id-Version: Blender 5.0.0 Beta (b'd29f9f6118e5')\n"
+"Project-Id-Version: Blender 5.1.0 Beta (b'5a04f1d246f1')\n"
 "Report-Msgid-Bugs-To: \n"
 "PO-Revision-Date: 2025-07-23 15:29+0000\n"
 "Last-Translator: Anonymous <noreply@weblate.org>\n"
@@ -71,6 +71,10 @@ msgid "Empty"
 msgstr "Аҭацәы"
 
 
+msgid "Texts"
+msgstr "Аҳәоуқәа"
+
+
 msgid "Edge"
 msgstr "Акьыԥшь"
 
@@ -81,10 +85,6 @@ msgstr "Ахаҿы"
 
 msgid "Object"
 msgstr "Амаҭәар"
-
-
-msgid "Texts"
-msgstr "Аҳәоуқәа"
 
 
 msgid "Main Images"
@@ -121,10 +121,6 @@ msgstr "Архәара"
 
 msgid "View"
 msgstr "Аԥшра"
-
-
-msgid "Difference"
-msgstr "Аиԥшымра"
 
 
 msgid "Armature"
@@ -181,6 +177,10 @@ msgstr "Алгара"
 
 msgid "Start"
 msgstr "Алагара"
+
+
+msgid "Text"
+msgstr "Аҳәоу"
 
 
 msgid "Window"
@@ -266,16 +266,16 @@ msgid "3D Cursor"
 msgstr "3Д Ахырхага"
 
 
-msgid "Keying"
-msgstr " Аиҭаганҵа"
-
-
-msgid "Text"
-msgstr "Аҳәоу"
+msgid "Difference"
+msgstr "Аиԥшымра"
 
 
 msgid "Metaball"
 msgstr "Метампыл"
+
+
+msgid "Keying"
+msgstr " Аиҭаганҵа"
 
 
 msgid "Light"

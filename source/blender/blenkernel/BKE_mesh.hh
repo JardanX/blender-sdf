@@ -378,6 +378,14 @@ inline int edge_other_vert(const int2 edge, const int vert)
 
 /** \} */
 
+/** Whether the meta-data refers to a float2 type on the face corner domain. */
+bool is_uv_map(const AttributeMetaData &meta_data);
+bool is_uv_map(const std::optional<AttributeMetaData> &meta_data);
+
+/** Whether the meta-data refers to a color type on the point or corner domain. */
+bool is_color_attribute(const AttributeMetaData &meta_data);
+bool is_color_attribute(const std::optional<AttributeMetaData> &meta_data);
+
 }  // namespace mesh
 
 /** Create a mesh with no built-in attributes. */
@@ -436,6 +444,10 @@ void mesh_ensure_default_color_attribute_on_add(Mesh &mesh,
                                                 StringRef id,
                                                 AttrDomain domain,
                                                 bke::AttrType data_type);
+void mesh_ensure_default_uv_attribute_on_add(Mesh &mesh,
+                                             StringRef id,
+                                             AttrDomain domain,
+                                             bke::AttrType data_type);
 
 void mesh_data_update(Depsgraph &depsgraph,
                       const Scene &scene,
@@ -444,6 +456,32 @@ void mesh_data_update(Depsgraph &depsgraph,
 
 /** Remove strings referring to attributes if they no longer exist. */
 void mesh_remove_invalid_attribute_strings(Mesh &mesh);
+
+/**
+ * Check whether the mesh upholds required invariants and fix errors by removing invalid elements
+ * or correcting attribute values.
+ *
+ * \return True if the mesh was valid (fixes were not applied).
+ */
+bool mesh_validate(Mesh &mesh, bool verbose = false);
+
+/**
+ * Check whether the mesh upholds required invariants.
+ * \return True if the mesh is valid.
+ */
+bool mesh_is_valid(const Mesh &mesh, bool verbose = true);
+
+/**
+ * Check whether face material indices are valid, and correct them if not.
+ * \return True if the indices were valid.
+ */
+bool mesh_validate_material_indices(Mesh &mesh);
+
+/**
+ * Check whether faces contain duplicate vertex indices.
+ * \return a mask of all invalid faces.
+ */
+IndexMask mesh_find_faces_duplicate_verts(const Mesh &mesh, IndexMaskMemory &memory);
 
 void mesh_apply_spatial_organization(Mesh &mesh);
 const AttributeAccessorFunctions &mesh_attribute_accessor_functions();

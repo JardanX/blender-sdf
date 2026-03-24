@@ -8,46 +8,19 @@
 
 #include "NOD_socket_items.hh"
 
+#include "BKE_node.hh"
+
 namespace blender::nodes {
 
 inline bool socket_type_supported_in_closure(const eNodeSocketDatatype socket_type,
                                              const int ntree_type)
 {
-  switch (ntree_type) {
-    case NTREE_GEOMETRY:
-      return ELEM(socket_type,
-                  SOCK_FLOAT,
-                  SOCK_VECTOR,
-                  SOCK_RGBA,
-                  SOCK_BOOLEAN,
-                  SOCK_ROTATION,
-                  SOCK_MATRIX,
-                  SOCK_INT,
-                  SOCK_STRING,
-                  SOCK_GEOMETRY,
-                  SOCK_OBJECT,
-                  SOCK_MATERIAL,
-                  SOCK_IMAGE,
-                  SOCK_COLLECTION,
-                  SOCK_BUNDLE,
-                  SOCK_CLOSURE);
-    case NTREE_SHADER:
-      return ELEM(socket_type,
-                  SOCK_FLOAT,
-                  SOCK_VECTOR,
-                  SOCK_RGBA,
-                  SOCK_SHADER,
-                  SOCK_BUNDLE,
-                  SOCK_CLOSURE,
-                  SOCK_INT);
-    default:
-      return false;
-  }
+  return bke::node_tree_type_supports_socket_type_static(ntree_type, socket_type);
 }
 
 struct ClosureInputItemsAccessor : public socket_items::SocketItemsAccessorDefaults {
   using ItemT = NodeClosureInputItem;
-  static StructRNA *item_srna;
+  static StructRNA **item_srna;
   static int node_type;
   static constexpr StringRefNull node_idname = "NodeClosureOutput";
   static constexpr bool has_type = true;
@@ -81,7 +54,7 @@ struct ClosureInputItemsAccessor : public socket_items::SocketItemsAccessorDefau
 
   static void destruct_item(ItemT *item)
   {
-    MEM_SAFE_FREE(item->name);
+    MEM_SAFE_DELETE(item->name);
   }
 
   static void blend_write_item(BlendWriter *writer, const ItemT &item);
@@ -121,7 +94,7 @@ struct ClosureInputItemsAccessor : public socket_items::SocketItemsAccessorDefau
 
 struct ClosureOutputItemsAccessor : public socket_items::SocketItemsAccessorDefaults {
   using ItemT = NodeClosureOutputItem;
-  static StructRNA *item_srna;
+  static StructRNA **item_srna;
   static int node_type;
   static constexpr StringRefNull node_idname = "NodeClosureOutput";
   static constexpr bool has_type = true;
@@ -155,7 +128,7 @@ struct ClosureOutputItemsAccessor : public socket_items::SocketItemsAccessorDefa
 
   static void destruct_item(ItemT *item)
   {
-    MEM_SAFE_FREE(item->name);
+    MEM_SAFE_DELETE(item->name);
   }
 
   static void blend_write_item(BlendWriter *writer, const ItemT &item);
@@ -195,7 +168,7 @@ struct ClosureOutputItemsAccessor : public socket_items::SocketItemsAccessorDefa
 
 struct EvaluateClosureInputItemsAccessor : public socket_items::SocketItemsAccessorDefaults {
   using ItemT = NodeEvaluateClosureInputItem;
-  static StructRNA *item_srna;
+  static StructRNA **item_srna;
   static int node_type;
   static constexpr StringRefNull node_idname = "NodeEvaluateClosure";
   static constexpr bool has_type = true;
@@ -229,7 +202,7 @@ struct EvaluateClosureInputItemsAccessor : public socket_items::SocketItemsAcces
 
   static void destruct_item(ItemT *item)
   {
-    MEM_SAFE_FREE(item->name);
+    MEM_SAFE_DELETE(item->name);
   }
 
   static void blend_write_item(BlendWriter *writer, const ItemT &item);
@@ -270,7 +243,7 @@ struct EvaluateClosureInputItemsAccessor : public socket_items::SocketItemsAcces
 
 struct EvaluateClosureOutputItemsAccessor : public socket_items::SocketItemsAccessorDefaults {
   using ItemT = NodeEvaluateClosureOutputItem;
-  static StructRNA *item_srna;
+  static StructRNA **item_srna;
   static int node_type;
   static constexpr StringRefNull node_idname = "NodeEvaluateClosure";
   static constexpr bool has_type = true;
@@ -304,7 +277,7 @@ struct EvaluateClosureOutputItemsAccessor : public socket_items::SocketItemsAcce
 
   static void destruct_item(ItemT *item)
   {
-    MEM_SAFE_FREE(item->name);
+    MEM_SAFE_DELETE(item->name);
   }
 
   static void blend_write_item(BlendWriter *writer, const ItemT &item);

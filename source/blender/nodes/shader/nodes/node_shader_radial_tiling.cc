@@ -14,7 +14,9 @@
 
 #include "BLI_radial_tiling.hh"
 
-namespace blender::nodes::node_shader_radial_tiling_cc {
+namespace blender {
+
+namespace nodes::node_shader_radial_tiling_cc {
 
 NODE_STORAGE_FUNCS(NodeRadialTiling)
 
@@ -56,14 +58,14 @@ static void sh_node_radial_tiling_declare(NodeDeclarationBuilder &b)
       .description("Roundness of the segment coordinates systems");
 }
 
-static void node_shader_buts_radial_tiling(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_shader_buts_radial_tiling(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->prop(ptr, "normalize", UI_ITEM_R_SPLIT_EMPTY_NAME, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "normalize", ui::ITEM_R_SPLIT_EMPTY_NAME, std::nullopt, ICON_NONE);
 }
 
 static void node_shader_init_radial_tiling(bNodeTree * /*ntree*/, bNode *node)
 {
-  NodeRadialTiling *storage = MEM_callocN<NodeRadialTiling>(__func__);
+  NodeRadialTiling *storage = MEM_new<NodeRadialTiling>(__func__);
   storage->normalize = false;
 
   node->storage = storage;
@@ -201,25 +203,27 @@ static void sh_node_radial_tiling_build_multi_function(NodeMultiFunctionBuilder 
   builder.construct_and_set_matching_fn<RoundedPolygonFunction>(storage.normalize);
 }
 
-}  // namespace blender::nodes::node_shader_radial_tiling_cc
+}  // namespace nodes::node_shader_radial_tiling_cc
 
 void register_node_type_sh_radial_tiling()
 {
-  namespace file_ns = blender::nodes::node_shader_radial_tiling_cc;
+  namespace file_ns = nodes::node_shader_radial_tiling_cc;
 
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
-  sh_geo_node_type_base(&ntype, "ShaderNodeRadialTiling");
+  common_node_type_base(&ntype, "ShaderNodeRadialTiling");
   ntype.ui_name = "Radial Tiling";
   ntype.ui_description = "Transform Coordinate System for Radial Tiling";
   ntype.nclass = NODE_CLASS_OP_VECTOR;
   ntype.declare = file_ns::sh_node_radial_tiling_declare;
   ntype.draw_buttons = file_ns::node_shader_buts_radial_tiling;
   ntype.initfunc = file_ns::node_shader_init_radial_tiling;
-  blender::bke::node_type_storage(
+  bke::node_type_storage(
       ntype, "NodeRadialTiling", node_free_standard_storage, node_copy_standard_storage);
   ntype.gpu_fn = file_ns::node_shader_gpu_radial_tiling;
   ntype.build_multi_function = file_ns::sh_node_radial_tiling_build_multi_function;
 
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 }
+
+}  // namespace blender

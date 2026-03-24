@@ -20,10 +20,6 @@ ExternalProject_Add(external_imath
     ${DEFAULT_CMAKE_FLAGS}
     ${IMATH_EXTRA_ARGS}
 
-  PATCH_COMMAND ${PATCH_CMD} -p 1 -d
-    ${BUILD_DIR}/imath/src/external_imath <
-    ${PATCH_DIR}/imath_358.diff
-
   INSTALL_DIR ${LIBDIR}/imath
 )
 
@@ -43,5 +39,6 @@ if(WIN32)
   )
 else()
   harvest(external_imath imath/include imath/include "*.h")
+  harvest(external_imath imath/lib/cmake/Imath imath/lib/cmake/Imath "*.cmake")
   harvest_rpath_lib(external_imath imath/lib imath/lib "*${SHAREDLIBEXT}*")
 endif()

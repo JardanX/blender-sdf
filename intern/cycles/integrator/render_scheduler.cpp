@@ -355,6 +355,9 @@ RenderWork RenderScheduler::get_render_work()
   render_work.adaptive_sampling.threshold = work_adaptive_threshold();
   render_work.adaptive_sampling.reset = false;
 
+  /* Denoise volume guiding at power of two samples, but not needed when done. */
+  render_work.volume_guiding_denoise = is_power_of_two(state_.num_rendered_samples) && !done();
+
   bool denoiser_delayed;
   bool denoiser_ready_to_display;
   render_work.tile.denoise = work_need_denoise(denoiser_delayed, denoiser_ready_to_display);
@@ -921,7 +924,7 @@ int RenderScheduler::get_num_samples_to_path_trace() const
     if (path_tracing_time_limit != 0) {
       /* Use the per-sample time from the previously rendered batch of samples, so that the
        * correction is applied much quicker. Also use the predicted increase in performance from
-       * increased occupany. */
+       * increased occupancy. */
       const double predicted_render_time = num_samples_to_occupy *
                                            path_trace_time_.get_last_sample_time() /
                                            ratio_to_increase_occupancy;
@@ -989,20 +992,6 @@ float RenderScheduler::work_adaptive_threshold() const
   }
 
   return max(state_.adaptive_sampling_threshold, adaptive_sampling_.threshold);
-}
-
-bool RenderScheduler::volume_guiding_need_denoise() const
-{
-  if (!is_power_of_two(get_num_rendered_samples())) {
-    return false;
-  }
-
-  if (done()) {
-    /* No need to denoise after the last sample. */
-    return false;
-  }
-
-  return true;
 }
 
 bool RenderScheduler::work_need_denoise(bool &delayed, bool &ready_to_display)

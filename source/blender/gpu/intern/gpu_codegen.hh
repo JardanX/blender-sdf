@@ -42,14 +42,9 @@ struct GPUCodegenCreateInfo : ShaderCreateInfo {
   StageInterfaceInfo *interface_generated = nullptr;
   /** Optional name buffer containing names referenced by StringRefNull. */
   NameBuffer name_buffer;
-  /** Copy of the GPUMaterial name, to prevent dangling pointers. */
-  std::string info_name_;
 
-  GPUCodegenCreateInfo(const char *name) : ShaderCreateInfo(name), info_name_(name)
-  {
-    /* Base class is always initialized first, so we need to update the name_ pointer here. */
-    name_ = info_name_.c_str();
-  };
+  GPUCodegenCreateInfo(const char *name) : ShaderCreateInfo(name) {};
+
   ~GPUCodegenCreateInfo()
   {
     MEM_delete(interface_generated);
@@ -66,7 +61,7 @@ class GPUCodegen {
  private:
   uint32_t hash_ = 0;
   BLI_HashMurmur2A hm2a_;
-  ListBase ubo_inputs_ = {nullptr, nullptr};
+  ListBaseT<LinkData> ubo_inputs_ = {nullptr, nullptr};
   GPUInput *cryptomatte_input_ = nullptr;
 
   /** Cache parameters for complexity heuristic. */
@@ -96,7 +91,7 @@ class GPUCodegen {
  private:
   void set_unique_ids();
 
-  void node_serialize(blender::Set<blender::StringRefNull> &used_libraries,
+  void node_serialize(Set<StringRefNull> &used_libraries,
                       std::stringstream &eval_ss,
                       const GPUNode *node);
   GPUGraphOutput graph_serialize(GPUNodeTag tree_tag,

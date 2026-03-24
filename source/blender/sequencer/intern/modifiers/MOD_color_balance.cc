@@ -13,7 +13,6 @@
 #include "DNA_sequence_types.h"
 
 #include "SEQ_modifier.hh"
-#include "SEQ_modifiertypes.hh"
 
 #include "UI_interface.hh"
 #include "UI_interface_layout.hh"
@@ -239,7 +238,7 @@ struct ColorBalanceApplyOp {
 
 static void colorBalance_init_data(StripModifierData *smd)
 {
-  ColorBalanceModifierData *cbmd = (ColorBalanceModifierData *)smd;
+  ColorBalanceModifierData *cbmd = reinterpret_cast<ColorBalanceModifierData *>(smd);
 
   cbmd->color_multiply = 1.0f;
   cbmd->color_balance.method = 0;
@@ -256,7 +255,7 @@ static void colorBalance_init_data(StripModifierData *smd)
 
 static void colorBalance_apply(ModifierApplyContext &context, StripModifierData *smd, ImBuf *mask)
 {
-  const ColorBalanceModifierData *cbmd = (const ColorBalanceModifierData *)smd;
+  const ColorBalanceModifierData *cbmd = reinterpret_cast<const ColorBalanceModifierData *>(smd);
 
   ColorBalanceApplyOp op;
   op.init(*cbmd, context.image->byte_buffer.data != nullptr);
@@ -265,102 +264,102 @@ static void colorBalance_apply(ModifierApplyContext &context, StripModifierData 
 
 static void colorBalance_panel_draw(const bContext *C, Panel *panel)
 {
-  uiLayout *layout = panel->layout;
-  PointerRNA *ptr = UI_panel_custom_data_get(panel);
+  ui::Layout &layout = *panel->layout;
+  PointerRNA *ptr = ui::panel_custom_data_get(panel);
 
   PointerRNA color_balance = RNA_pointer_get(ptr, "color_balance");
   const int correction_method = RNA_enum_get(&color_balance, "correction_method");
 
-  layout->use_property_split_set(true);
+  layout.use_property_split_set(true);
 
-  layout->prop(ptr, "color_multiply", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  layout->prop(&color_balance, "correction_method", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "color_multiply", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(&color_balance, "correction_method", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
-  uiLayout &flow = layout->grid_flow(true, 0, true, false, false);
+  ui::Layout &flow = layout.grid_flow(true, 0, true, false, false);
   flow.use_property_split_set(false);
   if (correction_method == SEQ_COLOR_BALANCE_METHOD_LIFTGAMMAGAIN) {
     /* Split into separate scopes to be able to reuse "split" and "col" variable names. */
     {
-      uiLayout &split = flow.column(false).split(0.35f, false);
-      uiLayout &col = split.column(true);
+      ui::Layout &split = flow.column(false).split(0.35f, false);
+      ui::Layout &col = split.column(true);
       col.label(IFACE_("Lift"), ICON_NONE);
       col.separator();
       col.separator();
       col.prop(&color_balance, "lift", UI_ITEM_NONE, "", ICON_NONE);
       col.prop(
           &color_balance, "invert_lift", UI_ITEM_NONE, IFACE_("Invert"), ICON_ARROW_LEFTRIGHT);
-      uiTemplateColorPicker(&split, &color_balance, "lift", true, false, false, true);
+      template_color_picker(&split, &color_balance, "lift", true, false, false, true);
       col.separator();
     }
     {
-      uiLayout &split = flow.column(false).split(0.35f, false);
-      uiLayout &col = split.column(true);
+      ui::Layout &split = flow.column(false).split(0.35f, false);
+      ui::Layout &col = split.column(true);
       col.label(IFACE_("Gamma"), ICON_NONE);
       col.separator();
       col.separator();
       col.prop(&color_balance, "gamma", UI_ITEM_NONE, "", ICON_NONE);
       col.prop(
           &color_balance, "invert_gamma", UI_ITEM_NONE, IFACE_("Invert"), ICON_ARROW_LEFTRIGHT);
-      uiTemplateColorPicker(&split, &color_balance, "gamma", true, false, true, true);
+      template_color_picker(&split, &color_balance, "gamma", true, false, true, true);
       col.separator();
     }
     {
-      uiLayout &split = flow.column(false).split(0.35f, false);
-      uiLayout &col = split.column(true);
+      ui::Layout &split = flow.column(false).split(0.35f, false);
+      ui::Layout &col = split.column(true);
       col.label(IFACE_("Gain"), ICON_NONE);
       col.separator();
       col.separator();
       col.prop(&color_balance, "gain", UI_ITEM_NONE, "", ICON_NONE);
       col.prop(
           &color_balance, "invert_gain", UI_ITEM_NONE, IFACE_("Invert"), ICON_ARROW_LEFTRIGHT);
-      uiTemplateColorPicker(&split, &color_balance, "gain", true, false, true, true);
+      template_color_picker(&split, &color_balance, "gain", true, false, true, true);
     }
   }
   else if (correction_method == SEQ_COLOR_BALANCE_METHOD_SLOPEOFFSETPOWER) {
     {
-      uiLayout &split = flow.column(false).split(0.35f, false);
-      uiLayout &col = split.column(true);
+      ui::Layout &split = flow.column(false).split(0.35f, false);
+      ui::Layout &col = split.column(true);
       col.label(IFACE_("Offset"), ICON_NONE);
       col.separator();
       col.separator();
       col.prop(&color_balance, "offset", UI_ITEM_NONE, "", ICON_NONE);
       col.prop(
           &color_balance, "invert_offset", UI_ITEM_NONE, IFACE_("Invert"), ICON_ARROW_LEFTRIGHT);
-      uiTemplateColorPicker(&split, &color_balance, "offset", true, false, false, true);
+      template_color_picker(&split, &color_balance, "offset", true, false, false, true);
       col.separator();
     }
     {
-      uiLayout &split = flow.column(false).split(0.35f, false);
-      uiLayout &col = split.column(true);
+      ui::Layout &split = flow.column(false).split(0.35f, false);
+      ui::Layout &col = split.column(true);
       col.label(IFACE_("Power"), ICON_NONE);
       col.separator();
       col.separator();
       col.prop(&color_balance, "power", UI_ITEM_NONE, "", ICON_NONE);
       col.prop(
           &color_balance, "invert_power", UI_ITEM_NONE, IFACE_("Invert"), ICON_ARROW_LEFTRIGHT);
-      uiTemplateColorPicker(&split, &color_balance, "power", true, false, false, true);
+      template_color_picker(&split, &color_balance, "power", true, false, false, true);
       col.separator();
     }
     {
-      uiLayout &split = flow.column(false).split(0.35f, false);
-      uiLayout &col = split.column(true);
+      ui::Layout &split = flow.column(false).split(0.35f, false);
+      ui::Layout &col = split.column(true);
       col.label(IFACE_("Slope"), ICON_NONE);
       col.separator();
       col.separator();
       col.prop(&color_balance, "slope", UI_ITEM_NONE, "", ICON_NONE);
       col.prop(
           &color_balance, "invert_slope", UI_ITEM_NONE, IFACE_("Invert"), ICON_ARROW_LEFTRIGHT);
-      uiTemplateColorPicker(&split, &color_balance, "slope", true, false, false, true);
+      template_color_picker(&split, &color_balance, "slope", true, false, false, true);
     }
   }
   else {
     BLI_assert_unreachable();
   }
 
-  if (uiLayout *mask_input_layout = layout->panel_prop(
+  if (ui::Layout *mask_input_layout = layout.panel_prop(
           C, ptr, "open_mask_input_panel", IFACE_("Mask Input")))
   {
-    draw_mask_input_type_settings(C, mask_input_layout, ptr);
+    draw_mask_input_type_settings(C, *mask_input_layout, ptr);
   }
 }
 

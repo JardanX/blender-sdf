@@ -8,13 +8,15 @@
 
 #  include "draw_object_infos_infos.hh"
 #  include "draw_view_infos.hh"
-#  include "gpu_shader_fullscreen_infos.hh"
 
 #  include "gpu_index_load_infos.hh"
 #  include "gpu_shader_create_info.hh"
 
+#  include "overlay_fullscreen_infos.hh"
 #  include "overlay_shader_shared.hh"
+#endif
 
+#ifdef GLSL_CPP_STUBS
 #  define CURVES_SHADER
 #  define DRW_HAIR_INFO
 
@@ -53,7 +55,9 @@ ADDITIONAL_INFO(draw_object_infos)
 ADDITIONAL_INFO(overlay_outline_prepass)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_CLIP_VARIATION(overlay_outline_prepass_mesh)
+CREATE_INFO_VARIANT(overlay_outline_prepass_mesh_clipped,
+                    overlay_outline_prepass_mesh,
+                    drw_clipped)
 
 GPU_SHADER_NAMED_INTERFACE_INFO(overlay_outline_prepass_wire_iface, vert)
 FLAT(float3, pos)
@@ -71,7 +75,9 @@ ADDITIONAL_INFO(draw_object_infos)
 ADDITIONAL_INFO(overlay_outline_prepass)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_CLIP_VARIATION(overlay_outline_prepass_curves)
+CREATE_INFO_VARIANT(overlay_outline_prepass_curves_clipped,
+                    overlay_outline_prepass_curves,
+                    drw_clipped)
 
 GPU_SHADER_CREATE_INFO(overlay_outline_prepass_wire)
 DO_STATIC_COMPILATION()
@@ -85,7 +91,9 @@ PUSH_CONSTANT(int2, gpu_attr_0)
 VERTEX_SOURCE("overlay_outline_prepass_wire_vert.glsl")
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_CLIP_VARIATION(overlay_outline_prepass_wire)
+CREATE_INFO_VARIANT(overlay_outline_prepass_wire_clipped,
+                    overlay_outline_prepass_wire,
+                    drw_clipped)
 
 GPU_SHADER_NAMED_INTERFACE_INFO(overlay_outline_prepass_gpencil_flat_iface, gp_interp_flat)
 FLAT(float2, aspect)
@@ -119,7 +127,9 @@ ADDITIONAL_INFO(draw_gpencil)
 ADDITIONAL_INFO(draw_object_infos)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_CLIP_VARIATION(overlay_outline_prepass_gpencil)
+CREATE_INFO_VARIANT(overlay_outline_prepass_gpencil_clipped,
+                    overlay_outline_prepass_gpencil,
+                    drw_clipped)
 
 GPU_SHADER_CREATE_INFO(overlay_outline_prepass_pointcloud)
 DO_STATIC_COMPILATION()
@@ -132,7 +142,9 @@ ADDITIONAL_INFO(draw_object_infos)
 ADDITIONAL_INFO(overlay_outline_prepass)
 GPU_SHADER_CREATE_END()
 
-OVERLAY_INFO_CLIP_VARIATION(overlay_outline_prepass_pointcloud)
+CREATE_INFO_VARIANT(overlay_outline_prepass_pointcloud_clipped,
+                    overlay_outline_prepass_pointcloud,
+                    drw_clipped)
 
 /** \} */
 
@@ -152,7 +164,7 @@ SAMPLER(2, sampler2DDepth, scene_depth_tx)
 FRAGMENT_OUT(0, float4, frag_color)
 FRAGMENT_OUT(1, float4, line_output)
 FRAGMENT_SOURCE("overlay_outline_detect_frag.glsl")
-ADDITIONAL_INFO(gpu_fullscreen)
+ADDITIONAL_INFO(overlay_fullscreen)
 ADDITIONAL_INFO(draw_view)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()

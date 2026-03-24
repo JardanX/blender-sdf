@@ -26,7 +26,7 @@
 
 namespace blender::nodes::node_composite_displace_cc {
 
-static void cmp_node_displace_declare(NodeDeclarationBuilder &b)
+static void node_declare(NodeDeclarationBuilder &b)
 {
   b.use_custom_socket_order();
   b.allow_any_socket_order();
@@ -60,10 +60,10 @@ static void cmp_node_displace_declare(NodeDeclarationBuilder &b)
       .optional_label();
 }
 
-static void cmp_node_init_displace(bNodeTree * /*ntree*/, bNode *node)
+static void node_init(bNodeTree * /*ntree*/, bNode *node)
 {
   /* Unused, kept for forward compatibility. */
-  NodeDisplaceData *data = MEM_callocN<NodeDisplaceData>(__func__);
+  NodeDisplaceData *data = MEM_new<NodeDisplaceData>(__func__);
   node->storage = data;
 }
 
@@ -117,8 +117,8 @@ class DisplaceOperation : public NodeOperation {
       GPU_texture_filter_mode(input_image, use_bilinear);
     }
 
-    const ExtensionMode extension_x = this->get_extension_mode_x();
-    const ExtensionMode extension_y = this->get_extension_mode_y();
+    const Extension extension_x = this->get_extension_mode_x();
+    const Extension extension_y = this->get_extension_mode_y();
     GPU_texture_extend_mode_x(input_image, map_extension_mode_to_extend_mode(extension_x));
     GPU_texture_extend_mode_y(input_image, map_extension_mode_to_extend_mode(extension_y));
     input_image.bind_as_texture(shader, "input_tx");
@@ -131,7 +131,7 @@ class DisplaceOperation : public NodeOperation {
     output_image.allocate_texture(domain);
     output_image.bind_as_image(shader, "output_img");
 
-    compute_dispatch_threads_at_least(shader, domain.size);
+    compute_dispatch_threads_at_least(shader, domain.data_size);
 
     input_image.unbind_as_texture();
     displacement.unbind_as_texture();
@@ -145,13 +145,13 @@ class DisplaceOperation : public NodeOperation {
     const Result &displacement = this->get_input("Displacement");
 
     const Interpolation interpolation = this->get_interpolation();
-    const ExtensionMode extension_x = this->get_extension_mode_x();
-    const ExtensionMode extension_y = this->get_extension_mode_y();
+    const Extension extension_x = this->get_extension_mode_x();
+    const Extension extension_y = this->get_extension_mode_y();
     const Domain domain = this->compute_domain();
     Result &output = this->get_result("Image");
     output.allocate_texture(domain);
 
-    const int2 size = domain.size;
+    const int2 size = domain.data_size;
 
     if (interpolation == Interpolation::Anisotropic) {
       this->compute_anisotropic(size, image, output, displacement);
@@ -167,14 +167,14 @@ class DisplaceOperation : public NodeOperation {
                              const Result &image,
                              Result &output,
                              const Result &displacement,
-                             const ExtensionMode &extension_mode_x,
-                             const ExtensionMode &extension_mode_y) const
+                             const Extension &extension_mode_x,
+                             const Extension &extension_mode_y) const
   {
     parallel_for(size, [&](const int2 base_texel) {
       const float2 coordinates = this->compute_coordinates(base_texel, size, displacement);
       output.store_pixel(
           base_texel,
-          image.sample(coordinates, interpolation, extension_mode_x, extension_mode_y));
+          image.sample<Color>(coordinates, interpolation, extension_mode_x, extension_mode_y));
     });
   }
 
@@ -224,7 +224,8 @@ class DisplaceOperation : public NodeOperation {
                                            const float2 &y_gradient) {
         /* Sample the input using the displaced coordinates passing in the computed gradients in
          * order to utilize the anisotropic filtering capabilities of the sampler. */
-        output.store_pixel(texel, image.sample_ewa_zero(coordinates, x_gradient, y_gradient));
+        output.store_pixel(texel,
+                           image.sample_ewa(coordinates, x_gradient, y_gradient, Extension::Clip));
       };
 
       compute_anisotropic_pixel(
@@ -269,10 +270,8 @@ class DisplaceOperation : public NodeOperation {
 
   Interpolation get_interpolation()
   {
-    const Result &input = this->get_input("Interpolation");
-    const MenuValue default_menu_value = MenuValue(CMP_NODE_INTERPOLATION_BILINEAR);
-    const MenuValue menu_value = input.get_single_value_default(default_menu_value);
-    const CMPNodeInterpolation interpolation = static_cast<CMPNodeInterpolation>(menu_value.value);
+    const CMPNodeInterpolation interpolation = static_cast<CMPNodeInterpolation>(
+        this->get_input("Interpolation").get_single_value_default<MenuValue>().value);
     switch (interpolation) {
       case CMP_NODE_INTERPOLATION_NEAREST:
         return Interpolation::Nearest;
@@ -287,67 +286,61 @@ class DisplaceOperation : public NodeOperation {
     return Interpolation::Nearest;
   }
 
-  ExtensionMode get_extension_mode_x()
+  Extension get_extension_mode_x()
   {
-    const Result &input = this->get_input("Extension X");
-    const MenuValue default_menu_value = MenuValue(CMP_NODE_EXTENSION_MODE_CLIP);
-    const MenuValue menu_value = input.get_single_value_default(default_menu_value);
-    const CMPExtensionMode extension_x = static_cast<CMPExtensionMode>(menu_value.value);
+    const CMPExtensionMode extension_x = static_cast<CMPExtensionMode>(
+        this->get_input("Extension X").get_single_value_default<MenuValue>().value);
     switch (extension_x) {
       case CMP_NODE_EXTENSION_MODE_CLIP:
-        return ExtensionMode::Clip;
+        return Extension::Clip;
       case CMP_NODE_EXTENSION_MODE_REPEAT:
-        return ExtensionMode::Repeat;
+        return Extension::Repeat;
       case CMP_NODE_EXTENSION_MODE_EXTEND:
-        return ExtensionMode::Extend;
+        return Extension::Extend;
     }
 
-    return ExtensionMode::Clip;
+    return Extension::Clip;
   }
 
-  ExtensionMode get_extension_mode_y()
+  Extension get_extension_mode_y()
   {
-    const Result &input = this->get_input("Extension Y");
-    const MenuValue default_menu_value = MenuValue(CMP_NODE_EXTENSION_MODE_CLIP);
-    const MenuValue menu_value = input.get_single_value_default(default_menu_value);
-    const CMPExtensionMode extension_y = static_cast<CMPExtensionMode>(menu_value.value);
+    const CMPExtensionMode extension_y = static_cast<CMPExtensionMode>(
+        this->get_input("Extension Y").get_single_value_default<MenuValue>().value);
     switch (extension_y) {
       case CMP_NODE_EXTENSION_MODE_CLIP:
-        return ExtensionMode::Clip;
+        return Extension::Clip;
       case CMP_NODE_EXTENSION_MODE_REPEAT:
-        return ExtensionMode::Repeat;
+        return Extension::Repeat;
       case CMP_NODE_EXTENSION_MODE_EXTEND:
-        return ExtensionMode::Extend;
+        return Extension::Extend;
     }
 
-    return ExtensionMode::Clip;
+    return Extension::Clip;
   }
 };
 
-static NodeOperation *get_compositor_operation(Context &context, DNode node)
+static NodeOperation *get_compositor_operation(Context &context, const bNode &node)
 {
   return new DisplaceOperation(context, node);
 }
 
-}  // namespace blender::nodes::node_composite_displace_cc
-
-static void register_node_type_cmp_displace()
+static void node_register()
 {
-  namespace file_ns = blender::nodes::node_composite_displace_cc;
-
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   cmp_node_type_base(&ntype, "CompositorNodeDisplace", CMP_NODE_DISPLACE);
   ntype.ui_name = "Displace";
   ntype.ui_description = "Displace pixel position using an offset vector";
   ntype.enum_name_legacy = "DISPLACE";
   ntype.nclass = NODE_CLASS_DISTORT;
-  ntype.declare = file_ns::cmp_node_displace_declare;
-  ntype.initfunc = file_ns::cmp_node_init_displace;
-  blender::bke::node_type_storage(
+  ntype.declare = node_declare;
+  ntype.initfunc = node_init;
+  bke::node_type_storage(
       ntype, "NodeDisplaceData", node_free_standard_storage, node_copy_standard_storage);
-  ntype.get_compositor_operation = file_ns::get_compositor_operation;
+  ntype.get_compositor_operation = get_compositor_operation;
 
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 }
-NOD_REGISTER_NODE(register_node_type_cmp_displace)
+NOD_REGISTER_NODE(node_register)
+
+}  // namespace blender::nodes::node_composite_displace_cc

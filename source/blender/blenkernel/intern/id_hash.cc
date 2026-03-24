@@ -27,12 +27,12 @@ namespace blender::bke::id_hash {
 
 static std::optional<Vector<char>> read_file(const StringRefNull path)
 {
-  blender::fstream stream{path.c_str(), std::ios_base::in | std::ios_base::binary};
+  fstream stream{path.c_str(), std::ios_base::in | std::ios_base::binary};
   stream.seekg(0, std::ios_base::end);
   const int64_t size = stream.tellg();
   stream.seekg(0, std::ios_base::beg);
 
-  blender::Vector<char> buffer(size);
+  Vector<char> buffer(size);
   stream.read(buffer.data(), size);
   if (stream.bad()) {
     return std::nullopt;
@@ -177,10 +177,10 @@ static void compute_deep_hash_recursive(const Main &bmain,
       const_cast<ID *>(&id),
       [&](LibraryIDLinkCallbackData *cb_data) {
         if (cb_data->cb_flag & IDWALK_CB_LOOPBACK) {
-          /* Loopback pointer (e.g. from a shapekey to its owner geometry ID, or from a collection
-           * to its parents) should always be ignored, as they do not represent an actual
-           * dependency. The dependency relationship should already have been processed from the
-           * owner to its dependency anyway (if applicable). */
+          /* Loop-back pointer (e.g. from a shape-key to its owner geometry ID, or from a
+           * collection to its parents) should always be ignored, as they do not represent an
+           * actual dependency. The dependency relationship should already have been
+           * processed from the owner to its dependency anyway (if applicable). */
           return IDWALK_RET_NOP;
         }
         if (cb_data->cb_flag & (IDWALK_CB_EMBEDDED | IDWALK_CB_EMBEDDED_NOT_OWNING)) {

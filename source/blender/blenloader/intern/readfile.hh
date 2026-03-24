@@ -16,6 +16,7 @@
 #  include "BLI_winstuff.h"
 #endif
 
+#include "BLI_enum_flags.hh"
 #include "BLI_fileops.h"
 #include "BLI_filereader.h"
 #include "BLI_map.hh"
@@ -27,11 +28,14 @@
 #include "BLO_core_blend_header.hh"
 #include "BLO_readfile.hh"
 
+namespace blender {
+
 struct BlendFileData;
 struct BlendfileLinkAppendContext;
 struct BlendFileReadParams;
 struct BlendFileReadReport;
 struct BLOCacheStorage;
+struct BHeadN;
 struct BHeadSort;
 struct DNA_ReconstructInfo;
 struct IDNameLib_Map;
@@ -62,7 +66,7 @@ enum eFileDataFlag {
    */
   FD_FLAGS_HAS_INVALID_ID_NAMES = 1 << 6,
 };
-ENUM_OPERATORS(eFileDataFlag, FD_FLAGS_IS_MEMFILE)
+ENUM_OPERATORS(eFileDataFlag)
 
 /* Disallow since it's 32bit on ms-windows. */
 #ifdef __GNUC__
@@ -77,7 +81,7 @@ ENUM_OPERATORS(eFileDataFlag, FD_FLAGS_IS_MEMFILE)
  */
 struct FileData {
   /** Linked list of BHeadN's. */
-  ListBase bhead_list = {};
+  ListBaseT<BHeadN> bhead_list = {};
   enum eFileDataFlag flags = eFileDataFlag(0);
   bool is_eof = false;
   BlenderHeader blender_header = {};
@@ -140,7 +144,7 @@ struct FileData {
   OldNewMap *datamap = nullptr;
   OldNewMap *globmap = nullptr;
   /** Used to keep track of already loaded packed IDs to avoid loading them multiple times. */
-  std::shared_ptr<blender::Map<IDHash, ID *>> id_by_deep_hash;
+  std::shared_ptr<Map<IDHash, ID *>> id_by_deep_hash;
 
   /**
    * Store mapping from old ID pointers (the values they have in the .blend file) to new ones,
@@ -154,7 +158,7 @@ struct FileData {
   BHeadSort *bheadmap = nullptr;
   int tot_bheadmap = 0;
 
-  std::optional<blender::Map<blender::StringRefNull, BHead *>> bhead_idname_map;
+  std::optional<Map<StringRefNull, BHead *>> bhead_idname_map;
 
   /**
    * The root (main, local) Main.
@@ -169,8 +173,8 @@ struct FileData {
   /**
    * The main for the (local) data loaded from this filedata.
    *
-   * This is the same as #bmain when opening a blendfile, but not when reading/loading from
-   * libraries blendfiles.
+   * This is the same as #bmain when opening a blend-file, but not when reading/loading from
+   * libraries blend-files.
    */
   Main *fd_bmain = nullptr;
 
@@ -193,6 +197,11 @@ struct FileData {
 
   /** Opaque handle to the storage system used for non-static allocation strings. */
   void *storage_handle = nullptr;
+
+  /**
+   * Set when reading a file from undo with incomplete preview, to trigger restart of preview jobs.
+   */
+  bool need_preview_render_restart = false;
 };
 
 /**
@@ -226,7 +235,7 @@ FileData *blo_filedata_from_memfile(MemFile *memfile,
                                     BlendFileReadReport *reports);
 
 /**
- * Build a #GSet of old main (we only care about local data here,
+ * Build a #IDNameLib_Map of old main (we only care about local data here,
  * so we can do that after #blo_split_main() call.
  */
 void blo_make_old_idmap_from_main(FileData *fd, Main *bmain) ATTR_NONNULL(1, 2);
@@ -311,6 +320,7 @@ void blo_do_versions_430(FileData *fd, Library *lib, Main *bmain);
 void blo_do_versions_440(FileData *fd, Library *lib, Main *bmain);
 void blo_do_versions_450(FileData *fd, Library *lib, Main *bmain);
 void blo_do_versions_500(FileData *fd, Library *lib, Main *bmain);
+void blo_do_versions_510(FileData *fd, Library *lib, Main *bmain);
 
 void do_versions_after_linking_250(Main *bmain);
 void do_versions_after_linking_260(Main *bmain);
@@ -325,6 +335,7 @@ void do_versions_after_linking_430(FileData *fd, Main *bmain);
 void do_versions_after_linking_440(FileData *fd, Main *bmain);
 void do_versions_after_linking_450(FileData *fd, Main *bmain);
 void do_versions_after_linking_500(FileData *fd, Main *bmain);
+void do_versions_after_linking_510(FileData *fd, Main *bmain);
 
 void do_versions_after_setup(Main *new_bmain,
                              BlendfileLinkAppendContext *lapp_context,
@@ -338,6 +349,10 @@ void do_versions_after_setup(Main *new_bmain,
  */
 void *blo_read_get_new_globaldata_address(FileData *fd, const void *adr) ATTR_NONNULL(1);
 
-/* Mark the Main data as invalid (.blend file reading should be aborted ASAP, and the already read
- * data should be discarded). Also add an error report to `fd` including given `message`. */
+/**
+ * Mark the Main data as invalid (.blend file reading should be aborted ASAP, and the already read
+ * data should be discarded). Also add an error report to `fd` including given `message`.
+ */
 void blo_readfile_invalidate(FileData *fd, Main *bmain, const char *message) ATTR_NONNULL(1, 2, 3);
+
+}  // namespace blender

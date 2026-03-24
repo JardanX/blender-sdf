@@ -30,11 +30,13 @@ def keyconfig_update(keyconfig_data, keyconfig_version):
         for km_name, _km_params, km_items_data in keyconfig_data:
             if km_name == "Transform Modal Map":
                 return km_items_data
+        return None
 
     def get_ui_keymap():
         for km_name, _km_params, km_items_data in keyconfig_data:
             if km_name == "User Interface":
                 return km_items_data
+        return None
 
     def remove_properties(op_prop_map):
         nonlocal keyconfig_data
@@ -173,8 +175,11 @@ def keyconfig_update(keyconfig_data, keyconfig_version):
 
         if km_items_data := get_transform_modal_map():
             def use_alt_navigate():
-                km_item = next((i for i in km_items_data["items"] if i[0] ==
-                                "PROPORTIONAL_SIZE" and i[1]["type"] == 'TRACKPADPAN'), None)
+                km_item = next(
+                    (i for i in km_items_data["items"] if i[0] ==
+                     "PROPORTIONAL_SIZE" and i[1]["type"] == 'TRACKPADPAN'),
+                    None,
+                )
                 if km_item:
                     return "alt" not in km_item[1] or km_item[1]["alt"] is False
 
@@ -283,7 +288,7 @@ def keyconfig_update(keyconfig_data, keyconfig_version):
                         item_prop["properties"][toggle_path_index] = (
                             "use_secondary", ".".join((*updated_path_elements, toggle_path_identifier)))
 
-    if keyconfig_version < (5, 0, 118):
+    if keyconfig_version < (5, 1, 6):
         has_view_select = False
         has_view_scroll = False
 
@@ -324,5 +329,8 @@ def keyconfig_update(keyconfig_data, keyconfig_version):
                 km_ui_items_data["items"].extend(scroll_items)
         else:
             print("Error versioning keymap: Missing \"User Interface\" keymap")
+
+    if keyconfig_version < (5, 1, 11):
+        rename_keymap({"Grease Pencil Paint Mode": "Grease Pencil Draw Mode"})
 
     return keyconfig_data
