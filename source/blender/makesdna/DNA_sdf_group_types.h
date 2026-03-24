@@ -13,14 +13,19 @@
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
 
-struct AnimData;
-struct Object;
-
 #ifdef __cplusplus
 namespace blender::bke {
 struct SDFGroupRuntime;
 }
-using SDFGroupRuntimeHandle = blender::bke::SDFGroupRuntime;
+#endif
+
+namespace blender {
+
+struct AnimData;
+struct Object;
+
+#ifdef __cplusplus
+using SDFGroupRuntimeHandle = bke::SDFGroupRuntime;
 #else
 typedef struct SDFGroupRuntimeHandle SDFGroupRuntimeHandle;
 #endif
@@ -67,3 +72,5 @@ typedef struct SDFGroup {
 
   SDFGroupRuntimeHandle *runtime; /* Keep last. */
 } SDFGroup;
+
+}  // namespace blender

@@ -33,45 +33,45 @@
 
 #define FxaaSat(x) clamp(x, 0.0, 1.0)
 #define FxaaTexTop(t, p) textureLod(t, p, 0.0)
-#define FxaaTexOff(t, p, o, r) textureLod(t, p + (vec2(o) * r), 0.0)
+#define FxaaTexOff(t, p, o, r) textureLod(t, p + (float2(o) * r), 0.0)
 
-vec3 FxaaLinearToSRGB(vec3 linear)
+float3 FxaaLinearToSRGB(float3 linear)
 {
-  vec3 higher = vec3(1.055) * pow(linear, vec3(1.0 / 2.4)) - vec3(0.055);
-  vec3 lower = linear * vec3(12.92);
-  return mix(lower, higher, step(vec3(0.0031308), linear));
+  float3 higher = float3(1.055) * pow(linear, float3(1.0 / 2.4)) - float3(0.055);
+  float3 lower = linear * float3(12.92);
+  return mix(lower, higher, step(float3(0.0031308), linear));
 }
 
 /* sRGB-aware luma for perceptual edge detection (matches MathOPS). */
-float FxaaLuma(vec3 rgb)
+float FxaaLuma(float3 rgb)
 {
-  vec3 srgb = FxaaLinearToSRGB(clamp(rgb, 0.0, 1.0));
+  float3 srgb = FxaaLinearToSRGB(clamp(rgb, 0.0, 1.0));
   return srgb.g * (0.587 / 0.299) + srgb.r;
 }
 
-float FxaaLuma(vec4 rgba)
+float FxaaLuma(float4 rgba)
 {
   return FxaaLuma(rgba.rgb);
 }
 
 /* ---- Main FXAA pixel shader ---- */
 
-vec4 FxaaPixelShader(vec2 pos,
+float4 FxaaPixelShader(float2 pos,
                      sampler2D tex,
-                     vec2 fxaaQualityRcpFrame,
+                     float2 fxaaQualityRcpFrame,
                      float fxaaQualitySubpix,
                      float fxaaQualityEdgeThreshold,
                      float fxaaQualityEdgeThresholdMin)
 {
-  vec2 posM;
+  float2 posM;
   posM.x = pos.x;
   posM.y = pos.y;
-  vec4 rgbyM = FxaaTexTop(tex, posM);
+  float4 rgbyM = FxaaTexTop(tex, posM);
   float lumaM = FxaaLuma(rgbyM);
-  float lumaS = FxaaLuma(FxaaTexOff(tex, posM, ivec2(0, 1), fxaaQualityRcpFrame.xy));
-  float lumaE = FxaaLuma(FxaaTexOff(tex, posM, ivec2(1, 0), fxaaQualityRcpFrame.xy));
-  float lumaN = FxaaLuma(FxaaTexOff(tex, posM, ivec2(0, -1), fxaaQualityRcpFrame.xy));
-  float lumaW = FxaaLuma(FxaaTexOff(tex, posM, ivec2(-1, 0), fxaaQualityRcpFrame.xy));
+  float lumaS = FxaaLuma(FxaaTexOff(tex, posM, int2(0, 1), fxaaQualityRcpFrame.xy));
+  float lumaE = FxaaLuma(FxaaTexOff(tex, posM, int2(1, 0), fxaaQualityRcpFrame.xy));
+  float lumaN = FxaaLuma(FxaaTexOff(tex, posM, int2(0, -1), fxaaQualityRcpFrame.xy));
+  float lumaW = FxaaLuma(FxaaTexOff(tex, posM, int2(-1, 0), fxaaQualityRcpFrame.xy));
 
   float maxSM = max(lumaS, lumaM);
   float minSM = min(lumaS, lumaM);
@@ -90,10 +90,10 @@ vec4 FxaaPixelShader(vec2 pos,
     return rgbyM;
   }
 
-  float lumaNW = FxaaLuma(FxaaTexOff(tex, posM, ivec2(-1, -1), fxaaQualityRcpFrame.xy));
-  float lumaSE = FxaaLuma(FxaaTexOff(tex, posM, ivec2(1, 1), fxaaQualityRcpFrame.xy));
-  float lumaNE = FxaaLuma(FxaaTexOff(tex, posM, ivec2(1, -1), fxaaQualityRcpFrame.xy));
-  float lumaSW = FxaaLuma(FxaaTexOff(tex, posM, ivec2(-1, 1), fxaaQualityRcpFrame.xy));
+  float lumaNW = FxaaLuma(FxaaTexOff(tex, posM, int2(-1, -1), fxaaQualityRcpFrame.xy));
+  float lumaSE = FxaaLuma(FxaaTexOff(tex, posM, int2(1, 1), fxaaQualityRcpFrame.xy));
+  float lumaNE = FxaaLuma(FxaaTexOff(tex, posM, int2(1, -1), fxaaQualityRcpFrame.xy));
+  float lumaSW = FxaaLuma(FxaaTexOff(tex, posM, int2(-1, 1), fxaaQualityRcpFrame.xy));
 
   float lumaNS = lumaN + lumaS;
   float lumaWE = lumaW + lumaE;
@@ -142,10 +142,10 @@ vec4 FxaaPixelShader(vec2 pos,
   }
   float subpixC = FxaaSat(abs(subpixB) * subpixRcpRange);
 
-  vec2 posB;
+  float2 posB;
   posB.x = posM.x;
   posB.y = posM.y;
-  vec2 offNP;
+  float2 offNP;
   offNP.x = (!horzSpan) ? 0.0 : fxaaQualityRcpFrame.x;
   offNP.y = (horzSpan) ? 0.0 : fxaaQualityRcpFrame.y;
   if (!horzSpan) {
@@ -154,10 +154,10 @@ vec4 FxaaPixelShader(vec2 pos,
   if (horzSpan) {
     posB.y += lengthSign * 0.5;
   }
-  vec2 posN;
+  float2 posN;
   posN.x = posB.x - offNP.x * FXAA_QUALITY__P0;
   posN.y = posB.y - offNP.y * FXAA_QUALITY__P0;
-  vec2 posP;
+  float2 posP;
   posP.x = posB.x + offNP.x * FXAA_QUALITY__P0;
   posP.y = posB.y + offNP.y * FXAA_QUALITY__P0;
   float subpixD = ((-2.0) * subpixC) + 3.0;

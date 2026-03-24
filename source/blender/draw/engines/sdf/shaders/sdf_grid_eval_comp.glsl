@@ -22,7 +22,7 @@ void main()
 
   /* Phase 1: BVH cull — build bitmask of nearby objects (max 1024) */
   uint obj_bits[32]; /* 1024 bits */
-  for (int w = 0; w < 32; w++) obj_bits[w] = 0u;
+  for (int w = 0; w < 32; w++) { obj_bits[w] = 0u; }
 
   if (use_bvh != 0 && bvh_root >= 0 && object_count <= 1024) {
     int stack[64];
@@ -49,8 +49,8 @@ void main()
         obj_bits[si >> 5] |= (1u << (si & 31));
       }
       else {
-        if (node.child_a >= 0 && sp < 63) stack[sp++] = node.child_a;
-        if (node.child_b >= 0 && sp < 63) stack[sp++] = node.child_b;
+        if (node.child_a >= 0 && sp < 63) { stack[sp++] = node.child_a; }
+        if (node.child_b >= 0 && sp < 63) { stack[sp++] = node.child_b; }
       }
     }
   }
@@ -105,7 +105,7 @@ void main()
 
     if (gid_obj < 0) {
       if (scene_dist >= 1e9f) {
-        if (obj.csg_operation == 0) scene_dist = d;
+        if (obj.csg_operation == 0) { scene_dist = d; }
       }
       else {
         scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,

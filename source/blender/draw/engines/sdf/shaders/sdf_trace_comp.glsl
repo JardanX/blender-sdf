@@ -84,7 +84,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     float grp_winner_id = -1.0f;
 
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      if (!is_shape_near(m)) continue;
+      if (!is_shape_near(m)) { continue; }
 
       float aabb_skip_thresh = max(sdf_ray_epsilon, objects[m].blend);
       if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > aabb_skip_thresh) {
@@ -150,8 +150,8 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
 
   /* Ungrouped objects: per-step AABB test per object */
   for (int i = 0; i < object_count; i++) {
-    if (!is_shape_near(i)) continue;
-    if (objects[i].group_id >= 0) continue;
+    if (!is_shape_near(i)) { continue; }
+    if (objects[i].group_id >= 0) { continue; }
 
     float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
     float ungrouped_skip_thresh = max(0.0f, objects[i].blend);
@@ -327,16 +327,18 @@ float3 heat_color(float t)
   float3 medium = float3(0.0, 1.0, 0.0);
   float3 warm = float3(1.0, 1.0, 0.0);
   float3 hot = float3(1.0, 0.0, 0.0);
-  if (t < 0.33f)
+  if (t < 0.33f) {
     return mix(cool, medium, t / 0.33f);
-  if (t < 0.66f)
+  }
+  if (t < 0.66f) {
     return mix(medium, warm, (t - 0.33f) / 0.33f);
+  }
   return mix(warm, hot, (t - 0.66f) / 0.34f);
 }
 
 void main()
 {
-  int2 pixel = ivec2(gl_GlobalInvocationID.xy);
+  int2 pixel = int2(gl_GlobalInvocationID.xy);
   int local_idx = int(gl_LocalInvocationID.y * kTileSize + gl_LocalInvocationID.x);
 
 #ifdef USE_TILE_CULLING
@@ -467,7 +469,7 @@ void main()
 
     while (stackTop >= 0) {
       int index = stack[stackTop--];
-      if (index < 0) continue;
+      if (index < 0) { continue; }
 
       SdfAabbNodeGPU node = aabb_nodes[index];
 
@@ -481,14 +483,14 @@ void main()
       float3 aabbHalfExtents = 0.5f * (node.bounds_max.xyz - node.bounds_min.xyz);
       float separation = abs(dot(rayDirOrtho, ray_origin - aabbCenter)) -
                           dot(rayDirOrthoAbs, aabbHalfExtents);
-      if (separation > 0.0f) continue;
+      if (separation > 0.0f) { continue; }
 
       if (node.child_a < 0) {
         float3 lt1 = (node.bounds_min.xyz - ray_origin) * inv_dir;
         float3 lt2 = (node.bounds_max.xyz - ray_origin) * inv_dir;
         float ltMin = max(max(min(lt1.x, lt2.x), min(lt1.y, lt2.y)), min(lt1.z, lt2.z));
         float ltMax = min(min(max(lt1.x, lt2.x), max(lt1.y, lt2.y)), max(lt1.z, lt2.z));
-        if (ltMax < 0.0f || ltMin > ltMax) continue;
+        if (ltMax < 0.0f || ltMin > ltMax) { continue; }
 
         int idx = node.shape_index;
         if (idx >= 0 && idx < kMaxBitfieldBits) {
@@ -552,7 +554,7 @@ void main()
 #endif
 
   for (int step = 0; step < sdf_max_steps; step++) {
-    if (t > t_exit) break;
+    if (t > t_exit) { break; }
     float3 pos = ray_origin + ray_dir * t;
 
     /* Combined evaluation + empty-space skip */
@@ -567,7 +569,7 @@ void main()
       t += max(aabb_skip, sdf_ray_epsilon);
       prev_radius = 0.0f;
       step_length = 0.0f;
-      if (t > t_exit) break;
+      if (t > t_exit) { break; }
       continue;
     }
 
@@ -584,7 +586,7 @@ void main()
       t += max(aabb_skip, sdf_ray_epsilon);
       prev_radius = 0.0f;
       step_length = 0.0f;
-      if (t > t_exit) break;
+      if (t > t_exit) { break; }
       continue;
     }
 
@@ -660,10 +662,11 @@ void main()
         float(tile_active_obj_count()) / max(float(object_count), 1.0f));
     barrier();
     for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride)
+      if (uint(local_idx) < stride) {
         s_tileObjList[local_idx] = floatBitsToInt(
             max(intBitsToFloat(s_tileObjList[local_idx]),
                 intBitsToFloat(s_tileObjList[local_idx + int(stride)])));
+      }
       barrier();
     }
     float max_heat = intBitsToFloat(s_tileObjList[0]);
@@ -685,10 +688,11 @@ void main()
     s_tileObjList[local_idx] = floatBitsToInt(float(steps_taken) / 128.0f);
     barrier();
     for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride)
+      if (uint(local_idx) < stride) {
         s_tileObjList[local_idx] = floatBitsToInt(
             max(intBitsToFloat(s_tileObjList[local_idx]),
                 intBitsToFloat(s_tileObjList[local_idx + int(stride)])));
+      }
       barrier();
     }
     float max_heat = intBitsToFloat(s_tileObjList[0]);
@@ -703,7 +707,7 @@ void main()
     float total_range = t_exit - t_enter_before_cone;
     float savings = (total_range > 0.001f) ? clamp(skip / total_range, 0.0f, 1.0f) : 0.0f;
     float3 cone_color = mix(float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), savings);
-    if (s_coneHitPos.w < 0.0f) cone_color = float3(0.0f);
+    if (s_coneHitPos.w < 0.0f) { cone_color = float3(0.0f); }
     imageStore(out_color_img, pixel, float4(cone_color, 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
@@ -723,8 +727,9 @@ void main()
     tile_heat[local_idx] = float(g_numNearShapes) / max(float(object_count), 1.0f);
     barrier();
     for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride)
+      if (uint(local_idx) < stride) {
         tile_heat[local_idx] = max(tile_heat[local_idx], tile_heat[local_idx + stride]);
+      }
       barrier();
     }
     float max_heat = tile_heat[0];
@@ -746,8 +751,9 @@ void main()
     tile_heat[local_idx] = float(steps_taken) / 128.0f;
     barrier();
     for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride)
+      if (uint(local_idx) < stride) {
         tile_heat[local_idx] = max(tile_heat[local_idx], tile_heat[local_idx + stride]);
+      }
       barrier();
     }
     float max_heat = tile_heat[0];

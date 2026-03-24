@@ -12,15 +12,20 @@
 #include "DNA_ID.h"
 #include "DNA_defs.h"
 
+#ifdef __cplusplus
+namespace blender::bke {
+struct SDFRuntime;
+}
+#endif
+
+namespace blender {
+
 struct AnimData;
 struct Material;
 struct SDFGroup;
 
 #ifdef __cplusplus
-namespace blender::bke {
-struct SDFRuntime;
-}
-using SDFRuntimeHandle = blender::bke::SDFRuntime;
+using SDFRuntimeHandle = bke::SDFRuntime;
 #else
 typedef struct SDFRuntimeHandle SDFRuntimeHandle;
 #endif
@@ -203,3 +208,5 @@ typedef struct SDF {
   SDFRuntimeHandle *runtime; /* Keep last. */
 } SDF;
 
+
+}  // namespace blender

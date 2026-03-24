@@ -132,13 +132,10 @@ set(SRC_DNA_DEFAULTS_INC
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_pointcloud_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_scene_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_space_defaults.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_sdf_defaults.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_sdf_group_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_speaker_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_texture_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_userdef_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_vec_defaults.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_view3d_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_volume_defaults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_world_defaults.h
 )
@@ -151,7 +148,7 @@ set(SRC_DNA_OTHER_INC
 )
 
 add_subdirectory(datatoc)
-add_subdirectory(gpu/glsl_preprocess)
+add_subdirectory(gpu/shader_tool)
 add_subdirectory(editors)
 add_subdirectory(windowmanager)
 add_subdirectory(animrig)
