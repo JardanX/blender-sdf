@@ -32,11 +32,6 @@ if(WITH_OPENSUBDIV)
     endif()
   endmacro()
 
-  list(APPEND INC_SYS
-    ${OPENSUBDIV_INCLUDE_DIRS}
-    ${Epoxy_INCLUDE_DIRS}
-  )
-
   list(APPEND SRC
     # Base.
     internal/base/memory.h
@@ -76,8 +71,8 @@ if(WITH_OPENSUBDIV)
   )
 
   list(APPEND LIB
-    ${OPENSUBDIV_LIBRARIES}
-    ${Epoxy_LIBRARIES}
+    bf::dependencies::optional::opensubdiv
+    bf::dependencies::epoxy
   )
 
   if(WIN32)
@@ -90,9 +85,16 @@ if(WITH_OPENSUBDIV)
     internal/evaluator/shaders/osd_eval_patches_comp.glsl
   )
 
-  set(GLSL_C)
+  set(GLSL_INC
+    # For osd_patch_basis.glsl
+    ../../source/blender/draw/intern/shaders
+
+    internal/evaluator/shaders
+  )
+
+  set(GLSL_C "")
   foreach(GLSL_FILE ${GLSL_SRC})
-    glsl_to_c(${GLSL_FILE} GLSL_C)
+    glsl_to_c(${GLSL_FILE} GLSL_C GLSL_INC)
   endforeach()
 
   blender_add_lib(bf_osd_shaders "${GLSL_C}" "" "" "")
@@ -137,9 +139,6 @@ blender_add_lib(bf_intern_opensubdiv "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 # Tests.
 
 if(WITH_GTESTS AND WITH_OPENSUBDIV)
-  add_definitions(${GFLAGS_DEFINES})
-  add_definitions(${GLOG_DEFINES})
-
   set(TEST_SRC
     internal/topology/mesh_topology_test.cc
   )

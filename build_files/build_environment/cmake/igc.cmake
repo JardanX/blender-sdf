@@ -101,7 +101,7 @@ ExternalProject_Add(external_igc
     ${IGC_EXTRA_ARGS}
 
   # IGC is pretty set in its way where sub projects ought to live, for some it offers
-  # hooks to supply alternatives folders, other are just hard-coded with no way to configure
+  # hooks to supply alternative folders, other are just hard-coded with no way to configure
   # we symlink everything here, since it's less work than trying to convince the cmake
   # scripts to accept alternative locations.
   PATCH_COMMAND
@@ -135,7 +135,6 @@ add_dependencies(
   external_igc_vcintrinsics
   external_igc_llvm
   external_igc_opencl_clang
-  external_igc_vcintrinsics
   external_igc_spirv_headers
   external_igc_spirv_tools
   external_igc_spirv_translator

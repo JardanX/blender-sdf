@@ -27,9 +27,11 @@
 @class MTLCommandQueue;
 @class MTLRenderPipelineState;
 
-namespace blender::gpu {
+namespace blender {
+
+namespace gpu {
 class FrameBuffer;
-}  // namespace blender::gpu
+}  // namespace gpu
 
 /* Texture Update system structs. */
 struct TextureUpdateRoutineSpecialisation {
@@ -61,11 +63,11 @@ struct TextureUpdateRoutineSpecialisation {
 
   uint64_t hash() const
   {
-    blender::DefaultHash<std::string> string_hasher;
-    return (uint64_t)string_hasher(this->input_data_type + this->output_data_type +
-                                   std::to_string((this->component_count_input << 9) |
-                                                  (this->component_count_output << 5) |
-                                                  (this->is_clear ? 1 : 0)));
+    DefaultHash<std::string> string_hasher;
+    return uint64_t(string_hasher(this->input_data_type + this->output_data_type +
+                                  std::to_string((this->component_count_input << 9) |
+                                                 (this->component_count_output << 5) |
+                                                 (this->is_clear ? 1 : 0))));
   }
 };
 
@@ -90,7 +92,7 @@ struct DepthTextureUpdateRoutineSpecialisation {
 
   uint64_t hash() const
   {
-    return (uint64_t)(this->data_mode);
+    return uint64_t(this->data_mode);
   }
 };
 
@@ -119,7 +121,7 @@ struct TextureReadRoutineSpecialisation {
 
   uint64_t hash() const
   {
-    blender::DefaultHash<std::string> string_hasher;
+    DefaultHash<std::string> string_hasher;
     return uint64_t(string_hasher(this->input_data_type + this->output_data_type +
                                   std::to_string((this->component_count_input << 8) +
                                                  this->component_count_output +
@@ -127,7 +129,7 @@ struct TextureReadRoutineSpecialisation {
   }
 };
 
-namespace blender::gpu {
+namespace gpu {
 
 class MTLContext;
 class MTLVertBuf;
@@ -180,6 +182,10 @@ class MTLTexture : public Texture {
   friend class MTLStateManager;
   friend class MTLFrameBuffer;
   friend class MTLStorageBuf;
+
+  /* Special case: The XR blitting function needs access to the Metal blit encoder and handles
+   * for directly blitting from an UNORM to an SRGB texture without color space conversion. */
+  friend void xr_blit(id<MTLTexture> metal_xr_texture, int ofsx, int ofsy, int width, int height);
 
  private:
   /* Where the textures data comes from. */
@@ -264,7 +270,6 @@ class MTLTexture : public Texture {
   /* Whether the texture's properties or state has changed (e.g. mipmap range), and re-baking of
    * GPU resource is required. */
   bool is_dirty_;
-  bool is_bound_;
 
  public:
   MTLTexture(const char *name);
@@ -274,8 +279,12 @@ class MTLTexture : public Texture {
              id<MTLTexture> metal_texture);
   ~MTLTexture() override;
 
-  void update_sub(
-      int mip, int offset[3], int extent[3], eGPUDataFormat type, const void *data) override;
+  void update_sub(int mip,
+                  int offset[3],
+                  int extent[3],
+                  eGPUDataFormat type,
+                  const void *data,
+                  const uint unpack_row_length) override;
   void update_sub(int offset[3],
                   int extent[3],
                   eGPUDataFormat format,
@@ -292,7 +301,7 @@ class MTLTexture : public Texture {
   bool texture_is_baked();
   const char *get_name()
   {
-    return name_;
+    return name_.c_str();
   }
 
   bool has_custom_swizzle()
@@ -317,6 +326,11 @@ class MTLTexture : public Texture {
   {
     return tex_buffer_metadata_;
   }
+
+  id<MTLTexture> get_metal_handle();
+  id<MTLTexture> get_metal_handle_base();
+  id<MTLTexture> get_non_srgb_handle();
+  MTLSamplerState get_sampler_state();
 
  protected:
   bool init_internal() override;
@@ -357,10 +371,6 @@ class MTLTexture : public Texture {
                      void *r_data);
   void bake_mip_swizzle_view();
 
-  id<MTLTexture> get_metal_handle();
-  id<MTLTexture> get_metal_handle_base();
-  id<MTLTexture> get_non_srgb_handle();
-  MTLSamplerState get_sampler_state();
   void blit(id<MTLBlitCommandEncoder> blit_encoder,
             uint src_x_offset,
             uint src_y_offset,
@@ -400,7 +410,7 @@ class MTLTexture : public Texture {
    *
    * MECHANISM:
    *
-   *  blender::map<INPUT DEFINES STRUCT, compute PSO> update_2d_array_kernel_psos;
+   *  map<INPUT DEFINES STRUCT, compute PSO> update_2d_array_kernel_psos;
    * - Generate compute shader with configured kernel below with variable parameters depending
    *   on input/output format configurations. Do not need to keep source or descriptors around,
    *   just PSO, as same input defines will always generate the same code.
@@ -436,8 +446,7 @@ class MTLTexture : public Texture {
 
   id<MTLComputePipelineState> mtl_texture_update_impl(
       TextureUpdateRoutineSpecialisation specialization_params,
-      blender::Map<TextureUpdateRoutineSpecialisation, id<MTLComputePipelineState>>
-          &specialization_cache,
+      Map<TextureUpdateRoutineSpecialisation, id<MTLComputePipelineState>> &specialization_cache,
       GPUTextureType texture_type);
 
   /* Depth Update Utilities */
@@ -470,8 +479,7 @@ class MTLTexture : public Texture {
 
   id<MTLComputePipelineState> mtl_texture_read_impl(
       TextureReadRoutineSpecialisation specialization_params,
-      blender::Map<TextureReadRoutineSpecialisation, id<MTLComputePipelineState>>
-          &specialization_cache,
+      Map<TextureReadRoutineSpecialisation, id<MTLComputePipelineState>> &specialization_cache,
       GPUTextureType texture_type);
 
   /* fullscreen blit utilities. */
@@ -686,4 +694,5 @@ inline eGPUTextureUsage gpu_usage_from_mtl(MTLTextureUsage mtl_usage)
   return usage;
 }
 
-}  // namespace blender::gpu
+}  // namespace gpu
+}  // namespace blender

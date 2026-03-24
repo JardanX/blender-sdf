@@ -578,7 +578,6 @@ class VersioningTest(unittest.TestCase):
     def test_nla_conversion(self):
         nla_object = bpy.data.objects["nla_object"]
         nla_anim_data = nla_object.animation_data
-        self.assertTrue(nla_anim_data.action.is_action_layered)
         self.assertNotEqual(nla_anim_data.action_slot_handle, 0)
 
         # The action that is not pushed into an NLA strip.
@@ -590,19 +589,15 @@ class VersioningTest(unittest.TestCase):
             self.assertEqual(fcurve.array_index, fcurve_index)
 
         self.assertEqual(len(nla_anim_data.nla_tracks), 2)
-        self.assertTrue(nla_anim_data.nla_tracks[0].strips[0].action.is_action_layered)
         self.assertNotEqual(nla_anim_data.nla_tracks[0].strips[0].action_slot_handle, 0)
 
-        self.assertTrue(nla_anim_data.nla_tracks[1].strips[0].action.is_action_layered)
         self.assertNotEqual(nla_anim_data.nla_tracks[1].strips[0].action_slot_handle, 0)
 
     def test_multi_use_action(self):
         object_a = bpy.data.objects["multi_user_object_a"]
         object_b = bpy.data.objects["multi_user_object_b"]
-        self.assertTrue(object_a.animation_data.action.is_action_layered)
         self.assertNotEqual(object_a.animation_data.action_slot_handle, 0)
 
-        self.assertTrue(object_b.animation_data.action.is_action_layered)
         self.assertNotEqual(object_b.animation_data.action_slot_handle, 0)
 
         self.assertEqual(object_a.animation_data.action, object_b.animation_data.action)
@@ -620,12 +615,10 @@ class VersioningTest(unittest.TestCase):
     def test_action_constraint(self):
         constrained_object = bpy.data.objects["action_constraint_constrained"]
         action_constraint = constrained_object.constraints[0]
-        self.assertTrue(action_constraint.action.is_action_layered)
         self.assertNotEqual(action_constraint.action_slot_handle, 0)
 
         action_owner_object = bpy.data.objects["action_constraint_action_owner"]
         action = action_owner_object.animation_data.action
-        self.assertTrue(action.is_action_layered)
         self.assertEqual(action, action_constraint.action)
         self.assertEqual(action_owner_object.animation_data.action_slot_handle, action_constraint.action_slot_handle)
         strip = action.layers[0].strips[0]
@@ -638,7 +631,6 @@ class VersioningTest(unittest.TestCase):
     def test_armature_action_conversion(self):
         armature_object = bpy.data.objects["armature_object"]
         action = armature_object.animation_data.action
-        self.assertTrue(action.is_action_layered)
         strip = action.layers[0].strips[0]
         self.assertEqual(len(strip.channelbags[0].groups), 2)
         self.assertEqual(strip.channelbags[0].groups[0].name, "Bone")
@@ -823,6 +815,85 @@ class ConvenienceFunctionsTest(unittest.TestCase):
         # Check that the group was also created correctly.
         self.assertIn("grúpa", channelbag.groups)
         self.assertIn(fcurve, channelbag.groups["grúpa"].channels[:])
+
+
+class ReplaceAction(unittest.TestCase):
+
+    # Data that exists in the test file.
+    initial_action: bpy.types.Action
+    replacement_action: bpy.types.Action
+
+    # Object animated before and after a replace
+    obj_animated: bpy.types.Object
+    # Object without a slot in `replacement_action`
+    obj_no_slot_after: bpy.types.Object
+    # Object without a slot before in `initial_action` but that has one in `replacement_action`
+    obj_no_slot_before: bpy.types.Object
+    # Armature object with slot before and after a replace
+    armature: bpy.types.Armature
+    obj_shapekeys: bpy.types.Object
+    obj_material: bpy.types.Object
+    # Object with an action constraint
+    obj_action_constraint: bpy.types.Object
+    # Object with an NLA strip pointing to `initial_action`
+    obj_nla: bpy.types.Object
+
+    def setUp(self) -> None:
+        bpy.ops.wm.open_mainfile(filepath=str(args.testdir / "remap_action.blend"))
+
+        self.initial_action = bpy.data.actions["initial_action"]
+        self.replacement_action = bpy.data.actions["replace_action"]
+        self.obj_animated = bpy.data.objects["obj_animated"]
+        self.obj_no_slot_after = bpy.data.objects["obj_no_slot_after"]
+        self.obj_no_slot_before = bpy.data.objects["obj_no_slot_before"]
+        self.armature = bpy.data.objects["Armature"]
+        self.obj_action_constraint = bpy.data.objects["action_constrained"]
+        self.obj_nla = bpy.data.objects["obj_nla"]
+        self.obj_shapekeys = bpy.data.objects["obj_shapekeys"]
+        self.obj_material = bpy.data.objects["obj_material"]
+
+    def test_action_remap(self):
+        self.assertEqual(self.obj_animated.animation_data.action, self.initial_action)
+
+        bpy.ops.anim.replace_action(
+            old_session_uid=self.initial_action.session_uid,
+            new_session_uid=self.replacement_action.session_uid)
+
+        self.assertEqual(self.obj_animated.animation_data.action, self.replacement_action)
+        self.assertEqual(self.obj_no_slot_after.animation_data.action_slot, None)
+        self.assertNotEqual(self.obj_no_slot_before.animation_data.action_slot, None)
+        self.assertEqual(self.armature.animation_data.action, self.replacement_action)
+        self.assertEqual(self.obj_shapekeys.data.shape_keys.animation_data.action, self.replacement_action)
+
+        # Actions of embedded data blocks should also be replaced.
+        material = self.obj_material.material_slots[0].material
+        self.assertEqual(material.node_tree.animation_data.action, self.replacement_action)
+
+        # The operator shouldn't touch the NLA or action constraints.
+        self.assertEqual(self.obj_action_constraint.animation_data.action, None)
+        self.assertEqual(self.obj_action_constraint.constraints[0].action, self.initial_action)
+        self.assertEqual(self.obj_nla.animation_data.action, None)
+        self.assertEqual(self.obj_nla.animation_data.nla_tracks[0].strips[0].action, self.initial_action)
+
+    def test_action_remap_new(self):
+        self.assertEqual(self.obj_animated.animation_data.action, self.initial_action)
+
+        bpy.ops.anim.replace_action_new(
+            old_session_uid=self.initial_action.session_uid)
+
+        new_action = bpy.data.actions["Action"]
+        self.assertEqual(self.obj_animated.animation_data.action, new_action)
+        # The new action should have the same slots as the previous one.
+        self.assertNotEqual(self.obj_animated.animation_data.action_slot, None)
+        self.assertEqual(self.obj_no_slot_after.animation_data.action, new_action)
+        self.assertEqual(self.obj_no_slot_before.animation_data.action, new_action)
+        self.assertEqual(self.armature.animation_data.action, new_action)
+
+        # The operator shouldn't touch the NLA or action constraints.
+        self.assertEqual(self.obj_action_constraint.animation_data.action, None)
+        self.assertEqual(self.obj_action_constraint.constraints[0].action, self.initial_action)
+        self.assertEqual(self.obj_nla.animation_data.action, None)
+        self.assertEqual(self.obj_nla.animation_data.nla_tracks[0].strips[0].action, self.initial_action)
 
 
 def main():

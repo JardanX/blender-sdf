@@ -29,7 +29,7 @@ class AssetCatalogDefinitionFile;
 class AssetCatalogFilter;
 class AssetCatalogTree;
 
-using CatalogID = bUUID;
+using CatalogID = UUID;
 using CatalogPathComponent = std::string;
 /* Would be nice to be able to use `std::filesystem::path` for this, but it's currently not
  * available on the minimum macOS target version. */
@@ -44,7 +44,7 @@ class AssetCatalogService {
   /**
    * Cached catalog tree storage. Lazy-created by #AssetCatalogService::catalog_tree().
    */
-  std::unique_ptr<AssetCatalogTree> catalog_tree_;
+  std::shared_ptr<AssetCatalogTree> catalog_tree_;
   std::recursive_mutex catalog_tree_mutex_;
 
   Vector<std::unique_ptr<AssetCatalogCollection>> undo_snapshots_;
@@ -61,7 +61,8 @@ class AssetCatalogService {
 
   struct read_only_tag {};
 
-  explicit AssetCatalogService(const CatalogFilePath &asset_library_root = {});
+  explicit AssetCatalogService(const CatalogFilePath &asset_library_root = {},
+                               std::optional<read_only_tag> read_only_tag = std::nullopt);
   explicit AssetCatalogService(read_only_tag);
 
   /**
@@ -189,7 +190,7 @@ class AssetCatalogService {
   /**
    * May be called from multiple threads.
    */
-  const AssetCatalogTree &catalog_tree();
+  std::shared_ptr<const AssetCatalogTree> catalog_tree();
 
   /** Return true only if there are no catalogs known. */
   bool is_empty() const;

@@ -13,6 +13,9 @@
 
 namespace blender::gpu {
 
+/** FP16 value 1.0 */
+constexpr uint16_t HALF_VALUE_1 = 0x3c00;
+
 /* -------------------------------------------------------------------- */
 /** \name Conversion types
  * \{ */
@@ -863,14 +866,6 @@ static void convert(FLOAT3 &dst, const HALF4 &src)
   dst.value.z = math::half_to_float(src.get_b());
 }
 
-static void convert(HALF4 &dst, const FLOAT3 &src)
-{
-  dst.set_r(math::float_to_half(src.value.x));
-  dst.set_g(math::float_to_half(src.value.y));
-  dst.set_b(math::float_to_half(src.value.z));
-  dst.set_a(0x3c00); /* FP16 1.0 */
-}
-
 static void convert(FLOAT3 &dst, const FLOAT4 &src)
 {
   dst.value.x = src.value.r;
@@ -973,6 +968,25 @@ void convert_per_pixel(void *dst_memory, const void *src_memory, size_t buffer_s
   MutableSpan<DestinationType> dst = MutableSpan<DestinationType>(
       static_cast<DestinationType *>(dst_memory), buffer_size);
   convert<DestinationType, SourceType>(dst, src);
+}
+
+/**
+ * \brief Inline remapping from 3 components to 4 components where the data is stored at the end of
+ * the buffer.
+ */
+template<typename ComponentType>
+void remap_components_3to4_front_to_back(MutableSpan<ComponentType> components,
+                                         int64_t size,
+                                         ComponentType component_4_value)
+{
+  for (int index : IndexRange(size)) {
+    const int src_index = index * 3 + size;
+    const int dst_index = index * 4;
+    components[dst_index] = components[src_index];
+    components[dst_index + 1] = components[src_index + 1];
+    components[dst_index + 2] = components[src_index + 2];
+    components[dst_index + 3] = component_4_value;
+  }
 }
 
 static void convert_buffer(void *dst_memory,
@@ -1089,15 +1103,15 @@ static void convert_buffer(void *dst_memory,
          * regarding Inf and NaNs. Use make finite version to avoid unexpected black pixels on
          * certain implementation. For platform parity we clamp these infinite values to finite
          * values. */
-        blender::math::float_to_half_make_finite_array(
+        math::float_to_half_make_finite_array(
             src.slice(range).data(), dst.slice(range).data(), range.size());
       });
       break;
     }
     case ConversionType::HALF_TO_FLOAT:
-      blender::math::half_to_float_array(static_cast<const uint16_t *>(src_memory),
-                                         static_cast<float *>(dst_memory),
-                                         to_component_len(device_format) * buffer_size);
+      math::half_to_float_array(static_cast<const uint16_t *>(src_memory),
+                                static_cast<float *>(dst_memory),
+                                to_component_len(device_format) * buffer_size);
       break;
 
     case ConversionType::FLOAT_TO_B10F_G11F_R11F:
@@ -1115,9 +1129,37 @@ static void convert_buffer(void *dst_memory,
       convert_per_pixel<FLOAT3, B10F_G11G_R11F>(dst_memory, src_memory, buffer_size);
       break;
 
-    case ConversionType::FLOAT3_TO_HALF4:
-      convert_per_pixel<HALF4, FLOAT3>(dst_memory, src_memory, buffer_size);
+    case ConversionType::FLOAT3_TO_HALF4: {
+      size_t element_len = buffer_size;
+      constexpr int64_t src_component_len = 3;
+      constexpr int64_t dst_component_len = 4;
+      Span<float> src(static_cast<const float *>(src_memory), element_len * src_component_len);
+      MutableSpan<uint16_t> dst(static_cast<uint16_t *>(dst_memory),
+                                element_len * dst_component_len);
+
+      /* Number of pixels to process in a single chunk. */
+      constexpr int64_t chunk_size = 16 * 1024;
+
+      threading::parallel_for(IndexRange(element_len), chunk_size, [&](const IndexRange range) {
+        IndexRange src_range = IndexRange(range.start() * src_component_len,
+                                          range.size() * src_component_len);
+        IndexRange dst_range = IndexRange(range.start() * dst_component_len,
+                                          range.size() * dst_component_len);
+        IndexRange dst_range_offset = IndexRange(range.start() * dst_component_len + range.size(),
+                                                 range.size() * src_component_len);
+        /* Doing float to half conversion manually to avoid implementation specific behavior
+         * regarding Inf and NaNs. Use make finite version to avoid unexpected black pixels on
+         * certain implementation. For platform parity we clamp these infinite values to finite
+         * values. */
+        math::float_to_half_make_finite_array(
+            src.slice(src_range).data(), dst.slice(dst_range_offset).data(), src_range.size());
+        /* Conversion are stored at the end of the dst_memory, so remapping works with sequential
+         * access. */
+        remap_components_3to4_front_to_back(dst.slice(dst_range), range.size(), HALF_VALUE_1);
+      });
+
       break;
+    }
     case ConversionType::HALF4_TO_FLOAT3:
       convert_per_pixel<FLOAT3, HALF4>(dst_memory, src_memory, buffer_size);
       break;
@@ -1134,6 +1176,14 @@ static void convert_buffer(void *dst_memory,
 /* -------------------------------------------------------------------- */
 /** \name API
  * \{ */
+
+bool needs_conversion(eGPUDataFormat host_format,
+                      TextureFormat host_texture_format,
+                      TextureFormat device_format)
+{
+  ConversionType conversion_type = host_to_device(host_format, host_texture_format, device_format);
+  return conversion_type != ConversionType::PASS_THROUGH;
+}
 
 void convert_host_to_device(void *dst_buffer,
                             const void *src_buffer,

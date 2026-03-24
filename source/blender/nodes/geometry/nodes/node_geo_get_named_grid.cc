@@ -36,11 +36,11 @@ static void node_declare(NodeDeclarationBuilder &b)
   b.add_output(eNodeSocketDatatype(node->custom1), "Grid").structure_type(StructureType::Grid);
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->use_property_split_set(true);
-  layout->use_property_decorate_set(false);
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.use_property_split_set(true);
+  layout.use_property_decorate_set(false);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 #ifdef WITH_OPENVDB
@@ -136,7 +136,7 @@ static void node_rna(StructRNA *srna)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_node_type_base(&ntype, "GeometryNodeGetNamedGrid", GEO_NODE_GET_NAMED_GRID);
   ntype.ui_name = "Get Named Grid";
@@ -147,7 +147,7 @@ static void node_register()
   ntype.draw_buttons = node_layout;
   ntype.initfunc = node_init;
   ntype.geometry_node_execute = node_geo_exec;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 
   node_rna(ntype.rna_ext.srna);
 }

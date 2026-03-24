@@ -73,14 +73,14 @@ struct ElemData_Armature {
   float zwidth;
 };
 
-static ElemData_Armature *armature_coords_and_quats_get_recurse(const ListBase *bone_base,
+static ElemData_Armature *armature_coords_and_quats_get_recurse(const ListBaseT<Bone> *bone_base,
                                                                 ElemData_Armature *elem_array)
 {
   ElemData_Armature *elem = elem_array;
-  LISTBASE_FOREACH (const Bone *, bone, bone_base) {
+  for (const Bone &bone : *bone_base) {
 
-#define COPY_PTR(member) memcpy(elem->member, bone->member, sizeof(bone->member))
-#define COPY_VAL(member) memcpy(&elem->member, &bone->member, sizeof(bone->member))
+#define COPY_PTR(member) memcpy(elem->member, bone.member, sizeof(bone.member))
+#define COPY_VAL(member) memcpy(&elem->member, &bone.member, sizeof(bone.member))
     COPY_PTR(head);
     COPY_PTR(tail);
     COPY_VAL(roll);
@@ -95,7 +95,7 @@ static ElemData_Armature *armature_coords_and_quats_get_recurse(const ListBase *
 #undef COPY_PTR
 #undef COPY_VAL
 
-    elem = armature_coords_and_quats_get_recurse(&bone->childbase, elem + 1);
+    elem = armature_coords_and_quats_get_recurse(&bone.childbase, elem + 1);
   }
   return elem;
 }
@@ -107,13 +107,13 @@ static void armature_coords_and_quats_get(const bArmature *arm,
 }
 
 static const ElemData_Armature *armature_coords_and_quats_apply_with_mat4_recurse(
-    ListBase *bone_base, const ElemData_Armature *elem_array, const float4x4 &transform)
+    ListBaseT<Bone> *bone_base, const ElemData_Armature *elem_array, const float4x4 &transform)
 {
   const ElemData_Armature *elem = elem_array;
-  LISTBASE_FOREACH (Bone *, bone, bone_base) {
+  for (Bone &bone : *bone_base) {
 
-#define COPY_PTR(member) memcpy(bone->member, elem->member, sizeof(bone->member))
-#define COPY_VAL(member) memcpy(&bone->member, &elem->member, sizeof(bone->member))
+#define COPY_PTR(member) memcpy(bone.member, elem->member, sizeof(bone.member))
+#define COPY_VAL(member) memcpy(&bone.member, &elem->member, sizeof(bone.member))
     COPY_PTR(head);
     COPY_PTR(tail);
     COPY_VAL(roll);
@@ -128,8 +128,7 @@ static const ElemData_Armature *armature_coords_and_quats_apply_with_mat4_recurs
 #undef COPY_PTR
 #undef COPY_VAL
 
-    elem = armature_coords_and_quats_apply_with_mat4_recurse(
-        &bone->childbase, elem + 1, transform);
+    elem = armature_coords_and_quats_apply_with_mat4_recurse(&bone.childbase, elem + 1, transform);
   }
   return elem;
 }
@@ -206,6 +205,49 @@ static void edit_armature_coords_and_quats_apply(bArmature *arm,
   edit_armature_coords_and_quats_apply_with_mat4(arm, elem_array, float4x4::identity());
 }
 
+/* MetaBall */
+
+struct ElemData_MetaBall {
+  float co[3];
+  float quat[4];
+  float exp[3];
+  float rad;
+};
+
+static void metaball_coords_and_quats_get(const MetaBall *mb,
+                                          MutableSpan<ElemData_MetaBall> elem_array)
+{
+  ElemData_MetaBall *elem = elem_array.data();
+  for (const MetaElem *ml = static_cast<const MetaElem *>(mb->elems.first); ml;
+       ml = ml->next, elem++)
+  {
+    copy_v3_v3(elem->co, &ml->x);
+    copy_qt_qt(elem->quat, ml->quat);
+    copy_v3_v3(elem->exp, &ml->expx);
+    elem->rad = ml->rad;
+  }
+}
+
+static void metaball_coords_and_quats_apply_with_mat4(MetaBall *mb,
+                                                      const Span<ElemData_MetaBall> elem_array,
+                                                      const float4x4 &transform)
+{
+  const ElemData_MetaBall *elem = elem_array.data();
+  for (MetaElem *ml = static_cast<MetaElem *>(mb->elems.first); ml; ml = ml->next, elem++) {
+    copy_v3_v3(&ml->x, elem->co);
+    copy_qt_qt(ml->quat, elem->quat);
+    copy_v3_v3(&ml->expx, elem->exp);
+    ml->rad = elem->rad;
+  }
+  /* MATHOPS: Removed — BKE_mball_transform(mb, transform.ptr(), true); */
+}
+
+static void metaball_coords_and_quats_apply(MetaBall *mb, const Span<ElemData_MetaBall> elem_array)
+{
+  /* Avoid code duplication by using a unit matrix. */
+  metaball_coords_and_quats_apply_with_mat4(mb, elem_array, float4x4::identity());
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -246,6 +288,12 @@ struct XFormObjectData_Armature : public XFormObjectData {
   virtual ~XFormObjectData_Armature() = default;
 };
 
+struct XFormObjectData_MetaBall : public XFormObjectData {
+  Array<ElemData_MetaBall> elems;
+  bool is_edit_mode = false;
+  virtual ~XFormObjectData_MetaBall() = default;
+};
+
 struct XFormObjectData_GreasePencil : public XFormObjectData {
   Array<float3> positions;
   Array<float> radii;
@@ -272,7 +320,7 @@ static std::unique_ptr<XFormObjectData> data_xform_create_ex(ID *id, bool is_edi
 
   switch (GS(id->name)) {
     case ID_ME: {
-      Mesh *mesh = (Mesh *)id;
+      Mesh *mesh = id_cast<Mesh *>(id);
       Key *key = mesh->key;
       const int key_index = -1;
 
@@ -312,7 +360,7 @@ static std::unique_ptr<XFormObjectData> data_xform_create_ex(ID *id, bool is_edi
       return xod;
     }
     case ID_LT: {
-      Lattice *lt_orig = (Lattice *)id;
+      Lattice *lt_orig = id_cast<Lattice *>(id);
       Lattice *lt = is_edit_mode ? lt_orig->editlatt->latt : lt_orig;
       Key *key = lt->key;
       const int key_index = -1;
@@ -338,7 +386,7 @@ static std::unique_ptr<XFormObjectData> data_xform_create_ex(ID *id, bool is_edi
       return xod;
     }
     case ID_CU_LEGACY: {
-      Curve *cu = (Curve *)id;
+      Curve *cu = id_cast<Curve *>(id);
       Key *key = cu->key;
 
       if (cu->ob_type == OB_FONT) {
@@ -347,7 +395,7 @@ static std::unique_ptr<XFormObjectData> data_xform_create_ex(ID *id, bool is_edi
       }
 
       const int key_index = -1;
-      ListBase *nurbs;
+      ListBaseT<Nurb> *nurbs;
       if (is_edit_mode) {
         EditNurb *editnurb = cu->editnurb;
         nurbs = &editnurb->nurbs;
@@ -374,7 +422,7 @@ static std::unique_ptr<XFormObjectData> data_xform_create_ex(ID *id, bool is_edi
       return xod;
     }
     case ID_AR: {
-      bArmature *arm = (bArmature *)id;
+      bArmature *arm = id_cast<bArmature *>(id);
       if (is_edit_mode) {
         auto xod = std::make_unique<XFormObjectData_Armature>();
         xod->id = id;
@@ -390,8 +438,18 @@ static std::unique_ptr<XFormObjectData> data_xform_create_ex(ID *id, bool is_edi
       armature_coords_and_quats_get(arm, xod->elems);
       return xod;
     }
+    case ID_MB: {
+      /* Edit mode and object mode are shared. */
+      MetaBall *mb = id_cast<MetaBall *>(id);
+      auto xod = std::make_unique<XFormObjectData_MetaBall>();
+      xod->id = id;
+      xod->is_edit_mode = is_edit_mode;
+      xod->elems.reinitialize(BLI_listbase_count(&mb->elems));
+      metaball_coords_and_quats_get(mb, xod->elems);
+      return xod;
+    }
     case ID_GP: {
-      GreasePencil *grease_pencil = (GreasePencil *)id;
+      GreasePencil *grease_pencil = id_cast<GreasePencil *>(id);
       const int elem_array_len = BKE_grease_pencil_stroke_point_count(*grease_pencil);
       auto xod = std::make_unique<XFormObjectData_GreasePencil>();
       xod->id = id;
@@ -465,7 +523,7 @@ void data_xform_by_mat4(XFormObjectData &xod_base, const float4x4 &transform)
 {
   switch (GS(xod_base.id->name)) {
     case ID_ME: {
-      Mesh *mesh = (Mesh *)xod_base.id;
+      Mesh *mesh = id_cast<Mesh *>(xod_base.id);
 
       Key *key = mesh->key;
       const int key_index = -1;
@@ -490,7 +548,7 @@ void data_xform_by_mat4(XFormObjectData &xod_base, const float4x4 &transform)
     }
     case ID_LT: {
       const auto &xod = reinterpret_cast<XFormObjectData_Lattice &>(xod_base);
-      Lattice *lt_orig = (Lattice *)xod_base.id;
+      Lattice *lt_orig = id_cast<Lattice *>(xod_base.id);
       Lattice *lt = xod.is_edit_mode ? lt_orig->editlatt->latt : lt_orig;
 
       Key *key = lt->key;
@@ -511,11 +569,11 @@ void data_xform_by_mat4(XFormObjectData &xod_base, const float4x4 &transform)
     case ID_CU_LEGACY: {
       const auto &xod = reinterpret_cast<XFormObjectData_Curve &>(xod_base);
       BLI_assert(xod.is_edit_mode == false); /* Not used currently. */
-      Curve *cu = (Curve *)xod_base.id;
+      Curve *cu = id_cast<Curve *>(xod_base.id);
 
       Key *key = cu->key;
       const int key_index = -1;
-      ListBase *nurb = nullptr;
+      const ListBaseT<Nurb> *nurb = nullptr;
 
       if (xod.is_edit_mode) {
         EditNurb *editnurb = cu->editnurb;
@@ -541,7 +599,7 @@ void data_xform_by_mat4(XFormObjectData &xod_base, const float4x4 &transform)
     case ID_AR: {
       const auto &xod = reinterpret_cast<XFormObjectData_Armature &>(xod_base);
       BLI_assert(xod.is_edit_mode == false); /* Not used currently. */
-      bArmature *arm = (bArmature *)xod_base.id;
+      bArmature *arm = id_cast<bArmature *>(xod_base.id);
       if (xod.is_edit_mode) {
         edit_armature_coords_and_quats_apply_with_mat4(arm, xod.elems, transform);
       }
@@ -550,8 +608,15 @@ void data_xform_by_mat4(XFormObjectData &xod_base, const float4x4 &transform)
       }
       break;
     }
+    case ID_MB: {
+      /* Meta-balls are a special case, edit-mode and object mode data is shared. */
+      MetaBall *mb = id_cast<MetaBall *>(xod_base.id);
+      const auto &xod = reinterpret_cast<XFormObjectData_MetaBall &>(xod_base);
+      metaball_coords_and_quats_apply_with_mat4(mb, xod.elems, transform);
+      break;
+    }
     case ID_GP: {
-      GreasePencil *grease_pencil = (GreasePencil *)xod_base.id;
+      GreasePencil *grease_pencil = id_cast<GreasePencil *>(xod_base.id);
       const auto &xod = reinterpret_cast<XFormObjectData_GreasePencil &>(xod_base);
       BKE_grease_pencil_point_coords_apply_with_mat4(
           *grease_pencil, xod.positions, xod.radii, transform);
@@ -590,7 +655,7 @@ void data_xform_restore(XFormObjectData &xod_base)
 {
   switch (GS(xod_base.id->name)) {
     case ID_ME: {
-      Mesh *mesh = (Mesh *)xod_base.id;
+      Mesh *mesh = id_cast<Mesh *>(xod_base.id);
 
       Key *key = mesh->key;
       const int key_index = -1;
@@ -615,7 +680,7 @@ void data_xform_restore(XFormObjectData &xod_base)
     }
     case ID_LT: {
       const auto &xod = reinterpret_cast<XFormObjectData_Lattice &>(xod_base);
-      Lattice *lt_orig = (Lattice *)xod_base.id;
+      Lattice *lt_orig = id_cast<Lattice *>(xod_base.id);
       Lattice *lt = xod.is_edit_mode ? lt_orig->editlatt->latt : lt_orig;
 
       Key *key = lt->key;
@@ -634,7 +699,7 @@ void data_xform_restore(XFormObjectData &xod_base)
       break;
     }
     case ID_CU_LEGACY: {
-      Curve *cu = (Curve *)xod_base.id;
+      Curve *cu = id_cast<Curve *>(xod_base.id);
 
       Key *key = cu->key;
       const int key_index = -1;
@@ -657,7 +722,7 @@ void data_xform_restore(XFormObjectData &xod_base)
       break;
     }
     case ID_AR: {
-      bArmature *arm = (bArmature *)xod_base.id;
+      bArmature *arm = id_cast<bArmature *>(xod_base.id);
       const auto &xod = reinterpret_cast<XFormObjectData_Armature &>(xod_base);
       if (xod.is_edit_mode) {
         edit_armature_coords_and_quats_apply(arm, xod.elems);
@@ -667,8 +732,15 @@ void data_xform_restore(XFormObjectData &xod_base)
       }
       break;
     }
+    case ID_MB: {
+      /* Meta-balls are a special case, edit-mode and object mode data is shared. */
+      MetaBall *mb = id_cast<MetaBall *>(xod_base.id);
+      const auto &xod = reinterpret_cast<XFormObjectData_MetaBall &>(xod_base);
+      metaball_coords_and_quats_apply(mb, xod.elems);
+      break;
+    }
     case ID_GP: {
-      GreasePencil *grease_pencil = (GreasePencil *)xod_base.id;
+      GreasePencil *grease_pencil = id_cast<GreasePencil *>(xod_base.id);
       const auto &xod = reinterpret_cast<XFormObjectData_GreasePencil &>(xod_base);
       BKE_grease_pencil_point_coords_apply(*grease_pencil, xod.positions, xod.radii);
       break;
@@ -703,7 +775,7 @@ void data_xform_tag_update(XFormObjectData &xod_base)
 {
   switch (GS(xod_base.id->name)) {
     case ID_ME: {
-      Mesh *mesh = (Mesh *)xod_base.id;
+      Mesh *mesh = id_cast<Mesh *>(xod_base.id);
       const auto &xod = reinterpret_cast<XFormObjectData_Mesh &>(xod_base);
       if (xod.is_edit_mode) {
         EDBMUpdate_Params params{};
@@ -717,32 +789,38 @@ void data_xform_tag_update(XFormObjectData &xod_base)
     }
     case ID_LT: {
       /* Generic update. */
-      Lattice *lt = (Lattice *)xod_base.id;
+      Lattice *lt = id_cast<Lattice *>(xod_base.id);
       DEG_id_tag_update(&lt->id, ID_RECALC_GEOMETRY);
       break;
     }
     case ID_CU_LEGACY: {
       /* Generic update. */
-      Curve *cu = (Curve *)xod_base.id;
+      Curve *cu = id_cast<Curve *>(xod_base.id);
       DEG_id_tag_update(&cu->id, ID_RECALC_GEOMETRY);
       break;
     }
     case ID_AR: {
       /* Generic update. */
-      bArmature *arm = (bArmature *)xod_base.id;
+      bArmature *arm = id_cast<bArmature *>(xod_base.id);
       /* XXX, zero is needed, no other flags properly update this. */
       DEG_id_tag_update(&arm->id, 0);
       break;
     }
+    case ID_MB: {
+      /* Generic update. */
+      MetaBall *mb = id_cast<MetaBall *>(xod_base.id);
+      DEG_id_tag_update(&mb->id, ID_RECALC_GEOMETRY | ID_RECALC_SYNC_TO_EVAL);
+      break;
+    }
     case ID_GD_LEGACY: {
       /* Generic update. */
-      bGPdata *gpd = (bGPdata *)xod_base.id;
+      bGPdata *gpd = id_cast<bGPdata *>(xod_base.id);
       DEG_id_tag_update(&gpd->id, ID_RECALC_GEOMETRY | ID_RECALC_SYNC_TO_EVAL);
       break;
     }
     case ID_GP: {
       /* Generic update. */
-      GreasePencil *grease_pencil = (GreasePencil *)xod_base.id;
+      GreasePencil *grease_pencil = id_cast<GreasePencil *>(xod_base.id);
       DEG_id_tag_update(&grease_pencil->id, ID_RECALC_GEOMETRY | ID_RECALC_SYNC_TO_EVAL);
       break;
     }

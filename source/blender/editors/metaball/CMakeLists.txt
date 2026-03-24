@@ -8,10 +8,14 @@ set(INC
 )
 
 set(INC_SYS
-
 )
 
 set(SRC
+  editmball_undo.cc
+  mball_edit.cc
+  mball_ops.cc
+
+  mball_intern.hh
 )
 
 set(LIB

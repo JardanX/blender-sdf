@@ -60,6 +60,7 @@ class NODE_MT_shader_node_input_base(node_add_menu.NodeMenu):
             context, layout, "ShaderNodeCameraData",
             ["View Vector", "View Z Depth", "View Distance"],
         )
+        self.node_operator(layout, "ShaderNodeRGB")
         self.node_operator(layout, "ShaderNodeVertexColor")
         self.node_operator_with_outputs(
             context, layout, "ShaderNodeHairInfo",
@@ -117,11 +118,11 @@ class NODE_MT_shader_node_input_base(node_add_menu.NodeMenu):
             context, layout, "ShaderNodePointInfo",
             ["Position", "Radius", "Random"],
         )
-        self.node_operator(layout, "ShaderNodeRGB")
+        self.node_operator(layout, "ShaderNodeRaycast")
         self.node_operator(layout, "ShaderNodeTangent")
         self.node_operator_with_outputs(
             context, layout, "ShaderNodeTexCoord",
-            ["Normal", "UV", "Object", "Camera", "Window", "Reflection"],
+            ["Generated", "Normal", "UV", "Object", "Camera", "Window", "Reflection"],
         )
         self.node_operator(layout, "ShaderNodeUVAlongStroke", poll=line_style_shader_nodes_poll(context))
         self.node_operator(layout, "ShaderNodeUVMap")
@@ -422,6 +423,7 @@ class NODE_MT_shader_node_utilities_base(node_add_menu.NodeMenu):
         self.node_operator(layout, "NodeEvaluateClosure")
         self.node_operator(layout, "NodeCombineBundle")
         self.node_operator(layout, "NodeSeparateBundle")
+        self.node_operator(layout, "NodeJoinBundle")
         layout.separator()
         self.node_operator(layout, "GeometryNodeMenuSwitch")
         if cycles_shader_nodes_poll(context):
@@ -460,7 +462,7 @@ class NODE_MT_shader_node_all_base(node_add_menu.NodeMenu):
 
 
 add_menus = {
-    # menu bl_idname: baseclass
+    # menu `bl_idname`: base-class.
     "NODE_MT_category_shader_input": NODE_MT_shader_node_input_base,
     "NODE_MT_category_shader_output": NODE_MT_shader_node_output_base,
     "NODE_MT_category_shader_color": NODE_MT_shader_node_color_base,
@@ -480,7 +482,7 @@ add_menus = node_add_menu.generate_menus(
 
 
 swap_menus = {
-    # menu bl_idname: baseclass
+    # menu `bl_idname`: base-class.
     "NODE_MT_shader_node_input_swap": NODE_MT_shader_node_input_base,
     "NODE_MT_shader_node_output_swap": NODE_MT_shader_node_output_base,
     "NODE_MT_shader_node_color_swap": NODE_MT_shader_node_color_base,

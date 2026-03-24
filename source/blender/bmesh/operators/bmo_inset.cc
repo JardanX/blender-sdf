@@ -11,7 +11,7 @@
 
 #include "MEM_guardedalloc.h"
 
-#include "BLI_alloca.h"
+#include "BLI_array.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
@@ -25,6 +25,8 @@
 #include "bmesh.hh"
 
 #include "intern/bmesh_operators_private.hh" /* own include */
+
+namespace blender {
 
 /* Merge loop-data that diverges, see: #41445 */
 #define USE_LOOP_CUSTOMDATA_MERGE
@@ -268,10 +270,10 @@ static void bmo_face_inset_individual(BMesh *bm,
   InterpFace *iface = nullptr;
 
   /* stores verts split away from the face (aligned with face verts) */
-  BMVert **verts = BLI_array_alloca(verts, f->len);
+  Array<BMVert *, BM_DEFAULT_NGON_STACK_SIZE> verts(f->len);
   /* store edge normals (aligned with face-loop-edges) */
-  float (*edge_nors)[3] = BLI_array_alloca(edge_nors, f->len);
-  float (*coords)[3] = BLI_array_alloca(coords, f->len);
+  Array<float3, BM_DEFAULT_NGON_STACK_SIZE> edge_nors(f->len);
+  Array<float3, BM_DEFAULT_NGON_STACK_SIZE> coords(f->len);
 
   BMLoop *l_iter, *l_first;
   BMLoop *l_other;
@@ -569,12 +571,11 @@ static float bm_edge_info_average_length_fallback(BMVert *v_lookup,
 
   /* Only run this once, if needed. */
   if (UNLIKELY(vert_lengths == nullptr)) {
-    BMVert **vert_stack = static_cast<BMVert **>(
-        MEM_mallocN(sizeof(*vert_stack) * bm->totvert, __func__));
+    BMVert **vert_stack = MEM_new_array_uninitialized<BMVert *>(bm->totvert, __func__);
     STACK_DECLARE(vert_stack);
     STACK_INIT(vert_stack, bm->totvert);
 
-    vert_lengths = MEM_calloc_arrayN<VertLengths>(bm->totvert, __func__);
+    vert_lengths = MEM_new_array_zeroed<VertLengths>(bm->totvert, __func__);
 
     /* Needed for 'vert_lengths' lookup from connected vertices. */
     BM_mesh_elem_index_ensure(bm, BM_VERT);
@@ -636,7 +637,7 @@ static float bm_edge_info_average_length_fallback(BMVert *v_lookup,
         }
       }
     }
-    MEM_freeN(vert_stack);
+    MEM_delete(vert_stack);
     *vert_lengths_p = vert_lengths;
   }
 
@@ -700,8 +701,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
 
   /* BMVert original location storage */
   const bool use_vert_coords_orig = use_edge_rail;
-  MemArena *vert_coords_orig = nullptr;
-  GHash *vert_coords = nullptr;
+  Map<BMVert *, float3> vert_coords;
 
   BMVert *v;
   BMEdge *e;
@@ -711,8 +711,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
   if (use_interpolate) {
     interp_arena = BLI_memarena_new(BLI_MEMARENA_STD_BUFSIZE, __func__);
     /* warning, we could be more clever here and not over alloc */
-    iface_array = static_cast<InterpFace **>(
-        MEM_callocN(sizeof(*iface_array) * bm->totface, __func__));
+    iface_array = MEM_new_array_zeroed<InterpFace *>(bm->totface, __func__);
     iface_array_len = bm->totface;
   }
 
@@ -754,7 +753,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
   }
   bm->elem_index_dirty |= BM_EDGE;
 
-  edge_info = MEM_malloc_arrayN<SplitEdgeInfo>(edge_info_len, __func__);
+  edge_info = MEM_new_array_uninitialized<SplitEdgeInfo>(edge_info_len, __func__);
 
   /* fill in array and initialize tagging */
   es = edge_info;
@@ -768,24 +767,6 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
       /* initialize no and e_new after */
     }
   }
-
-  if (use_vert_coords_orig) {
-    vert_coords_orig = BLI_memarena_new(BLI_MEMARENA_STD_BUFSIZE, __func__);
-    vert_coords = BLI_ghash_ptr_new(__func__);
-  }
-
-/* Utility macros. */
-#define VERT_ORIG_STORE(_v) \
-  { \
-    float *_co = static_cast<float *>(BLI_memarena_alloc(vert_coords_orig, sizeof(float[3]))); \
-    copy_v3_v3(_co, (_v)->co); \
-    BLI_ghash_insert(vert_coords, _v, _co); \
-  } \
-  (void)0
-#define VERT_ORIG_GET(_v) (const float *)BLI_ghash_lookup_default(vert_coords, (_v), (_v)->co)
-/* memory for the coords isn't given back to the arena,
- * acceptable in this case since it runs a fixed number of times. */
-#define VERT_ORIG_REMOVE(_v) BLI_ghash_remove(vert_coords, (_v), nullptr, nullptr)
 
   for (i = 0, es = edge_info; i < edge_info_len; i++, es++) {
     if ((es->l = bm_edge_is_mixed_face_tag(es->e_old->l))) {
@@ -884,9 +865,9 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
         /* in some cases the edge doesn't split off */
         if (vout_len == 1) {
           if (use_vert_coords_orig) {
-            VERT_ORIG_STORE(vout[0]);
+            vert_coords.add(vout[0], vout[0]->co);
           }
-          MEM_freeN(vout);
+          MEM_delete(vout);
           continue;
         }
 
@@ -898,7 +879,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
           int vecpair[2];
 
           if (use_vert_coords_orig) {
-            VERT_ORIG_STORE(v_split);
+            vert_coords.add(v_split, v_split->co);
           }
 
           /* find adjacent */
@@ -954,12 +935,12 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
                 if (l_other_a->v == l_other_b->v) {
                   /* both edges faces are adjacent, but we don't need to know the shared edge
                    * having both verts is enough. */
-                  const float *co_other;
+                  float3 co_other;
 
                   /* note that we can't use 'l_other_a->v' directly since it
                    * may be inset and give a feedback loop. */
                   if (use_vert_coords_orig) {
-                    co_other = VERT_ORIG_GET(l_other_a->v);
+                    co_other = vert_coords.lookup_default(l_other_a->v, l_other_a->v->co);
                   }
                   else {
                     co_other = l_other_a->v->co;
@@ -1119,7 +1100,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
               else {
                 if (BM_vert_splice(bm, v_glue, v_split)) {
                   if (use_vert_coords_orig) {
-                    VERT_ORIG_REMOVE(v_split);
+                    vert_coords.remove(v_split);
                   }
                 }
               }
@@ -1127,14 +1108,9 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
           }
           /* end glue */
         }
-        MEM_freeN(vout);
+        MEM_delete(vout);
       }
     }
-  }
-
-  if (use_vert_coords_orig) {
-    BLI_memarena_free(vert_coords_orig);
-    BLI_ghash_free(vert_coords, nullptr, nullptr);
   }
 
   if (use_interpolate) {
@@ -1306,7 +1282,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
     }
 
     BLI_memarena_free(interp_arena);
-    MEM_freeN(iface_array);
+    MEM_delete(iface_array);
   }
 
   /* we could flag new edges/verts too, is it useful? */
@@ -1356,7 +1332,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
      * which BM_vert_calc_shell_factor uses. */
 
     /* over allocate */
-    varr_co = MEM_calloc_arrayN<float[3]>(bm->totvert, __func__);
+    varr_co = MEM_new_array_zeroed<float[3]>(bm->totvert, __func__);
     void *vert_lengths_p = nullptr;
 
     BM_ITER_MESH_INDEX (v, &iter, bm, BM_VERTS_OF_MESH, i) {
@@ -1377,7 +1353,7 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
     }
 
     if (vert_lengths_p != nullptr) {
-      MEM_freeN(vert_lengths_p);
+      MEM_delete_void(vert_lengths_p);
     }
 
     BM_ITER_MESH_INDEX (v, &iter, bm, BM_VERTS_OF_MESH, i) {
@@ -1385,10 +1361,12 @@ void bmo_inset_region_exec(BMesh *bm, BMOperator *op)
         copy_v3_v3(v->co, varr_co[i]);
       }
     }
-    MEM_freeN(varr_co);
+    MEM_delete(varr_co);
   }
 
-  MEM_freeN(edge_info);
+  MEM_delete(edge_info);
 }
 
 /** \} */
+
+}  // namespace blender

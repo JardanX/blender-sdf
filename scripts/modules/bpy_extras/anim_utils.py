@@ -16,7 +16,7 @@ __all__ = (
 
 import contextlib
 from dataclasses import dataclass
-from typing import Iterable, Optional, Union, Iterator
+from typing import Iterable
 from collections.abc import (
     Mapping,
     Sequence,
@@ -24,8 +24,8 @@ from collections.abc import (
 
 import bpy
 from bpy.types import (
-    Context, Action, ActionSlot, ActionChannelbag,
-    Object, PoseBone, KeyingSet,
+    Action, ActionSlot, ActionChannelbag,
+    PoseBone,
 )
 
 from rna_prop_ui import (
@@ -154,14 +154,14 @@ def bake_action(
         bake_options,
 ):
     """
-    :arg obj: Object to bake.
+    :param obj: Object to bake.
     :type obj: :class:`bpy.types.Object`
-    :arg action: An action to bake the data into, or None for a new action
+    :param action: An action to bake the data into, or None for a new action
        to be created.
     :type action: :class:`bpy.types.Action` | None
-    :arg frames: Frames to bake.
-    :type frames: int
-    :arg bake_options: Options for baking.
+    :param frames: Frames to bake.
+    :type frames: Iterable[int]
+    :param bake_options: Options for baking.
     :type bake_options: :class:`anim_utils.BakeOptions`
     :return: Action or None.
     :rtype: :class:`bpy.types.Action` | None
@@ -186,11 +186,13 @@ def bake_action_objects(
     """
     A version of :func:`bake_action_objects_iter` that takes frames and returns the output.
 
-    :arg frames: Frames to bake.
-    :type frames: iterable of int
-    :arg bake_options: Options for baking.
+    :param object_action_pairs: Sequence of object action tuples,
+       action is the destination for the baked data. When None a new action will be created.
+    :type object_action_pairs: Sequence[tuple[:class:`bpy.types.Object`, :class:`bpy.types.Action` | None]]
+    :param frames: Frames to bake.
+    :type frames: Iterable[int]
+    :param bake_options: Options for baking.
     :type bake_options: :class:`anim_utils.BakeOptions`
-
     :return: A sequence of Action or None types (aligned with ``object_action_pairs``)
     :rtype: Sequence[:class:`bpy.types.Action`]
     """
@@ -209,13 +211,16 @@ def bake_action_objects_iter(
         bake_options,
 ):
     """
-    An coroutine that bakes actions for multiple objects.
+    A coroutine that bakes actions for multiple objects.
 
-    :arg object_action_pairs: Sequence of object action tuples,
+    :param object_action_pairs: Sequence of object action tuples,
        action is the destination for the baked data. When None a new action will be created.
-    :type object_action_pairs: Sequence of (:class:`bpy.types.Object`, :class:`bpy.types.Action`)
-    :arg bake_options: Options for baking.
+    :type object_action_pairs: Sequence[tuple[:class:`bpy.types.Object`, :class:`bpy.types.Action` | None]]
+    :param bake_options: Options for baking.
     :type bake_options: :class:`anim_utils.BakeOptions`
+    :return: A generator that yields None for each frame, then finally
+       yields a tuple of actions (aligned with *object_action_pairs*).
+    :rtype: Generator
     """
     scene = bpy.context.scene
     frame_back = scene.frame_current
@@ -245,18 +250,17 @@ def bake_action_iter(
         bake_options,
 ):
     """
-    An coroutine that bakes action for a single object.
+    A coroutine that bakes action for a single object.
 
-    :arg obj: Object to bake.
+    :param obj: Object to bake.
     :type obj: :class:`bpy.types.Object`
-    :arg action: An action to bake the data into, or None for a new action
+    :param action: An action to bake the data into, or None for a new action
        to be created.
     :type action: :class:`bpy.types.Action` | None
-    :arg bake_options: Boolean options of what to include into the action bake.
+    :param bake_options: Options for baking.
     :type bake_options: :class:`anim_utils.BakeOptions`
-
     :return: an action or None
-    :rtype: :class:`bpy.types.Action`
+    :rtype: :class:`bpy.types.Action` | None
     """
     # -------------------------------------------------------------------------
     # Helper Functions and vars
@@ -351,8 +355,10 @@ def bake_action_iter(
         for name, pbone in obj.pose.bones.items():
             if bake_options.do_visual_keying:
                 # Get the final transform of the bone in its own local space...
-                matrix[name] = obj.convert_space(pose_bone=pbone, matrix=pbone.matrix,
-                                                 from_space='POSE', to_space='LOCAL')
+                matrix[name] = obj.convert_space(
+                    pose_bone=pbone, matrix=pbone.matrix,
+                    from_space='POSE', to_space='LOCAL',
+                )
             else:
                 matrix[name] = pbone.matrix_basis.copy()
 
@@ -471,16 +477,21 @@ def bake_action_iter(
 
     if bake_options.do_pose:
         for f, armature_custom_properties in armature_info:
-            bake_custom_properties(obj, custom_props=armature_custom_properties,
-                                   frame=f, group_name="Armature Custom Properties")
+            bake_custom_properties(
+                obj,
+                custom_props=armature_custom_properties,
+                frame=f,
+                group_name="Armature Custom Properties"
+            )
 
         for name, pbone in obj.pose.bones.items():
             if bake_options.only_selected and not pbone.select:
                 continue
 
             if bake_options.do_constraint_clear:
-                while pbone.constraints:
-                    pbone.constraints.remove(pbone.constraints[0])
+                for con in pbone.constraints[:]:
+                    if not con.is_override_data:
+                        pbone.constraints.remove(con)
 
             # Create compatible euler & quaternion rotation values.
             euler_prev = None
@@ -567,8 +578,9 @@ def bake_action_iter(
     # object. TODO. multiple objects
     if bake_options.do_object:
         if bake_options.do_constraint_clear:
-            while obj.constraints:
-                obj.constraints.remove(obj.constraints[0])
+            for con in obj.constraints[:]:
+                if not con.is_override_data:
+                    obj.constraints.remove(con)
 
         # Create compatible euler & quaternion rotations.
         euler_prev = None
@@ -716,7 +728,7 @@ class KeyframesCo:
         Assumes the action is new, that it has no F-curves. Otherwise, the only difference between versions is
         performance and implementation simplicity.
 
-        :arg group_name: Name of the Group that F-curves are added to.
+        :param group_name: Name of the Group that F-curves are added to.
         """
         linear_enum_values = [
             bpy.types.Keyframe.bl_rna.properties["interpolation"].enum_items["LINEAR"].value
@@ -748,7 +760,7 @@ class KeyframesCo:
         Assumes the action already exists, that it might already have F-curves. Otherwise, the
         only difference between versions is performance and implementation simplicity.
 
-        :arg lookup_fcurves: : This is only used for efficiency.
+        :param lookup_fcurves: : This is only used for efficiency.
            It's a substitute for ``channelbag.fcurves.find()`` which is a potentially expensive linear search.
         """
         linear_enum_values = [
@@ -798,8 +810,15 @@ class AutoKeying:
 
     @classmethod
     @contextlib.contextmanager
-    def keytype(cls, the_keytype: str) -> Iterator[None]:
-        """Context manager to set the key type that's inserted."""
+    def keytype(cls, the_keytype):
+        """
+        Context manager to set the key type that's inserted.
+
+        :param the_keytype: The key type to use.
+        :type the_keytype: str
+        :return: A context manager that resets the key type on exit.
+        :rtype: Iterator[None]
+        """
         default_keytype = cls._keytype
         try:
             cls._keytype = the_keytype
@@ -812,12 +831,28 @@ class AutoKeying:
     def options(
             cls,
             *,
-            keytype: str = "",
-            use_loc: bool = True,
-            use_rot: bool = True,
-            use_scale: bool = True,
-            force_autokey: bool = False) -> Iterator[None]:
-        """Context manager to set various keyframing options."""
+            keytype="",
+            use_loc=True,
+            use_rot=True,
+            use_scale=True,
+            force_autokey=False,
+    ):
+        """
+        Context manager to set various keyframing options.
+
+        :param keytype: The key type to use.
+        :type keytype: str
+        :param use_loc: Key location channels.
+        :type use_loc: bool
+        :param use_rot: Key rotation channels.
+        :type use_rot: bool
+        :param use_scale: Key scale channels.
+        :type use_scale: bool
+        :param force_autokey: Allow use without the user activating auto-keying.
+        :type force_autokey: bool
+        :return: A context manager that resets the options on exit.
+        :rtype: Iterator[None]
+        """
         default_keytype = cls._keytype
         default_use_loc = cls._use_loc
         default_use_rot = cls._use_rot
@@ -838,8 +873,15 @@ class AutoKeying:
             cls._force_autokey = default_force_autokey
 
     @classmethod
-    def keying_options(cls, context: Context) -> set[str]:
-        """Retrieve the general keyframing options from user preferences."""
+    def keying_options(cls, context):
+        """
+        Retrieve the general keyframing options from user preferences.
+
+        :param context: The context.
+        :type context: :class:`bpy.types.Context`
+        :return: The keyframing option flags.
+        :rtype: set[str]
+        """
 
         prefs = context.preferences
         ts = context.scene.tool_settings
@@ -854,8 +896,17 @@ class AutoKeying:
         return options
 
     @classmethod
-    def keying_options_from_keyingset(cls, context: Context, keyingset: KeyingSet) -> set[str]:
-        """Retrieve the general keyframing options from user preferences."""
+    def keying_options_from_keyingset(cls, context, keyingset):
+        """
+        Retrieve the general keyframing options from user preferences.
+
+        :param context: The context.
+        :type context: :class:`bpy.types.Context`
+        :param keyingset: The keying set to read options from.
+        :type keyingset: :class:`bpy.types.KeyingSet`
+        :return: The keyframing option flags.
+        :rtype: set[str]
+        """
 
         ts = context.scene.tool_settings
         options = set()
@@ -869,8 +920,15 @@ class AutoKeying:
         return options
 
     @classmethod
-    def autokeying_options(cls, context: Context) -> Optional[set[str]]:
-        """Retrieve the Auto Keyframe options, or None if disabled."""
+    def autokeying_options(cls, context):
+        """
+        Retrieve the Auto Keyframe options, or None if disabled.
+
+        :param context: The context.
+        :type context: :class:`bpy.types.Context`
+        :return: The keyframing option flags, or None when auto-keying is disabled.
+        :rtype: set[str] | None
+        """
 
         ts = context.scene.tool_settings
 
@@ -892,8 +950,15 @@ class AutoKeying:
         return options
 
     @staticmethod
-    def get_4d_rotlock(bone: PoseBone) -> Iterable[bool]:
-        "Retrieve the lock status for 4D rotation."
+    def get_4d_rotlock(bone):
+        """
+        Retrieve the lock status for 4D rotation.
+
+        :param bone: The pose bone to check.
+        :type bone: :class:`bpy.types.PoseBone`
+        :return: Lock status for W, X, Y, Z rotation channels.
+        :rtype: list[bool]
+        """
         if bone.lock_rotations_4d:
             return [bone.lock_rotation_w, *bone.lock_rotation]
         return [all(bone.lock_rotation)] * 4
@@ -901,13 +966,26 @@ class AutoKeying:
     @classmethod
     def keyframe_channels(
         cls,
-        target: Union[Object, PoseBone],
-        options: set[str],
-        data_path: str,
-        group: str,
-        locks: Iterable[bool],
-    ) -> None:
-        """Keyframe channels, avoiding keying locked channels."""
+        target,
+        options,
+        data_path,
+        group,
+        locks,
+    ):
+        """
+        Keyframe channels, avoiding keying locked channels.
+
+        :param target: The object or pose bone to keyframe.
+        :type target: :class:`bpy.types.Object` | :class:`bpy.types.PoseBone`
+        :param options: Keyframing options.
+        :type options: set[str]
+        :param data_path: The data path to keyframe.
+        :type data_path: str
+        :param group: The group name for the keyframes.
+        :type group: str
+        :param locks: Per-channel lock status.
+        :type locks: Iterable[bool]
+        """
         if all(locks):
             return
 
@@ -923,10 +1001,17 @@ class AutoKeying:
     @classmethod
     def key_transformation(
         cls,
-        target: Union[Object, PoseBone],
-        options: set[str],
-    ) -> None:
-        """Keyframe transformation properties, avoiding keying locked channels."""
+        target,
+        options,
+    ):
+        """
+        Keyframe transformation properties, avoiding keying locked channels.
+
+        :param target: The object or pose bone to keyframe.
+        :type target: :class:`bpy.types.Object` | :class:`bpy.types.PoseBone`
+        :param options: Keyframing options.
+        :type options: set[str]
+        """
 
         is_bone = isinstance(target, PoseBone)
         if is_bone:
@@ -952,11 +1037,17 @@ class AutoKeying:
             keyframe("scale", target.lock_scale)
 
     @classmethod
-    def key_transformation_via_keyingset(cls,
-                                         context: Context,
-                                         target: Union[Object, PoseBone],
-                                         keyingset: KeyingSet) -> None:
-        """Auto-key transformation properties with the given keying set."""
+    def key_transformation_via_keyingset(cls, context, target, keyingset):
+        """
+        Auto-key transformation properties with the given keying set.
+
+        :param context: The context.
+        :type context: :class:`bpy.types.Context`
+        :param target: The object or pose bone to keyframe.
+        :type target: :class:`bpy.types.Object` | :class:`bpy.types.PoseBone`
+        :param keyingset: The keying set to use.
+        :type keyingset: :class:`bpy.types.KeyingSet`
+        """
 
         keyingset.refresh()
 
@@ -978,7 +1069,7 @@ class AutoKeying:
                 case 'NAMED':
                     group = keysetpath.group
                 case 'KEYINGSET':
-                    group = keyingset.name
+                    group = keyingset.bl_label
                 case 'NONE', _:
                     group = ""
 
@@ -999,12 +1090,18 @@ class AutoKeying:
             keyframe("scale", target.lock_scale)
 
     @classmethod
-    def active_keyingset(cls, context: Context) -> KeyingSet | None:
-        """Return the active keying set, if it should be used.
+    def active_keyingset(cls, context):
+        """
+        Return the active keying set, if it should be used.
 
         Only returns the active keying set when the auto-key settings indicate
         it should be used, and when it is not using absolute paths (because
         that's not supported by the Copy Global Transform add-on).
+
+        :param context: The context.
+        :type context: :class:`bpy.types.Context`
+        :return: The active keying set, or None when it should not be used.
+        :rtype: :class:`bpy.types.KeyingSet` | None
         """
         ts = context.scene.tool_settings
         if not ts.use_keyframe_insert_keyingset:
@@ -1022,8 +1119,15 @@ class AutoKeying:
         return active_keyingset
 
     @classmethod
-    def autokey_transformation(cls, context: Context, target: Union[Object, PoseBone]) -> None:
-        """Auto-key transformation properties."""
+    def autokey_transformation(cls, context, target):
+        """
+        Auto-key transformation properties.
+
+        :param context: The context.
+        :type context: :class:`bpy.types.Context`
+        :param target: The object or pose bone to keyframe.
+        :type target: :class:`bpy.types.Object` | :class:`bpy.types.PoseBone`
+        """
 
         # See if the active keying set should be used.
         keyingset = cls.active_keyingset(context)

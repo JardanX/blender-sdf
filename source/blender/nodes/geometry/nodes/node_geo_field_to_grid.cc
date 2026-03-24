@@ -23,7 +23,9 @@
 #  include "BKE_volume_grid_process.hh"
 #endif
 
-namespace blender::nodes::node_geo_field_to_grid_cc {
+namespace blender {
+
+namespace nodes::node_geo_field_to_grid_cc {
 
 NODE_STORAGE_FUNCS(GeometryNodeFieldToGrid)
 using ItemsAccessor = FieldToGridItemsAccessor;
@@ -55,7 +57,7 @@ static void node_declare(NodeDeclarationBuilder &b)
 
     b.add_input(data_type, item.name, input_identifier)
         .supports_field()
-        .socket_name_ptr(&tree->id, FieldToGridItemsAccessor::item_srna, &item, "name");
+        .socket_name_ptr(&tree->id, *FieldToGridItemsAccessor::item_srna, &item, "name");
     b.add_output(data_type, item.name, output_identifier)
         .structure_type(StructureType::Grid)
         .align_with_previous()
@@ -68,16 +70,16 @@ static void node_declare(NodeDeclarationBuilder &b)
       .align_with_previous();
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
-static void node_layout_ex(uiLayout *layout, bContext *C, PointerRNA *ptr)
+static void node_layout_ex(ui::Layout &layout, bContext *C, PointerRNA *ptr)
 {
   bNodeTree &tree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
   bNode &node = *static_cast<bNode *>(ptr->data);
-  if (uiLayout *panel = layout->panel(C, "field_to_grid_items", false, IFACE_("Fields"))) {
+  if (ui::Layout *panel = layout.panel(C, "field_to_grid_items", false, IFACE_("Fields"))) {
     socket_items::ui::draw_items_list_with_operators<ItemsAccessor>(C, panel, tree, node);
     socket_items::ui::draw_active_item_props<ItemsAccessor>(tree, node, [&](PointerRNA *item_ptr) {
       panel->use_property_split_set(true);
@@ -349,7 +351,7 @@ static void node_geo_exec(GeoNodeExecParams params)
 
 static void node_init(bNodeTree * /*tree*/, bNode *node)
 {
-  GeometryNodeFieldToGrid *data = MEM_callocN<GeometryNodeFieldToGrid>(__func__);
+  GeometryNodeFieldToGrid *data = MEM_new<GeometryNodeFieldToGrid>(__func__);
   data->data_type = SOCK_FLOAT;
   node->storage = data;
 }
@@ -357,13 +359,13 @@ static void node_init(bNodeTree * /*tree*/, bNode *node)
 static void node_free_storage(bNode *node)
 {
   socket_items::destruct_array<ItemsAccessor>(*node);
-  MEM_freeN(node->storage);
+  MEM_delete(static_cast<GeometryNodeFieldToGrid *>(node->storage));
 }
 
 static void node_copy_storage(bNodeTree * /*dst_tree*/, bNode *dst_node, const bNode *src_node)
 {
   const GeometryNodeFieldToGrid &src_storage = node_storage(*src_node);
-  auto *dst_storage = MEM_dupallocN<GeometryNodeFieldToGrid>(__func__, src_storage);
+  auto *dst_storage = MEM_new<GeometryNodeFieldToGrid>(__func__, dna::shallow_copy(src_storage));
   dst_node->storage = dst_storage;
 
   socket_items::copy_array<ItemsAccessor>(*src_node, *dst_node);
@@ -399,7 +401,7 @@ static const bNodeSocket *node_internally_linked_input(const bNodeTree & /*tree*
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_node_type_base(&ntype, "GeometryNodeFieldToGrid");
   ntype.ui_name = "Field to Grid";
@@ -408,8 +410,7 @@ static void node_register()
   ntype.nclass = NODE_CLASS_GEOMETRY;
   ntype.declare = node_declare;
   ntype.initfunc = node_init;
-  blender::bke::node_type_storage(
-      ntype, "GeometryNodeFieldToGrid", node_free_storage, node_copy_storage);
+  bke::node_type_storage(ntype, "GeometryNodeFieldToGrid", node_free_storage, node_copy_storage);
   ntype.geometry_node_execute = node_geo_exec;
   ntype.draw_buttons = node_layout;
   ntype.draw_buttons_ex = node_layout_ex;
@@ -420,15 +421,15 @@ static void node_register()
   ntype.internally_linked_input = node_internally_linked_input;
   ntype.blend_write_storage_content = node_blend_write;
   ntype.blend_data_read_storage_content = node_blend_read;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 }
 NOD_REGISTER_NODE(node_register)
 
-}  // namespace blender::nodes::node_geo_field_to_grid_cc
+}  // namespace nodes::node_geo_field_to_grid_cc
 
-namespace blender::nodes {
+namespace nodes {
 
-StructRNA *FieldToGridItemsAccessor::item_srna = &RNA_GeometryNodeFieldToGridItem;
+StructRNA **FieldToGridItemsAccessor::item_srna = &RNA_GeometryNodeFieldToGridItem;
 
 void FieldToGridItemsAccessor::blend_write_item(BlendWriter *writer, const ItemT &item)
 {
@@ -440,4 +441,5 @@ void FieldToGridItemsAccessor::blend_read_data_item(BlendDataReader *reader, Ite
   BLO_read_string(reader, &item.name);
 }
 
-}  // namespace blender::nodes
+}  // namespace nodes
+}  // namespace blender

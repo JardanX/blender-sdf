@@ -16,7 +16,6 @@
 #include "scene/osl.h"
 #include "scene/pointcloud.h"
 #include "scene/scene.h"
-#include "scene/sdf.h"
 #include "scene/shader.h"
 #include "scene/shader_nodes.h"
 #include "scene/stats.h"
@@ -110,10 +109,6 @@ int Geometry::motion_step(const float time) const
 
 bool Geometry::need_build_bvh(BVHLayout layout) const
 {
-  /* SDF objects use distance-field ray marching, not hardware BVH. */
-  if (is_sdf()) {
-    return false;
-  }
   return is_instanced() || layout == BVH_LAYOUT_OPTIX || layout == BVH_LAYOUT_MULTI_OPTIX ||
          layout == BVH_LAYOUT_METAL || layout == BVH_LAYOUT_MULTI_OPTIX_EMBREE ||
          layout == BVH_LAYOUT_MULTI_METAL || layout == BVH_LAYOUT_MULTI_METAL_EMBREE ||
@@ -234,6 +229,10 @@ static void update_device_flags_attribute(uint32_t &device_update_flags,
         device_update_flags |= ATTR_UCHAR4_MODIFIED;
         break;
       }
+      case AttrKernelDataType::NORMAL: {
+        device_update_flags |= ATTR_NORMAL_MODIFIED;
+        break;
+      }
       case AttrKernelDataType::NUM: {
         break;
       }
@@ -258,6 +257,9 @@ static void update_attribute_realloc_flags(uint32_t &device_update_flags,
   }
   if (attributes.modified(AttrKernelDataType::UCHAR4)) {
     device_update_flags |= ATTR_UCHAR4_NEEDS_REALLOC;
+  }
+  if (attributes.modified(AttrKernelDataType::NORMAL)) {
+    device_update_flags |= ATTR_NORMAL_NEEDS_REALLOC;
   }
 }
 
@@ -409,8 +411,16 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
         }
       }
 
-      if (geom->is_hair() && shader->shadow_transparency_needs_realloc) {
-        device_update_flags |= ATTR_FLOAT_NEEDS_REALLOC;
+      if (geom->is_hair()) {
+        if (shader->shadow_transparency_needs_realloc) {
+          device_update_flags |= ATTR_FLOAT_NEEDS_REALLOC;
+        }
+        if (shader->need_update_shadow_transparency) {
+          Attribute *attr = geom->attributes.find(ATTR_STD_SHADOW_TRANSPARENCY);
+          if (attr) {
+            attr->modified = true;
+          }
+        }
       }
     }
 
@@ -424,7 +434,7 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     /* Re-create volume mesh if we will rebuild or refit the BVH. Note we
      * should only do it in that case, otherwise the BVH and mesh can go
      * out of sync. */
-    if (geom->is_modified() && geom->is_volume()) {
+    if (geom->is_volume() && (geom->is_modified() || (update_flags & VOLUME_MODIFIED))) {
       /* Create volume meshes if there is voxel data. */
       if (!volume_images_updated) {
         progress.set_status("Updating Meshes Volume Bounds");
@@ -516,7 +526,6 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
 
     if (device_update_flags & DEVICE_MESH_DATA_NEEDS_REALLOC) {
       dscene->tri_verts.tag_realloc();
-      dscene->tri_vnormal.tag_realloc();
       dscene->tri_vindex.tag_realloc();
       dscene->tri_shader.tag_realloc();
     }
@@ -577,11 +586,18 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     dscene->attributes_uchar4.tag_modified();
   }
 
+  if (device_update_flags & ATTR_NORMAL_NEEDS_REALLOC) {
+    dscene->attributes_map.tag_realloc();
+    dscene->attributes_normal.tag_realloc();
+  }
+  else if (device_update_flags & ATTR_NORMAL_MODIFIED) {
+    dscene->attributes_normal.tag_modified();
+  }
+
   if (device_update_flags & DEVICE_MESH_DATA_MODIFIED) {
     /* if anything else than vertices or shaders are modified, we would need to reallocate, so
      * these are the only arrays that can be updated */
     dscene->tri_verts.tag_modified();
-    dscene->tri_vnormal.tag_modified();
     dscene->tri_shader.tag_modified();
   }
 
@@ -679,7 +695,7 @@ void GeometryManager::device_update_volume_images(Device *device, Scene *scene, 
     }
 
     for (Attribute &attr : geom->attributes.attributes) {
-      if (attr.element != ATTR_ELEMENT_VOXEL) {
+      if (!(attr.element & ATTR_ELEMENT_VOXEL)) {
         continue;
       }
 
@@ -711,7 +727,7 @@ void GeometryManager::device_update(Device *device,
   LOG_INFO << "Total " << scene->geometry.size() << " meshes.";
 
   bool true_displacement_used = false;
-  bool curve_shadow_transparency_used = false;
+  bool curve_need_update_shadow_transparency = false;
   size_t num_tessellation = 0;
 
   {
@@ -747,16 +763,26 @@ void GeometryManager::device_update(Device *device,
             true_displacement_used = true;
           }
         }
-        else if (geom->is_hair()) {
-          Hair *hair = static_cast<Hair *>(geom);
-          if (hair->need_shadow_transparency()) {
-            curve_shadow_transparency_used = true;
-          }
-        }
+      }
 
-        if (progress.get_cancel()) {
-          return;
+      if (progress.get_cancel()) {
+        return;
+      }
+    }
+
+    for (Geometry *geom : scene->geometry) {
+      if (geom->is_hair()) {
+        Hair *hair = static_cast<Hair *>(geom);
+        if ((geom->is_modified() && hair->need_shadow_transparency()) ||
+            hair->need_update_shadow_transparency())
+        {
+          curve_need_update_shadow_transparency = true;
+          break;
         }
+      }
+
+      if (progress.get_cancel()) {
+        return;
       }
     }
   }
@@ -836,7 +862,7 @@ void GeometryManager::device_update(Device *device,
   }
 
   /* Update images needed for true displacement. */
-  if (true_displacement_used || curve_shadow_transparency_used) {
+  if (true_displacement_used || curve_need_update_shadow_transparency) {
     const scoped_callback_timer timer([scene](double time) {
       if (scene->update_stats) {
         scene->update_stats->geometry.times.add_entry(
@@ -853,7 +879,7 @@ void GeometryManager::device_update(Device *device,
   const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
       scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
   geom_calc_offset(scene, bvh_layout);
-  if (true_displacement_used || curve_shadow_transparency_used) {
+  if (true_displacement_used || curve_need_update_shadow_transparency) {
     const scoped_callback_timer timer([scene](double time) {
       if (scene->update_stats) {
         scene->update_stats->geometry.times.add_entry(
@@ -896,10 +922,8 @@ void GeometryManager::device_update(Device *device,
     }
   }
 
-  /* Update displacement and hair shadow transparency. */
+  /* Update displacement. */
   bool displacement_done = false;
-  bool curve_shadow_transparency_done = false;
-
   {
     /* Copy constant data needed by shader evaluation. */
     device->const_copy_to("data", &dscene->data, sizeof(dscene->data));
@@ -916,13 +940,36 @@ void GeometryManager::device_update(Device *device,
           Mesh *mesh = static_cast<Mesh *>(geom);
           if (displace(device, scene, mesh, progress)) {
             displacement_done = true;
+            need_flags_update = true;
           }
         }
-        else if (geom->is_hair()) {
-          Hair *hair = static_cast<Hair *>(geom);
-          if (hair->update_shadow_transparency(device, scene, progress)) {
-            curve_shadow_transparency_done = true;
-          }
+      }
+
+      if (progress.get_cancel()) {
+        return;
+      }
+    }
+  }
+
+  if (progress.get_cancel()) {
+    return;
+  }
+
+  /* Update hair shadow transparency. */
+  bool curve_shadow_transparency_done = false;
+  {
+    const scoped_callback_timer timer([scene](double time) {
+      if (scene->update_stats) {
+        scene->update_stats->geometry.times.add_entry(
+            {"device_update (curve shadow transparency)", time});
+      }
+    });
+
+    for (Geometry *geom : scene->geometry) {
+      if (geom->is_hair()) {
+        Hair *hair = static_cast<Hair *>(geom);
+        if (hair->update_shadow_transparency(device, scene, progress)) {
+          curve_shadow_transparency_done = true;
         }
       }
 
@@ -949,41 +996,6 @@ void GeometryManager::device_update(Device *device,
     device_update_attributes(device, dscene, scene, progress);
     if (progress.get_cancel()) {
       return;
-    }
-  }
-
-  /* Determine which SDFGeometry is the "active atlas" BEFORE the BVH build,
-   * because the OptiX TLAS code in device_impl.cpp uses is_active_atlas to
-   * find the correct SDFGeometry for building the SDF BLAS.
-   *
-   * Selection priority:
-   *  1. Freshly synced (need_update_rebuild): has the most recent atlas data.
-   *  2. Previously active (is_active_atlas): keeps selection stable when no
-   *     SDF changed but device_update runs due to other object changes.
-   *  3. First non-empty fallback: initial render or after atlas removal. */
-  SDFGeometry *first_sdf = nullptr;
-  bool found_rebuild = false;
-  for (Geometry *geom : scene->geometry) {
-    if (geom->is_sdf()) {
-      SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-      bool has_data = !sdf->indirection_data.empty() ||
-                      (sdf->use_instanced && !sdf->shape_atlas_data.empty());
-      if (has_data) {
-        if (sdf->need_update_rebuild) {
-          first_sdf = sdf;
-          found_rebuild = true;
-        }
-        else if (!found_rebuild) {
-          if (first_sdf == nullptr || sdf->is_active_atlas) {
-            first_sdf = sdf;
-          }
-        }
-      }
-    }
-  }
-  for (Geometry *geom : scene->geometry) {
-    if (geom->is_sdf()) {
-      static_cast<SDFGeometry *>(geom)->is_active_atlas = (geom == first_sdf);
     }
   }
 
@@ -1028,6 +1040,7 @@ void GeometryManager::device_update(Device *device,
     shader->need_update_uvs = false;
     shader->need_update_attribute = false;
     shader->need_update_displacement = false;
+    shader->need_update_shadow_transparency = false;
     shader->shadow_transparency_needs_realloc = false;
   }
 
@@ -1080,291 +1093,11 @@ void GeometryManager::device_update(Device *device,
     }
   }
 
-  /* Upload SDF data to device.
-   *
-   * All SDF Blender objects are baked into a single shared atlas by sync_sdf().
-   * Each SDFGeometry instance contains the same combined atlas, so we only
-   * upload one as a single KernelSDF entry (num_sdfs=1).
-   * first_sdf and is_active_atlas were determined above (before BVH build). */
-  {
-    if (first_sdf != nullptr && first_sdf->use_instanced) {
-      /* ---- Per-shape instanced mode (TLAS/BLAS) ---- */
-      const int num_shapes = (int)first_sdf->shapes.size();
-      const int num_instances = (int)first_sdf->instances.size();
-
-      /* Find the Cycles object for sd->object. */
-      int sdf_object_id = 0;
-      for (size_t oi = 0; oi < scene->objects.size(); oi++) {
-        if (scene->objects[oi]->get_geometry() == first_sdf) {
-          sdf_object_id = (int)oi;
-          break;
-        }
-      }
-
-      /* Upload per-shape metadata. */
-      dscene->sdf_shape_objects.alloc(num_shapes);
-      KernelSDFShape *shape_data = dscene->sdf_shape_objects.data();
-      for (int si = 0; si < num_shapes; si++) {
-        const SDFGeometry::ShapeInfo &s = first_sdf->shapes[si];
-        KernelSDFShape &ks = shape_data[si];
-        ks.indirection_offset = s.indirection_offset;
-        ks.atlas_offset = s.atlas_offset;
-        ks.brick_map_offset = s.brick_map_offset;
-        ks.active_bricks = s.active_bricks;
-        ks.grid_res_x = s.grid_res.x;
-        ks.grid_res_y = s.grid_res.y;
-        ks.grid_res_z = s.grid_res.z;
-        ks.bricks_per_axis = s.bricks_per_axis;
-        ks.voxel_size = s.voxel_size;
-        ks.origin.x = s.origin.x;
-        ks.origin.y = s.origin.y;
-        ks.origin.z = s.origin.z;
-      }
-
-      /* Upload per-instance metadata.
-       * Re-resolve shader IDs here because sync_sdf caches them during
-       * the Blender sync phase, BEFORE shader_manager->device_update_pre()
-       * reassigns shader->id values. Using the cached IDs would point to
-       * the wrong shader (e.g. background instead of default_surface). */
-      dscene->sdf_shape_instances.alloc(num_instances);
-      KernelSDFInstance *inst_data = dscene->sdf_shape_instances.data();
-      for (int ii = 0; ii < num_instances; ii++) {
-        const SDFGeometry::InstanceInfo &inst = first_sdf->instances[ii];
-        KernelSDFInstance &ki = inst_data[ii];
-        ki.shape_id = inst.shape_id;
-        ki.shader_id = scene->shader_manager->get_shader_id(
-            inst.shader ? inst.shader : scene->default_surface);
-        ki.object_id = sdf_object_id;
-        ki.pad = 0;
-        ki.world_to_local = inst.world_to_local;
-        ki.local_to_world = inst.local_to_world;
-      }
-
-      /* Upload concatenated per-shape data arrays. */
-      if (!first_sdf->shape_indirection_data.empty()) {
-        dscene->sdf_shape_indirection.alloc(first_sdf->shape_indirection_data.size());
-        memcpy(dscene->sdf_shape_indirection.data(),
-               first_sdf->shape_indirection_data.data(),
-               first_sdf->shape_indirection_data.size() * sizeof(int));
-        dscene->sdf_shape_indirection.copy_to_device();
-      }
-
-      if (!first_sdf->shape_atlas_data.empty()) {
-        dscene->sdf_shape_atlas.alloc(first_sdf->shape_atlas_data.size());
-        memcpy(dscene->sdf_shape_atlas.data(),
-               first_sdf->shape_atlas_data.data(),
-               first_sdf->shape_atlas_data.size() * sizeof(uint16_t));
-        dscene->sdf_shape_atlas.copy_to_device();
-      }
-
-      if (!first_sdf->shape_brick_map_data.empty()) {
-        dscene->sdf_shape_brick_map.alloc(first_sdf->shape_brick_map_data.size());
-        memcpy(dscene->sdf_shape_brick_map.data(),
-               first_sdf->shape_brick_map_data.data(),
-               first_sdf->shape_brick_map_data.size() * sizeof(int4));
-        dscene->sdf_shape_brick_map.copy_to_device();
-      }
-
-      dscene->sdf_shape_objects.copy_to_device();
-      dscene->sdf_shape_instances.copy_to_device();
-
-      dscene->data.num_sdf_shapes = num_shapes;
-      dscene->data.num_sdf_instances = num_instances;
-
-      /* Clear world-space arrays. */
-      dscene->sdf_objects.free();
-      dscene->sdf_shader_map.free();
-      dscene->sdf_indirection.free();
-      dscene->sdf_atlas.free();
-      dscene->sdf_matid.free();
-      dscene->sdf_blend_id.free();
-      dscene->sdf_blend_factor.free();
-      dscene->sdf_brick_map.free();
-      dscene->data.num_sdfs = 0;
-      dscene->data.num_sdf_bricks = 0;
-    }
-    else if (first_sdf != nullptr && !first_sdf->indirection_data.empty()) {
-      /* ---- World-space atlas mode (original) ---- */
-      const int num_sdfs = 1;
-
-      dscene->sdf_objects.alloc(num_sdfs);
-      KernelSDF *sdf_data = dscene->sdf_objects.data();
-
-      dscene->sdf_shader_map.alloc(first_sdf->num_objects);
-      int *shader_map = dscene->sdf_shader_map.data();
-
-      dscene->sdf_indirection.alloc(first_sdf->indirection_data.size());
-      int *indirection_ptr = dscene->sdf_indirection.data();
-
-      dscene->sdf_atlas.alloc(first_sdf->atlas_data.size());
-      float4 *atlas_ptr = dscene->sdf_atlas.data();
-
-      dscene->sdf_matid.alloc(first_sdf->matid_data.size());
-      int *matid_ptr = dscene->sdf_matid.data();
-
-      /* Blend data for material mixing. */
-      const bool has_blend = !first_sdf->blend_id_data.empty();
-      if (has_blend) {
-        dscene->sdf_blend_id.alloc(first_sdf->blend_id_data.size());
-        dscene->sdf_blend_factor.alloc(first_sdf->blend_factor_data.size());
-      }
-
-      int sdf_object_id = 0;
-      for (size_t oi = 0; oi < scene->objects.size(); oi++) {
-        if (scene->objects[oi]->get_geometry() == first_sdf) {
-          sdf_object_id = (int)oi;
-          break;
-        }
-      }
-
-      KernelSDF &ksdf = sdf_data[0];
-      ksdf.indirection_offset = 0;
-      ksdf.atlas_offset = 0;
-      ksdf.matid_offset = 0;
-      ksdf.grid_res = first_sdf->grid_res;
-      ksdf.bricks_per_axis = first_sdf->bricks_per_axis;
-      ksdf.num_objects = first_sdf->num_objects;
-      ksdf.shader_offset = 0;
-      ksdf.object_id = sdf_object_id;
-      ksdf.blend_offset = has_blend ? 0 : -1;
-      ksdf.pad1 = 0;
-      ksdf.pad2 = 0;
-      ksdf.pad3 = 0;
-      ksdf.voxel_size = first_sdf->voxel_size;
-      ksdf.origin.x = first_sdf->origin.x;
-      ksdf.origin.y = first_sdf->origin.y;
-      ksdf.origin.z = first_sdf->origin.z;
-
-      memcpy(indirection_ptr,
-             first_sdf->indirection_data.data(),
-             first_sdf->indirection_data.size() * sizeof(int));
-
-      memcpy(atlas_ptr,
-             first_sdf->atlas_data.data(),
-             first_sdf->atlas_data.size() * sizeof(float4));
-
-      memcpy(matid_ptr,
-             first_sdf->matid_data.data(),
-             first_sdf->matid_data.size() * sizeof(int));
-
-      if (has_blend) {
-        memcpy(dscene->sdf_blend_id.data(),
-               first_sdf->blend_id_data.data(),
-               first_sdf->blend_id_data.size() * sizeof(int));
-        memcpy(dscene->sdf_blend_factor.data(),
-               first_sdf->blend_factor_data.data(),
-               first_sdf->blend_factor_data.size() * sizeof(float));
-      }
-
-      /* Re-resolve shader IDs at device upload time (sync_sdf caches them
-       * before shader_manager reassigns IDs, so cached values may be stale). */
-      for (int i = 0; i < first_sdf->num_objects; i++) {
-        if (i < (int)first_sdf->object_shaders.size() && first_sdf->object_shaders[i]) {
-          shader_map[i] = scene->shader_manager->get_shader_id(first_sdf->object_shaders[i]);
-        }
-        else if (!first_sdf->get_used_shaders().empty()) {
-          Shader *shader = static_cast<Shader *>(first_sdf->get_used_shaders()[0]);
-          shader_map[i] = scene->shader_manager->get_shader_id(shader);
-        }
-        else {
-          shader_map[i] = scene->shader_manager->get_shader_id(scene->default_surface);
-        }
-      }
-
-      /* Build per-brick map for hardware BVH. */
-      {
-        const int gr = first_sdf->grid_res;
-        vector<int4> brick_entries;
-        brick_entries.reserve(gr * gr * gr / 4);
-
-        for (int bz = 0; bz < gr; bz++) {
-          for (int by = 0; by < gr; by++) {
-            for (int bx = 0; bx < gr; bx++) {
-              const int idx = bz * gr * gr + by * gr + bx;
-              const int slot = first_sdf->indirection_data[idx];
-              if (slot >= 0 || slot == -2) {
-                const int brick_linear = bx + by * gr + bz * gr * gr;
-                brick_entries.push_back(make_int4(brick_linear, slot, 0, 0));
-              }
-            }
-          }
-        }
-
-        if (!brick_entries.empty()) {
-          dscene->sdf_brick_map.alloc(brick_entries.size());
-          memcpy(dscene->sdf_brick_map.data(),
-                 brick_entries.data(),
-                 brick_entries.size() * sizeof(int4));
-          dscene->sdf_brick_map.copy_to_device();
-          dscene->data.num_sdf_bricks = (int)brick_entries.size();
-        }
-        else {
-          dscene->sdf_brick_map.free();
-          dscene->data.num_sdf_bricks = 0;
-        }
-      }
-
-      dscene->sdf_objects.copy_to_device();
-      dscene->sdf_shader_map.copy_to_device();
-      dscene->sdf_indirection.copy_to_device();
-      dscene->sdf_atlas.copy_to_device();
-      dscene->sdf_matid.copy_to_device();
-      if (has_blend) {
-        dscene->sdf_blend_id.copy_to_device();
-        dscene->sdf_blend_factor.copy_to_device();
-      }
-      else {
-        dscene->sdf_blend_id.free();
-        dscene->sdf_blend_factor.free();
-      }
-
-      dscene->data.num_sdfs = num_sdfs;
-
-      /* Clear instanced arrays. */
-      dscene->sdf_shape_objects.free();
-      dscene->sdf_shape_instances.free();
-      dscene->sdf_shape_indirection.free();
-      dscene->sdf_shape_atlas.free();
-      dscene->sdf_shape_brick_map.free();
-      dscene->data.num_sdf_shapes = 0;
-      dscene->data.num_sdf_instances = 0;
-    }
-    else {
-      dscene->sdf_objects.free();
-      dscene->sdf_shader_map.free();
-      dscene->sdf_indirection.free();
-      dscene->sdf_atlas.free();
-      dscene->sdf_matid.free();
-      dscene->sdf_blend_id.free();
-      dscene->sdf_blend_factor.free();
-      dscene->sdf_brick_map.free();
-      dscene->sdf_shape_objects.free();
-      dscene->sdf_shape_instances.free();
-      dscene->sdf_shape_indirection.free();
-      dscene->sdf_shape_atlas.free();
-      dscene->sdf_shape_brick_map.free();
-
-      dscene->data.num_sdfs = 0;
-      dscene->data.num_sdf_bricks = 0;
-      dscene->data.num_sdf_shapes = 0;
-      dscene->data.num_sdf_instances = 0;
-    }
-  }
-
   /* unset flags */
 
   for (Geometry *geom : scene->geometry) {
     geom->clear_modified();
     geom->attributes.clear_modified();
-
-    /* SDF geometries don't build individual BVHs (need_build_bvh returns false),
-     * so compute_bvh() is never pushed for them when only need_update_rebuild is
-     * set (not is_modified via socket changes). Clear the flag explicitly here
-     * to prevent stale flags from causing wrong first_sdf selection on subsequent
-     * frames. Non-SDF types are left alone — their flag is managed by compute_bvh(). */
-    if (geom->is_sdf()) {
-      geom->need_update_rebuild = false;
-    }
 
     if (geom->is_mesh()) {
       Mesh *mesh = static_cast<Mesh *>(geom);
@@ -1385,7 +1118,6 @@ void GeometryManager::device_update(Device *device,
   dscene->tri_verts.clear_modified();
   dscene->tri_shader.clear_modified();
   dscene->tri_vindex.clear_modified();
-  dscene->tri_vnormal.clear_modified();
   dscene->curves.clear_modified();
   dscene->curve_keys.clear_modified();
   dscene->curve_segments.clear_modified();
@@ -1397,6 +1129,7 @@ void GeometryManager::device_update(Device *device,
   dscene->attributes_float3.clear_modified();
   dscene->attributes_float4.clear_modified();
   dscene->attributes_uchar4.clear_modified();
+  dscene->attributes_normal.clear_modified();
 }
 
 void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool force_free)
@@ -1411,7 +1144,6 @@ void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool forc
   dscene->prim_time.free_if_need_realloc(force_free);
   dscene->tri_verts.free_if_need_realloc(force_free);
   dscene->tri_shader.free_if_need_realloc(force_free);
-  dscene->tri_vnormal.free_if_need_realloc(force_free);
   dscene->tri_vindex.free_if_need_realloc(force_free);
   dscene->curves.free_if_need_realloc(force_free);
   dscene->curve_keys.free_if_need_realloc(force_free);
@@ -1424,6 +1156,7 @@ void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool forc
   dscene->attributes_float3.free_if_need_realloc(force_free);
   dscene->attributes_float4.free_if_need_realloc(force_free);
   dscene->attributes_uchar4.free_if_need_realloc(force_free);
+  dscene->attributes_normal.free_if_need_realloc(force_free);
 
   /* Signal for shaders like displacement not to do ray tracing. */
   dscene->data.bvh.bvh_layout = BVH_LAYOUT_NONE;

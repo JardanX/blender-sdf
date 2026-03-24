@@ -15,8 +15,6 @@
 #include "BLI_offset_indices.hh"
 #include "BLI_task.hh"
 
-#include "DNA_customdata_types.h"
-
 #include "GEO_interpolate_curves.hh"
 #include "GEO_resample_curves.hh"
 
@@ -233,17 +231,17 @@ void sample_curve_padded(const bke::CurvesGeometry &curves,
  * Return true if the attribute should be copied/interpolated to the result curves.
  * Don't output attributes that correspond to curve types that have no curves in the result.
  */
-static bool interpolate_attribute_to_curves(const StringRef attribute_id,
+static bool interpolate_attribute_to_curves(const StringRef name,
                                             const std::array<int, CURVE_TYPES_NUM> &type_counts)
 {
-  if (bke::attribute_name_is_anonymous(attribute_id)) {
+  if (bke::attribute_name_is_anonymous(name)) {
     return true;
   }
   /* Bezier handles and types are interpolated manually. */
-  if (ELEM(attribute_id, "handle_type_left", "handle_type_right", "handle_left", "handle_right")) {
+  if (ELEM(name, "handle_type_left", "handle_type_right", "handle_left", "handle_right")) {
     return false;
   }
-  if (ELEM(attribute_id, "nurbs_weight")) {
+  if (ELEM(name, "nurbs_weight")) {
     return type_counts[CURVE_TYPE_NURBS] != 0;
   }
   return true;
@@ -252,7 +250,7 @@ static bool interpolate_attribute_to_curves(const StringRef attribute_id,
 /**
  * Return true if the attribute should be copied to poly curves.
  */
-static bool interpolate_attribute_to_poly_curve(const StringRef attribute_id)
+static bool interpolate_attribute_to_poly_curve(const StringRef name)
 {
   static const Set<StringRef> no_interpolation{{
       "handle_type_left",
@@ -261,7 +259,7 @@ static bool interpolate_attribute_to_poly_curve(const StringRef attribute_id)
       "handle_left",
       "nurbs_weight",
   }};
-  return !no_interpolation.contains(attribute_id);
+  return !no_interpolation.contains(name);
 }
 
 struct AttributesForInterpolation {
@@ -406,8 +404,7 @@ static void sample_curve_attribute(const bke::CurvesGeometry &src_curves,
   BLI_assert(dst_sample_factors.size() == dst_points_num);
 #endif
 
-  bke::attribute_math::convert_to_static_type(type, [&](auto dummy) {
-    using T = decltype(dummy);
+  bke::attribute_math::to_static_type(type, [&]<typename T>() {
     Span<T> src = src_data.typed<T>();
     MutableSpan<T> dst = dst_data.typed<T>();
 
@@ -663,8 +660,8 @@ static void sample_bezier_curve_positions_handles(const bool cyclic,
                                                   const Span<float3> src_pos,
                                                   const Span<float3> src_handle_left,
                                                   const Span<float3> src_handle_right,
-                                                  const VArray<int8_t> src_types_left,
-                                                  const VArray<int8_t> src_types_right,
+                                                  const Span<int8_t> src_types_left,
+                                                  const Span<int8_t> src_types_right,
                                                   const Span<int> dst_indices,
                                                   const Span<float> dst_factors,
                                                   const IndexRange dst_points,
@@ -763,8 +760,8 @@ static void sample_curve_positions_and_handles(const bke::CurvesGeometry &src_cu
   const VArray<bool> src_cyclic = src_curves.cyclic();
   const std::optional<Span<float3>> src_handle_left = src_curves.handle_positions_left();
   const std::optional<Span<float3>> src_handle_right = src_curves.handle_positions_right();
-  const VArray<int8_t> src_types_left = src_curves.handle_types_left();
-  const VArray<int8_t> src_types_right = src_curves.handle_types_right();
+  const VArraySpan<int8_t> src_handle_types_left = src_curves.handle_types_left();
+  const VArraySpan<int8_t> src_handle_types_right = src_curves.handle_types_right();
 
 #ifndef NDEBUG
   const int dst_points_num = dst_positions.size();
@@ -786,6 +783,8 @@ static void sample_curve_positions_and_handles(const bke::CurvesGeometry &src_cu
     const IndexRange dst_points = dst_points_by_curve[i_dst_curve];
 
     const Span<float3> src_pos = src_positions.slice(src_points);
+    const Span<int8_t> src_types_left = src_handle_types_left.slice(src_points);
+    const Span<int8_t> src_types_right = src_handle_types_right.slice(src_points);
     const Span<int> dst_indices = dst_sample_indices.slice(dst_points);
     const Span<float> dst_factors = dst_sample_factors.slice(dst_points);
 
@@ -879,8 +878,7 @@ static void mix_arrays(const GSpan src_from,
                        const IndexMask &selection,
                        const GMutableSpan dst)
 {
-  bke::attribute_math::convert_to_static_type(dst.type(), [&](auto dummy) {
-    using T = decltype(dummy);
+  bke::attribute_math::to_static_type(dst.type(), [&]<typename T>() {
     const Span<T> from = src_from.typed<T>();
     const Span<T> to = src_to.typed<T>();
     const MutableSpan<T> dst_typed = dst.typed<T>();
@@ -908,8 +906,7 @@ static void mix_arrays(const GSpan src_from,
 {
   group_selection.foreach_index(GrainSize(32), [&](const int curve) {
     const IndexRange range = groups[curve];
-    bke::attribute_math::convert_to_static_type(dst.type(), [&](auto dummy) {
-      using T = decltype(dummy);
+    bke::attribute_math::to_static_type(dst.type(), [&]<typename T>() {
       const Span<T> from = src_from.typed<T>();
       const Span<T> to = src_to.typed<T>();
       const MutableSpan<T> dst_typed = dst.typed<T>();
@@ -1217,10 +1214,10 @@ void interpolate_curves_with_samples(const CurvesGeometry &from_curves,
 
     /* Only mix "safe" attribute types for now. Other types (int, bool, etc.) are just copied from
      * the first curve of each pair. */
-    const bool can_mix_attribute = ELEM(bke::cpp_type_to_custom_data_type(dst.type()),
-                                        CD_PROP_FLOAT,
-                                        CD_PROP_FLOAT2,
-                                        CD_PROP_FLOAT3);
+    const bool can_mix_attribute = ELEM(bke::cpp_type_to_attribute_type(dst.type()),
+                                        bke::AttrType::Float,
+                                        bke::AttrType::Float2,
+                                        bke::AttrType::Float3);
     if (can_mix_attribute && !src_from.is_empty() && !src_to.is_empty()) {
       array_utils::copy(GVArray::from_span(src_from), from_curve_mask, dst);
       array_utils::copy(GVArray::from_span(src_to), to_curve_mask, dst);

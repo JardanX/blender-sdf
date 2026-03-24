@@ -14,6 +14,8 @@
 #include "vk_image_view.hh"
 #include "vk_memory.hh"
 
+#include "BLI_enum_flags.hh"
+
 namespace blender::gpu {
 
 class VKSampler;
@@ -26,11 +28,13 @@ enum class VKImageViewFlags {
   DEFAULT = 0,
   NO_SWIZZLING = 1 << 0,
 };
-ENUM_OPERATORS(VKImageViewFlags, VKImageViewFlags::NO_SWIZZLING)
+ENUM_OPERATORS(VKImageViewFlags)
 
 class VKTexture : public Texture {
+  friend class VKDescriptorSetTracker;
   friend class VKDescriptorSetUpdator;
   friend class VKContext;
+  friend class VKTexturePool;
 
   /**
    * Texture format how the texture is stored on the device.
@@ -73,6 +77,15 @@ class VKTexture : public Texture {
                                       false,
                                       VKImageViewArrayed::DONT_CARE};
 
+  /**
+   * \brief Has this texture data.
+   *
+   * Is used to decide if host image copy can be performed to overwrite the data outside the
+   * render-graph.
+   */
+  bool has_data_ = false;
+  bool allow_host_image_copy_ = false;
+
  public:
   VKTexture(const char *name) : Texture(name) {}
 
@@ -96,10 +109,15 @@ class VKTexture : public Texture {
                   int extent[3],
                   eGPUDataFormat format,
                   const void *data,
-                  VKPixelBuffer *pixel_buffer);
+                  VKPixelBuffer *pixel_buffer,
+                  const uint unpack_row_length = 0);
 
-  void update_sub(
-      int mip, int offset[3], int extent[3], eGPUDataFormat format, const void *data) override;
+  void update_sub(int mip,
+                  int offset[3],
+                  int extent[3],
+                  eGPUDataFormat format,
+                  const void *data,
+                  const uint unpack_row_length) override;
   void update_sub(int offset[3],
                   int extent[3],
                   eGPUDataFormat format,

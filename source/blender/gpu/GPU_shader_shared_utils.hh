@@ -31,11 +31,13 @@
 #pragma once
 
 #ifdef GLSL_CPP_STUBS
+#  include "gpu_shader_compat.hh"
+
 /* Silence macros when compiling for shaders. */
 #  define BLI_STATIC_ASSERT(cond, msg)
 #  define BLI_STATIC_ASSERT_ALIGN(type_, align_)
 #  define BLI_STATIC_ASSERT_SIZE(type_, size_)
-#  define ENUM_OPERATORS(a, b)
+#  define ENUM_OPERATORS(a)
 #  define UNUSED_VARS(a) (void)a
 /* Math function renaming. */
 #  define cosf cos
@@ -50,12 +52,13 @@
 #  define expf exp
 
 #elif defined(GPU_SHADER)
+#  include "gpu_shader_compat.hh"
+
 /* Silence macros when compiling for shaders. */
 #  define BLI_STATIC_ASSERT(cond, msg)
 #  define BLI_STATIC_ASSERT_ALIGN(type_, align_)
 #  define BLI_STATIC_ASSERT_SIZE(type_, size_)
-#  define ATTR_FALLTHROUGH
-#  define ENUM_OPERATORS(a, b)
+#  define ENUM_OPERATORS(a)
 #  define UNUSED_VARS(a)
 /* Math function renaming. */
 #  define cosf cos
@@ -73,6 +76,7 @@
 #  ifndef GPU_SHADER /* Avoid parsing this into shader code. */
 
 #    include "BLI_assert.h"
+#    include "BLI_enum_flags.hh"
 #    include "BLI_sys_types.h"
 
 #    include <math.h>
@@ -110,6 +114,32 @@ using blender::float4x2;
 using blender::float2x4;
 using blender::float3x4;
 using blender::float4x4;
+
+/**
+ * Wrapper type for members of unions in host shared structure.
+ * Passthrough implementation when compiled with host code.
+ * See gpu_shader_compat_cxx.hh for the C++ stub implementation.
+ * This implementation needs to have the correct base type and can safely cast to it.
+ */
+template<typename T> struct union_t {
+  T data;
+
+  const T &operator()() const
+  {
+    return *reinterpret_cast<const T *>(this);
+  }
+
+  T &operator()()
+  {
+    return *reinterpret_cast<T *>(this);
+  }
+};
+
+/* Mute the following attributes. Avoid warning about unknown attribute.
+ * These are parsed by our shader translation tool. */
+
+/* To be used on struct. Means the layout is to be used with uniform or storage buffers. */
+#    define host_shared
 
 #  endif
 

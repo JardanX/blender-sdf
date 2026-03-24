@@ -11,7 +11,9 @@
 #  include "gpu_shader_compat.hh"
 
 #  include "GPU_shader_shared.hh"
+#endif
 
+#ifdef GLSL_CPP_STUBS
 #  define USE_WORLD_CLIP_PLANES
 #endif
 
@@ -19,6 +21,7 @@
 
 GPU_SHADER_CREATE_INFO(gpu_clip_planes)
 UNIFORM_BUF_FREQ(1, GPUClipPlanes, clipPlanes, PASS)
+BUILTINS(BuiltinBits::CLIP_DISTANCES)
 TYPEDEF_SOURCE("GPU_shader_shared.hh")
 DEFINE("USE_WORLD_CLIP_PLANES")
 GPU_SHADER_CREATE_END()

@@ -16,8 +16,8 @@
 #  include "scene/object.h"
 #  include "scene/pointcloud.h"
 #  include "scene/scene.h"
-#  include "scene/sdf.h"
 
+#  include "util/algorithm.h"
 #  include "util/debug.h"
 #  include "util/log.h"
 #  include "util/path.h"
@@ -106,7 +106,7 @@ OptiXDevice::~OptiXDevice()
   free_bvh_memory_delayed();
 
   sbt_data.free();
-  texture_info.free();
+  image_info.free();
   launch_params.free();
 
   /* Unload modules. */
@@ -353,8 +353,6 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
   if (kernel_features & (KERNEL_FEATURE_HAIR_RIBBON | KERNEL_FEATURE_POINTCLOUD)) {
     pipeline_options.usesPrimitiveTypeFlags |= OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
   }
-  /* SDF objects also use custom primitives for ray marching intersection. */
-  pipeline_options.usesPrimitiveTypeFlags |= OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
 
   /* Keep track of whether motion blur is enabled, so to enable/disable motion in BVH builds
    * This is necessary since objects may be reported to have motion if the Vector pass is
@@ -370,7 +368,7 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
     string ptx_data;
     if (use_adaptive_compilation() || path_file_size(ptx_filename) == -1) {
       string cflags = compile_kernel_get_common_cflags(kernel_features);
-      ptx_filename = compile_kernel(cflags, ("kernel" + suffix).c_str(), "optix", true);
+      ptx_filename = compile_kernel(cflags, ("kernel" + suffix).c_str(), true);
     }
     if (ptx_filename.empty() || !path_read_compressed_text(ptx_filename, ptx_data)) {
       set_error(string_printf("Failed to load OptiX kernel from '%s'", ptx_filename.c_str()));
@@ -521,20 +519,6 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
     group_descs[PG_HITL_POINTCLOUD] = ignore_desc;
   }
 
-  /* SDF custom intersection. */
-  {
-    group_descs[PG_HITD_SDF] = group_descs[PG_HITD];
-    group_descs[PG_HITD_SDF].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    group_descs[PG_HITD_SDF].hitgroup.moduleIS = optix_module;
-    group_descs[PG_HITD_SDF].hitgroup.entryFunctionNameIS = "__intersection__sdf";
-    group_descs[PG_HITS_SDF] = group_descs[PG_HITS];
-    group_descs[PG_HITS_SDF].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    group_descs[PG_HITS_SDF].hitgroup.moduleIS = optix_module;
-    group_descs[PG_HITS_SDF].hitgroup.entryFunctionNameIS = "__intersection__sdf";
-    group_descs[PG_HITV_SDF] = ignore_desc;
-    group_descs[PG_HITL_SDF] = ignore_desc;
-  }
-
   /* Add hit group for local intersections. */
   if (kernel_features & (KERNEL_FEATURE_SUBSURFACE | KERNEL_FEATURE_NODE_RAYTRACE)) {
     group_descs[PG_HITL].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
@@ -575,10 +559,14 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
     group_descs[PG_RGEN_SHADE_BACKGROUND].raygen.module = optix_module;
     group_descs[PG_RGEN_SHADE_BACKGROUND].raygen.entryFunctionName =
         "__raygen__kernel_optix_integrator_shade_background";
-    group_descs[PG_RGEN_SHADE_LIGHT].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-    group_descs[PG_RGEN_SHADE_LIGHT].raygen.module = optix_module;
-    group_descs[PG_RGEN_SHADE_LIGHT].raygen.entryFunctionName =
-        "__raygen__kernel_optix_integrator_shade_light";
+    group_descs[PG_RGEN_SHADE_LIGHT_NEE].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    group_descs[PG_RGEN_SHADE_LIGHT_NEE].raygen.module = optix_module;
+    group_descs[PG_RGEN_SHADE_LIGHT_NEE].raygen.entryFunctionName =
+        "__raygen__kernel_optix_integrator_shade_light_nee";
+    group_descs[PG_RGEN_SHADE_LIGHT_FORWARD].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    group_descs[PG_RGEN_SHADE_LIGHT_FORWARD].raygen.module = optix_module;
+    group_descs[PG_RGEN_SHADE_LIGHT_FORWARD].raygen.entryFunctionName =
+        "__raygen__kernel_optix_integrator_shade_light_forward";
     group_descs[PG_RGEN_SHADE_SURFACE].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     group_descs[PG_RGEN_SHADE_SURFACE].raygen.module = optix_module;
     group_descs[PG_RGEN_SHADE_SURFACE].raygen.entryFunctionName =
@@ -689,10 +677,6 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
         trace_css, stack_size[PG_HITD_POINTCLOUD].cssIS + stack_size[PG_HITD_POINTCLOUD].cssAH);
     trace_css = std::max(
         trace_css, stack_size[PG_HITS_POINTCLOUD].cssIS + stack_size[PG_HITS_POINTCLOUD].cssAH);
-    trace_css = std::max(
-        trace_css, stack_size[PG_HITD_SDF].cssIS + stack_size[PG_HITD_SDF].cssAH);
-    trace_css = std::max(
-        trace_css, stack_size[PG_HITS_SDF].cssIS + stack_size[PG_HITS_SDF].cssAH);
 
     return stack_size;
   };
@@ -758,11 +742,6 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
       pipeline_groups.push_back(groups[PG_HITV_POINTCLOUD]);
       pipeline_groups.push_back(groups[PG_HITL_POINTCLOUD]);
     }
-    /* SDF custom intersection groups. */
-    pipeline_groups.push_back(groups[PG_HITD_SDF]);
-    pipeline_groups.push_back(groups[PG_HITS_SDF]);
-    pipeline_groups.push_back(groups[PG_HITV_SDF]);
-    pipeline_groups.push_back(groups[PG_HITL_SDF]);
 
     optix_assert(optixPipelineCreate(context,
                                      &pipeline_options,
@@ -821,9 +800,6 @@ bool OptiXDevice::load_kernels(const uint kernel_features)
       pipeline_groups.push_back(groups[PG_HITD_POINTCLOUD]);
       pipeline_groups.push_back(groups[PG_HITS_POINTCLOUD]);
     }
-    /* SDF custom intersection groups. */
-    pipeline_groups.push_back(groups[PG_HITD_SDF]);
-    pipeline_groups.push_back(groups[PG_HITS_SDF]);
 
     optix_assert(optixPipelineCreate(context,
                                      &pipeline_options,
@@ -1081,7 +1057,8 @@ bool OptiXDevice::load_osl_kernels()
     vector<OptixProgramGroup> pipeline_groups;
     pipeline_groups.reserve(NUM_PROGRAM_GROUPS);
     pipeline_groups.push_back(groups[PG_RGEN_SHADE_BACKGROUND]);
-    pipeline_groups.push_back(groups[PG_RGEN_SHADE_LIGHT]);
+    pipeline_groups.push_back(groups[PG_RGEN_SHADE_LIGHT_NEE]);
+    pipeline_groups.push_back(groups[PG_RGEN_SHADE_LIGHT_FORWARD]);
     pipeline_groups.push_back(groups[PG_RGEN_SHADE_SURFACE]);
     pipeline_groups.push_back(groups[PG_RGEN_SHADE_SURFACE_RAYTRACE]);
     pipeline_groups.push_back(groups[PG_CALL_SVM_AO]);
@@ -1347,10 +1324,6 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 
     /* Build bottom level acceleration structures (BLAS). */
     Geometry *const geom = bvh->geometry[0];
-    if (geom->is_sdf()) {
-      /* SDF objects use distance-field ray marching, not hardware BVH. */
-      return;
-    }
     if (geom->is_hair()) {
       /* Build BLAS for curve primitives. */
       Hair *const hair = static_cast<Hair *const>(geom);
@@ -1569,7 +1542,10 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
           verts = motion_keys->data_float3() + (step > center_step ? step - 1 : step) * num_verts;
         }
 
-        memcpy(vertex_data.data() + num_verts * step, verts, num_verts * sizeof(float3));
+        /* Direct copy from Cycles padded float3, needs to match float4 size. */
+        static_assert(sizeof(float3) == sizeof(float4));
+        std::copy_n(
+            verts, num_verts, reinterpret_cast<float3 *>(vertex_data.data() + num_verts * step));
       }
 
       /* Upload triangle data to GPU. */
@@ -1713,30 +1689,9 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
       return;
     }
 
-    /* Count additional SDF TLAS instances needed beyond regular BVH objects.
-     * In instanced mode each SDF object instance becomes a separate TLAS entry;
-     * in world-space mode there is one extra TLAS entry for the combined SDF BLAS. */
-    size_t sdf_extra_instances = 0;
-    {
-      for (Geometry *geom : bvh->geometry) {
-        if (geom->is_sdf()) {
-          SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-          if (sdf->is_active_atlas) {
-            if (sdf->use_instanced && !sdf->shape_brick_map_data.empty()) {
-              sdf_extra_instances = sdf->instances.size();
-            }
-            else if (!sdf->indirection_data.empty()) {
-              sdf_extra_instances = 1;
-            }
-            break;
-          }
-        }
-      }
-    }
-
     /* Fill instance descriptions. */
     device_vector<OptixInstance> instances(this, "optix tlas instances", MEM_READ_ONLY);
-    instances.alloc(bvh->objects.size() + sdf_extra_instances);
+    instances.alloc(bvh->objects.size());
 
     /* Calculate total motion transform size and allocate memory for them. */
     size_t motion_transform_offset = 0;
@@ -1764,9 +1719,6 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
       }
 
       BVHOptiX *const blas = static_cast<BVHOptiX *>(ob->get_geometry()->bvh.get());
-      if (!blas) {
-        continue;
-      }
       OptixTraversableHandle handle = blas->traversable_handle;
       if (handle == 0) {
         continue;
@@ -1914,274 +1866,20 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
       }
     }
 
-    /* Build SDF BLAS with per-brick AABBs for hardware BVH acceleration.
-     * Two modes:
-     * 1. World-space: One BLAS with all active bricks (original).
-     * 2. Per-shape TLAS/BLAS: One BLAS per unique shape, one TLAS instance per
-     *    object with its transform. Enables hardware instancing for O(shapes) memory.
-     * Based on SBS approach from "Ray Tracing of SDF Grids" (JCGT 2022). */
-    sdf_blas_handle = 0;
-    sdf_shape_blas_data.clear();
-    sdf_shape_blas_handles.clear();
-    {
-      SDFGeometry *first_sdf = nullptr;
-      for (Geometry *geom : bvh->geometry) {
-        if (geom->is_sdf()) {
-          SDFGeometry *sdf = static_cast<SDFGeometry *>(geom);
-          if (sdf->is_active_atlas) {
-            first_sdf = sdf;
-            break;
-          }
-        }
-      }
-      Object *sdf_object = nullptr;
-      if (first_sdf) {
-        for (Object *ob : bvh->objects) {
-          if (ob->get_geometry() == first_sdf) {
-            sdf_object = ob;
-            break;
-          }
-        }
-      }
-
-      if (sdf_object && first_sdf && first_sdf->use_instanced &&
-          !first_sdf->shape_brick_map_data.empty())
-      {
-        /* ---- Per-shape TLAS/BLAS instanced mode ---- */
-        const CUDAContextScope scope(this);
-        const int num_shapes = (int)first_sdf->shapes.size();
-
-        sdf_shape_blas_data.resize(num_shapes);
-        sdf_shape_blas_handles.resize(num_shapes, 0);
-
-        for (int si = 0; si < num_shapes; si++) {
-          const SDFGeometry::ShapeInfo &shape = first_sdf->shapes[si];
-          if (shape.active_bricks <= 0) {
-            continue;
-          }
-
-          /* Build per-shape AABBs in local space. */
-          const float brick_world = float(8) * shape.voxel_size;
-          vector<OptixAabb> aabb_list;
-          aabb_list.reserve(shape.active_bricks);
-
-          const int3 gr = shape.grid_res;
-          for (int bz = 0; bz < gr.z; bz++) {
-            for (int by = 0; by < gr.y; by++) {
-              for (int bx = 0; bx < gr.x; bx++) {
-                const int flat_idx = bx + by * gr.x + bz * gr.x * gr.y;
-                const int slot = first_sdf->shape_indirection_data[shape.indirection_offset +
-                                                                    flat_idx];
-                if (slot >= 0 || slot == -2) {
-                  OptixAabb aabb;
-                  aabb.minX = shape.origin.x + float(bx) * brick_world;
-                  aabb.minY = shape.origin.y + float(by) * brick_world;
-                  aabb.minZ = shape.origin.z + float(bz) * brick_world;
-                  aabb.maxX = shape.origin.x + float(bx + 1) * brick_world;
-                  aabb.maxY = shape.origin.y + float(by + 1) * brick_world;
-                  aabb.maxZ = shape.origin.z + float(bz + 1) * brick_world;
-                  aabb_list.push_back(aabb);
-                }
-              }
-            }
-          }
-
-          const int num_bricks = (int)aabb_list.size();
-          if (num_bricks == 0) {
-            continue;
-          }
-
-          device_vector<OptixAabb> sdf_aabb(this, "sdf shape blas aabb", MEM_READ_ONLY);
-          sdf_aabb.alloc(num_bricks);
-          memcpy(sdf_aabb.data(), aabb_list.data(), num_bricks * sizeof(OptixAabb));
-          sdf_aabb.copy_to_device();
-
-          unsigned int sdf_build_flags = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
-          OptixBuildInput sdf_build_input = {};
-          sdf_build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
-          CUdeviceptr aabb_ptr = sdf_aabb.device_pointer;
-          sdf_build_input.customPrimitiveArray.aabbBuffers = &aabb_ptr;
-          sdf_build_input.customPrimitiveArray.numPrimitives = num_bricks;
-          sdf_build_input.customPrimitiveArray.strideInBytes = sizeof(OptixAabb);
-          sdf_build_input.customPrimitiveArray.flags = &sdf_build_flags;
-          sdf_build_input.customPrimitiveArray.numSbtRecords = 1;
-          sdf_build_input.customPrimitiveArray.primitiveIndexOffset = 0;
-
-          OptixAccelBuildOptions accel_options = {};
-          accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE |
-                                     OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
-          accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
-
-          OptixAccelBufferSizes sizes = {};
-          optix_assert(optixAccelComputeMemoryUsage(
-              context, &accel_options, &sdf_build_input, 1, &sizes));
-
-          device_only_memory<char> temp_mem(this, "sdf shape blas temp", false);
-          temp_mem.alloc_to_device(sizes.tempSizeInBytes);
-
-          sdf_shape_blas_data[si] = make_unique<device_only_memory<char>>(
-              this, "sdf shape blas", false);
-          sdf_shape_blas_data[si]->alloc_to_device(sizes.outputSizeInBytes);
-
-          optix_assert(optixAccelBuild(context,
-                                       0,
-                                       &accel_options,
-                                       &sdf_build_input,
-                                       1,
-                                       temp_mem.device_pointer,
-                                       sizes.tempSizeInBytes,
-                                       sdf_shape_blas_data[si]->device_pointer,
-                                       sizes.outputSizeInBytes,
-                                       &sdf_shape_blas_handles[si],
-                                       nullptr,
-                                       0));
-        }
-
-        /* Add one TLAS instance per SDF object instance. */
-        for (int ii = 0; ii < (int)first_sdf->instances.size(); ii++) {
-          const SDFGeometry::InstanceInfo &inst = first_sdf->instances[ii];
-          const int shape_id = inst.shape_id;
-
-          if (shape_id < 0 || shape_id >= num_shapes ||
-              sdf_shape_blas_handles[shape_id] == 0)
-          {
-            continue;
-          }
-
-          OptixInstance &sdf_inst = instances[num_instances++];
-          memset(&sdf_inst, 0, sizeof(sdf_inst));
-
-          /* Set transform: local_to_world (OptiX uses 3x4 row-major). */
-          const Transform &tfm = inst.local_to_world;
-          sdf_inst.transform[0] = tfm.x.x;
-          sdf_inst.transform[1] = tfm.x.y;
-          sdf_inst.transform[2] = tfm.x.z;
-          sdf_inst.transform[3] = tfm.x.w;
-          sdf_inst.transform[4] = tfm.y.x;
-          sdf_inst.transform[5] = tfm.y.y;
-          sdf_inst.transform[6] = tfm.y.z;
-          sdf_inst.transform[7] = tfm.y.w;
-          sdf_inst.transform[8] = tfm.z.x;
-          sdf_inst.transform[9] = tfm.z.y;
-          sdf_inst.transform[10] = tfm.z.z;
-          sdf_inst.transform[11] = tfm.z.w;
-
-          /* instanceId encodes the instance index for kernel lookup. */
-          sdf_inst.instanceId = ii;
-          sdf_inst.visibilityMask = 0xFF;
-          sdf_inst.sbtOffset = PG_HITD_SDF - PG_HITD;
-          sdf_inst.flags = OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
-          sdf_inst.traversableHandle = sdf_shape_blas_handles[shape_id];
-        }
-      }
-      else if (sdf_object && first_sdf && !first_sdf->indirection_data.empty()) {
-        /* ---- World-space BLAS (original path) ---- */
-        const int grid_res = first_sdf->grid_res;
-        const float voxel_size = first_sdf->voxel_size;
-        const float brick_world = float(8) * voxel_size;
-        const float3 origin = first_sdf->origin;
-
-        vector<OptixAabb> aabb_list;
-        aabb_list.reserve(grid_res * grid_res * grid_res / 4);
-
-        for (int bz = 0; bz < grid_res; bz++) {
-          for (int by = 0; by < grid_res; by++) {
-            for (int bx = 0; bx < grid_res; bx++) {
-              const int idx = bz * grid_res * grid_res + by * grid_res + bx;
-              const int slot = first_sdf->indirection_data[idx];
-              if (slot >= 0 || slot == -2) {
-                OptixAabb aabb;
-                aabb.minX = origin.x + float(bx) * brick_world;
-                aabb.minY = origin.y + float(by) * brick_world;
-                aabb.minZ = origin.z + float(bz) * brick_world;
-                aabb.maxX = origin.x + float(bx + 1) * brick_world;
-                aabb.maxY = origin.y + float(by + 1) * brick_world;
-                aabb.maxZ = origin.z + float(bz + 1) * brick_world;
-                aabb_list.push_back(aabb);
-              }
-            }
-          }
-        }
-
-        const int num_bricks = (int)aabb_list.size();
-        if (num_bricks > 0) {
-          device_vector<OptixAabb> sdf_aabb(this, "sdf blas aabb", MEM_READ_ONLY);
-          sdf_aabb.alloc(num_bricks);
-          memcpy(sdf_aabb.data(), aabb_list.data(), num_bricks * sizeof(OptixAabb));
-          sdf_aabb.copy_to_device();
-
-          unsigned int sdf_build_flags = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
-          OptixBuildInput sdf_build_input = {};
-          sdf_build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
-          CUdeviceptr aabb_ptr = sdf_aabb.device_pointer;
-          sdf_build_input.customPrimitiveArray.aabbBuffers = &aabb_ptr;
-          sdf_build_input.customPrimitiveArray.numPrimitives = num_bricks;
-          sdf_build_input.customPrimitiveArray.strideInBytes = sizeof(OptixAabb);
-          sdf_build_input.customPrimitiveArray.flags = &sdf_build_flags;
-          sdf_build_input.customPrimitiveArray.numSbtRecords = 1;
-          sdf_build_input.customPrimitiveArray.primitiveIndexOffset = 0;
-
-          const CUDAContextScope scope(this);
-
-          OptixAccelBuildOptions accel_options = {};
-          accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE |
-                                     OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
-          accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
-
-          OptixAccelBufferSizes sizes = {};
-          optix_assert(optixAccelComputeMemoryUsage(
-              context, &accel_options, &sdf_build_input, 1, &sizes));
-
-          device_only_memory<char> temp_mem(this, "sdf blas temp", false);
-          temp_mem.alloc_to_device(sizes.tempSizeInBytes);
-
-          sdf_blas_data = make_unique<device_only_memory<char>>(this, "sdf blas", false);
-          sdf_blas_data->alloc_to_device(sizes.outputSizeInBytes);
-
-          optix_assert(optixAccelBuild(context,
-                                       0,
-                                       &accel_options,
-                                       &sdf_build_input,
-                                       1,
-                                       temp_mem.device_pointer,
-                                       sizes.tempSizeInBytes,
-                                       sdf_blas_data->device_pointer,
-                                       sizes.outputSizeInBytes,
-                                       &sdf_blas_handle,
-                                       nullptr,
-                                       0));
-
-          OptixInstance &sdf_instance = instances[num_instances++];
-          memset(&sdf_instance, 0, sizeof(sdf_instance));
-          sdf_instance.transform[0] = 1.0f;
-          sdf_instance.transform[5] = 1.0f;
-          sdf_instance.transform[10] = 1.0f;
-          sdf_instance.instanceId = sdf_object->get_device_index();
-          sdf_instance.visibilityMask = 0xFF;
-          sdf_instance.sbtOffset = PG_HITD_SDF - PG_HITD;
-          sdf_instance.flags = OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
-          sdf_instance.traversableHandle = sdf_blas_handle;
-        }
-      }
-    }
-
     /* Upload instance descriptions. */
     instances.resize(num_instances);
+    instances.copy_to_device();
 
-    if (num_instances > 0) {
-      instances.copy_to_device();
+    /* Build top-level acceleration structure (TLAS) */
+    OptixBuildInput build_input = {};
+    build_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+    build_input.instanceArray.instances = instances.device_pointer;
+    build_input.instanceArray.numInstances = num_instances;
 
-      /* Build top-level acceleration structure (TLAS) */
-      OptixBuildInput build_input = {};
-      build_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
-      build_input.instanceArray.instances = instances.device_pointer;
-      build_input.instanceArray.numInstances = num_instances;
-
-      if (!build_optix_bvh(bvh_optix, OPTIX_BUILD_OPERATION_BUILD, build_input, 0)) {
-        progress.set_error("Failed to build OptiX acceleration structure");
-      }
-      tlas_handle = bvh_optix->traversable_handle;
+    if (!build_optix_bvh(bvh_optix, OPTIX_BUILD_OPERATION_BUILD, build_input, 0)) {
+      progress.set_error("Failed to build OptiX acceleration structure");
     }
+    tlas_handle = bvh_optix->traversable_handle;
   }
 }
 

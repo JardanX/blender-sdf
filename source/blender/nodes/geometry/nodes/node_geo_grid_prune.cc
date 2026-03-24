@@ -91,9 +91,9 @@ static void node_declare(NodeDeclarationBuilder &b)
   }
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 static std::optional<eNodeSocketDatatype> node_type_for_socket_type(const bNodeSocket &socket)
@@ -188,18 +188,18 @@ static void node_geo_exec(GeoNodeExecParams params)
     }
     case Mode::SDF: {
       const VolumeGridType grid_type = bke::volume_grid::get_type(grid_base);
-      BKE_volume_grid_type_to_static_type(grid_type, [&](auto type_tag) {
-        using GridT = typename decltype(type_tag)::type;
-        if constexpr (bke::volume_grid::is_supported_grid_type<GridT>) {
-          if constexpr (std::is_scalar_v<typename GridT::ValueType>) {
-            GridT &grid = static_cast<GridT &>(grid_base);
-            openvdb::tools::pruneLevelSet(grid.tree());
-          }
-        }
-        else {
-          BLI_assert_unreachable();
-        }
-      });
+      BKE_volume_grid_type_to_static_type(
+          grid_type, [&]<std::derived_from<openvdb::GridBase> GridT>() {
+            if constexpr (bke::volume_grid::is_supported_grid_type<GridT>) {
+              if constexpr (std::is_scalar_v<typename GridT::ValueType>) {
+                GridT &grid = static_cast<GridT &>(grid_base);
+                openvdb::tools::pruneLevelSet(grid.tree());
+              }
+            }
+            else {
+              BLI_assert_unreachable();
+            }
+          });
       break;
     }
   }
@@ -228,7 +228,7 @@ static void node_rna(StructRNA *srna)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
   geo_node_type_base(&ntype, "GeometryNodeGridPrune");
   ntype.ui_name = "Prune Grid";
   ntype.ui_description =
@@ -240,7 +240,7 @@ static void node_register()
   ntype.initfunc = node_init;
   ntype.gather_link_search_ops = node_gather_link_search_ops;
   ntype.geometry_node_execute = node_geo_exec;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
   node_rna(ntype.rna_ext.srna);
 }
 NOD_REGISTER_NODE(node_register)

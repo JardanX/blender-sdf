@@ -40,7 +40,7 @@ void IDNode::init(const ID *id, const char * /*subdata*/)
   BLI_assert(id != nullptr);
   /* Store ID-pointer. */
   id_type = GS(id->name);
-  id_orig = (ID *)id;
+  id_orig = const_cast<ID *>(id);
   id_orig_session_uid = id->session_uid;
   eval_flags = 0;
   previous_eval_flags = 0;
@@ -106,7 +106,7 @@ void IDNode::destroy()
   /* Free memory used by this evaluated ID. */
   if (!ELEM(id_cow, id_orig, nullptr)) {
     deg_free_eval_copy_datablock(id_cow);
-    MEM_freeN(id_cow);
+    MEM_delete(id_cow);
     id_cow = nullptr;
     DEG_COW_PRINT(
         "Destroy evaluated ID for %s: id_orig=%p id_cow=%p\n", id_orig->name, id_orig, id_cow);
@@ -142,7 +142,7 @@ ComponentNode *IDNode::add_component(NodeType type, const StringRef name)
   if (!comp_node) {
     DepsNodeFactory *factory = type_get_factory(type);
     BLI_assert(factory);
-    comp_node = (ComponentNode *)factory->create_node(this->id_orig, "", name);
+    comp_node = static_cast<ComponentNode *>(factory->create_node(this->id_orig, "", name));
 
     /* Register. */
     ComponentIDKey key(type, comp_node->name);

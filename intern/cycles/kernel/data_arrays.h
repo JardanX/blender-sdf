@@ -30,7 +30,6 @@ KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)
 
 /* triangles */
 KERNEL_DATA_ARRAY(uint, tri_shader)
-KERNEL_DATA_ARRAY(packed_float3, tri_vnormal)
 KERNEL_DATA_ARRAY(packed_uint3, tri_vindex)
 KERNEL_DATA_ARRAY(packed_float3, tri_verts)
 
@@ -50,6 +49,7 @@ KERNEL_DATA_ARRAY(float2, attributes_float2)
 KERNEL_DATA_ARRAY(packed_float3, attributes_float3)
 KERNEL_DATA_ARRAY(float4, attributes_float4)
 KERNEL_DATA_ARRAY(uchar4, attributes_uchar4)
+KERNEL_DATA_ARRAY(packed_normal, attributes_normal)
 
 /* lights */
 KERNEL_DATA_ARRAY(KernelLightDistribution, light_distribution)
@@ -79,7 +79,7 @@ KERNEL_DATA_ARRAY(float, lookup_table)
 KERNEL_DATA_ARRAY(float, sample_pattern_lut)
 
 /* image textures */
-KERNEL_DATA_ARRAY(TextureInfo, texture_info)
+KERNEL_DATA_ARRAY(KernelImageInfo, image_info)
 
 /* ies lights */
 KERNEL_DATA_ARRAY(float, ies)
@@ -89,22 +89,5 @@ KERNEL_DATA_ARRAY(KernelOctreeNode, volume_tree_nodes)
 KERNEL_DATA_ARRAY(KernelOctreeRoot, volume_tree_roots)
 KERNEL_DATA_ARRAY(int, volume_tree_root_ids)
 KERNEL_DATA_ARRAY(float, volume_step_size)
-
-/* SDF (world-space atlas mode). */
-KERNEL_DATA_ARRAY(KernelSDF, sdf_objects)
-KERNEL_DATA_ARRAY(int, sdf_shader_map)
-KERNEL_DATA_ARRAY(int, sdf_indirection)
-KERNEL_DATA_ARRAY(float4, sdf_atlas)
-KERNEL_DATA_ARRAY(int, sdf_matid)
-KERNEL_DATA_ARRAY(int, sdf_blend_id)
-KERNEL_DATA_ARRAY(float, sdf_blend_factor)
-KERNEL_DATA_ARRAY(int4, sdf_brick_map)
-
-/* SDF (per-shape TLAS/BLAS instanced mode). */
-KERNEL_DATA_ARRAY(KernelSDFShape, sdf_shape_objects)
-KERNEL_DATA_ARRAY(KernelSDFInstance, sdf_shape_instances)
-KERNEL_DATA_ARRAY(int, sdf_shape_indirection)
-KERNEL_DATA_ARRAY(uint16_t, sdf_shape_atlas)
-KERNEL_DATA_ARRAY(int4, sdf_shape_brick_map)
 
 #undef KERNEL_DATA_ARRAY

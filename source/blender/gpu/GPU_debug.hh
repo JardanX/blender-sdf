@@ -61,7 +61,11 @@
 
 #pragma once
 
-#include <cstdint>
+#include "BLI_index_range.hh"
+
+#include <string>
+
+namespace blender {
 
 #define GPU_DEBUG_SHADER_COMPILATION_GROUP "Shader Compilation"
 #define GPU_DEBUG_SHADER_SPECIALIZATION_GROUP "Shader Specialization"
@@ -73,16 +77,11 @@ void GPU_debug_group_end();
  * "Group1 > Group 2 > Group3 > ... > GroupN : "
  */
 void GPU_debug_get_groups_names(int name_buf_len, char *r_name_buf);
+std::string GPU_debug_get_groups_names(IndexRange levels = IndexRange(0, 9999));
 /**
  * Return true if inside a debug group with the same name.
  */
 bool GPU_debug_group_match(const char *ref);
-
-/**
- * Retrieve the latest frame times from the profiler (in nanoseconds).
- */
-void GPU_profile_get_latest_time(const char *name, uint64_t *r_gpu_time, uint64_t *r_cpu_time);
-void GPU_profile_add_group_cpu(const char *name, uint64_t cpu_start, uint64_t cpu_end);
 
 /**
  * GPU Frame capture support.
@@ -117,7 +116,7 @@ void *GPU_debug_capture_scope_create(const char *name);
 bool GPU_debug_capture_scope_begin(void *scope);
 void GPU_debug_capture_scope_end(void *scope);
 
-namespace blender::gpu {
+namespace gpu {
 
 /**
  * Need to be declared as static with a unique identifier string.
@@ -160,4 +159,5 @@ struct DebugScope {
   }
 };
 
-}  // namespace blender::gpu
+}  // namespace gpu
+}  // namespace blender

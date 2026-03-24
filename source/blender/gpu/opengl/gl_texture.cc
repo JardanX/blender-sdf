@@ -6,6 +6,7 @@
  * \ingroup gpu
  */
 
+#include <cstdint>
 #include <string>
 
 #include "BLI_assert.h"
@@ -19,6 +20,7 @@
 #include "GPU_platform.hh"
 
 #include "GPU_vertex_buffer.hh" /* TODO: should be `gl_vertex_buffer.hh`. */
+#include "MEM_guardedalloc.h"
 #include "gl_backend.hh"
 #include "gl_debug.hh"
 #include "gl_state.hh"
@@ -89,7 +91,7 @@ bool GLTexture::init_internal()
     glTexParameteri(target_, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   }
 
-  debug::object_label(GL_TEXTURE, tex_id_, name_);
+  debug::object_label(GL_TEXTURE, tex_id_, name_.c_str());
   return true;
 }
 
@@ -110,7 +112,7 @@ bool GLTexture::init_internal(VertBuf *vbo)
     glTexBuffer(target_, internal_format, gl_vbo->vbo_id_);
   }
 
-  debug::object_label(GL_TEXTURE, tex_id_, name_);
+  debug::object_label(GL_TEXTURE, tex_id_, name_.c_str());
 
   return true;
 }
@@ -133,7 +135,7 @@ bool GLTexture::init_internal(gpu::Texture *src,
                 layer_offset,
                 this->layer_count());
 
-  debug::object_label(GL_TEXTURE, tex_id_, name_);
+  debug::object_label(GL_TEXTURE, tex_id_, name_.c_str());
 
   /* Stencil view support. */
   if (ELEM(format_, TextureFormat::SFLOAT_32_DEPTH_UINT_8)) {
@@ -187,8 +189,12 @@ void GLTexture::update_sub_direct_state_access(
   has_pixels_ = true;
 }
 
-void GLTexture::update_sub(
-    int mip, int offset[3], int extent[3], eGPUDataFormat type, const void *data)
+void GLTexture::update_sub(int mip,
+                           int offset[3],
+                           int extent[3],
+                           eGPUDataFormat type,
+                           const void *data,
+                           const uint unpack_row_length)
 {
   BLI_assert(validate_data_format(format_, type));
   BLI_assert(data != nullptr);
@@ -198,26 +204,25 @@ void GLTexture::update_sub(
     return;
   }
 
-  /* If `texture_unpack_row_length` is 0, rows are sequentially stored. Otherwise we unpack data
+  /* If `unpack_row_length` is 0, rows are sequentially stored. Otherwise we unpack data
    * into a staging block, so the half conversion below doesn't happen on the full input. */
-  const uint texture_unpack_row_length =
-      GLContext::state_manager_active_get()->texture_unpack_row_length_get();
-  const bool do_texture_unpack = !ELEM(texture_unpack_row_length, 0, extent[0]);
+  const bool do_texture_unpack = !ELEM(unpack_row_length, 0, extent[0]);
 
-  /* Unpack `data` if `texture_unpack_row_length` is set. */
-  std::unique_ptr<uint8_t, MEM_freeN_smart_ptr_deleter> unpack_buffer = nullptr;
+  /* Unpack `data` if `unpack_row_length` is set. */
+  std::unique_ptr<uint8_t, MEM_smart_ptr_deleter<uint8_t>> unpack_buffer = nullptr;
   if (do_texture_unpack) {
     BLI_assert_msg(!(format_flag_ & GPU_FORMAT_COMPRESSED),
-                   "Compressed data with texture_unpack_row_length != 0 is not supported.");
+                   "Compressed data with unpack_row_length != 0 is not supported.");
     BLI_assert_msg(extent[2] <= 1,
-                   "3D texture data with texture_unpack_row_length != 0 is not supported.");
+                   "3D texture data with unpack_row_length != 0 is not supported.");
 
-    size_t src_row_stride = texture_unpack_row_length * to_bytesize(format_, type);
+    size_t src_row_stride = unpack_row_length * to_bytesize(format_, type);
     size_t dst_row_stride = max_ii(extent[0], 1) * to_bytesize(format_, type);
     size_t dst_total_count = dst_row_stride * max_ii(extent[1], 1) * max_ii(extent[2], 1);
 
     /* Allocate buffer to size necessary for gather */
-    unpack_buffer.reset((uint8_t *)MEM_mallocN_aligned(dst_total_count, 128, __func__));
+    unpack_buffer.reset(
+        static_cast<uint8_t *>(MEM_new_uninitialized_aligned(dst_total_count, 128, __func__)));
 
     /* Strided loop; we advance source and destination pointers separately during a gather. */
     const uint8_t *src_ptr = static_cast<const uint8_t *>(data);
@@ -234,14 +239,14 @@ void GLTexture::update_sub(
   }
 
   /* If `data` is float and target storage is half, convert to half */
-  std::unique_ptr<uint16_t, MEM_freeN_smart_ptr_deleter> clamped_half_buffer = nullptr;
+  std::unique_ptr<uint16_t, MEM_smart_ptr_deleter<uint16_t>> clamped_half_buffer = nullptr;
   if (type == GPU_DATA_FLOAT && is_half_float(format_)) {
     size_t dst_pixel_count = max_ii(extent[0], 1) * max_ii(extent[1], 1) * max_ii(extent[2], 1);
     size_t dst_total_count = to_component_len(format_) * dst_pixel_count;
 
     /* Allocate buffer to size necessary for conversion.. */
-    clamped_half_buffer.reset(
-        (uint16_t *)MEM_mallocN_aligned(sizeof(uint16_t) * dst_total_count, 128, __func__));
+    clamped_half_buffer.reset(static_cast<uint16_t *>(
+        MEM_new_uninitialized_aligned(sizeof(uint16_t) * dst_total_count, 128, __func__)));
 
     Span<float> src(static_cast<const float *>(data), dst_total_count);
     MutableSpan<uint16_t> dst(static_cast<uint16_t *>(clamped_half_buffer.get()), dst_total_count);
@@ -252,7 +257,7 @@ void GLTexture::update_sub(
        * regarding Inf and NaNs. Use make finite version to avoid unexpected black pixels on
        * certain implementation. For platform parity we clamp these infinite values to finite
        * values. */
-      blender::math::float_to_half_make_finite_array(
+      math::float_to_half_make_finite_array(
           src.slice(range).data(), dst.slice(range).data(), range.size());
     });
 
@@ -337,7 +342,7 @@ void GLTexture::update_sub(int offset[3],
   GLContext::state_manager_active_get()->texture_bind_temp(this);
 
   /* Bind pixel buffer for source data. */
-  GLint pix_buf_handle = (GLint)GPU_pixel_buffer_get_native_handle(pixbuf).handle;
+  GLint pix_buf_handle = GLint(GPU_pixel_buffer_get_native_handle(pixbuf).handle);
   glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pix_buf_handle);
 
   switch (dimensions) {
@@ -446,7 +451,7 @@ void *GLTexture::read(int mip, eGPUDataFormat type)
 
   /* AMD Pro driver have a bug that write 8 bytes past buffer size
    * if the texture is big. (see #66573) */
-  void *data = MEM_mallocN(texture_size + 8, "GPU_texture_read");
+  void *data = MEM_new_uninitialized(texture_size + 8, "GPU_texture_read");
 
   GLenum gl_format = to_gl_data_format(
       format_ == TextureFormat::SFLOAT_32_DEPTH_UINT_8 ? TextureFormat::SFLOAT_32_DEPTH : format_);
@@ -459,7 +464,7 @@ void *GLTexture::read(int mip, eGPUDataFormat type)
     GLContext::state_manager_active_get()->texture_bind_temp(this);
     if (type_ == GPU_TEXTURE_CUBE) {
       size_t cube_face_size = texture_size / 6;
-      char *pdata = (char *)data;
+      char *pdata = static_cast<char *>(data);
       for (int i = 0; i < 6; i++, pdata += cube_face_size) {
         glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, mip, gl_format, gl_type, pdata);
       }
@@ -479,10 +484,10 @@ void *GLTexture::read(int mip, eGPUDataFormat type)
 
 void GLTexture::swizzle_set(const char swizzle[4])
 {
-  GLint gl_swizzle[4] = {(GLint)swizzle_to_gl(swizzle[0]),
-                         (GLint)swizzle_to_gl(swizzle[1]),
-                         (GLint)swizzle_to_gl(swizzle[2]),
-                         (GLint)swizzle_to_gl(swizzle[3])};
+  GLint gl_swizzle[4] = {GLint(swizzle_to_gl(swizzle[0])),
+                         GLint(swizzle_to_gl(swizzle[1])),
+                         GLint(swizzle_to_gl(swizzle[2])),
+                         GLint(swizzle_to_gl(swizzle[3]))};
   if (GLContext::direct_state_access_support) {
     glTextureParameteriv(tex_id_, GL_TEXTURE_SWIZZLE_RGBA, gl_swizzle);
   }
@@ -527,7 +532,7 @@ FrameBuffer *GLTexture::framebuffer_get()
     return framebuffer_;
   }
   BLI_assert(!(type_ & GPU_TEXTURE_1D));
-  framebuffer_ = GPU_framebuffer_create(name_);
+  framebuffer_ = GPU_framebuffer_create(name_.c_str());
   framebuffer_->attachment_set(this->attachment_type(0), GPU_ATTACHMENT_TEXTURE(this));
   has_pixels_ = true;
   return framebuffer_;
@@ -806,7 +811,7 @@ void GLTexture::check_feedback_loop()
         SNPRINTF(msg,
                  "Feedback loop: Trying to bind a texture (%s) with mip range %d-%d but mip %d is "
                  "attached to the active framebuffer (%s)",
-                 name_,
+                 name_.c_str(),
                  mip_min_,
                  mip_max_,
                  attachment.mip,

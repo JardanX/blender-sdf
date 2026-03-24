@@ -27,6 +27,8 @@
 #include "gpencil_shader.hh"
 #include "gpencil_shader_shared.hh"
 
+namespace blender {
+
 struct GpencilBatchCache;
 struct Object;
 struct RenderEngine;
@@ -41,7 +43,7 @@ struct View3D;
 
 #define GP_MAX_MASKBITS 256
 
-namespace blender::draw::gpencil {
+namespace draw::gpencil {
 
 struct MaterialPool {
   /* Single linked-list. */
@@ -70,7 +72,7 @@ struct LightPool {
 struct tVfx {
   /** Single linked-list. */
   struct tVfx *next = nullptr;
-  std::unique_ptr<PassSimple> vfx_ps = std::make_unique<PassSimple>("vfx");
+  ::std::unique_ptr<PassSimple> vfx_ps = ::std::make_unique<PassSimple>("vfx");
   /* Frame-buffer reference since it may not be allocated yet. */
   gpu::FrameBuffer **target_fb = nullptr;
 };
@@ -80,9 +82,9 @@ struct tLayer {
   /** Single linked-list. */
   struct tLayer *next;
   /** Geometry pass (draw all strokes). */
-  std::unique_ptr<PassSimple> geom_ps;
+  ::std::unique_ptr<PassSimple> geom_ps;
   /** Blend pass to composite onto the target buffer (blends modes). NULL if not needed. */
-  std::unique_ptr<PassSimple> blend_ps;
+  ::std::unique_ptr<PassSimple> blend_ps;
   /** Layer id of the mask. */
   BLI_bitmap *mask_bits;
   BLI_bitmap *mask_invert_bits;
@@ -165,6 +167,7 @@ struct Instance final : public DrawEngine {
 
   Framebuffer render_fb = {"render_fb"};
   Framebuffer gpencil_fb = {"gpencil_fb"};
+  Framebuffer combined_pass_fb = {"combined_pass_fb"};
   Framebuffer gpencil_pass_fb = {"gpencil_pass_fb"};
   Framebuffer snapshot_fb = {"snapshot_fb"};
   Framebuffer layer_fb = {"layer_fb"};
@@ -275,9 +278,10 @@ struct Instance final : public DrawEngine {
   bool use_layer_fb;
   bool use_object_fb;
   bool use_mask_fb;
-  /* If viewport compositor is active, we need to render grease pencil onto another additional
-   * pass. */
-  bool use_separate_pass;
+  /* The viewport compositor needs the combined pass, so we need to render to it. */
+  bool need_combined_pass;
+  /* The viewport compositor needs the grease pencil pass, so we need to render to it. */
+  bool need_grease_pencil_pass;
   /* Some blend mode needs to add negative values.
    * This is only supported if target texture is signed. Only switch for the `reveal_tex`. */
   bool use_signed_fb;
@@ -379,13 +383,13 @@ struct Instance final : public DrawEngine {
 
   static void material_pool_free(void *storage)
   {
-    MaterialPool *matpool = (MaterialPool *)storage;
+    MaterialPool *matpool = static_cast<MaterialPool *>(storage);
     GPU_UBO_FREE_SAFE(matpool->ubo);
   }
 
   static void light_pool_free(void *storage)
   {
-    LightPool *lightpool = (LightPool *)storage;
+    LightPool *lightpool = static_cast<LightPool *>(storage);
     GPU_UBO_FREE_SAFE(lightpool->ubo);
   }
 };
@@ -437,4 +441,5 @@ LightPool *gpencil_light_pool_add(Instance *inst);
  */
 LightPool *gpencil_light_pool_create(Instance *inst, Object *ob);
 
-}  // namespace blender::draw::gpencil
+}  // namespace draw::gpencil
+}  // namespace blender

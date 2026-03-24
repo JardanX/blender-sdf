@@ -45,6 +45,8 @@
 #include "DNA_fluid_types.h"
 #include "DNA_scene_types.h"
 
+namespace blender {
+
 #define FLUID_JOB_BAKE_ALL "FLUID_OT_bake_all"
 #define FLUID_JOB_BAKE_DATA "FLUID_OT_bake_data"
 #define FLUID_JOB_BAKE_NOISE "FLUID_OT_bake_noise"
@@ -134,9 +136,9 @@ static bool fluid_initjob(
 {
   FluidModifierData *fmd = nullptr;
   FluidDomainSettings *fds;
-  Object *ob = blender::ed::object::context_active_object(C);
+  Object *ob = ed::object::context_active_object(C);
 
-  fmd = (FluidModifierData *)BKE_modifiers_findby_type(ob, eModifierType_Fluid);
+  fmd = reinterpret_cast<FluidModifierData *>(BKE_modifiers_findby_type(ob, eModifierType_Fluid));
   if (!fmd) {
     BLI_strncpy_utf8(error_msg, N_("Bake failed: no Fluid modifier found"), error_size);
     return false;
@@ -225,7 +227,7 @@ static bool fluid_validatepaths(FluidJob *job, ReportList *reports)
 static void fluid_bake_free(void *customdata)
 {
   FluidJob *job = static_cast<FluidJob *>(customdata);
-  MEM_freeN(job);
+  MEM_delete(job);
 }
 
 static void fluid_bake_sequence(FluidJob *job)
@@ -527,7 +529,7 @@ static void fluid_free_startjob(void *customdata, wmJobWorkerStatus *worker_stat
 
 static wmOperatorStatus fluid_bake_exec(bContext *C, wmOperator *op)
 {
-  FluidJob *job = MEM_mallocN<FluidJob>("FluidJob");
+  FluidJob *job = MEM_new_uninitialized<FluidJob>("FluidJob");
   char error_msg[256] = "\0";
 
   if (!fluid_initjob(C, job, op, error_msg, sizeof(error_msg))) {
@@ -554,7 +556,7 @@ static wmOperatorStatus fluid_bake_exec(bContext *C, wmOperator *op)
 static wmOperatorStatus fluid_bake_invoke(bContext *C, wmOperator *op, const wmEvent * /*_event*/)
 {
   Scene *scene = CTX_data_scene(C);
-  FluidJob *job = MEM_mallocN<FluidJob>("FluidJob");
+  FluidJob *job = MEM_new_uninitialized<FluidJob>("FluidJob");
   char error_msg[256] = "\0";
 
   if (!fluid_initjob(C, job, op, error_msg, sizeof(error_msg))) {
@@ -613,13 +615,13 @@ static wmOperatorStatus fluid_free_exec(bContext *C, wmOperator *op)
 {
   FluidModifierData *fmd = nullptr;
   FluidDomainSettings *fds;
-  Object *ob = blender::ed::object::context_active_object(C);
+  Object *ob = ed::object::context_active_object(C);
   Scene *scene = CTX_data_scene(C);
 
   /*
    * Get modifier data
    */
-  fmd = (FluidModifierData *)BKE_modifiers_findby_type(ob, eModifierType_Fluid);
+  fmd = reinterpret_cast<FluidModifierData *>(BKE_modifiers_findby_type(ob, eModifierType_Fluid));
   if (!fmd) {
     BKE_report(op->reports, RPT_ERROR, "Bake free failed: no Fluid modifier found");
     return OPERATOR_CANCELLED;
@@ -638,7 +640,7 @@ static wmOperatorStatus fluid_free_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  FluidJob *job = MEM_mallocN<FluidJob>("FluidJob");
+  FluidJob *job = MEM_new_uninitialized<FluidJob>("FluidJob");
   job->bmain = CTX_data_main(C);
   job->scene = scene;
   job->depsgraph = CTX_data_depsgraph_pointer(C);
@@ -678,12 +680,12 @@ static wmOperatorStatus fluid_pause_exec(bContext *C, wmOperator *op)
 {
   FluidModifierData *fmd = nullptr;
   FluidDomainSettings *fds;
-  Object *ob = blender::ed::object::context_active_object(C);
+  Object *ob = ed::object::context_active_object(C);
 
   /*
    * Get modifier data
    */
-  fmd = (FluidModifierData *)BKE_modifiers_findby_type(ob, eModifierType_Fluid);
+  fmd = reinterpret_cast<FluidModifierData *>(BKE_modifiers_findby_type(ob, eModifierType_Fluid));
   if (!fmd) {
     BKE_report(op->reports, RPT_ERROR, "Bake free failed: no Fluid modifier found");
     return OPERATOR_CANCELLED;
@@ -866,3 +868,5 @@ void FLUID_OT_pause_bake(wmOperatorType *ot)
   ot->exec = fluid_pause_exec;
   ot->poll = ED_operator_object_active_editable;
 }
+
+}  // namespace blender

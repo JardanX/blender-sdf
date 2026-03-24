@@ -27,7 +27,7 @@ static void node_declare(NodeDeclarationBuilder &b)
 static void node_geo_exec(GeoNodeExecParams params)
 {
   /* The fillet method was only introduced in OpenVDB 12. Since we don't presently require 12,
-     disable this node when building against older versions. */
+   * disable this node when building against older versions. */
 #ifdef WITH_OPENVDB
 #  if OPENVDB_ABI_VERSION_NUMBER >= 12
   auto grid = params.extract_input<bke::VolumeGrid<float>>("Grid");
@@ -67,7 +67,7 @@ static void node_geo_exec(GeoNodeExecParams params)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
   geo_node_type_base(&ntype, "GeometryNodeSDFGridFillet");
   ntype.ui_name = "SDF Grid Fillet";
   ntype.ui_description =
@@ -76,7 +76,7 @@ static void node_register()
   ntype.nclass = NODE_CLASS_GEOMETRY;
   ntype.declare = node_declare;
   ntype.geometry_node_execute = node_geo_exec;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 }
 NOD_REGISTER_NODE(node_register)
 

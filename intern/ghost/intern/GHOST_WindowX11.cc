@@ -15,7 +15,7 @@
 #include "GHOST_Debug.hh"
 #include "GHOST_IconX11.hh"
 #include "GHOST_SystemX11.hh"
-#include "GHOST_Types.h"
+#include "GHOST_Types.hh"
 #include "GHOST_WindowX11.hh"
 #include "GHOST_utildefines.hh"
 
@@ -1514,6 +1514,11 @@ GHOST_TSuccess GHOST_WindowX11::setWindowCustomCursorShape(const uint8_t *bitmap
 
 uint16_t GHOST_WindowX11::getDPIHint()
 {
+  /* Early out if use of DPI scale is disabled. */
+  if (!system_->native_pixel_) {
+    return 96;
+  }
+
   /* Try to read DPI setting set using xrdb */
   char *resMan = XResourceManagerString(display_);
   if (resMan) {

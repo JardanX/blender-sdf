@@ -33,9 +33,11 @@ class USERPREF_HT_header(Header):
             pass
         else:
             # Show '*' to let users know the preferences have been modified.
+            # It is shown to the left so that it is visible when the sidebar is narrow,
+            # and for consistency with unsaved files in the title bar.
             layout.operator(
                 "wm.save_userpref",
-                text=iface_("Save Preferences") + (" *" if prefs.is_dirty else ""),
+                text=("* " if prefs.is_dirty else "") + iface_("Save Preferences"),
                 translate=False,
             )
 
@@ -64,14 +66,26 @@ class USERPREF_PT_navigation_bar(Panel):
 
     def draw(self, context):
         layout = self.layout
+        view = context.space_data
 
         prefs = context.preferences
+
+        layout.prop(view, "search_filter", icon='VIEWZOOM', text="")
+        layout.separator(factor=0.1)
 
         col = layout.column()
 
         col.scale_x = 1.3
         col.scale_y = 1.3
-        col.prop(prefs, "active_section", expand=True)
+        if view.search_filter:
+            col.prop_tabs_enum(
+                prefs,
+                "active_section",
+                data_highlight=view,
+                property_highlight="tab_search_results",
+                expand_as='ROW')
+        else:
+            col.prop(prefs, "active_section", expand=True)
 
 
 class USERPREF_MT_editor_menus(Menu):
@@ -114,14 +128,14 @@ class USERPREF_MT_save_load(Menu):
         layout.operator_context = 'EXEC_AREA'
         if prefs.use_preferences_save:
             layout.operator("wm.save_userpref", text="Save Preferences")
+
+        layout.operator_context = 'INVOKE_AREA'
         sub_revert = layout.column(align=True)
         # NOTE: regarding `factory_startup`. To correctly show the active state of this menu item,
         # the user preferences themselves would need to have a `factory_startup` state.
         # Since showing an active menu item whenever factory-startup is used is not such a problem, leave this as-is.
         sub_revert.active = prefs.is_dirty or bpy.app.factory_startup
         sub_revert.operator("wm.read_userpref", text="Revert to Saved Preferences")
-
-        layout.operator_context = 'INVOKE_AREA'
 
         app_template = prefs.app_template
         if app_template:
@@ -231,6 +245,7 @@ class USERPREF_PT_interface_display(InterfacePanel, CenterAlignMixIn, Panel):
 
         col = layout.column(heading="Search", align=True)
         col.prop(prefs, "use_recent_searches", text="Sort by Most Recent")
+        col.prop(prefs, "show_hidden_ids", text="Show Hidden")
 
 
 class USERPREF_PT_interface_text(InterfacePanel, CenterAlignMixIn, Panel):
@@ -728,10 +743,9 @@ class USERPREF_PT_system_display_graphics(SystemPanel, CenterAlignMixIn, Panel):
             layout.label(text="A restart of Blender is required", icon='INFO')
 
         if system.gpu_backend == 'VULKAN':
-            col = layout.column()
-            col.label(text="Current Vulkan backend limitations:", icon='INFO')
-            col.label(text="\u2022 Low performance in VR", icon='BLANK1')
             if sys.platform == "win32" and gpu.platform.device_type_get() == 'QUALCOMM':
+                col = layout.column()
+                col.label(text="Current Vulkan backend limitations:", icon='INFO')
                 col.label(text="\u2022 Windows on ARM requires driver 31.0.112.0 or higher", icon='BLANK1')
 
 
@@ -1779,7 +1793,11 @@ class USERPREF_PT_file_paths_asset_libraries(FilePathsPanel, Panel):
 class USERPREF_UL_asset_libraries(UIList):
     def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
         asset_library = item
-        layout.prop(asset_library, "name", text="", emboss=False)
+
+        row = layout.row(align=True)
+        row.prop(asset_library, "name", text="", emboss=False)
+        row.prop(asset_library, "enabled", text="", emboss=False,
+                 icon='CHECKBOX_HLT' if asset_library.enabled else 'CHECKBOX_DEHLT')
 
 
 class USERPREF_UL_extension_repos(UIList):
@@ -1980,6 +1998,10 @@ class USERPREF_PT_input_tablet(InputPanel, CenterAlignMixIn, Panel):
         col = layout.column()
         col.prop(inputs, "pressure_threshold_max")
         col.prop(inputs, "pressure_softness")
+        use_debug = prefs.experimental.use_paint_debug and prefs.view.show_developer_ui
+
+        if use_debug:
+            col.prop(inputs, "show_tablet_debug_values")
 
 
 class USERPREF_PT_input_ndof(InputPanel, CenterAlignMixIn, Panel):
@@ -2134,9 +2156,12 @@ class USERPREF_PT_ndof_settings(Panel):
         col.row().prop(props, "ndof_navigation_mode", text="Navigation Mode")
 
         if show_3dview_settings:
-            col.prop(props, "ndof_lock_horizon", text="Lock Horizon")
             colsub = col.column()
-            colsub.active = props.ndof_navigation_mode == 'FLY'
+            colsub.active = props.ndof_navigation_mode in {'FLY', 'OBJECT'}
+            colsub.prop(props, "ndof_lock_horizon", text="Lock Horizon")
+            del colsub
+            colsub = col.column()
+            colsub.active = props.ndof_navigation_mode in {'FLY', 'DRONE'}
             colsub.prop(props, "ndof_fly_speed_auto", text="Auto Fly Speed")
             del colsub
             layout.separator()
@@ -2594,8 +2619,10 @@ class USERPREF_PT_addons(AddOnPanel, Panel):
                     (search in bl_info["name"].casefold() or
                      search in iface_(bl_info["name"]).casefold()) or
                     (bl_info["author"] and (search in bl_info["author"].casefold())) or
-                    ((filter == "All") and (search in bl_info["category"].casefold() or
-                                            search in iface_(bl_info["category"]).casefold()))
+                    ((filter == "All") and (
+                        search in bl_info["category"].casefold() or
+                        search in iface_(bl_info["category"]).casefold()
+                    ))
             ):
                 continue
 
@@ -2895,6 +2922,7 @@ class USERPREF_PT_developer_tools(Panel):
                 ({"property": "use_asset_indexing"}, None),
                 ({"property": "use_viewport_debug"}, None),
                 ({"property": "use_eevee_debug"}, None),
+                ({"property": "use_paint_debug"}, None),
                 ({"property": "use_extensions_debug"}, ("/blender/blender/issues/119521", "#119521")),
                 ({"property": "write_legacy_blend_file_format"}, ("/blender/blender/issues/129309", "#129309")),
                 ({"property": "no_data_block_packing"}, ("/blender/blender/issues/132167", "#132167")),
@@ -2943,6 +2971,7 @@ class USERPREF_PT_experimental_new_features(ExperimentalPanel, Panel):
                  ("blender/blender/projects/10", "Pipeline, Assets & IO Project Page")),
                 ({"property": "use_shader_node_previews"}, ("blender/blender/issues/110353", "#110353")),
                 ({"property": "use_geometry_nodes_lists"}, ("blender/blender/issues/140918", "#140918")),
+                ({"property": "use_geometry_bundle"}, ("blender/blender/issues/150574", "#150574")),
             ),
         )
 

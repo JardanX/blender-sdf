@@ -8,11 +8,11 @@
 
 #pragma once
 
-#include "BLI_utildefines.h"
+#include "BLI_enum_flags.hh"
 
 #include "gpu_context_private.hh"
 
-#include "GHOST_Types.h"
+#include "GHOST_Types.hh"
 
 #include "render_graph/vk_render_graph.hh"
 #include "vk_common.hh"
@@ -34,9 +34,10 @@ enum RenderGraphFlushFlags {
   NONE = 0,
   RENEW_RENDER_GRAPH = 1 << 0,
   SUBMIT = 1 << 1,
-  WAIT_FOR_COMPLETION = 1 << 2,
+  WAIT_FOR_SUBMISSION = 1 << 2,
+  WAIT_FOR_COMPLETION = 1 << 3,
 };
-ENUM_OPERATORS(RenderGraphFlushFlags, RenderGraphFlushFlags::WAIT_FOR_COMPLETION);
+ENUM_OPERATORS(RenderGraphFlushFlags);
 
 class VKContext : public Context, NonCopyable {
   friend class VKDevice;
@@ -45,7 +46,7 @@ class VKContext : public Context, NonCopyable {
   VkExtent2D vk_extent_ = {};
   VkSurfaceFormatKHR swap_chain_format_ = {};
   gpu::Texture *surface_texture_ = nullptr;
-  void *ghost_context_;
+  GHOST_IContext *ghost_context_;
 
   Vector<std::unique_ptr<VKStreamingBuffer>> streaming_buffers_;
 
@@ -85,7 +86,7 @@ class VKContext : public Context, NonCopyable {
     return render_graph_.value().get();
   }
 
-  VKContext(void *ghost_window, void *ghost_context);
+  VKContext(GHOST_IWindow *ghost_window, GHOST_IContext *ghost_context);
   virtual ~VKContext();
 
   void activate() override;
@@ -136,7 +137,8 @@ class VKContext : public Context, NonCopyable {
    * Update the give shader data with the current state of the context.
    */
   void update_pipeline_data(render_graph::VKPipelineData &r_pipeline_data);
-  void update_pipeline_data(GPUPrimType primitive,
+  void update_pipeline_data(const VKFrameBuffer &framebuffer,
+                            GPUPrimType primitive,
                             VKVertexAttributeObject &vao,
                             render_graph::VKPipelineDataGraphics &r_pipeline_data);
 

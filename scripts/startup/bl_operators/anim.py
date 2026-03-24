@@ -223,7 +223,7 @@ class NLA_OT_bake(Operator):
         default=False,
     )
     clear_constraints: BoolProperty(
-        name="Clear Constraints",
+        name="Clear Local Constraints",
         description=(
             "Remove all constraints from keyed object/bones. "
             "To get a correct bake with this setting Visual Keying should be enabled"
@@ -392,8 +392,10 @@ class UpdateAnimatedTransformConstraint(Operator):
 
     use_convert_to_radians: BoolProperty(
         name="Convert to Radians",
-        description="Convert f-curves/drivers affecting rotations to radians.\n"
-                    "Warning: Use this only once",
+        description=(
+            "Convert f-curves/drivers affecting rotations to radians.\n"
+            "Warning: Use this only once"
+        ),
         default=True,
     )
 
@@ -711,9 +713,6 @@ class ANIM_OT_slot_new_for_id(Operator):
         if not animated_id.animation_data or not animated_id.animation_data.action:
             cls.poll_message_set("An action slot can only be created when an action is assigned")
             return False
-        if not animated_id.animation_data.action.is_action_layered:
-            cls.poll_message_set("Action slots are only supported by layered Actions. Upgrade this Action first")
-            return False
         if not animated_id.animation_data.action.is_editable:
             cls.poll_message_set("Creating a new Slot is not possible on a linked Action")
             return False
@@ -899,7 +898,7 @@ class ANIM_OT_version_bone_hide_property(Operator):
             self.report({'WARNING'}, rpt_("No armature animation was modified"))
             return {'CANCELLED'}
 
-        self.report({'INFO'}, rpt_(f"Modified the animation of {len(modified_armatures)} armatures"))
+        self.report({'INFO'}, rpt_("Modified the animation of {:d} armatures").format(len(modified_armatures)))
         for screen in bpy.data.screens:
             for area in screen.areas:
                 area.tag_redraw()

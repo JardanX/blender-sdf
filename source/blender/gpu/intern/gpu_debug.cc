@@ -16,30 +16,16 @@
 
 #include "GPU_debug.hh"
 
-#include "gpu_profile_report.hh"
+namespace blender {
 
-using namespace blender;
 using namespace blender::gpu;
-
-void GPU_profile_get_latest_time(const char *name, uint64_t *r_gpu_time, uint64_t *r_cpu_time)
-{
-  ProfileReport::get().get_latest_time(name, r_gpu_time, r_cpu_time);
-}
-
-void GPU_profile_add_group_cpu(const char *name, uint64_t cpu_start, uint64_t cpu_end)
-{
-  ProfileReport::get().add_group_cpu(name, cpu_start, cpu_end);
-}
 
 void GPU_debug_group_begin(const char *name)
 {
-  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu && !G.profile_gpu_overlay) {
+  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu) {
     return;
   }
   Context *ctx = Context::get();
-  if (ctx == nullptr) {
-    return;
-  }
   DebugStack &stack = ctx->debug_stack;
   stack.append(StringRef(name));
   ctx->debug_group_begin(name, stack.size());
@@ -47,13 +33,10 @@ void GPU_debug_group_begin(const char *name)
 
 void GPU_debug_group_end()
 {
-  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu && !G.profile_gpu_overlay) {
+  if (!(G.debug & G_DEBUG_GPU) && !G.profile_gpu) {
     return;
   }
   Context *ctx = Context::get();
-  if (ctx == nullptr) {
-    return;
-  }
   ctx->debug_stack.pop_last();
   ctx->debug_group_end();
 }
@@ -74,6 +57,28 @@ void GPU_debug_get_groups_names(int name_buf_len, char *r_name_buf)
     len += BLI_snprintf_rlen(r_name_buf + len, name_buf_len - len, "%s > ", name.data());
   }
   r_name_buf[len - 3] = '\0';
+}
+
+std::string GPU_debug_get_groups_names(IndexRange levels)
+{
+  Context *ctx = Context::get();
+  if (ctx == nullptr) {
+    return "";
+  }
+  DebugStack &stack = ctx->debug_stack;
+  if (stack.is_empty()) {
+    return "";
+  }
+  std::string result;
+
+  int i = 0;
+  for (StringRef &name : stack) {
+    if (levels.contains(i++)) {
+      result += name;
+      result += " > ";
+    }
+  }
+  return result.substr(0, result.size() - 3);
 }
 
 bool GPU_debug_group_match(const char *ref)
@@ -183,7 +188,7 @@ void GPU_debug_capture_scope_end(void *scope)
   ctx->debug_capture_scope_end(scope);
 }
 
-namespace blender::gpu {
+namespace gpu {
 
 void debug_validate_binding_image_format()
 {
@@ -217,4 +222,5 @@ void debug_validate_binding_image_format()
   }
 }
 
-}  // namespace blender::gpu
+}  // namespace gpu
+}  // namespace blender

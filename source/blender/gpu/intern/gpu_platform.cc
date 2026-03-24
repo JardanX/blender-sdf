@@ -22,11 +22,13 @@
 
 #include "gpu_platform_private.hh"
 
+namespace blender {
+
 /* -------------------------------------------------------------------- */
 /** \name GPUPlatformGlobal
  * \{ */
 
-namespace blender::gpu {
+namespace gpu {
 
 GPUPlatformGlobal GPG;
 
@@ -100,11 +102,11 @@ void GPUPlatformGlobal::init(GPUDeviceType gpu_device,
 
 void GPUPlatformGlobal::clear()
 {
-  MEM_SAFE_FREE(vendor);
-  MEM_SAFE_FREE(renderer);
-  MEM_SAFE_FREE(version);
-  MEM_SAFE_FREE(support_key);
-  MEM_SAFE_FREE(gpu_name);
+  MEM_SAFE_DELETE(vendor);
+  MEM_SAFE_DELETE(renderer);
+  MEM_SAFE_DELETE(version);
+  MEM_SAFE_DELETE(support_key);
+  MEM_SAFE_DELETE(gpu_name);
   devices.clear_and_shrink();
   device_uuid.reinitialize(0);
   device_luid.reinitialize(0);
@@ -112,7 +114,7 @@ void GPUPlatformGlobal::clear()
   initialized = false;
 }
 
-}  // namespace blender::gpu
+}  // namespace gpu
 
 /** \} */
 
@@ -179,17 +181,17 @@ bool GPU_type_matches_ex(GPUDeviceType device,
          (GPG.backend & backend);
 }
 
-blender::Span<GPUDevice> GPU_platform_devices_list()
+Span<GPUDevice> GPU_platform_devices_list()
 {
   return GPG.devices.as_span();
 }
 
-blender::Span<uint8_t> GPU_platform_uuid()
+Span<uint8_t> GPU_platform_uuid()
 {
   return GPG.device_uuid.as_span();
 }
 
-blender::Span<uint8_t> GPU_platform_luid()
+Span<uint8_t> GPU_platform_luid()
 {
   return GPG.device_luid.as_span();
 }
@@ -200,3 +202,5 @@ uint32_t GPU_platform_luid_node_mask()
 }
 
 /** \} */
+
+}  // namespace blender

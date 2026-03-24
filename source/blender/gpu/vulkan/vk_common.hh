@@ -65,7 +65,12 @@ struct VKSubImageRange {
 VkImageAspectFlags to_vk_image_aspect_flag_bits(const TextureFormat format);
 VkImageAspectFlags to_vk_image_aspect_flag_bits(const GPUFrameBufferBits buffers);
 VkFormat to_vk_format(const TextureFormat format);
+BLI_INLINE VkFormat to_vk_format(const TextureTargetFormat format)
+{
+  return to_vk_format(to_texture_format(format));
+}
 TextureFormat to_gpu_format(const VkFormat format);
+std::string to_gpu_format_string(VkFormat format);
 VkFormat to_vk_format(const GPUVertCompType type,
                       const uint32_t size,
                       const GPUVertFetchMode fetch_mode);
@@ -83,6 +88,12 @@ VkPrimitiveTopology to_vk_primitive_topology(const GPUPrimType prim_type);
 VkCullModeFlags to_vk_cull_mode_flags(const GPUFaceCullTest cull_test);
 VkSamplerAddressMode to_vk_sampler_address_mode(const GPUSamplerExtendMode extend_mode);
 VkDescriptorType to_vk_descriptor_type(const shader::ShaderCreateInfo::Resource &resource);
+VkImageCreateFlags to_vk_image_create(const GPUTextureType texture_type,
+                                      const GPUTextureFormatFlag format_flag,
+                                      const eGPUTextureUsage usage);
+VkImageUsageFlags to_vk_image_usage(const eGPUTextureUsage usage,
+                                    const GPUTextureFormatFlag format_flag,
+                                    bool use_image_host_copy);
 
 template<typename T> VkObjectType to_vk_object_type(T /*vk_obj*/)
 {

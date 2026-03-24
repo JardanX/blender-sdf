@@ -18,7 +18,9 @@
 #include "COM_node_operation.hh"
 #include "COM_result.hh"
 
-namespace blender::nodes::node_geo_enable_output_cc {
+namespace blender {
+
+namespace nodes::node_geo_enable_output_cc {
 
 static void node_declare(NodeDeclarationBuilder &b)
 {
@@ -39,6 +41,7 @@ static void node_declare(NodeDeclarationBuilder &b)
 
   if (nodes::socket_type_supports_fields(data_type)) {
     input_value.supports_field();
+    output_value.dependent_field().reference_pass_all();
   }
 
   if (bke::node_tree_reference_lifetimes::can_contain_referenced_data(data_type)) {
@@ -53,11 +56,11 @@ static void node_declare(NodeDeclarationBuilder &b)
   output_value.structure_type(StructureType::Dynamic);
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->use_property_split_set(true);
-  layout->use_property_decorate_set(false);
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.use_property_split_set(true);
+  layout.use_property_decorate_set(false);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 class LazyFunctionForEnableOutputNode : public LazyFunction {
@@ -110,7 +113,7 @@ class EnableOutputOperation : public NodeOperation {
 
   void execute() override
   {
-    const bool keep = this->get_input("Enable").get_single_value_default<bool>(true);
+    const bool keep = this->get_input("Enable").get_single_value_default<bool>();
     Result &output = this->get_result("Value");
     if (keep) {
       const Result &input = this->get_input("Value");
@@ -122,7 +125,7 @@ class EnableOutputOperation : public NodeOperation {
   }
 };
 
-static NodeOperation *node_get_compositor_operation(Context &context, DNode node)
+static NodeOperation *get_compositor_operation(Context &context, const bNode &node)
 {
   return new EnableOutputOperation(context, node);
 }
@@ -154,7 +157,7 @@ static const EnumPropertyItem *data_type_items_callback(bContext * /*C*/,
 {
   *r_free = true;
   const bNodeTree &ntree = *reinterpret_cast<bNodeTree *>(ptr->owner_id);
-  blender::bke::bNodeTreeType *ntree_type = ntree.typeinfo;
+  bke::bNodeTreeType *ntree_type = ntree.typeinfo;
   return enum_items_filter(
       rna_enum_node_socket_data_type_items, [&](const EnumPropertyItem &item) -> bool {
         bke::bNodeSocketType *socket_type = bke::node_socket_type_find_static(item.value);
@@ -184,7 +187,7 @@ static const bNodeSocket *node_internally_linked_input(const bNodeTree & /*tree*
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_cmp_node_type_base(&ntype, "NodeEnableOutput");
   ntype.ui_name = "Enable Output";
@@ -194,18 +197,18 @@ static void node_register()
   ntype.initfunc = node_init;
   ntype.draw_buttons = node_layout;
   ntype.declare = node_declare;
-  ntype.get_compositor_operation = node_get_compositor_operation;
+  ntype.get_compositor_operation = get_compositor_operation;
   ntype.get_extra_info = node_extra_info;
   ntype.internally_linked_input = node_internally_linked_input;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 
   node_rna(ntype.rna_ext.srna);
 }
 NOD_REGISTER_NODE(node_register)
 
-}  // namespace blender::nodes::node_geo_enable_output_cc
+}  // namespace nodes::node_geo_enable_output_cc
 
-namespace blender::nodes {
+namespace nodes {
 
 std::unique_ptr<LazyFunction> get_enable_output_node_lazy_function(
     const bNode &node, GeometryNodesLazyFunctionGraphInfo &own_lf_graph_info)
@@ -215,4 +218,5 @@ std::unique_ptr<LazyFunction> get_enable_output_node_lazy_function(
       node, own_lf_graph_info.mapping.lf_index_by_bsocket);
 }
 
-}  // namespace blender::nodes
+}  // namespace nodes
+}  // namespace blender

@@ -423,6 +423,7 @@ class CLIP_PT_tracking_settings_extras(CLIP_PT_tracking_panel, Panel):
     bl_parent_id = "CLIP_PT_tracking_settings"
     bl_space_type = 'CLIP_EDITOR'
     bl_region_type = 'TOOLS'
+    bl_category = "Track"
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -550,7 +551,7 @@ class CLIP_PT_tools_solve(CLIP_PT_tracking_panel, Panel):
         col.prop(settings, "refine_intrinsics_radial_distortion", text="Radial Distortion")
 
         row = col.row()
-        row.active = (camera.distortion_model == 'BROWN')
+        row.active = (camera.distortion_model in ('BROWN', 'NUKE'))
         row.prop(settings, "refine_intrinsics_tangential_distortion", text="Tangential Distortion")
 
         col = layout.column(align=True)
@@ -940,6 +941,9 @@ class CLIP_PT_tracking_lens(Panel):
             col = layout.column(align=True)
             col.prop(camera, "nuke_k1")
             col.prop(camera, "nuke_k2")
+            col.separator()
+            col.prop(camera, "nuke_p1")
+            col.prop(camera, "nuke_p2")
         elif camera.distortion_model == 'BROWN':
             col = layout.column(align=True)
             col.prop(camera, "brown_k1")
@@ -1220,11 +1224,16 @@ class CLIP_PT_tools_mask_tools(MASK_PT_tools, Panel):
 # --- end mask ---
 
 
-class CLIP_PT_footage(CLIP_PT_clip_view_panel, Panel):
+class CLIP_PT_footage(Panel):
     bl_space_type = 'CLIP_EDITOR'
     bl_region_type = 'UI'
     bl_category = "Footage"
     bl_label = "Footage Settings"
+
+    @classmethod
+    def poll(cls, context):
+        sc = context.space_data
+        return sc.view == 'CLIP'
 
     def draw(self, context):
         layout = self.layout
@@ -1232,13 +1241,13 @@ class CLIP_PT_footage(CLIP_PT_clip_view_panel, Panel):
         layout.use_property_decorate = False
 
         sc = context.space_data
-        clip = sc.clip
 
-        col = layout.column()
-        col.template_movieclip(sc, "clip", compact=True)
-        col.prop(clip, "frame_start")
-        col.prop(clip, "frame_offset")
-        col.template_movieclip_information(sc, "clip", sc.clip_user)
+        if not sc.clip:
+            layout.label(text="No active movie clip", icon='INFO')
+        else:
+            col = layout.column()
+            col.template_movieclip(sc, "clip", compact=True)
+            col.template_movieclip_information(sc, "clip", sc.clip_user)
 
 
 class CLIP_PT_animation(CLIP_PT_clip_view_panel, Panel):

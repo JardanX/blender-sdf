@@ -8,9 +8,7 @@
  * Do not hand edit this file!
  */
 
-#include "DNA_userdef_types.h"
-
-#include "BLO_userdef_default.h"
+#include "DNA_theme_types.h"
 
 /* clang-format off */
 
@@ -373,6 +371,7 @@ const bTheme U_theme_default = {
     .header_text = RGBA(0xeeeeeeff),
     .header_text_hi = RGBA(0xffffffff),
     .grid = RGBA(0x54545480),
+    .grid_major = RGBA(0x545454ff),
     .wire = RGBA(0x000000ff),
     .wire_edit = RGBA(0x000000ff),
     .select = RGBA(0xed5700ff),
@@ -425,6 +424,7 @@ const bTheme U_theme_default = {
     .clipping_border_3d = RGBA(0x3f3f3fff),
     .bundle_solid = RGBA(0xc8c8c8ff),
     .camera_path = RGBA(0x000000ff),
+    .gp_wire_edit = RGBA(0x99999980),
     .gp_vertex_size = 3,
     .gp_vertex = RGBA(0x000000ff),
     .gp_vertex_select = RGBA(0xff8500ff),
@@ -494,7 +494,9 @@ const bTheme U_theme_default = {
     .header_text_hi = RGBA(0xffffffff),
     .shade1 = RGBA(0xc0c0c000),
     .grid = RGBA(0x161616ff),
-    .ds_ipoline = RGBA(0x94e575cc),
+    .anim_interpolation_linear = RGBA(0x94e575cc),
+    .anim_interpolation_constant = RGBA(0xe59c7bcc),
+    .anim_interpolation_other = RGBA(0x5dbabeb3),
     .keyborder = RGBA(0x000000ff),
     .keyborder_select = RGBA(0x000000ff),
     .vertex_size = 3,
@@ -703,6 +705,7 @@ const bTheme U_theme_default = {
     .vertex_size = 3,
     .outline_width = 1,
     .facedot_size = 4,
+    .match = RGBA(0x4772b3ff),
   },
   .space_console = {
     .back = RGBA(0x1d1d1d00),
