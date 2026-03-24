@@ -873,9 +873,8 @@ hiprtScene HIPRTDevice::build_tlas(BVHHIPRT *bvh,
     bool transform_applied = geom->transform_applied;
 
     BVHHIPRT *current_bvh = static_cast<BVHHIPRT *>(geom->bvh.get());
-    bool is_valid_geometry = current_bvh &&
-                             current_bvh->geom_input.geomType != hiprtInvalidValue;
-    hiprtGeometry hiprt_geom_current = current_bvh ? current_bvh->hiprt_geom : nullptr;
+    bool is_valid_geometry = current_bvh->geom_input.geomType != hiprtInvalidValue;
+    hiprtGeometry hiprt_geom_current = current_bvh->hiprt_geom;
 
     hiprtFrameMatrix hiprt_transform_matrix = {{{0}}};
     Transform identity_matrix = transform_identity();

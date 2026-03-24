@@ -144,17 +144,6 @@ ccl_device_forceinline int intersection_get_shader_flags(KernelGlobals kg,
     shader = kernel_data_fetch(curves, prim).shader_id;
   }
 #endif
-  else if (type & PRIMITIVE_SDF) {
-    if (kernel_data.num_sdf_shapes > 0) {
-      /* Instanced mode: prim is an instance index. */
-      shader = kernel_data_fetch(sdf_shape_instances, prim).shader_id;
-    }
-    else {
-      /* World-space mode: prim is an SDF object index. */
-      const KernelSDF ksdf = kernel_data_fetch(sdf_objects, prim);
-      shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset);
-    }
-  }
 
   return kernel_data_fetch(shaders, (shader & SHADER_MASK)).flags;
 }
@@ -178,17 +167,6 @@ ccl_device_forceinline int intersection_get_shader_from_isect_prim(KernelGlobals
     shader = kernel_data_fetch(curves, prim).shader_id;
   }
 #endif
-  else if (isect_type & PRIMITIVE_SDF) {
-    if (kernel_data.num_sdf_shapes > 0) {
-      /* Instanced mode: prim is an instance index. */
-      shader = kernel_data_fetch(sdf_shape_instances, prim).shader_id;
-    }
-    else {
-      /* World-space mode: prim is an SDF object index. */
-      const KernelSDF ksdf = kernel_data_fetch(sdf_objects, prim);
-      shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset);
-    }
-  }
 
   return shader & SHADER_MASK;
 }

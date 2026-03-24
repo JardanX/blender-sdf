@@ -57,20 +57,7 @@ DeviceScene::DeviceScene(Device *device)
       volume_tree_nodes(device, "volume_tree_nodes", MEM_GLOBAL),
       volume_tree_roots(device, "volume_tree_roots", MEM_GLOBAL),
       volume_tree_root_ids(device, "volume_tree_root_ids", MEM_GLOBAL),
-      volume_step_size(device, "volume_step_size", MEM_GLOBAL),
-      sdf_objects(device, "sdf_objects", MEM_GLOBAL),
-      sdf_shader_map(device, "sdf_shader_map", MEM_GLOBAL),
-      sdf_indirection(device, "sdf_indirection", MEM_GLOBAL),
-      sdf_atlas(device, "sdf_atlas", MEM_GLOBAL),
-      sdf_matid(device, "sdf_matid", MEM_GLOBAL),
-      sdf_blend_id(device, "sdf_blend_id", MEM_GLOBAL),
-      sdf_blend_factor(device, "sdf_blend_factor", MEM_GLOBAL),
-      sdf_brick_map(device, "sdf_brick_map", MEM_GLOBAL),
-      sdf_shape_objects(device, "sdf_shape_objects", MEM_GLOBAL),
-      sdf_shape_instances(device, "sdf_shape_instances", MEM_GLOBAL),
-      sdf_shape_indirection(device, "sdf_shape_indirection", MEM_GLOBAL),
-      sdf_shape_atlas(device, "sdf_shape_atlas", MEM_GLOBAL),
-      sdf_shape_brick_map(device, "sdf_shape_brick_map", MEM_GLOBAL)
+      volume_step_size(device, "volume_step_size", MEM_GLOBAL)
 {
   memset((void *)&data, 0, sizeof(data));
 }

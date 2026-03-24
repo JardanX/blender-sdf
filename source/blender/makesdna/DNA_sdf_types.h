@@ -12,80 +12,75 @@
 #include "DNA_ID.h"
 #include "DNA_defs.h"
 
-struct AnimData;
-struct Material;
-
 #ifdef __cplusplus
 namespace blender::bke {
 struct SDFRuntime;
 }
-using SDFRuntimeHandle = blender::bke::SDFRuntime;
+#endif
+
+namespace blender {
+
+struct AnimData;
+struct Material;
+
+#ifdef __cplusplus
+using SDFRuntimeHandle = bke::SDFRuntime;
 #else
 typedef struct SDFRuntimeHandle SDFRuntimeHandle;
 #endif
 
-typedef enum eSDFType {
+enum eSDFType {
   SDF_TYPE_BOX = 0,
   SDF_TYPE_SPHERE = 1,
   SDF_TYPE_CAPSULE = 4,
   SDF_TYPE_TORUS = 5,
-} eSDFType;
+};
 
-typedef enum eSDFBlendType {
+enum eSDFBlendType {
   SDF_BLEND_LINEAR = 0,
   SDF_BLEND_SMOOTH = 1,
   SDF_BLEND_CHAMFER = 2,
   SDF_BLEND_ROUND = 3,
-} eSDFBlendType;
+};
 
-typedef enum eSDFCSGOperation {
+enum eSDFCSGOperation {
   SDF_CSG_UNION = 0,
   SDF_CSG_SUBTRACT = 1,
   SDF_CSG_INTERSECT = 2,
-} eSDFCSGOperation;
+};
 
-typedef struct SDF {
+struct SDF {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(SDF)
-  /** See #ID_Type comment for why this is here. */
   static constexpr ID_Type id_type = ID_SF;
 #endif
 
   ID id;
-  /** Animation data (must be immediately after id for utilities to use it). */
   struct AnimData *adt;
 
-  /** SDF primitive type. */
   int sdf_type;
   char _pad0[4];
 
-  /** Size in each axis. */
   float size[3];
-  /** Bevel radius. */
   float bevel;
 
-  /** Display color (RGBA). */
   float color[4];
 
-  /** Blend amount for CSG operations. */
   float blend;
-  /** Blend type (eSDFBlendType). */
   int blend_type;
-  /** CSG operation (eSDFCSGOperation). */
   int csg_operation;
   char _pad1[4];
 
-  /** Material slots. */
   struct Material **mat;
-  /** Number of material slots. */
   short totcol;
   char _pad2[6];
 
-  /** Runtime data (keep last). */
   SDFRuntimeHandle *runtime;
-} SDF;
+};
 
 /** #SDF.flag */
 enum {
   SDF_DS_EXPAND = (1 << 0),
 };
+
+}  // namespace blender

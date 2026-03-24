@@ -1348,7 +1348,7 @@ class CyclesMeshSettings(bpy.types.PropertyGroup):
             description="Cycles mesh settings",
             type=cls,
         )
-        # MATHOPS: MetaBall removed — skip registration.
+        # MATHOPS: MetaBall.cycles removed (MetaBall RNA deleted)
 
     @classmethod
     def unregister(cls):

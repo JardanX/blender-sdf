@@ -2454,15 +2454,28 @@ def draw_device(self, context):
     layout.use_property_split = True
     layout.use_property_decorate = False
 
-    # MATHOPS: Device selector and OSL toggle are in the Path Tracer wrapper panel
-    # (RENDER_PT_proximity_cycles in properties_render.py). Nothing drawn here.
+    if context.engine == 'CYCLES':
+        from . import engine
+        cscene = scene.cycles
+
+        col = layout.column()
+        col.active = show_device_active(context)
+        col.prop(cscene, "device")
+
+        from . import engine
+        if engine.with_osl() and (
+            use_cpu(context) or (
+                use_optix(context) and (
+                engine.osl_version()[1] >= 13 or engine.osl_version()[0] > 1))):
+            osl_col = layout.column()
+            osl_col.prop(cscene, "shading_system")
 
 
 def draw_pause(self, context):
     layout = self.layout
     scene = context.scene
 
-    if context.engine == 'CYCLES':
+    if context.engine == "CYCLES":
         view = context.space_data
 
         if view.shading.type == 'RENDERED':
@@ -2611,13 +2624,6 @@ def register():
         panel.COMPAT_ENGINES.add('CYCLES')
 
     for cls in classes:
-        # MATHOPS: Nest top-level Cycles render panels under the Path Tracer wrapper.
-        # Only panels in bl_context="render" that don't already have a parent.
-        if (cls.__name__.startswith('CYCLES_RENDER_PT_') and
-                not hasattr(cls, 'bl_parent_id') and
-                getattr(cls, 'bl_context', '') == 'render'):
-            cls.bl_parent_id = "RENDER_PT_proximity_cycles"
-
         register_class(cls)
 
 
@@ -2633,6 +2639,3 @@ def unregister():
 
     for cls in classes:
         unregister_class(cls)
-        # MATHOPS: Remove dynamically added parent nesting.
-        if getattr(cls, 'bl_parent_id', None) == "RENDER_PT_proximity_cycles":
-            del cls.bl_parent_id

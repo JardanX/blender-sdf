@@ -576,7 +576,7 @@ static StructRNA *rna_Object_data_typef(PointerRNA *ptr)
     case OB_FONT:
       return RNA_Curve;
     case OB_MBALL:
-      return RNA_MetaBall;
+      return RNA_ID; /* MATHOPS: MetaBall RNA removed */
     case OB_LAMP:
       return RNA_Light;
     case OB_CAMERA:

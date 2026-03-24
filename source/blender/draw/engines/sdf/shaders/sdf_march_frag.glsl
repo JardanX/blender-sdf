@@ -634,8 +634,8 @@ void main()
       local_normal = computeDualVoxelNormal(hit_in_brick, ihit.hit_brick, ihit.hit_slot, bricks_per_axis);
     }
 
-    /* Transform normal: N_world = normalize(transpose(world_to_local) * N_local). */
-    hit_normal = normalize(mat3(transpose(inst.world_to_local)) * local_normal);
+    float4x4 w2l_t = transpose(inst.world_to_local);
+    hit_normal = normalize(float3x3(w2l_t) * local_normal);
   }
   else {
     /* ---- World-space mode: BVH-guided DDA ---- */

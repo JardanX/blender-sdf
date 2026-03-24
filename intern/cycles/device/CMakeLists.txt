@@ -15,13 +15,6 @@ if(WITH_CYCLES_DEVICE_OPTIX OR WITH_CYCLES_DEVICE_CUDA)
   endif()
 
   add_definitions(-DCYCLES_RUNTIME_OPTIX_ROOT_DIR="${CYCLES_RUNTIME_OPTIX_ROOT_DIR}")
-
-  if(WIN32)
-    # Tell nvcc where to find cl.exe when Blender is not launched from a Developer Command Prompt.
-    get_filename_component(_MSVC_CL_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    add_definitions(-DCYCLES_MSVC_CL_DIR="${_MSVC_CL_DIR}")
-    unset(_MSVC_CL_DIR)
-  endif()
 endif()
 
 set(SRC_BASE

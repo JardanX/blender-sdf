@@ -2909,7 +2909,7 @@ void do_versions_after_linking_500(FileData *fd, Main *bmain)
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 122)) {
     /* MATHOPS: Remap all engines to Cycles — single engine architecture.
      * EEVEE removed, Proximity/Workbench only used for solid viewport internally. */
-    LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
+    for (Scene *scene = static_cast<Scene *>(bmain->scenes.first); scene; scene = static_cast<Scene *>(scene->id.next)) {
       if (STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE) ||
           STREQ(scene->r.engine, "BLENDER_WORKBENCH") ||
           STREQ(scene->r.engine, RE_engine_id_BLENDER_EEVEE_NEXT) ||
@@ -4507,11 +4507,11 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 119)) {
-    LISTBASE_FOREACH (Object *, obj, &bmain->objects) {
+    for (Object *obj = static_cast<Object *>(bmain->objects.first); obj; obj = static_cast<Object *>(obj->id.next)) {
       if (!obj->pose) {
         continue;
       }
-      LISTBASE_FOREACH (bPoseChannel *, pose_bone, &obj->pose->chanbase) {
+      for (bPoseChannel *pose_bone = static_cast<bPoseChannel *>(obj->pose->chanbase.first); pose_bone; pose_bone = pose_bone->next) {
         /* Those flags were previously unused, so to be safe we clear them. */
         pose_bone->flag &= ~(POSE_SELECTED_ROOT | POSE_SELECTED_TIP);
       }
@@ -4520,9 +4520,9 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 124)) {
     /* Initialize SDF draw engine defaults for View3DShading. */
-    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
-      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
-        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
+    for (bScreen *screen = static_cast<bScreen *>(bmain->screens.first); screen; screen = static_cast<bScreen *>(screen->id.next)) {
+      for (ScrArea *area = static_cast<ScrArea *>(screen->areabase.first); area; area = area->next) {
+        for (SpaceLink *sl = static_cast<SpaceLink *>(area->spacedata.first); sl; sl = sl->next) {
           if (sl->spacetype == SPACE_VIEW3D) {
             View3D *v3d = (View3D *)sl;
             if (v3d->shading.sdf_resolution == 0 ||

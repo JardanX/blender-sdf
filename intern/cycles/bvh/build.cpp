@@ -416,9 +416,6 @@ void BVHBuild::add_references(BVHRange &root)
   size_t num_alloc_references = 0;
 
   for (Object *ob : objects) {
-    if (ob->get_geometry()->is_sdf()) {
-      continue; /* SDF uses separate ray marching, not BVH. */
-    }
     if (params.top_level) {
       if (!ob->is_traceable()) {
         continue;
@@ -447,10 +444,6 @@ void BVHBuild::add_references(BVHRange &root)
       if (!ob->is_traceable()) {
         ++i;
         continue;
-      }
-      if (ob->get_geometry()->is_sdf()) {
-        ++i;
-        continue; /* SDF uses separate ray marching, not BVH. */
       }
       if (!ob->get_geometry()->is_instanced()) {
         add_reference_geometry(bounds, center, ob->get_geometry(), i);

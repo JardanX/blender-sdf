@@ -275,7 +275,7 @@ static bool buttons_context_path_data(ButsContextPath *path, int type)
   if (RNA_struct_is_a(ptr->type, RNA_Volume) && ELEM(type, -1, OB_VOLUME)) {
     return true;
   }
-  if (RNA_struct_is_a(ptr->type, &RNA_SDF) && ELEM(type, -1, OB_SDF)) {
+  if (RNA_struct_is_a(ptr->type, RNA_SDF) && ELEM(type, -1, OB_SDF)) {
     return true;
   }
   /* try to get an object in the path, no pinning supported here */
@@ -1021,7 +1021,7 @@ int /*eContextResult*/ buttons_context(const bContext *C,
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "sdf")) {
-    set_pointer_type(path, result, &RNA_SDF);
+    set_pointer_type(path, result, RNA_SDF);
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "material")) {

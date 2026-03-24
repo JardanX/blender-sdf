@@ -90,21 +90,4 @@ KERNEL_DATA_ARRAY(KernelOctreeRoot, volume_tree_roots)
 KERNEL_DATA_ARRAY(int, volume_tree_root_ids)
 KERNEL_DATA_ARRAY(float, volume_step_size)
 
-/* SDF (world-space atlas mode). */
-KERNEL_DATA_ARRAY(KernelSDF, sdf_objects)
-KERNEL_DATA_ARRAY(int, sdf_shader_map)
-KERNEL_DATA_ARRAY(int, sdf_indirection)
-KERNEL_DATA_ARRAY(float4, sdf_atlas)
-KERNEL_DATA_ARRAY(int, sdf_matid)
-KERNEL_DATA_ARRAY(int, sdf_blend_id)
-KERNEL_DATA_ARRAY(float, sdf_blend_factor)
-KERNEL_DATA_ARRAY(int4, sdf_brick_map)
-
-/* SDF (per-shape TLAS/BLAS instanced mode). */
-KERNEL_DATA_ARRAY(KernelSDFShape, sdf_shape_objects)
-KERNEL_DATA_ARRAY(KernelSDFInstance, sdf_shape_instances)
-KERNEL_DATA_ARRAY(int, sdf_shape_indirection)
-KERNEL_DATA_ARRAY(uint16_t, sdf_shape_atlas)
-KERNEL_DATA_ARRAY(int4, sdf_shape_brick_map)
-
 #undef KERNEL_DATA_ARRAY

@@ -1883,7 +1883,9 @@ static bool rna_RenderSettings_multiple_engines_get(PointerRNA * /*ptr*/)
 {
   /* MATHOPS: Count only visible engines (Workbench/Proximity and Hydra Storm are hidden). */
   int visible = 0;
-  LISTBASE_FOREACH (RenderEngineType *, type, &R_engines) {
+  for (RenderEngineType *type = static_cast<RenderEngineType *>(R_engines.first); type;
+       type = type->next)
+  {
     if (!STREQ(type->idname, RE_engine_id_BLENDER_WORKBENCH) &&
         !STREQ(type->idname, "HYDRA_STORM"))
     {

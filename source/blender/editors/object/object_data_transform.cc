@@ -36,7 +36,6 @@
 #include "BKE_grease_pencil.hh"
 #include "BKE_key.hh"
 #include "BKE_lattice.hh"
-#include "BKE_mball.hh"
 #include "BKE_mesh_types.hh"
 
 #include "bmesh.hh"
@@ -240,7 +239,7 @@ static void metaball_coords_and_quats_apply_with_mat4(MetaBall *mb,
     copy_v3_v3(&ml->expx, elem->exp);
     ml->rad = elem->rad;
   }
-  BKE_mball_transform(mb, transform.ptr(), true);
+  /* MATHOPS: Removed — BKE_mball_transform(mb, transform.ptr(), true); */
 }
 
 static void metaball_coords_and_quats_apply(MetaBall *mb, const Span<ElemData_MetaBall> elem_array)

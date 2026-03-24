@@ -198,6 +198,8 @@ void DRW_viewport_data_free(DRWData *drw_data);
 bool DRW_gpu_context_release();
 void DRW_gpu_context_activate(bool drw_state);
 
+void DRW_sdf_perf_info_get(const char **r_text, bool *r_active);
+
 namespace draw {
 
 void DRW_cdlayer_attr_aliases_add(GPUVertFormat *format,

@@ -13,7 +13,6 @@
 #include "kernel/geom/motion_triangle_intersect.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/point_intersect.h"
-#include "kernel/geom/sdf.h"
 #include "kernel/geom/triangle_intersect.h"
 
 /* Device specific acceleration structures for ray tracing. */
@@ -161,9 +160,7 @@ ccl_device_intersect void scene_intersect_shadow_all(KernelGlobals kg,
     payload.max_record_isect_t = ray->tmax;
 
 #  if defined(__BVH2__)
-    if (kernel_data.bvh.have_bvh_nodes) {
-      scene_intersect_shadow_all_bvh2(kg, ray, payload);
-    }
+    scene_intersect_shadow_all_bvh2(kg, ray, payload);
 #  elif defined(__KERNEL_HIPRT__)
     scene_intersect_shadow_all_hiprt(kg, ray, payload);
 #  elif defined(__KERNEL_METALRT__)
@@ -232,67 +229,40 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     return false;
   }
 
-  bool hit = false;
-
-  /* Ensure isect->t is initialized to ray->tmax so that intersection routines
-   * that run outside BVH traversal (e.g. SDF ray march) have a valid max
-   * distance even when the BVH traversal is skipped (no BVH nodes). */
-  isect->t = ray->tmax;
-
 #  ifdef __EMBREE__
   IF_USING_EMBREE
   {
     if (kernel_data.device_bvh) {
-      hit = kernel_embree_intersect(kg, ray, visibility, isect);
+      return kernel_embree_intersect(kg, ray, visibility, isect);
     }
   }
 #  endif
 
   IF_NOT_USING_EMBREE
   {
-    /* Skip BVH traversal if no BVH nodes exist (e.g. scene with only SDF objects). */
-    if (kernel_data.bvh.have_bvh_nodes) {
 #  ifdef __OBJECT_MOTION__
-      if (kernel_data.bvh.have_motion) {
+    if (kernel_data.bvh.have_motion) {
 #    ifdef __HAIR__
-        if (kernel_data.bvh.have_curves) {
-          hit = bvh_intersect_hair_motion(kg, ray, isect, visibility);
-        }
-        else
+      if (kernel_data.bvh.have_curves) {
+        return bvh_intersect_hair_motion(kg, ray, isect, visibility);
+      }
 #    endif /* __HAIR__ */
-        {
-          hit = bvh_intersect_motion(kg, ray, isect, visibility);
-        }
-      }
-      else
+
+      return bvh_intersect_motion(kg, ray, isect, visibility);
+    }
 #  endif /* __OBJECT_MOTION__ */
-      {
+
 #  ifdef __HAIR__
-        if (kernel_data.bvh.have_curves) {
-          hit = bvh_intersect_hair(kg, ray, isect, visibility);
-        }
-        else
+    if (kernel_data.bvh.have_curves) {
+      return bvh_intersect_hair(kg, ray, isect, visibility);
+    }
 #  endif /* __HAIR__ */
-        {
-          hit = bvh_intersect(kg, ray, isect, visibility);
-        }
-      }
-    }
+
+    return bvh_intersect(kg, ray, isect, visibility);
   }
 
-  /* SDF intersection: march all SDF objects, only find closer hits. */
-  if (kernel_data.num_sdfs > 0) {
-    if (sdf_intersect_all(kg, ray, isect, visibility)) {
-      hit = true;
-    }
-  }
-  else if (kernel_data.num_sdf_shapes > 0) {
-    if (sdf_intersect_all_instanced(kg, ray, isect, visibility)) {
-      hit = true;
-    }
-  }
-
-  return hit;
+  kernel_assert(false);
+  return false;
 }
 
 ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
@@ -300,66 +270,7 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
                                                  const uint visibility)
 {
   Intersection isect;
-  isect.t = ray->tmax;
-
-  bool hit = false;
-
-  /* Standard BVH traversal for triangle/curve/point geometry. */
-#  ifdef __EMBREE__
-  IF_USING_EMBREE
-  {
-    if (kernel_data.device_bvh) {
-      hit = kernel_embree_intersect(kg, ray, visibility, &isect);
-    }
-  }
-#  endif
-
-  IF_NOT_USING_EMBREE
-  {
-    if (kernel_data.bvh.have_bvh_nodes) {
-#  ifdef __OBJECT_MOTION__
-      if (kernel_data.bvh.have_motion) {
-#    ifdef __HAIR__
-        if (kernel_data.bvh.have_curves) {
-          hit = bvh_intersect_hair_motion(kg, ray, &isect, visibility);
-        }
-        else
-#    endif
-        {
-          hit = bvh_intersect_motion(kg, ray, &isect, visibility);
-        }
-      }
-      else
-#  endif
-      {
-#  ifdef __HAIR__
-        if (kernel_data.bvh.have_curves) {
-          hit = bvh_intersect_hair(kg, ray, &isect, visibility);
-        }
-        else
-#  endif
-        {
-          hit = bvh_intersect(kg, ray, &isect, visibility);
-        }
-      }
-    }
-  }
-
-  /* SDF shadow: existence check only, skips Newton-Raphson refinement. */
-  if (kernel_data.num_sdfs > 0) {
-    const float shadow_tmax = hit ? isect.t : ray->tmax;
-    if (sdf_intersect_all_shadow(kg, ray, shadow_tmax, visibility)) {
-      hit = true;
-    }
-  }
-  else if (kernel_data.num_sdf_shapes > 0) {
-    const float shadow_tmax = hit ? isect.t : ray->tmax;
-    if (sdf_intersect_all_instanced_shadow(kg, ray, shadow_tmax, visibility)) {
-      hit = true;
-    }
-  }
-
-  return hit;
+  return scene_intersect(kg, ray, visibility, &isect);
 }
 
 /* Single object BVH traversal, for SSS/AO/bevel. */

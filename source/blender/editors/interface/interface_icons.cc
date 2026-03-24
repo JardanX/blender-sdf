@@ -2194,6 +2194,8 @@ int icon_from_object_type(const Object *object)
       return ICON_OUTLINER_OB_POINTCLOUD;
     case OB_VOLUME:
       return ICON_OUTLINER_OB_VOLUME;
+    case OB_SDF:
+      return ICON_SDF_PRIMITIVE;
     case OB_EMPTY:
       if (object->instance_collection && (object->transflag & OB_DUPLICOLLECTION)) {
         return ICON_OUTLINER_OB_GROUP_INSTANCE;
