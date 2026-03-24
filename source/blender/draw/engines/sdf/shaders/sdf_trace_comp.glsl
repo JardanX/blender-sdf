@@ -274,9 +274,10 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
       }
     }
     else {
-      /* Grouped: accumulate into group CSG chain, track per-object winner */
+      /* Grouped: accumulate into group CSG chain, track per-object winner.
+       * Allow all ops except subtract to initialize (subtract needs a base). */
       if (!grp_has_hit) {
-        if (obj.csg_operation == 0) {
+        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL) {
           grp_dist = d;
           grp_color = obj.color.rgb;
           grp_winner_id = float(obj.original_index);

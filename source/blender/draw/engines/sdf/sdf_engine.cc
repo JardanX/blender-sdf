@@ -1178,22 +1178,9 @@ class Instance : public DrawEngine {
         float max_blend = grp_blend;
         int start = groups_gpu_[gi].first_object;
         int cnt = groups_gpu_[gi].object_count;
-        bool has_push_avoid = false;
         for (int m = start; m < start + cnt; m++) {
           float b = (objects_[m].blend_type == 0) ? 0.0f : objects_[m].blend;
           max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
-          int op = objects_[m].csg_operation;
-          if (op == SDF_CSG_PUSH || op == SDF_CSG_AVOID) {
-            has_push_avoid = true;
-          }
-        }
-        if (has_push_avoid) {
-          float3 gmin(1e30f), gmax(-1e30f);
-          for (int m = start; m < start + cnt; m++) {
-            gmin = math::min(gmin, float3(objects_[m].bbox_min));
-            gmax = math::max(gmax, float3(objects_[m].bbox_max));
-          }
-          max_blend = std::max(max_blend, math::length(gmax - gmin));
         }
         for (int m = start; m < start + cnt; m++) {
           memcpy(&objects_[m]._pad3, &max_blend, sizeof(float));
@@ -1464,9 +1451,7 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
-    /* Intersection: expand to scene bounds.
-     * Push/Avoid: expand base (union) objects to group bounds so they are
-     * in every tile where push/avoid extends. */
+    /* Intersection: expand to scene bounds (must be evaluated everywhere). */
     {
       float3 smin = float3(1e30f), smax = float3(-1e30f);
       for (int i = 0; i < int(objects_.size()); i++) {
@@ -1477,26 +1462,6 @@ class Instance : public DrawEngine {
         if (objects_[i].csg_operation == SDF_CSG_INTERSECT) {
           objects_[i].bbox_min = float4(smin, 0.0f);
           objects_[i].bbox_max = float4(smax, 0.0f);
-        }
-      }
-      for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
-        int start = groups_gpu_[gi].first_object;
-        int cnt = groups_gpu_[gi].object_count;
-        bool has_push_avoid = false;
-        float3 gmin(1e30f), gmax(-1e30f);
-        for (int m = start; m < start + cnt; m++) {
-          int op = objects_[m].csg_operation;
-          if (op == SDF_CSG_PUSH || op == SDF_CSG_AVOID) {
-            has_push_avoid = true;
-          }
-          gmin = math::min(gmin, float3(objects_[m].bbox_min));
-          gmax = math::max(gmax, float3(objects_[m].bbox_max));
-        }
-        if (has_push_avoid) {
-          for (int m = start; m < start + cnt; m++) {
-            objects_[m].bbox_min = float4(math::min(float3(objects_[m].bbox_min), gmin), 0.0f);
-            objects_[m].bbox_max = float4(math::max(float3(objects_[m].bbox_max), gmax), 0.0f);
-          }
         }
       }
     }
