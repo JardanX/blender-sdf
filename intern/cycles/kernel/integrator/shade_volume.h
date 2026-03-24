@@ -13,6 +13,7 @@
 #include "kernel/integrator/intersect_closest.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/shadow_linking.h"
+#include "kernel/integrator/state.h"
 #include "kernel/integrator/volume_shader.h"
 #include "kernel/integrator/volume_stack.h"
 
@@ -25,8 +26,6 @@
 
 CCL_NAMESPACE_BEGIN
 
-#ifdef __VOLUME__
-
 /* Events for probabilistic scattering. */
 
 enum VolumeIntegrateEvent {
@@ -34,6 +33,8 @@ enum VolumeIntegrateEvent {
   VOLUME_PATH_ATTENUATED = 1,
   VOLUME_PATH_MISSED = 2
 };
+
+#ifdef __VOLUME__
 
 struct VolumeIntegrateResult {
   /* Throughput and offset for direct light scattering. */
@@ -913,7 +914,7 @@ ccl_device_inline bool volume_indirect_scatter_advance(const ccl_private OctreeT
   return vstate.t > octree.t.max;
 }
 
-/* Adavance to the next candidate indirect scatter position, and compute the direct throughput. */
+/** Advance to the next candidate indirect scatter position, and compute the direct throughput. */
 ccl_device_inline bool volume_integrate_advance(KernelGlobals kg,
                                                 const ccl_private Ray *ccl_restrict ray,
                                                 ccl_private ShaderData *ccl_restrict sd,
@@ -2421,29 +2422,28 @@ ccl_device_forceinline void integrate_volume_direct_light(
     return;
   }
 
-  /* Evaluate light shader.
-   *
-   * TODO: can we reuse sd memory? In theory we can move this after
-   * integrate_surface_bounce, evaluate the BSDF, and only then evaluate
-   * the light shader. This could also move to its own kernel, for
-   * non-constant light sources. */
-  ShaderDataTinyStorage emission_sd_storage;
-  ccl_private ShaderData *emission_sd = AS_SHADER_DATA(&emission_sd_storage);
-  const Spectrum light_eval = light_sample_shader_eval(kg, state, emission_sd, &ls, sd->time);
-  if (is_zero(light_eval)) {
-    return;
-  }
+  /* Evaluate constant part of light shader, rest will optionally be done in another kernel. */
+  Spectrum light_shader_eval ccl_optional_struct_init;
+  const bool is_constant_light_shader = light_sample_shader_eval_nee_constant(
+      kg, ls.shader, ls.prim, ls.type != LIGHT_TRIANGLE, light_shader_eval);
 
   /* Evaluate BSDF. */
   BsdfEval phase_eval ccl_optional_struct_init;
   const float phase_pdf = volume_shader_phase_eval(
       kg, state, sd, phases, ls.D, &phase_eval, ls.shader);
   const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, phase_pdf);
-  bsdf_eval_mul(&phase_eval, light_eval / ls.pdf * mis_weight);
+  bsdf_eval_mul(&phase_eval, light_shader_eval * ls.eval_fac / ls.pdf * mis_weight);
 
-  /* Path termination. */
-  const float terminate = path_state_rng_light_termination(kg, rng_state);
-  if (light_sample_terminate(kg, &phase_eval, terminate)) {
+  /* Path termination for constant light shader. */
+  if (is_constant_light_shader && !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_TREE)) {
+    const float terminate = path_state_rng_light_termination(kg, rng_state);
+    if (light_sample_terminate(kg, &phase_eval, terminate)) {
+      return;
+    }
+  }
+  /* For non-constant light shader, probabilistic termination happens in
+   * SHADE_LIGHT_NEE when the full contribution is known. */
+  else if (bsdf_eval_is_zero(&phase_eval)) {
     return;
   }
 
@@ -2453,7 +2453,11 @@ ccl_device_forceinline void integrate_volume_direct_light(
 
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrator_shadow_path_init(
-      kg, state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW, false);
+      kg,
+      state,
+      (is_constant_light_shader) ? DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW :
+                                   DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_NEE,
+      false);
 
   /* Write shadow ray and associated state to global memory. */
   integrator_state_write_shadow_ray(shadow_state, &ray);
@@ -2463,7 +2467,12 @@ ccl_device_forceinline void integrate_volume_direct_light(
   const uint16_t bounce = INTEGRATOR_STATE(state, path, bounce);
   const uint16_t transparent_bounce = INTEGRATOR_STATE(state, path, transparent_bounce);
   uint32_t shadow_flag = INTEGRATOR_STATE(state, path, flag);
-  const Spectrum throughput_phase = throughput * bsdf_eval_sum(&phase_eval);
+  const Spectrum phase_sum = bsdf_eval_sum(&phase_eval);
+  const Spectrum throughput_phase = throughput * phase_sum;
+
+  if (!(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_TREE)) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bsdf_eval_average) = average(phase_sum);
+  }
 
   if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
     PackedSpectrum pass_diffuse_weight;

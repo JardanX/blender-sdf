@@ -14,12 +14,14 @@
 
 #include "gpu_texture_private.hh"
 
-namespace blender {
-namespace gpu {
+namespace blender::gpu {
+
+class GLTexturePool;
 
 class GLTexture : public Texture {
   friend class GLStateManager;
   friend class GLFrameBuffer;
+  friend class GLTexturePool;
 
  private:
   /**
@@ -58,8 +60,12 @@ class GLTexture : public Texture {
   GLTexture(const char *name);
   ~GLTexture();
 
-  void update_sub(
-      int mip, int offset[3], int extent[3], eGPUDataFormat type, const void *data) override;
+  void update_sub(int mip,
+                  int offset[3],
+                  int extent[3],
+                  eGPUDataFormat type,
+                  const void *data,
+                  const uint unpack_row_length = 0) override;
   void update_sub(int offset[3],
                   int extent[3],
                   eGPUDataFormat format,
@@ -375,5 +381,14 @@ inline GLenum channel_len_to_gl(int channel_len)
   }
 }
 
-}  // namespace gpu
-}  // namespace blender
+BLI_INLINE GLTexture *unwrap(Texture *tex)
+{
+  return static_cast<GLTexture *>(tex);
+}
+
+BLI_INLINE Texture *wrap(GLTexture *texture)
+{
+  return static_cast<Texture *>(texture);
+}
+
+}  // namespace blender::gpu

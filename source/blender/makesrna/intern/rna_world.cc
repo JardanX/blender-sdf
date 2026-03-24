@@ -33,19 +33,21 @@
 
 #  include "WM_api.hh"
 
+namespace blender {
+
 static PointerRNA rna_World_lighting_get(PointerRNA *ptr)
 {
-  return RNA_pointer_create_with_parent(*ptr, &RNA_WorldLighting, ptr->owner_id);
+  return RNA_pointer_create_with_parent(*ptr, RNA_WorldLighting, ptr->owner_id);
 }
 
 static PointerRNA rna_World_mist_get(PointerRNA *ptr)
 {
-  return RNA_pointer_create_with_parent(*ptr, &RNA_WorldMistSettings, ptr->owner_id);
+  return RNA_pointer_create_with_parent(*ptr, RNA_WorldMistSettings, ptr->owner_id);
 }
 
 static void rna_World_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
-  World *wo = (World *)ptr->owner_id;
+  World *wo = id_cast<World *>(ptr->owner_id);
 
   DEG_id_tag_update(&wo->id, 0);
   WM_main_add_notifier(NC_WORLD | ND_WORLD, wo);
@@ -63,7 +65,7 @@ static void rna_World_draw_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
 
 static void rna_World_draw_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
-  World *wo = (World *)ptr->owner_id;
+  World *wo = id_cast<World *>(ptr->owner_id);
 
   DEG_id_tag_update(&wo->id, 0);
   WM_main_add_notifier(NC_WORLD | ND_WORLD_DRAW, wo);
@@ -72,7 +74,7 @@ static void rna_World_draw_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
 
 void rna_World_lightgroup_get(PointerRNA *ptr, char *value)
 {
-  LightgroupMembership *lgm = ((World *)ptr->owner_id)->lightgroup;
+  LightgroupMembership *lgm = (id_cast<World *>(ptr->owner_id))->lightgroup;
   char value_buf[sizeof(lgm->name)];
   int len = BKE_lightgroup_membership_get(lgm, value_buf);
   memcpy(value, value_buf, len + 1);
@@ -80,13 +82,13 @@ void rna_World_lightgroup_get(PointerRNA *ptr, char *value)
 
 int rna_World_lightgroup_length(PointerRNA *ptr)
 {
-  LightgroupMembership *lgm = ((World *)ptr->owner_id)->lightgroup;
+  LightgroupMembership *lgm = (id_cast<World *>(ptr->owner_id))->lightgroup;
   return BKE_lightgroup_membership_length(lgm);
 }
 
 void rna_World_lightgroup_set(PointerRNA *ptr, const char *value)
 {
-  BKE_lightgroup_membership_set(&((World *)ptr->owner_id)->lightgroup, value);
+  BKE_lightgroup_membership_set(&(id_cast<World *>(ptr->owner_id))->lightgroup, value);
 }
 
 bool rna_World_use_nodes_get(PointerRNA * /*ptr*/)
@@ -102,7 +104,11 @@ void rna_World_use_nodes_set(PointerRNA * /*ptr*/, bool /*new_value*/)
    * warning here. */
 }
 
+}  // namespace blender
+
 #else
+
+namespace blender {
 
 static const EnumPropertyItem world_probe_resolution_items[] = {
     {LIGHT_PROBE_RESOLUTION_128, "128", 0, "128", ""},
@@ -274,6 +280,7 @@ void RNA_def_world(BlenderRNA *brna)
       prop, "rna_World_lightgroup_get", "rna_World_lightgroup_length", "rna_World_lightgroup_set");
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Lightgroup", "Lightgroup that the world belongs to");
+  RNA_def_property_update(prop, 0, "rna_World_draw_update");
 
   /* Reflection Probe Baking. */
   prop = RNA_def_property(srna, "probe_resolution", PROP_ENUM, PROP_NONE);
@@ -344,5 +351,7 @@ void RNA_def_world(BlenderRNA *brna)
   rna_def_lighting(brna);
   rna_def_world_mist(brna);
 }
+
+}  // namespace blender
 
 #endif

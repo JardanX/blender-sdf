@@ -257,7 +257,7 @@ set(LIB
   PRIVATE bf::render
   PRIVATE bf::windowmanager
   PRIVATE bf::intern::atomic
-  PRIVATE bf::extern::fmtlib
+  PRIVATE bf::dependencies::optional::opensubdiv
 )
 
 set(GLSL_SRC
@@ -266,7 +266,9 @@ set(GLSL_SRC
   intern/shaders/draw_object_infos_infos.hh
   intern/shaders/draw_view_infos.hh
   intern/shaders/subdiv_infos.hh
+  intern/shaders/subdiv_patch_eval_infos.hh
 
+  # MATHOPS: Removed — EEVEE shader infos
 
   engines/image/shaders/infos/engine_image_infos.hh
 
@@ -280,6 +282,7 @@ set(GLSL_SRC
   engines/overlay/shaders/infos/overlay_edit_mode_infos.hh
   engines/overlay/shaders/infos/overlay_extra_infos.hh
   engines/overlay/shaders/infos/overlay_facing_infos.hh
+  engines/overlay/shaders/infos/overlay_fullscreen_infos.hh
   engines/overlay/shaders/infos/overlay_grid_infos.hh
   engines/overlay/shaders/infos/overlay_outline_infos.hh
   engines/overlay/shaders/infos/overlay_paint_infos.hh
@@ -294,7 +297,6 @@ set(GLSL_SRC
 
   engines/select/shaders/infos/select_id_infos.hh
 
-  engines/workbench/shaders/infos/workbench_composite_infos.hh
   engines/workbench/shaders/infos/workbench_depth_infos.hh
   engines/workbench/shaders/infos/workbench_effect_antialiasing_infos.hh
   engines/workbench/shaders/infos/workbench_effect_dof_infos.hh
@@ -302,14 +304,15 @@ set(GLSL_SRC
   engines/workbench/shaders/infos/workbench_prepass_infos.hh
   engines/workbench/shaders/infos/workbench_shadow_infos.hh
   engines/workbench/shaders/infos/workbench_transparent_resolve_infos.hh
-  engines/workbench/shaders/infos/workbench_volume_infos.hh
+
+  # MATHOPS: Removed — EEVEE shaders
 
 
-
-  engines/workbench/shaders/workbench_cavity_lib.glsl
+  engines/workbench/shaders/workbench_cavity.bsl.hh
+  engines/workbench/shaders/workbench_common.bsl.hh
   engines/workbench/shaders/workbench_common_lib.glsl
-  engines/workbench/shaders/workbench_composite_frag.glsl
-  engines/workbench/shaders/workbench_curvature_lib.glsl
+  engines/workbench/shaders/workbench_composite.bsl.hh
+  engines/workbench/shaders/workbench_curvature.bsl.hh
   engines/workbench/shaders/workbench_effect_dof_prepare_frag.glsl
   engines/workbench/shaders/workbench_effect_dof_downsample_frag.glsl
   engines/workbench/shaders/workbench_effect_dof_blur1_frag.glsl
@@ -320,26 +323,28 @@ set(GLSL_SRC
   engines/workbench/shaders/workbench_effect_smaa_frag.glsl
   engines/workbench/shaders/workbench_effect_smaa_vert.glsl
   engines/workbench/shaders/workbench_effect_taa_frag.glsl
+  engines/workbench/shaders/workbench_fullscreen_vert.glsl
   engines/workbench/shaders/workbench_image_lib.glsl
+  engines/workbench/shaders/workbench_image.bsl.hh
   engines/workbench/shaders/workbench_matcap_lib.glsl
-  engines/workbench/shaders/workbench_material_lib.glsl
+  engines/workbench/shaders/workbench_matcap.bsl.hh
+  engines/workbench/shaders/workbench_material.bsl.hh
   engines/workbench/shaders/workbench_merge_depth_frag.glsl
   engines/workbench/shaders/workbench_overlay_depth_frag.glsl
-  engines/workbench/shaders/workbench_prepass_frag.glsl
-  engines/workbench/shaders/workbench_prepass_hair_vert.glsl
-  engines/workbench/shaders/workbench_prepass_pointcloud_vert.glsl
-  engines/workbench/shaders/workbench_prepass_vert.glsl
+  engines/workbench/shaders/workbench_prepass.bsl.hh
   engines/workbench/shaders/workbench_shadow_caps_vert.glsl
   engines/workbench/shaders/workbench_shadow_debug_frag.glsl
+  engines/workbench/shaders/workbench_shadow_frag.glsl
   engines/workbench/shaders/workbench_shadow_lib.glsl
   engines/workbench/shaders/workbench_shadow_vert.glsl
   engines/workbench/shaders/workbench_shadow_visibility_comp.glsl
   engines/workbench/shaders/workbench_transparent_accum_frag.glsl
   engines/workbench/shaders/workbench_transparent_resolve_frag.glsl
-  engines/workbench/shaders/workbench_volume_frag.glsl
-  engines/workbench/shaders/workbench_volume_vert.glsl
+  engines/workbench/shaders/workbench_volume.bsl.hh
   engines/workbench/shaders/workbench_world_light_lib.glsl
+  engines/workbench/shaders/workbench_world_light.bsl.hh
 
+  engines/workbench/workbench_defines.hh
   engines/workbench/workbench_shader_shared.hh
 
   engines/sdf/shaders/sdf_trace_comp.glsl
@@ -356,6 +361,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/sdf_shader_shared.hh
 
+  intern/shaders/osd_patch_basis.glsl
   intern/shaders/subdiv_custom_data_interp_comp.glsl
   intern/shaders/subdiv_ibo_lines_comp.glsl
   intern/shaders/subdiv_ibo_tris_comp.glsl
@@ -376,7 +382,6 @@ set(GLSL_SRC
   intern/shaders/draw_curves_interpolation_comp.glsl
   intern/shaders/draw_curves_length_intercept_comp.glsl
   intern/shaders/draw_curves_lib.glsl
-  intern/shaders/draw_curves_test.glsl
   intern/shaders/draw_curves_topology_comp.glsl
   intern/shaders/draw_shape_lib.glsl
   intern/shaders/draw_command_generate_comp.glsl
@@ -399,7 +404,6 @@ set(GLSL_SRC
   intern/draw_command_shared.hh
   intern/draw_curves_defines.hh
   intern/draw_defines.hh
-  intern/draw_pointcloud_private.hh
   intern/draw_shader_shared.hh
   intern/draw_subdiv_defines.hh
   intern/draw_subdiv_shader_shared.hh
@@ -411,6 +415,7 @@ set(GLSL_SRC
   engines/gpencil/shaders/gpencil_antialiasing_frag.glsl
   engines/gpencil/shaders/gpencil_antialiasing_vert.glsl
   engines/gpencil/shaders/gpencil_common_lib.glsl
+  engines/gpencil/shaders/gpencil_fullscreen_vert.glsl
   engines/gpencil/shaders/gpencil_layer_blend_frag.glsl
   engines/gpencil/shaders/gpencil_mask_invert_frag.glsl
   engines/gpencil/shaders/gpencil_depth_merge_frag.glsl
@@ -425,6 +430,7 @@ set(GLSL_SRC
   engines/select/shaders/select_lib.glsl
   engines/select/shaders/select_debug_frag.glsl
 
+  engines/select/select_defines.hh
   engines/select/select_shader_shared.hh
 
   engines/overlay/shaders/overlay_antialiasing_frag.glsl
@@ -498,9 +504,10 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_extra_wire_vert.glsl
   engines/overlay/shaders/overlay_facing_frag.glsl
   engines/overlay/shaders/overlay_facing_vert.glsl
-  engines/overlay/shaders/overlay_grid_background_frag.glsl
+  engines/overlay/shaders/overlay_fullscreen_vert.glsl
   engines/overlay/shaders/overlay_grid_frag.glsl
   engines/overlay/shaders/overlay_grid_vert.glsl
+  engines/overlay/shaders/overlay_grid_common_lib.glsl
   engines/overlay/shaders/overlay_image_frag.glsl
   engines/overlay/shaders/overlay_image_vert.glsl
   engines/overlay/shaders/overlay_motion_path_line_frag.glsl
@@ -553,12 +560,56 @@ set(GLSL_SRC
   engines/image/shaders/image_engine_color_vert.glsl
   engines/image/shaders/image_engine_depth_frag.glsl
   engines/image/shaders/image_engine_depth_vert.glsl
+
+  # This test doesn't depend on gpu_shader_test, so it's always included.
+  intern/shaders/draw_curves_test.glsl
 )
 
-set(GLSL_C)
+# These tests depend on gpu_shader_test, so they're only included when WITH_GPU_BACKEND_TESTS is enabled.
+# MATHOPS: Removed — EEVEE test shaders
+set(GLSL_SRC_TEST
+)
 
+if(WITH_GTESTS)
+  if(WITH_GPU_BACKEND_TESTS)
+    list(APPEND GLSL_SRC ${GLSL_SRC_TEST})
+  endif()
+endif()
+
+set(GLSL_INC
+  ../gpu
+  ../gpu/intern
+  ../gpu/shaders
+  ../gpu/shaders/infos
+  ../gpu/shaders/common
+
+  engines/gpencil
+  engines/gpencil/shaders
+  engines/gpencil/shaders/infos
+  engines/workbench
+  engines/workbench/shaders
+  engines/workbench/shaders/infos
+  # MATHOPS: Removed — EEVEE include dirs
+  engines/overlay
+  engines/overlay/shaders
+  engines/overlay/shaders/infos
+  engines/select
+  engines/select/shaders
+  engines/select/shaders/infos
+  engines/image
+  engines/image/shaders
+  engines/image/shaders/infos
+  engines/sdf
+  engines/sdf/shaders
+  engines/sdf/shaders/infos
+
+  intern
+  intern/shaders
+)
+
+set(GLSL_C "")
 foreach(GLSL_FILE ${GLSL_SRC})
-  glsl_to_c(${GLSL_FILE} GLSL_C)
+  glsl_to_c(${GLSL_FILE} GLSL_C GLSL_INC)
 endforeach()
 
 blender_add_lib(bf_draw_shaders "${GLSL_C}" "" "" "")
@@ -593,21 +644,11 @@ list(APPEND INC ${CMAKE_CURRENT_BINARY_DIR})
 
 target_include_directories(bf_draw_shaders PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
-list(APPEND INC
-)
-
 if(WITH_DRAW_DEBUG)
   list(APPEND SRC
     engines/select/select_debug_engine.cc
   )
   add_definitions(-DWITH_DRAW_DEBUG)
-endif()
-
-if(WITH_OPENSUBDIV)
-  add_definitions(-DWITH_OPENSUBDIV)
-  list(APPEND INC_SYS
-    ${OPENSUBDIV_INCLUDE_DIRS}
-  )
 endif()
 
 if(WITH_MOD_FLUID)
@@ -636,8 +677,8 @@ if(WITH_GTESTS)
     endif()
     if(WITH_VULKAN_BACKEND)
       add_definitions(-DWITH_VULKAN_BACKEND)
-      list(APPEND INC_SYS
-        PUBLIC ${VULKAN_INCLUDE_DIRS}
+      list(APPEND LIB
+        PRIVATE bf::dependencies::optional::vulkan
       )
     endif()
   endif()
@@ -667,17 +708,30 @@ if(WITH_GTESTS)
     set(TEST_SRC
       tests/draw_curves_test.cc
       tests/draw_pass_test.cc
+      # MATHOPS: Removed — eevee_test.cc
       tests/draw_testing.cc
 
       tests/draw_testing.hh
     )
     set(TEST_INC
+      ${INC}
       ../../../intern/ghost
       ../gpu/tests
     )
     set(TEST_LIB
-      gpu_tests
+      ${LIB}
     )
-    blender_add_test_suite_lib(draw "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${LIB};${TEST_LIB}")
+    set(TEST_COMMON_SRC
+      tests/draw_testing.cc
+    )
+    if(NOT WITH_TESTS_SINGLE_BINARY)
+      list(APPEND TEST_COMMON_SRC
+        ../gpu/tests/gpu_testing.cc
+        ../gpu/tests/gpu_testing.hh
+      )
+    else()
+      list(APPEND TEST_LIB gpu_tests)
+    endif()
+    blender_add_test_suite_lib(draw "${TEST_SRC}" "${TEST_INC}" "${INC_SYS}" "${TEST_LIB}" "${TEST_COMMON_SRC}")
   endif()
 endif()

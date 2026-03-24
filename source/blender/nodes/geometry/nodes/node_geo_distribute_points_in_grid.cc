@@ -42,25 +42,34 @@ static void node_declare(NodeDeclarationBuilder &b)
                       .subtype(PROP_NONE)
                       .description(
                           "When combined with each voxel's value, determines the number of points "
-                          "to sample per unit volume");
-  auto &seed = b.add_input<decl::Int>("Seed").min(-10000).max(10000).description(
-      "Seed used by the random number generator to generate random points");
+                          "to sample per unit volume")
+                      .make_available(
+                          [](bNode &node) { node.custom1 = int16_t(DistributeMode::Random); });
+  auto &seed =
+      b.add_input<decl::Int>("Seed")
+          .min(-10000)
+          .max(10000)
+          .description("Seed used by the random number generator to generate random points")
+          .make_available([](bNode &node) { node.custom1 = int16_t(DistributeMode::Random); });
   auto &spacing = b.add_input<decl::Vector>("Spacing")
                       .default_value({0.3, 0.3, 0.3})
                       .min(0.0001f)
                       .subtype(PROP_XYZ)
-                      .description("Spacing between grid points");
+                      .description("Spacing between grid points")
+                      .make_available(
+                          [](bNode &node) { node.custom1 = int16_t(DistributeMode::Grid); });
   auto &threshold = b.add_input<decl::Float>("Threshold")
                         .default_value(0.1f)
                         .min(0.0f)
                         .max(FLT_MAX)
-                        .description("Minimum density of a voxel to contain a grid point");
+                        .description("Minimum density of a voxel to contain a grid point")
+                        .make_available(
+                            [](bNode &node) { node.custom1 = int16_t(DistributeMode::Grid); });
   b.add_output<decl::Geometry>("Points").propagate_all();
 
   const bNode *node = b.node_or_null();
   if (node != nullptr) {
     const auto mode = DistributeMode(node->custom1);
-
     density.available(mode == DistributeMode::Random);
     seed.available(mode == DistributeMode::Random);
     spacing.available(mode == DistributeMode::Grid);
@@ -68,9 +77,9 @@ static void node_declare(NodeDeclarationBuilder &b)
   }
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->prop(ptr, "mode", UI_ITEM_NONE, "", ICON_NONE);
+  layout.prop(ptr, "mode", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 static void node_init(bNodeTree * /*tree*/, bNode *node)
@@ -244,7 +253,7 @@ static void node_rna(StructRNA *srna)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
   geo_node_type_base(
       &ntype, "GeometryNodeDistributePointsInGrid", GEO_NODE_DISTRIBUTE_POINTS_IN_GRID);
   ntype.ui_name = "Distribute Points in Grid";
@@ -252,11 +261,11 @@ static void node_register()
   ntype.enum_name_legacy = "DISTRIBUTE_POINTS_IN_GRID";
   ntype.nclass = NODE_CLASS_GEOMETRY;
   ntype.initfunc = node_init;
-  blender::bke::node_type_size(ntype, 170, 100, 320);
+  bke::node_type_size(ntype, 170, 100, 320);
   ntype.declare = node_declare;
   ntype.geometry_node_execute = node_geo_exec;
   ntype.draw_buttons = node_layout;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 
   node_rna(ntype.rna_ext.srna);
 }

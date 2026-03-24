@@ -1481,12 +1481,8 @@ class CYCLES_OBJECT_PT_visibility_culling(CyclesButtonsPanel, Panel):
         row.prop(cob, "use_distance_cull")
 
 
-def panel_node_draw(layout, id_data, output_type, input_name):
+def panel_node_draw(layout, id_data, input_name):
     from bpy_extras.node_utils import find_node_input
-
-    if output_type not in ('OUTPUT_WORLD', 'OUTPUT_MATERIAL') and not id_data.use_nodes:
-        layout.operator("cycles.use_shading_nodes", icon='NODETREE')
-        return False
 
     ntree = id_data.node_tree
 
@@ -1646,7 +1642,7 @@ class CYCLES_LIGHT_PT_nodes(CyclesButtonsPanel, Panel):
         layout.use_property_split = True
 
         light = context.light
-        panel_node_draw(layout, light, 'OUTPUT_LIGHT', 'Surface')
+        panel_node_draw(layout, light, 'Surface')
 
 
 class CYCLES_LIGHT_PT_beam_shape(CyclesButtonsPanel, Panel):
@@ -1701,7 +1697,7 @@ class CYCLES_WORLD_PT_surface(CyclesButtonsPanel, Panel):
 
         world = context.world
 
-        if not panel_node_draw(layout, world, 'OUTPUT_WORLD', 'Surface'):
+        if not panel_node_draw(layout, world, 'Surface'):
             layout.prop(world, "color")
 
 
@@ -1722,7 +1718,7 @@ class CYCLES_WORLD_PT_volume(CyclesButtonsPanel, Panel):
         layout.use_property_split = True
 
         world = context.world
-        panel_node_draw(layout, world, 'OUTPUT_WORLD', 'Volume')
+        panel_node_draw(layout, world, 'Volume')
 
 
 class CYCLES_WORLD_PT_mist(CyclesButtonsPanel, Panel):
@@ -1915,7 +1911,7 @@ class CYCLES_MATERIAL_PT_surface(CyclesButtonsPanel, Panel):
         layout.use_property_split = True
 
         mat = context.material
-        if not panel_node_draw(layout, mat, 'OUTPUT_MATERIAL', 'Surface'):
+        if not panel_node_draw(layout, mat, 'Surface'):
             layout.prop(mat, "diffuse_color")
 
 
@@ -1938,7 +1934,7 @@ class CYCLES_MATERIAL_PT_volume(CyclesButtonsPanel, Panel):
         mat = context.material
         # cmat = mat.cycles
 
-        panel_node_draw(layout, mat, 'OUTPUT_MATERIAL', 'Volume')
+        panel_node_draw(layout, mat, 'Volume')
 
 
 class CYCLES_MATERIAL_PT_displacement(CyclesButtonsPanel, Panel):
@@ -1956,7 +1952,7 @@ class CYCLES_MATERIAL_PT_displacement(CyclesButtonsPanel, Panel):
         layout.use_property_split = True
 
         mat = context.material
-        panel_node_draw(layout, mat, 'OUTPUT_MATERIAL', 'Displacement')
+        panel_node_draw(layout, mat, 'Displacement')
 
 
 class CYCLES_MATERIAL_PT_settings(CyclesButtonsPanel, Panel):
@@ -2458,15 +2454,28 @@ def draw_device(self, context):
     layout.use_property_split = True
     layout.use_property_decorate = False
 
-    # MATHOPS: Device selector and OSL toggle are in the Path Tracer wrapper panel
-    # (RENDER_PT_proximity_cycles in properties_render.py). Nothing drawn here.
+    if context.engine == 'CYCLES':
+        from . import engine
+        cscene = scene.cycles
+
+        col = layout.column()
+        col.active = show_device_active(context)
+        col.prop(cscene, "device")
+
+        from . import engine
+        if engine.with_osl() and (
+            use_cpu(context) or (
+                use_optix(context) and (
+                engine.osl_version()[1] >= 13 or engine.osl_version()[0] > 1))):
+            osl_col = layout.column()
+            osl_col.prop(cscene, "shading_system")
 
 
 def draw_pause(self, context):
     layout = self.layout
     scene = context.scene
 
-    if context.engine == 'CYCLES':
+    if context.engine == "CYCLES":
         view = context.space_data
 
         if view.shading.type == 'RENDERED':
@@ -2615,13 +2624,6 @@ def register():
         panel.COMPAT_ENGINES.add('CYCLES')
 
     for cls in classes:
-        # MATHOPS: Nest top-level Cycles render panels under the Path Tracer wrapper.
-        # Only panels in bl_context="render" that don't already have a parent.
-        if (cls.__name__.startswith('CYCLES_RENDER_PT_') and
-                not hasattr(cls, 'bl_parent_id') and
-                getattr(cls, 'bl_context', '') == 'render'):
-            cls.bl_parent_id = "RENDER_PT_proximity_cycles"
-
         register_class(cls)
 
 
@@ -2637,6 +2639,3 @@ def unregister():
 
     for cls in classes:
         unregister_class(cls)
-        # MATHOPS: Remove dynamically added parent nesting.
-        if getattr(cls, 'bl_parent_id', None) == "RENDER_PT_proximity_cycles":
-            del cls.bl_parent_id

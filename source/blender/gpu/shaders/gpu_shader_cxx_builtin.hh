@@ -10,7 +10,6 @@
 
 #pragma once
 
-#include "gpu_shader_cxx_matrix.hh"
 #include "gpu_shader_cxx_vector.hh"
 
 /* Some compilers complain about lack of return values. Keep it short. */
@@ -37,19 +36,19 @@ template<int D> VecBase<bool, D> operator!(VecOp<bool, D>) RET;
 template<int D> VecBase<int, D> bitCount(VecOp<int, D>) RET;
 template<int D> VecBase<int, D> bitCount(VecOp<uint, D>) RET;
 template<int D> VecBase<int, D> bitfieldExtract(VecOp<int, D>, int, int) RET;
-template<int D> VecBase<int, D> bitfieldExtract(VecOp<uint, D>, int, int) RET;
+template<int D> VecBase<uint, D> bitfieldExtract(VecOp<uint, D>, int, int) RET;
 template<int D> VecBase<int, D> bitfieldInsert(VecOp<int, D>, VecOp<int, D>, int, int) RET;
-template<int D> VecBase<int, D> bitfieldInsert(VecOp<uint, D>, VecOp<uint, D>, int, int) RET;
+template<int D> VecBase<uint, D> bitfieldInsert(VecOp<uint, D>, VecOp<uint, D>, int, int) RET;
 template<int D> VecBase<int, D> bitfieldReverse(VecOp<int, D>) RET;
-template<int D> VecBase<int, D> bitfieldReverse(VecOp<uint, D>) RET;
+template<int D> VecBase<uint, D> bitfieldReverse(VecOp<uint, D>) RET;
 int bitCount(int) RET;
 int bitCount(uint) RET;
 int bitfieldExtract(int) RET;
-int bitfieldExtract(uint) RET;
+uint bitfieldExtract(uint) RET;
 int bitfieldInsert(int) RET;
-int bitfieldInsert(uint) RET;
+uint bitfieldInsert(uint) RET;
 int bitfieldReverse(int) RET;
-int bitfieldReverse(uint) RET;
+uint bitfieldReverse(uint) RET;
 
 template<int D> VecBase<int, D> findLSB(VecOp<int, D>) RET;
 template<int D> VecBase<int, D> findLSB(VecOp<uint, D>) RET;
@@ -165,6 +164,7 @@ template<typename T, int D> VecBase<T, D> mix(VecOp<T, D>, VecOp<T, D>, VecOp<bo
 
 VecBase<float, 3> cross(VecOp<float, 3>, VecOp<float, 3>) RET;
 template<int D> float dot(VecOp<float, D>, VecOp<float, D>) RET;
+float distance(float, float) RET;
 template<int D> float distance(VecOp<float, D>, VecOp<float, D>) RET;
 template<int D> float length(VecOp<float, D>) RET;
 template<int D> VecBase<float, D> normalize(VecOp<float, D>) RET;
@@ -220,11 +220,6 @@ float2 unpackUnorm2x16(uint) RET;
 float2 unpackSnorm2x16(uint) RET;
 float4 unpackUnorm4x8(uint) RET;
 float4 unpackSnorm4x8(uint) RET;
-
-/* Matrices functions. */
-template<int C, int R> float determinant(MatBase<C, R>) RET;
-template<int C, int R> MatBase<C, R> inverse(MatBase<C, R>) RET;
-template<int C, int R> MatBase<R, C> transpose(MatBase<C, R>) RET;
 
 namespace gl_ComputeShader {
 void barrier() {}

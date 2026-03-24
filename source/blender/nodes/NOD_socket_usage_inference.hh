@@ -15,11 +15,13 @@
 #include "NOD_socket_usage_inference_fwd.hh"
 #include "NOD_socket_value_inference.hh"
 
+namespace blender {
+
 struct bNodeTree;
 struct bNodeSocket;
 struct IDProperty;
 
-namespace blender::nodes::socket_usage_inference {
+namespace nodes::socket_usage_inference {
 
 class SocketUsageInferencerImpl;
 
@@ -30,7 +32,7 @@ class SocketUsageInferencer {
  private:
   SocketUsageInferencerImpl &impl_;
 
-  friend class InputSocketUsageParams;
+  friend class SocketUsageParams;
 
  public:
   SocketUsageInferencer(const bNodeTree &tree,
@@ -51,7 +53,7 @@ class SocketUsageInferencer {
   void mark_top_level_node_outputs_as_used();
 };
 
-class InputSocketUsageParams {
+class SocketUsageParams {
  private:
   SocketUsageInferencer &inferencer_;
   const ComputeContext *compute_context_ = nullptr;
@@ -61,11 +63,11 @@ class InputSocketUsageParams {
   const bNode &node;
   const bNodeSocket &socket;
 
-  InputSocketUsageParams(SocketUsageInferencer &inferencer,
-                         const ComputeContext *compute_context,
-                         const bNodeTree &tree,
-                         const bNode &node,
-                         const bNodeSocket &socket);
+  SocketUsageParams(SocketUsageInferencer &inferencer,
+                    const ComputeContext *compute_context,
+                    const bNodeTree &tree,
+                    const bNode &node,
+                    const bNodeSocket &socket);
 
   /**
    * Get an the statically known input value for the given socket identifier. The value may be
@@ -127,4 +129,6 @@ void infer_group_interface_usage(
     MutableSpan<SocketUsage> r_input_usages,
     std::optional<MutableSpan<SocketUsage>> r_output_usages = std::nullopt);
 
-}  // namespace blender::nodes::socket_usage_inference
+}  // namespace nodes::socket_usage_inference
+
+}  // namespace blender

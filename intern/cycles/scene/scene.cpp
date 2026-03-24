@@ -23,7 +23,6 @@
 #include "scene/particles.h"
 #include "scene/pointcloud.h"
 #include "scene/procedural.h"
-#include "scene/sdf.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
 #include "scene/svm.h"
@@ -434,9 +433,6 @@ bool Scene::need_global_attribute(AttributeStandard std)
   }
   if (std == ATTR_STD_MOTION_VERTEX_POSITION) {
     return need_motion() != MOTION_NONE;
-  }
-  if (std == ATTR_STD_MOTION_VERTEX_NORMAL) {
-    return need_motion() == MOTION_BLUR;
   }
   if (std == ATTR_STD_VOLUME_VELOCITY || std == ATTR_STD_VOLUME_VELOCITY_X ||
       std == ATTR_STD_VOLUME_VELOCITY_Y || std == ATTR_STD_VOLUME_VELOCITY_Z)
@@ -865,16 +861,6 @@ template<> PointCloud *Scene::create_node<PointCloud>()
   return node_ptr;
 }
 
-template<> SDFGeometry *Scene::create_node<SDFGeometry>()
-{
-  unique_ptr<SDFGeometry> node = make_unique<SDFGeometry>();
-  SDFGeometry *node_ptr = node.get();
-  node->set_owner(this);
-  geometry.push_back(std::move(node));
-  geometry_manager->tag_update(this, GeometryManager::SDF_ADDED);
-  return node_ptr;
-}
-
 template<> Object *Scene::create_node<Object>()
 {
   unique_ptr<Object> node = make_unique<Object>();
@@ -986,13 +972,6 @@ template<> void Scene::delete_node(PointCloud *node)
   geometry_manager->tag_update(this, GeometryManager::POINT_REMOVED);
 }
 
-template<> void Scene::delete_node(SDFGeometry *node)
-{
-  assert(node->get_owner() == this);
-  geometry.erase_by_swap(node);
-  geometry_manager->tag_update(this, GeometryManager::SDF_REMOVED);
-}
-
 template<> void Scene::delete_node(Geometry *node)
 {
   assert(node->get_owner() == this);
@@ -1000,9 +979,6 @@ template<> void Scene::delete_node(Geometry *node)
   uint flag;
   if (node->is_hair()) {
     flag = GeometryManager::HAIR_REMOVED;
-  }
-  else if (node->is_sdf()) {
-    flag = GeometryManager::SDF_REMOVED;
   }
   else {
     flag = GeometryManager::MESH_REMOVED;

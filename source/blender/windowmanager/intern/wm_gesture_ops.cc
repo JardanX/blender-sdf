@@ -39,9 +39,7 @@
 
 #include "RNA_access.hh"
 
-using blender::Array;
-using blender::float2;
-using blender::int2;
+namespace blender {
 
 /* -------------------------------------------------------------------- */
 /** \name Internal Gesture Utilities
@@ -578,8 +576,8 @@ wmOperatorStatus WM_gesture_lasso_modal(bContext *C, wmOperator *op, const wmEve
 
         if (gesture->points == gesture->points_alloc) {
           gesture->points_alloc *= 2;
-          gesture->customdata = MEM_reallocN(gesture->customdata,
-                                             sizeof(float[2]) * gesture->points_alloc);
+          gesture->customdata = MEM_realloc_uninitialized(
+              gesture->customdata, sizeof(float[2]) * gesture->points_alloc);
         }
 
         {
@@ -588,7 +586,7 @@ wmOperatorStatus WM_gesture_lasso_modal(bContext *C, wmOperator *op, const wmEve
           const float2 last_position(lasso[gesture->points - 1][0], lasso[gesture->points - 1][1]);
 
           const float2 delta = current_mouse_position - last_position;
-          const float dist_squared = blender::math::length_squared(delta);
+          const float dist_squared = math::length_squared(delta);
 
           /* Move the lasso. */
           if (gesture->move) {
@@ -599,8 +597,7 @@ wmOperatorStatus WM_gesture_lasso_modal(bContext *C, wmOperator *op, const wmEve
           }
           else if (gesture->use_smooth) {
             if (dist_squared > square_f(radius)) {
-              float2 result = blender::math::interpolate(
-                  current_mouse_position, last_position, factor);
+              float2 result = math::interpolate(current_mouse_position, last_position, factor);
 
               lasso[gesture->points][0] = result.x;
               lasso[gesture->points][1] = result.y;
@@ -713,7 +710,7 @@ void WM_OT_lasso_gesture(wmOperatorType *ot)
   ot->flag = OPTYPE_DEPENDS_ON_CURSOR;
 
   prop = RNA_def_property(ot->srna, "path", PROP_COLLECTION, PROP_NONE);
-  RNA_def_property_struct_runtime(ot->srna, prop, &RNA_OperatorMousePath);
+  RNA_def_property_struct_runtime(ot->srna, prop, RNA_OperatorMousePath);
 }
 #endif
 
@@ -847,7 +844,7 @@ wmOperatorStatus WM_gesture_polyline_modal(bContext *C, wmOperator *op, const wm
 
         const float dist = len_v2v2(cur, orig);
 
-        if (dist < blender::wm::gesture::POLYLINE_CLICK_RADIUS * UI_SCALE_FAC &&
+        if (dist < wm::gesture::POLYLINE_CLICK_RADIUS * UI_SCALE_FAC &&
             gesture_polyline_can_apply(*gesture, true))
         {
           return gesture_polyline_apply(C, op, true);
@@ -877,8 +874,8 @@ wmOperatorStatus WM_gesture_polyline_modal(bContext *C, wmOperator *op, const wm
                              (event->xy[1] - gesture->winrct.ymin));
         if (gesture->points == gesture->points_alloc) {
           gesture->points_alloc *= 2;
-          gesture->customdata = MEM_reallocN(gesture->customdata,
-                                             sizeof(short[2]) * gesture->points_alloc);
+          gesture->customdata = MEM_realloc_uninitialized(
+              gesture->customdata, sizeof(short[2]) * gesture->points_alloc);
         }
         short (*border)[2] = static_cast<short int (*)[2]>(gesture->customdata);
 
@@ -1278,3 +1275,5 @@ void WM_OT_straightline_gesture(wmOperatorType *ot)
 #endif
 
 /** \} */
+
+}  // namespace blender

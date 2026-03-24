@@ -18,7 +18,7 @@ struct BundleSignature {
     const bke::bNodeSocketType *type = nullptr;
     NodeSocketInterfaceStructureType structure_type;
 
-    BLI_STRUCT_EQUALITY_OPERATORS_3(Item, key, type, structure_type);
+    friend bool operator==(const Item &a, const Item &b) = default;
   };
 
   struct ItemKeyGetter {
@@ -32,6 +32,8 @@ struct BundleSignature {
 
   friend bool operator==(const BundleSignature &a, const BundleSignature &b);
   friend bool operator!=(const BundleSignature &a, const BundleSignature &b);
+
+  void add(std::string key, const eNodeSocketDatatype socket_type);
 
   static BundleSignature from_combine_bundle_node(const bNode &node,
                                                   bool allow_auto_structure_type);

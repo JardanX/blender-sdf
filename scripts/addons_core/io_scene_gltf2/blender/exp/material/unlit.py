@@ -8,7 +8,6 @@ from .search_node_tree import \
     NodeSocket, \
     previous_socket, \
     previous_node, \
-    get_factor_from_socket, \
     gather_alpha_info,  \
     gather_color_info
 
@@ -124,7 +123,6 @@ def gather_base_color_factor(info, export_settings):
     rgb, alpha = None, None
     path, path_alpha = None, None
     vc_info = {"color": None, "alpha": None, "color_type": None, "alpha_type": None, "alpha_mode": "OPAQUE"}
-
 
     if 'rgb_socket' in info:
         rgb_vc_info = gather_color_info(info['rgb_socket'].to_node_nav())

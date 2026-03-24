@@ -6,7 +6,8 @@ set(INC
   ..
 )
 
-set(INC_SYS )
+set(INC_SYS
+)
 
 if(WITH_CYCLES_DEVICE_OPTIX OR WITH_CYCLES_DEVICE_CUDA)
   if(NOT WITH_CUDA_DYNLOAD)
@@ -14,13 +15,6 @@ if(WITH_CYCLES_DEVICE_OPTIX OR WITH_CYCLES_DEVICE_CUDA)
   endif()
 
   add_definitions(-DCYCLES_RUNTIME_OPTIX_ROOT_DIR="${CYCLES_RUNTIME_OPTIX_ROOT_DIR}")
-
-  if(WIN32)
-    # Tell nvcc where to find cl.exe when Blender is not launched from a Developer Command Prompt.
-    get_filename_component(_MSVC_CL_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    add_definitions(-DCYCLES_MSVC_CL_DIR="${_MSVC_CL_DIR}")
-    unset(_MSVC_CL_DIR)
-  endif()
 endif()
 
 set(SRC_BASE
@@ -181,18 +175,15 @@ if(WITH_CYCLES_DEVICE_METAL)
 endif()
 
 if(WITH_CYCLES_DEVICE_ONEAPI)
-  if(WITH_CYCLES_ONEAPI_HOST_TASK_EXECUTION)
-    add_definitions(-DWITH_ONEAPI_SYCL_HOST_TASK)
-  endif()
   if(WITH_CYCLES_ONEAPI_BINARIES)
     set(cycles_kernel_oneapi_lib_suffix "_aot")
   else()
     set(cycles_kernel_oneapi_lib_suffix "_jit")
   endif()
   if(WIN32)
-    set(cycles_kernel_oneapi_lib ${CMAKE_CURRENT_BINARY_DIR}/../kernel/cycles_kernel_oneapi${cycles_kernel_oneapi_lib_suffix}.lib)
+    set(cycles_kernel_oneapi_lib ${CMAKE_CURRENT_BINARY_DIR}/../kernel/device/oneapi/cycles_kernel_oneapi${cycles_kernel_oneapi_lib_suffix}.lib)
   else()
-    set(cycles_kernel_oneapi_lib ${CMAKE_CURRENT_BINARY_DIR}/../kernel/libcycles_kernel_oneapi${cycles_kernel_oneapi_lib_suffix}.so)
+    set(cycles_kernel_oneapi_lib ${CMAKE_CURRENT_BINARY_DIR}/../kernel/device/oneapi/libcycles_kernel_oneapi${cycles_kernel_oneapi_lib_suffix}.so)
   endif()
   list(APPEND LIB
     ${cycles_kernel_oneapi_lib}
@@ -241,7 +232,7 @@ endif()
 
 if(WITH_CYCLES_OSL)
   list(APPEND LIB
-    ${OSL_LIBRARIES}
+    bf::dependencies::optional::osl
   )
 endif()
 

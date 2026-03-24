@@ -49,6 +49,8 @@
 #  include "bpy_rna.hh"
 #endif
 
+namespace blender {
+
 /* -------------------------------------------------------------------- */
 /** \name Internal Utilities
  * \{ */
@@ -127,9 +129,9 @@ static PyObject *bpy_lib_dir(BPy_Library *self);
 #endif
 
 static PyMethodDef bpy_lib_methods[] = {
-    {"__enter__", (PyCFunction)bpy_lib_enter, METH_NOARGS},
-    {"__exit__", (PyCFunction)bpy_lib_exit, METH_VARARGS},
-    {"__dir__", (PyCFunction)bpy_lib_dir, METH_NOARGS},
+    {"__enter__", reinterpret_cast<PyCFunction>(bpy_lib_enter), METH_NOARGS},
+    {"__exit__", reinterpret_cast<PyCFunction>(bpy_lib_exit), METH_VARARGS},
+    {"__dir__", reinterpret_cast<PyCFunction>(bpy_lib_dir), METH_NOARGS},
     {nullptr} /* sentinel */
 };
 
@@ -152,7 +154,7 @@ static PyTypeObject bpy_lib_Type = {
     /*tp_name*/ "bpy_lib",
     /*tp_basicsize*/ sizeof(BPy_Library),
     /*tp_itemsize*/ 0,
-    /*tp_dealloc*/ (destructor)bpy_lib_dealloc,
+    /*tp_dealloc*/ reinterpret_cast<destructor>(bpy_lib_dealloc),
     /*tp_vectorcall_offset*/ 0,
     /*tp_getattr*/ nullptr,
     /*tp_setattr*/ nullptr,
@@ -206,6 +208,7 @@ PyDoc_STRVAR(
     "filepath, "
     "*, "
     "link=False, "
+    "pack=False, "
     "relative=False, "
     "set_fake=False, "
     "recursive=False, "
@@ -219,34 +222,34 @@ PyDoc_STRVAR(
     "   Returns a context manager which exposes 2 library objects on entering.\n"
     "   Each object has attributes matching bpy.data which are lists of strings to be linked.\n"
     "\n"
-    "   :arg filepath: The path to a blend file.\n"
+    "   :param filepath: The path to a blend file.\n"
     "   :type filepath: str | bytes\n"
-    "   :arg link: When False reference to the original file is lost.\n"
+    "   :param link: When False reference to the original file is lost.\n"
     "   :type link: bool\n"
-    "   :arg pack: If True, and ``link`` is also True, pack linked data-blocks into the current "
+    "   :param pack: If True, and ``link`` is also True, pack linked data-blocks into the current "
     "blend-file.\n"
     "   :type pack: bool\n"
-    "   :arg relative: When True the path is stored relative to the open blend file.\n"
+    "   :param relative: When True the path is stored relative to the open blend file.\n"
     "   :type relative: bool\n"
-    "   :arg set_fake: If True, set fake user on appended IDs.\n"
+    "   :param set_fake: If True, set fake user on appended IDs.\n"
     "   :type set_fake: bool\n"
-    "   :arg recursive: If True, also make indirect dependencies of appended libraries local.\n"
+    "   :param recursive: If True, also make indirect dependencies of appended libraries local.\n"
     "   :type recursive: bool\n"
-    "   :arg reuse_local_id: If True,"
+    "   :param reuse_local_id: If True,"
     "try to re-use previously appended matching ID on new append.\n"
     "   :type reuse_local_id: bool\n"
-    "   :arg assets_only: If True, only list data-blocks marked as assets.\n"
+    "   :param assets_only: If True, only list data-blocks marked as assets.\n"
     "   :type assets_only: bool\n"
-    "   :arg clear_asset_data: If True, "
+    "   :param clear_asset_data: If True, "
     "clear the asset data on append (it is always kept for linked data).\n"
     "   :type clear_asset_data: bool\n"
-    "   :arg create_liboverrides: If True and ``link`` is True, liboverrides will\n"
+    "   :param create_liboverrides: If True and ``link`` is True, liboverrides will\n"
     "      be created for linked data.\n"
     "   :type create_liboverrides: bool\n"
-    "   :arg reuse_liboverrides: If True and ``create_liboverride`` is True,\n"
+    "   :param reuse_liboverrides: If True and ``create_liboverride`` is True,\n"
     "      search for existing liboverride first.\n"
     "   :type reuse_liboverrides: bool\n"
-    "   :arg create_liboverrides_runtime: If True and ``create_liboverride`` is True,\n"
+    "   :param create_liboverrides_runtime: If True and ``create_liboverride`` is True,\n"
     "      create (or search for existing) runtime liboverride.\n"
     "   :type create_liboverrides_runtime: bool\n");
 static PyObject *bpy_lib_load(BPy_PropertyRNA *self, PyObject *args, PyObject *kw)
@@ -296,7 +299,6 @@ static PyObject *bpy_lib_load(BPy_PropertyRNA *self, PyObject *args, PyObject *k
       nullptr,
   };
   static _PyArg_Parser _parser = {
-      PY_ARG_PARSER_HEAD_COMPAT()
       "O&" /* `filepath` */
       /* Optional keyword only arguments. */
       "|$"
@@ -446,7 +448,7 @@ static PyObject *bpy_lib_load(BPy_PropertyRNA *self, PyObject *args, PyObject *k
 
   ret->dict = _PyDict_NewPresized(bpy_library_dict_num);
 
-  return (PyObject *)ret;
+  return reinterpret_cast<PyObject *>(ret);
 }
 
 static PyObject *_bpy_names(BPy_Library *self, int blocktype)
@@ -516,7 +518,7 @@ static PyObject *bpy_lib_enter(BPy_Library *self)
   {
     PyObject *version;
     PyObject *identifier = PyUnicode_FromString("version");
-    blender::int3 blendfile_version;
+    int3 blendfile_version;
 
     /* Source. */
     blendfile_version = BLO_blendhandle_get_version(self->blo_handle);
@@ -525,7 +527,7 @@ static PyObject *bpy_lib_enter(BPy_Library *self)
     Py_DECREF(version);
 
     /* Destination. */
-    blendfile_version = blender::int3(
+    blendfile_version = int3(
         BLENDER_FILE_VERSION / 100, BLENDER_FILE_VERSION % 100, BLENDER_FILE_SUBVERSION);
     version = PyC_Tuple_PackArray_I32(&blendfile_version[0], 3);
     PyDict_SetItem(dict_dst, identifier, version);
@@ -569,7 +571,7 @@ static void bpy_lib_exit_warn_idname(BPy_Library *self,
   {
     /* Spurious errors can appear at shutdown */
     if (PyErr_ExceptionMatches(PyExc_Warning)) {
-      PyErr_WriteUnraisable((PyObject *)self);
+      PyErr_WriteUnraisable(reinterpret_cast<PyObject *>(self));
     }
   }
   PyErr_Restore(exc, val, tb);
@@ -587,7 +589,7 @@ static void bpy_lib_exit_warn_type(BPy_Library *self, PyObject *item)
   {
     /* Spurious errors can appear at shutdown */
     if (PyErr_ExceptionMatches(PyExc_Warning)) {
-      PyErr_WriteUnraisable((PyObject *)self);
+      PyErr_WriteUnraisable(reinterpret_cast<PyObject *>(self));
     }
   }
   PyErr_Restore(exc, val, tb);
@@ -799,7 +801,7 @@ static PyObject *bpy_lib_dir(BPy_Library *self)
 
 PyMethodDef BPY_library_load_method_def = {
     "load",
-    (PyCFunction)bpy_lib_load,
+    reinterpret_cast<PyCFunction>(bpy_lib_load),
     METH_VARARGS | METH_KEYWORDS,
     bpy_lib_load_doc,
 };
@@ -820,3 +822,5 @@ int BPY_library_load_type_ready()
 
   return 0;
 }
+
+}  // namespace blender

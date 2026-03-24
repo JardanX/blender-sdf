@@ -6,8 +6,6 @@
  * \ingroup spseq
  */
 
-#include <cstring>
-
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
@@ -23,7 +21,6 @@
 #include "ED_sequencer.hh"
 
 #include "IMB_imbuf.hh"
-#include "IMB_imbuf_types.hh"
 
 #include "sequencer_intern.hh"
 
@@ -86,7 +83,7 @@ void sequencer_buttons_register(ARegionType *art)
   PanelType *pt;
 
 #if 0
-  pt = MEM_callocN(sizeof(PanelType), "spacetype sequencer panel gpencil");
+  pt = MEM_new_zeroed<PanelType>("spacetype sequencer panel gpencil");
   STRNCPY_UTF8(pt->idname, "SEQUENCER_PT_gpencil");
   STRNCPY_UTF8(pt->label, N_("Grease Pencil"));
   STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
@@ -96,7 +93,7 @@ void sequencer_buttons_register(ARegionType *art)
   BLI_addtail(&art->paneltypes, pt);
 #endif
 
-  pt = MEM_callocN<PanelType>("spacetype sequencer panel metadata");
+  pt = MEM_new_zeroed<PanelType>("spacetype sequencer panel metadata");
   STRNCPY_UTF8(pt->idname, "SEQUENCER_PT_metadata");
   STRNCPY_UTF8(pt->label, N_("Metadata"));
   STRNCPY_UTF8(pt->category, "Metadata");

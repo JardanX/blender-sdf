@@ -6,6 +6,7 @@
 
 #include "BKE_type_conversions.hh"
 #include "BKE_volume_grid.hh"
+#include "BKE_volume_openvdb.hh"
 
 #include "NOD_rna_define.hh"
 #include "NOD_socket_search_link.hh"
@@ -102,9 +103,9 @@ static void node_gather_link_search_ops(GatherLinkSearchOpParams &params)
   }
 }
 
-static void node_layout(uiLayout *layout, bContext * /*C*/, PointerRNA *ptr)
+static void node_layout(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)
 {
-  layout->prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
+  layout.prop(ptr, "data_type", UI_ITEM_NONE, "", ICON_NONE);
 }
 
 #ifdef WITH_OPENVDB
@@ -122,8 +123,7 @@ void sample_grid(const bke::OpenvdbGridType<T> &grid,
   using TraitsT = typename bke::VolumeGridTraits<T>;
   AccessorT accessor = grid.getConstUnsafeAccessor();
 
-  auto sample_data = [&](auto sampler_type_tag) {
-    using Sampler = typename decltype(sampler_type_tag)::type;
+  auto sample_data = [&]<typename Sampler>() {
     mask.foreach_index([&](const int64_t i) {
       const float3 &pos = positions[i];
       const openvdb::Vec3R world_pos(pos.x, pos.y, pos.z);
@@ -141,40 +141,17 @@ void sample_grid(const bke::OpenvdbGridType<T> &grid,
   }
   switch (real_interpolation) {
     case InterpolationMode::TriLinear: {
-      sample_data(TypeTag<openvdb::tools::BoxSampler>{});
+      sample_data.template operator()<openvdb::tools::BoxSampler>();
       break;
     }
     case InterpolationMode::TriQuadratic: {
-      sample_data(TypeTag<openvdb::tools::QuadraticSampler>{});
+      sample_data.template operator()<openvdb::tools::QuadraticSampler>();
       break;
     }
     case InterpolationMode::Nearest: {
-      sample_data(TypeTag<openvdb::tools::PointSampler>{});
+      sample_data.template operator()<openvdb::tools::PointSampler>();
       break;
     }
-  }
-}
-
-template<typename Fn> void convert_to_static_type(const VolumeGridType type, const Fn &fn)
-{
-  switch (type) {
-    case VOLUME_GRID_BOOLEAN:
-      fn(bool());
-      break;
-    case VOLUME_GRID_FLOAT:
-      fn(float());
-      break;
-    case VOLUME_GRID_INT:
-      fn(int());
-      break;
-    case VOLUME_GRID_MASK:
-      fn(bool());
-      break;
-    case VOLUME_GRID_VECTOR_FLOAT:
-      fn(float3());
-      break;
-    default:
-      break;
   }
 }
 
@@ -210,14 +187,14 @@ class SampleGridFunction : public mf::MultiFunction {
     const VArraySpan<float3> positions = params.readonly_single_input<float3>(0, "Position");
     GMutableSpan dst = params.uninitialized_single_output(1, "Value");
 
-    bke::VolumeTreeAccessToken tree_token;
-    convert_to_static_type(grid_type_, [&](auto dummy) {
-      using T = decltype(dummy);
-      sample_grid<T>(static_cast<const bke::OpenvdbGridType<T> &>(*grid_base_),
-                     interpolation_,
-                     positions,
-                     mask,
-                     dst.typed<T>());
+    BKE_volume_grid_type_to_blender_value_type(grid_type_, [&]<typename T>() {
+      if constexpr (is_same_any_v<T, bool, float, int, float3>) {
+        sample_grid<T>(static_cast<const bke::OpenvdbGridType<T> &>(*grid_base_),
+                       interpolation_,
+                       positions,
+                       mask,
+                       dst.typed<T>());
+      }
     });
   }
 };
@@ -275,7 +252,7 @@ static void node_rna(StructRNA *srna)
 
 static void node_register()
 {
-  static blender::bke::bNodeType ntype;
+  static bke::bNodeType ntype;
 
   geo_node_type_base(&ntype, "GeometryNodeSampleGrid", GEO_NODE_SAMPLE_GRID);
   ntype.ui_name = "Sample Grid";
@@ -288,7 +265,7 @@ static void node_register()
   ntype.geometry_node_execute = node_geo_exec;
   ntype.draw_buttons = node_layout;
   ntype.geometry_node_execute = node_geo_exec;
-  blender::bke::node_register_type(ntype);
+  bke::node_register_type(ntype);
 
   node_rna(ntype.rna_ext.srna);
 }

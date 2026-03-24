@@ -7,9 +7,9 @@
 #  include "gpu_shader_compat.hh"
 
 #  include "draw_view_infos.hh"
-#  include "gpu_shader_fullscreen_infos.hh"
 
 #  include "overlay_common_infos.hh"
+#  include "overlay_fullscreen_infos.hh"
 #  include "overlay_shader_shared.hh"
 #endif
 
@@ -22,12 +22,11 @@ SAMPLER(0, sampler2D, color_buffer)
 SAMPLER(1, sampler2DDepth, depth_buffer)
 PUSH_CONSTANT(int, bg_type)
 PUSH_CONSTANT(float4, color_override)
-PUSH_CONSTANT(float, vignette_aperture)
-PUSH_CONSTANT(float, vignette_falloff)
 PUSH_CONSTANT(bool, vignette_enabled)
+PUSH_CONSTANT(float, vignette_aperture)
 FRAGMENT_SOURCE("overlay_background_frag.glsl")
 FRAGMENT_OUT(0, float4, frag_color)
-ADDITIONAL_INFO(gpu_fullscreen)
+ADDITIONAL_INFO(overlay_fullscreen)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 

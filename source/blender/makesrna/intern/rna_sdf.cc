@@ -8,11 +8,14 @@
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_types.hh"
 
 #include "rna_internal.hh"
 
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
+
+using namespace blender;
 
 #include "BLI_math_base.h"
 
@@ -998,11 +1001,15 @@ static void rna_def_sdf(BlenderRNA *brna)
   rna_def_animdata_common(srna);
 }
 
+namespace blender {
+
 void RNA_def_sdf(BlenderRNA *brna)
 {
   rna_def_sdf_modifier(brna);
   rna_def_sdf_polygon_point(brna);
   rna_def_sdf(brna);
 }
+
+}  // namespace blender
 
 #endif

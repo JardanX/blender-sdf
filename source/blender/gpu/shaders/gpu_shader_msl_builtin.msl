@@ -8,6 +8,8 @@
 
 #include "gpu_shader_msl_defines.msl"
 
+#pragma blender dead_code_elimination off
+
 using namespace metal;
 
 #define unpackUnorm4x8 unpack_unorm4x8_to_float
@@ -127,7 +129,6 @@ template<typename T> int findMSB(T x)
 
 /* Base instance with offsets. */
 #define gpu_BaseInstance gl_BaseInstanceARB
-#define gpu_InstanceIndex (gl_InstanceID + gpu_BaseInstance)
 
 #ifdef MTL_WORKGROUP_SIZE_X
 /* Older Metal compiler version don't treat vector component access as constexpr.
@@ -154,3 +155,5 @@ struct mtl_WorkGroupSize {
 };
 #  define gl_WorkGroupSize mtl_WorkGroupSize()
 #endif
+
+#pragma blender dead_code_elimination on

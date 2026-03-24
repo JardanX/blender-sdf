@@ -144,17 +144,6 @@ ccl_device_forceinline int intersection_get_shader_flags(KernelGlobals kg,
     shader = kernel_data_fetch(curves, prim).shader_id;
   }
 #endif
-  else if (type & PRIMITIVE_SDF) {
-    if (kernel_data.num_sdf_shapes > 0) {
-      /* Instanced mode: prim is an instance index. */
-      shader = kernel_data_fetch(sdf_shape_instances, prim).shader_id;
-    }
-    else {
-      /* World-space mode: prim is an SDF object index. */
-      const KernelSDF ksdf = kernel_data_fetch(sdf_objects, prim);
-      shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset);
-    }
-  }
 
   return kernel_data_fetch(shaders, (shader & SHADER_MASK)).flags;
 }
@@ -178,17 +167,6 @@ ccl_device_forceinline int intersection_get_shader_from_isect_prim(KernelGlobals
     shader = kernel_data_fetch(curves, prim).shader_id;
   }
 #endif
-  else if (isect_type & PRIMITIVE_SDF) {
-    if (kernel_data.num_sdf_shapes > 0) {
-      /* Instanced mode: prim is an instance index. */
-      shader = kernel_data_fetch(sdf_shape_instances, prim).shader_id;
-    }
-    else {
-      /* World-space mode: prim is an SDF object index. */
-      const KernelSDF ksdf = kernel_data_fetch(sdf_objects, prim);
-      shader = kernel_data_fetch(sdf_shader_map, ksdf.shader_offset);
-    }
-  }
 
   return shader & SHADER_MASK;
 }
@@ -199,8 +177,8 @@ ccl_device_forceinline int intersection_get_shader(
   return intersection_get_shader_from_isect_prim(kg, isect->prim, isect->type);
 }
 
-ccl_device_forceinline int intersection_get_object_flags(
-    KernelGlobals kg, const ccl_private Intersection *ccl_restrict isect)
+ccl_device_forceinline uint
+intersection_get_object_flags(KernelGlobals kg, const ccl_private Intersection *ccl_restrict isect)
 {
   return kernel_data_fetch(object_flag, isect->object);
 }
@@ -318,10 +296,10 @@ ccl_device_inline bool intersection_skip_shadow_link(KernelGlobals kg,
 ccl_device_forceinline bool intersection_skip_shadow_already_recoded(IntegratorShadowState state,
                                                                      const int object,
                                                                      const int prim,
-                                                                     const int num_hits)
+                                                                     const uint num_hits)
 {
-  const int num_recorded_hits = min(num_hits, int(INTEGRATOR_SHADOW_ISECT_SIZE));
-  for (int i = 0; i < num_recorded_hits; ++i) {
+  const uint num_recorded_hits = min(num_hits, INTEGRATOR_SHADOW_ISECT_SIZE);
+  for (uint i = 0; i < num_recorded_hits; ++i) {
     const int isect_object = INTEGRATOR_STATE_ARRAY(state, shadow_isect, i, object);
     const int isect_prim = INTEGRATOR_STATE_ARRAY(state, shadow_isect, i, prim);
     if (object == isect_object && prim == isect_prim) {

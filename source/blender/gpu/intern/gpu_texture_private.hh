@@ -9,6 +9,7 @@
 #pragma once
 
 #include "BLI_assert.h"
+#include "BLI_enum_flags.hh"
 
 #include "GPU_vertex_buffer.hh"
 
@@ -50,7 +51,7 @@ enum GPUTextureFormatFlag {
   GPU_FORMAT_DEPTH_STENCIL = (GPU_FORMAT_DEPTH | GPU_FORMAT_STENCIL),
 };
 
-ENUM_OPERATORS(GPUTextureFormatFlag, GPU_FORMAT_SIGNED)
+ENUM_OPERATORS(GPUTextureFormatFlag)
 
 enum GPUTextureType {
   GPU_TEXTURE_1D = (1 << 0),
@@ -65,7 +66,7 @@ enum GPUTextureType {
   GPU_TEXTURE_CUBE_ARRAY = (GPU_TEXTURE_CUBE | GPU_TEXTURE_ARRAY),
 };
 
-ENUM_OPERATORS(GPUTextureType, GPU_TEXTURE_BUFFER)
+ENUM_OPERATORS(GPUTextureType)
 
 /* Format types for samplers within the shader.
  * This covers the sampler format type permutations within GLSL/MSL. */
@@ -78,13 +79,7 @@ enum GPUSamplerFormat {
   GPU_SAMPLER_TYPE_MAX = 4
 };
 
-ENUM_OPERATORS(GPUSamplerFormat, GPU_SAMPLER_TYPE_UINT)
-
-#ifndef NDEBUG
-#  define DEBUG_NAME_LEN 64
-#else
-#  define DEBUG_NAME_LEN 8
-#endif
+ENUM_OPERATORS(GPUSamplerFormat)
 
 /* Maximum number of image units. */
 #define GPU_MAX_IMAGE 8
@@ -131,8 +126,8 @@ class Texture {
   /** For error checking */
   int mip_min_ = 0, mip_max_ = 0;
 
-  /** For debugging */
-  char name_[DEBUG_NAME_LEN];
+  /** For debugging. */
+  std::string name_;
 
   /** Frame-buffer references to update on deletion. */
   GPUAttachmentType fb_attachment_[GPU_TEX_MAX_FBO_ATTACHED];
@@ -171,8 +166,12 @@ class Texture {
 
   void usage_set(eGPUTextureUsage usage_flags);
 
-  virtual void update_sub(
-      int mip, int offset[3], int extent[3], eGPUDataFormat format, const void *data) = 0;
+  virtual void update_sub(int mip,
+                          int offset[3],
+                          int extent[3],
+                          eGPUDataFormat format,
+                          const void *data,
+                          uint unpack_row_length = 0) = 0;
   virtual void update_sub(int offset[3],
                           int extent[3],
                           eGPUDataFormat format,
@@ -325,7 +324,7 @@ class Texture {
  protected:
   virtual bool init_internal() = 0;
   virtual bool init_internal(VertBuf *vbo) = 0;
-  virtual bool init_internal(blender::gpu::Texture *src,
+  virtual bool init_internal(gpu::Texture *src,
                              int mip_offset,
                              int layer_offset,
                              bool use_stencil) = 0;
@@ -359,8 +358,6 @@ static inline const PixelBuffer *unwrap(const GPUPixelBuffer *pixbuf)
 {
   return reinterpret_cast<const PixelBuffer *>(pixbuf);
 }
-
-#undef DEBUG_NAME_LEN
 
 inline size_t to_bytesize(TextureFormat format)
 {

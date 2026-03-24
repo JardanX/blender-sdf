@@ -83,7 +83,6 @@ set(LIB
   PRIVATE bf::intern::guardedalloc
   PRIVATE bf::intern::clog
   PUBLIC bf::dependencies::optional::opencolorio
-  PRIVATE bf::extern::fmtlib
 )
 
 blender_add_lib(bf_imbuf_opencolorio "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
@@ -94,13 +93,24 @@ target_include_directories(bf_imbuf_opencolorio PUBLIC .)
 set(GLSL_SRC
   shaders/gpu_shader_display_transform_vert.glsl
   shaders/gpu_shader_display_transform_frag.glsl
+  shaders/gpu_shader_display_transform_lib.glsl
+  shaders/gpu_shader_display_transform_fallback_lib.glsl
 
   intern/ocio_shader_shared.hh
 )
 
-set(GLSL_C)
+set(GLSL_INC
+  ../../gpu
+  ../../gpu/shaders
+  ../../gpu/shaders/common
+
+  intern
+  shaders
+)
+
+set(GLSL_C "")
 foreach(GLSL_FILE ${GLSL_SRC})
-  glsl_to_c(${GLSL_FILE} GLSL_C)
+  glsl_to_c(${GLSL_FILE} GLSL_C GLSL_INC)
 endforeach()
 
 blender_add_lib(bf_imbuf_opencolorio_shaders "${GLSL_C}" "" "" "")

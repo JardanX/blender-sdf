@@ -32,7 +32,6 @@
 #include "DNA_material_types.h"
 
 #include "ED_curves.hh"
-#include "ED_grease_pencil.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
@@ -306,6 +305,10 @@ static ClosestElement find_closest_element(const PenToolOperation &ptd, const fl
   for (const int curves_index : ptd.curves_range()) {
     const bke::CurvesGeometry &curves = ptd.get_curves(curves_index);
     const float4x4 layer_to_object = ptd.layer_to_object_per_curves[curves_index];
+
+    if (curves.is_empty()) {
+      continue;
+    }
 
     IndexMaskMemory memory;
     const IndexMask bezier_points = ptd.visible_bezier_handle_points(curves_index, memory);
@@ -804,7 +807,11 @@ static void add_single_point_and_curve(const PenToolOperation &ptd,
 {
   const float3 depth_point = ptd.project(ptd.mouse_co);
 
-  ed::greasepencil::add_single_curve(curves, true);
+  /* Add single curve to the end. */
+  const int num_old_points = curves.points_num();
+  curves.resize(curves.points_num() + 1, curves.curves_num() + 1);
+  curves.offsets_for_write().last(1) = num_old_points;
+
   bke::MutableAttributeAccessor attributes = curves.attributes_for_write();
 
   Set<std::string> curve_attributes_to_skip;
@@ -821,9 +828,7 @@ static void add_single_point_and_curve(const PenToolOperation &ptd,
   const int material_index = ptd.vc.obact->actcol - 1;
   if (material_index != -1) {
     bke::SpanAttributeWriter<int> material_indexes = attributes.lookup_or_add_for_write_span<int>(
-        "material_index",
-        bke::AttrDomain::Curve,
-        bke::AttributeInitVArray(VArray<int>::from_single(0, curves.curves_num())));
+        "material_index", bke::AttrDomain::Curve, bke::AttributeInitValue(0));
     material_indexes.span.last() = material_index;
     material_indexes.finish();
     curve_attributes_to_skip.add("material_index");
@@ -1208,10 +1213,6 @@ wmOperatorStatus PenToolOperation::modal(bContext *C, wmOperator *op, const wmEv
   this->xy = float2(event->xy);
   this->prev_xy = float2(event->prev_xy);
 
-  if (event->type == EVENT_NONE) {
-    return OPERATOR_RUNNING_MODAL;
-  }
-
   if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
     return OPERATOR_FINISHED;
   }
@@ -1238,32 +1239,33 @@ wmOperatorStatus PenToolOperation::modal(bContext *C, wmOperator *op, const wmEv
 
   std::atomic<bool> changed = false;
   this->center_of_mass_co = calculate_center_of_mass(*this, false);
+  if (event->type == MOUSEMOVE || event->type == INBETWEEN_MOUSEMOVE) {
+    if (this->move_seg && this->closest_element.element_mode == ElementMode::Edge) {
+      const int curves_index = this->closest_element.drawing_index;
+      const float4x4 &layer_to_world = this->layer_to_world_per_curves[curves_index];
+      bke::CurvesGeometry &curves = this->get_curves(curves_index);
 
-  if (this->move_seg && this->closest_element.element_mode == ElementMode::Edge) {
-    const int curves_index = this->closest_element.drawing_index;
-    const float4x4 &layer_to_world = this->layer_to_world_per_curves[curves_index];
-    bke::CurvesGeometry &curves = this->get_curves(curves_index);
+      move_segment(*this, curves, layer_to_world);
+      this->tag_curve_changed(curves_index);
+      changed.store(true, std::memory_order_relaxed);
+    }
+    else {
+      threading::parallel_for(this->curves_range(), 1, [&](const IndexRange curves_range) {
+        for (const int curves_index : curves_range) {
+          bke::CurvesGeometry &curves = this->get_curves(curves_index);
+          const float4x4 &layer_to_object = this->layer_to_object_per_curves[curves_index];
+          const float4x4 &layer_to_world = this->layer_to_world_per_curves[curves_index];
 
-    move_segment(*this, curves, layer_to_world);
-    this->tag_curve_changed(curves_index);
-    changed.store(true, std::memory_order_relaxed);
-  }
-  else {
-    threading::parallel_for(this->curves_range(), 1, [&](const IndexRange curves_range) {
-      for (const int curves_index : curves_range) {
-        bke::CurvesGeometry &curves = this->get_curves(curves_index);
-        const float4x4 &layer_to_object = this->layer_to_object_per_curves[curves_index];
-        const float4x4 &layer_to_world = this->layer_to_world_per_curves[curves_index];
+          IndexMaskMemory memory;
+          const IndexMask selection = this->all_selected_points(curves_index, memory);
 
-        IndexMaskMemory memory;
-        const IndexMask selection = this->all_selected_points(curves_index, memory);
-
-        if (move_handles_in_curve(*this, curves, selection, layer_to_world, layer_to_object)) {
-          changed.store(true, std::memory_order_relaxed);
-          this->tag_curve_changed(curves_index);
+          if (move_handles_in_curve(*this, curves, selection, layer_to_world, layer_to_object)) {
+            changed.store(true, std::memory_order_relaxed);
+            this->tag_curve_changed(curves_index);
+          }
         }
-      }
-    });
+      });
+    }
   }
 
   pen_status_indicators(C, op);
@@ -1360,14 +1362,14 @@ class CurvesPenToolOperation : public PenToolOperation {
 
     Object *object = CTX_data_active_object(C);
     if (object && object_has_editable_curves(bmain, *object)) {
-      unique_curves.add_new(static_cast<Curves *>(object->data));
+      unique_curves.add_new(id_cast<Curves *>(object->data));
       this->layer_to_world_per_curves.append(object->object_to_world());
       this->active_drawing_index = 0;
     }
 
     CTX_DATA_BEGIN (C, Object *, object, selected_objects) {
       if (object_has_editable_curves(bmain, *object)) {
-        if (unique_curves.add(static_cast<Curves *>(object->data))) {
+        if (unique_curves.add(id_cast<Curves *>(object->data))) {
           this->layer_to_world_per_curves.append(object->object_to_world());
         }
       }
@@ -1446,7 +1448,8 @@ void pen_tool_common_props(wmOperatorType *ot)
   RNA_def_boolean(ot->srna, "delete_point", false, "Delete Point", "Delete an existing point");
   RNA_def_boolean(
       ot->srna, "insert_point", false, "Insert Point", "Insert Point into a curve segment");
-  RNA_def_boolean(ot->srna, "move_segment", false, "Move Segment", "Delete an existing point");
+  RNA_def_boolean(
+      ot->srna, "move_segment", false, "Move Segment", "Move an existing curve segment");
   RNA_def_boolean(
       ot->srna, "select_point", false, "Select Point", "Select a point or its handles");
   RNA_def_boolean(ot->srna, "move_point", false, "Move Point", "Move a point or its handles");

@@ -91,6 +91,7 @@ dict_custom = {
     "confusticated",
     "constructability",
     "constructible",
+    "contextless",
     "convolved",
     "coplanarity",
     "copyable",
@@ -174,6 +175,7 @@ dict_custom = {
     "elementwise",
     "embedder",
     "enablement",
+    "encodable",
     "enqueueing",
     "equiangular",
     "evolute",
@@ -188,6 +190,7 @@ dict_custom = {
     "foveation",
     "generatrix",
     "glitchy",
+    "handlings",
     "haptics",
     "headerless",
     "highlightable",
@@ -211,6 +214,7 @@ dict_custom = {
     "interdependencies",
     "interferences",
     "interocular",
+    "interpolant",
     "interpolator",
     "invariance",
     "invariant",
@@ -362,6 +366,7 @@ dict_custom = {
     "reparameterization",
     "reparametrization",
     "representable",
+    "reproject",
     "reprojected",
     "reprojecting",
     "reprojection",
@@ -400,6 +405,7 @@ dict_custom = {
     "stitchable",
     "strobing",
     "subclass",
+    "subclassed",
     "subclasses",
     "subclassing",
     "subdirectories",
@@ -429,6 +435,7 @@ dict_custom = {
     "tertiarily",
     "testability",
     "thumbstick",
+    "tokenization",
     "tokenize",
     "tokenizing",
     "toolchain",
@@ -917,7 +924,8 @@ files_ignore = {
     "source/blender/gpu/shaders/common/gpu_shader_smaa_lib.glsl",
 }
 
+# These contain many typos that could be resolved, then removed from this list.
 directories_ignore = {
-    "scripts/addons",
-    "scripts/addons_core",
+    "scripts/addons_core/io_scene_gltf2/",
+    "scripts/addons_core/rigify/",
 }

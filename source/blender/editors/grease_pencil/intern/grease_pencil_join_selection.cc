@@ -25,7 +25,9 @@
 
 #include <algorithm>
 
-namespace blender::ed::greasepencil {
+namespace blender {
+
+namespace ed::greasepencil {
 
 namespace {
 
@@ -148,10 +150,12 @@ void reverse_points_of(bke::CurvesGeometry &dst_curves, const IndexRange points_
     if (iter.data_type == bke::AttrType::String) {
       return;
     }
+    if (iter.storage_type == bke::AttrStorageType::Single) {
+      return;
+    }
 
     bke::GSpanAttributeWriter attribute = attributes.lookup_for_write_span(iter.name);
-    bke::attribute_math::convert_to_static_type(attribute.span.type(), [&](auto dummy) {
-      using T = decltype(dummy);
+    bke::attribute_math::to_static_type(attribute.span.type(), [&]<typename T>() {
       reverse_point_data<T>(points_to_reverse, attribute.span.typed<T>());
     });
     attribute.finish();
@@ -500,7 +504,7 @@ wmOperatorStatus grease_pencil_join_selection_exec(bContext *C, wmOperator *op)
   Object *object = CTX_data_active_object(C);
   const bke::AttrDomain selection_domain = ED_grease_pencil_selection_domain_get(
       scene->toolsettings, object);
-  GreasePencil &grease_pencil = *static_cast<GreasePencil *>(object->data);
+  GreasePencil &grease_pencil = *id_cast<GreasePencil *>(object->data);
   if (!grease_pencil.has_active_layer()) {
     BKE_report(op->reports, RPT_ERROR, "No active layer");
     return OPERATOR_CANCELLED;
@@ -620,7 +624,7 @@ void GREASE_PENCIL_OT_join_selection(wmOperatorType *ot)
 
 /** \} */
 
-}  // namespace blender::ed::greasepencil
+}  // namespace ed::greasepencil
 
 void ED_operatortypes_grease_pencil_join()
 {
@@ -628,3 +632,5 @@ void ED_operatortypes_grease_pencil_join()
 
   WM_operatortype_append(GREASE_PENCIL_OT_join_selection);
 }
+
+}  // namespace blender

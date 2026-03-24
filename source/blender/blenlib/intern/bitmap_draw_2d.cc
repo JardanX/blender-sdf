@@ -21,8 +21,7 @@
 
 #include "BLI_strict_flags.h" /* IWYU pragma: keep. Keep last. */
 
-using blender::int2;
-using blender::Span;
+namespace blender {
 
 /* -------------------------------------------------------------------- */
 /** \name Draw Line
@@ -328,7 +327,7 @@ void BLI_bitmap_draw_2d_poly_v2i_n(const int xmin,
   /* Originally by Darel Rex Finley, 2007.
    * Optimized by Campbell Barton, 2016 to track sorted intersections. */
 
-  int (*span_y)[2] = MEM_malloc_arrayN<int[2]>(size_t(verts.size()), __func__);
+  int (*span_y)[2] = MEM_new_array_uninitialized<int[2]>(size_t(verts.size()), __func__);
   int span_y_len = 0;
 
   for (int i_curr = 0, i_prev = int(verts.size() - 1); i_curr < verts.size(); i_prev = i_curr++) {
@@ -362,7 +361,7 @@ void BLI_bitmap_draw_2d_poly_v2i_n(const int xmin,
   struct NodeX {
     int span_y_index;
     int x;
-  } *node_x = MEM_malloc_arrayN<NodeX>(size_t(verts.size() + 1), __func__);
+  } *node_x = MEM_new_array_uninitialized<NodeX>(size_t(verts.size() + 1), __func__);
   int node_x_len = 0;
 
   int span_y_index = 0;
@@ -471,8 +470,10 @@ void BLI_bitmap_draw_2d_poly_v2i_n(const int xmin,
     }
   }
 
-  MEM_freeN(span_y);
-  MEM_freeN(node_x);
+  MEM_delete(span_y);
+  MEM_delete(node_x);
 }
 
 /** \} */
+
+}  // namespace blender

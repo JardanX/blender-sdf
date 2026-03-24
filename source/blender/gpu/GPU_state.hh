@@ -8,9 +8,12 @@
 
 #pragma once
 
-#include "BLI_utildefines.h"
+#include "BLI_enum_flags.hh"
+#include "BLI_sys_types.h"
 
-/** Opaque type hiding blender::gpu::Fence. */
+namespace blender {
+
+/** Opaque type hiding gpu::Fence. */
 struct GPUFence;
 
 enum GPUWriteMask {
@@ -24,7 +27,7 @@ enum GPUWriteMask {
   GPU_WRITE_COLOR = (GPU_WRITE_RED | GPU_WRITE_GREEN | GPU_WRITE_BLUE | GPU_WRITE_ALPHA),
 };
 
-ENUM_OPERATORS(GPUWriteMask, GPU_WRITE_COLOR)
+ENUM_OPERATORS(GPUWriteMask)
 
 enum GPUBarrier {
   /* Texture Barrier. */
@@ -58,7 +61,7 @@ enum GPUBarrier {
   // GPU_BARRIER_CLIENT_MAPPED_BUFFER = (1 << 15), /* Not implemented yet. */
 };
 
-ENUM_OPERATORS(GPUBarrier, GPU_BARRIER_BUFFER_UPDATE)
+ENUM_OPERATORS(GPUBarrier)
 
 /* NOTE: For Metal and Vulkan only.
  * TODO(Metal): Update barrier calls to use stage flags. */
@@ -71,7 +74,7 @@ enum GPUStageBarrierBits {
                            GPU_BARRIER_STAGE_COMPUTE),
 };
 
-ENUM_OPERATORS(GPUStageBarrierBits, GPU_BARRIER_STAGE_COMPUTE)
+ENUM_OPERATORS(GPUStageBarrierBits)
 
 /**
  * Defines the fixed pipeline blending equation.
@@ -93,6 +96,10 @@ enum GPUBlend {
   /** Replace logic op: SRC * (1 - DST)
    * NOTE: Does not modify alpha. */
   GPU_BLEND_INVERT,
+  /** Stores min(SRC, DST) per component. */
+  GPU_BLEND_MIN,
+  /** Stores max(SRC, DST) per component. */
+  GPU_BLEND_MAX,
   /** Order independent transparency.
    * NOTE: Cannot be used as is. Needs special setup (frame-buffer, shader ...). */
   GPU_BLEND_OIT,
@@ -105,6 +112,12 @@ enum GPUBlend {
   /** Multiplies every channel (alpha included) by `1 - SRC.a`. Used for piercing a hole using an
    * image alpha channel. */
   GPU_BLEND_OVERLAY_MASK_FROM_ALPHA,
+  /**
+   * Alpha channel is interpreted as transmittance (aka transparency) and not alpha.
+   * To be used with a frame-buffer with alpha cleared to 1 for full transparency.
+   * Equivalent to: `DST.rgba * SRC.a + float4(SRC.rgb, 0.0)`.
+   */
+  GPU_BLEND_TRANSPARENCY,
 };
 
 enum GPUDepthTest {
@@ -149,7 +162,6 @@ void GPU_depth_test(GPUDepthTest test);
 void GPU_stencil_test(GPUStencilTest test);
 void GPU_provoking_vertex(GPUProvokingVertex vert);
 void GPU_front_facing(bool invert);
-void GPU_depth_range(float near, float far);
 void GPU_scissor_test(bool enable);
 void GPU_line_smooth(bool enable);
 /**
@@ -179,7 +191,6 @@ void GPU_write_mask(GPUWriteMask mask);
 void GPU_color_mask(bool r, bool g, bool b, bool a);
 void GPU_depth_mask(bool depth);
 bool GPU_depth_mask_get();
-void GPU_shadow_offset(bool enable);
 void GPU_clip_distances(int distances_enabled);
 bool GPU_mipmap_enabled();
 void GPU_state_set(GPUWriteMask write_mask,
@@ -229,3 +240,5 @@ GPUFence *GPU_fence_create();
 void GPU_fence_free(GPUFence *fence);
 void GPU_fence_signal(GPUFence *fence);
 void GPU_fence_wait(GPUFence *fence);
+
+}  // namespace blender

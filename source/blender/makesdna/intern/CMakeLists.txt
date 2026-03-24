@@ -11,14 +11,13 @@ set(INC
 )
 
 set(INC_SYS
-
 )
 
 set(LIB
   PRIVATE bf::intern::atomic
   PRIVATE bf::intern::guardedalloc
   PRIVATE bf::dependencies::optional::tbb
-  PRIVATE bf::extern::fmtlib
+  bf::dependencies::fmt
 )
 
 add_definitions(-DWITH_DNA_GHASH)
@@ -90,17 +89,13 @@ setup_platform_linker_libs(makesdna)
 blender_target_include_dirs(makesdna ${INC})
 blender_target_include_dirs_sys(makesdna ${INC_SYS})
 target_link_libraries(makesdna ${LIB})
-
-if(WIN32 AND NOT UNIX)
-  if(DEFINED PTHREADS_LIBRARIES)
-    target_link_libraries(makesdna PRIVATE ${PTHREADS_LIBRARIES})
-  endif()
-endif()
+target_link_libraries(makesdna PRIVATE bf::dependencies::pthreads)
 
 # Output dna.cc
 add_custom_command(
   OUTPUT
     ${CMAKE_CURRENT_BINARY_DIR}/dna.cc
+    ${CMAKE_CURRENT_BINARY_DIR}/dna_defaults.cc
     ${CMAKE_CURRENT_BINARY_DIR}/dna_struct_ids.cc
     ${CMAKE_CURRENT_BINARY_DIR}/dna_type_offsets.h
     ${CMAKE_CURRENT_BINARY_DIR}/dna_verify.cc
@@ -111,6 +106,7 @@ add_custom_command(
     ${CMAKE_CURRENT_BINARY_DIR}/dna_type_offsets.h
     ${CMAKE_CURRENT_BINARY_DIR}/dna_verify.cc
     ${CMAKE_CURRENT_BINARY_DIR}/dna_struct_ids.cc
+    ${CMAKE_CURRENT_BINARY_DIR}/dna_defaults.cc
     ${CMAKE_SOURCE_DIR}/source/blender/makesdna/
   DEPENDS makesdna
 )
@@ -119,7 +115,6 @@ add_custom_command(
 # -----------------------------------------------------------------------------
 # Build bf_dna library
 set(SRC
-  dna_defaults.c
   dna_genfile.cc
   dna_utils.cc
   ${CMAKE_CURRENT_BINARY_DIR}/dna.cc
@@ -144,6 +139,22 @@ blender_add_lib(bf_dna "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 add_library(bf::dna ALIAS bf_dna)
 
 
+# -----------------------------------------------------------------------------
+# Build bf_dna_defaults library
+
+set(SRC
+  ${CMAKE_CURRENT_BINARY_DIR}/dna_defaults.cc
+  ${CMAKE_SOURCE_DIR}/release/datafiles/userdef/userdef_default_theme.c
+  ${SRC_DNA_INC}
+)
+
+set_source_files_properties(
+  ${CMAKE_CURRENT_BINARY_DIR}/dna_defaults.cc
+  PROPERTIES GENERATED TRUE
+)
+
+blender_add_lib(bf_dna_defaults "${SRC}" "${INC}" "${INC_SYS}" "${LIB};bf_dna")
+
 
 # -----------------------------------------------------------------------------
 # Build bf_dna_blenlib library
@@ -153,12 +164,10 @@ set(INC
 )
 
 set(INC_SYS
-
 )
 
 set(SRC
   ${BLENLIB_SRC}
-  ${SRC_DNA_DEFAULTS_INC}
   ${SRC_DNA_OTHER_INC}
 )
 

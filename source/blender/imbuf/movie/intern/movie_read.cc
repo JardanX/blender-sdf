@@ -53,6 +53,8 @@ extern "C" {
 
 #endif /* WITH_FFMPEG */
 
+namespace blender {
+
 #ifdef WITH_FFMPEG
 static CLG_LogRef LOG = {"video.read"};
 #endif
@@ -497,7 +499,7 @@ static int startffmpeg(MovieReader *anim)
     av_image_fill_arrays(
         anim->pFrameDeinterlaced->data,
         anim->pFrameDeinterlaced->linesize,
-        MEM_calloc_arrayN<uint8_t>(
+        MEM_new_array_zeroed<uint8_t>(
             av_image_get_buffer_size(
                 anim->pCodecCtx->pix_fmt, anim->pCodecCtx->width, anim->pCodecCtx->height, 1),
             "ffmpeg deinterlace"),
@@ -601,7 +603,6 @@ static AVFrame *ffmpeg_double_buffer_frame_fallback_get(MovieReader *anim)
  * video rotation in the same go if needed. */
 static void float_planar_to_interleaved(const AVFrame *frame, const int rotation, ImBuf *ibuf)
 {
-  using namespace blender;
   const size_t src_linesize = frame->linesize[0];
   BLI_assert_msg(frame->linesize[1] == src_linesize && frame->linesize[2] == src_linesize &&
                      frame->linesize[3] == src_linesize,
@@ -1049,9 +1050,6 @@ static int ffmpeg_generic_seek_workaround(MovieReader *anim,
   int64_t current_pts = *requested_pts;
   int64_t offset = 0;
 
-  int64_t cur_pts;
-  // int64_t prev_pts = -1; /* UNUSED. */
-
   /* Step backward frame by frame until we find the key frame we are looking for. */
   while (current_pts != 0) {
     current_pts = *requested_pts - int64_t(round(offset * ffmpeg_steps_per_frame_get(anim)));
@@ -1073,11 +1071,11 @@ static int ffmpeg_generic_seek_workaround(MovieReader *anim,
     }
 
     /* If this packet contains an I-frame, this could be the frame that we need. */
-    bool is_key_frame = read_packet->flags & AV_PKT_FLAG_KEY;
+    const bool is_key_frame = read_packet->flags & AV_PKT_FLAG_KEY;
     /* We need to check the packet timestamp as the key frame could be for a GOP forward in the
      * video stream. So if it has a larger timestamp than the frame we want, ignore it.
      */
-    cur_pts = timestamp_from_pts_or_dts(read_packet->pts, read_packet->dts);
+    const int64_t cur_pts = timestamp_from_pts_or_dts(read_packet->pts, read_packet->dts);
     av_packet_free(&read_packet);
 
     if (is_key_frame) {
@@ -1092,7 +1090,6 @@ static int ffmpeg_generic_seek_workaround(MovieReader *anim,
       break;
     }
 
-    // prev_pts = cur_pts; /* UNUSED. */
     offset++;
   }
 
@@ -1296,7 +1293,7 @@ static ImBuf *ffmpeg_fetchibuf(MovieReader *anim, int position, IMB_Timecode_Typ
   const size_t align = ffmpeg_get_buffer_alignment();
   const size_t pixel_size = anim->is_float ? 16 : 4;
   uint8_t *buffer_data = static_cast<uint8_t *>(
-      MEM_mallocN_aligned(pixel_size * anim->x * anim->y, align, "ffmpeg ibuf"));
+      MEM_new_uninitialized_aligned(pixel_size * anim->x * anim->y, align, "ffmpeg ibuf"));
   if (anim->is_float) {
     IMB_assign_float_buffer(cur_frame_final, (float *)buffer_data, IB_TAKE_OWNERSHIP);
   }
@@ -1336,9 +1333,9 @@ static ImBuf *ffmpeg_fetchibuf(MovieReader *anim, int position, IMB_Timecode_Typ
     }
   }
   else {
-    /* Colorspace conversion is lossy for byte buffers, so only assign the colorspace.
+    /* Color-space conversion is lossy for byte buffers, so only assign the color-space.
      * It is up to artists to ensure operations on byte buffers do not involve mixing different
-     * colorspaces. */
+     * color-spaces. */
     cur_frame_final->byte_buffer.colorspace = colormanage_colorspace_get_named(anim->colorspace);
   }
 
@@ -1362,7 +1359,7 @@ static void free_anim_ffmpeg(MovieReader *anim)
     av_frame_free(&anim->pFrame_backup);
     av_frame_free(&anim->pFrameRGB);
     if (anim->pFrameDeinterlaced->data[0] != nullptr) {
-      MEM_freeN(anim->pFrameDeinterlaced->data[0]);
+      MEM_delete(anim->pFrameDeinterlaced->data[0]);
     }
     av_frame_free(&anim->pFrameDeinterlaced);
     ffmpeg_sws_release_context(anim->img_convert_ctx);
@@ -1537,3 +1534,5 @@ int MOV_get_image_height(const MovieReader *anim)
 {
   return ELEM(anim->video_rotation, 90, 270) ? anim->x : anim->y;
 }
+
+}  // namespace blender

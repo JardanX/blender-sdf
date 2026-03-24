@@ -14,7 +14,9 @@
 
 #pragma once
 
-#include "BLI_utildefines.h"
+#include "BLI_enum_flags.hh"
+
+namespace blender {
 
 struct ID;
 struct Main;
@@ -73,7 +75,7 @@ enum eBPathForeachFlag {
    */
   BKE_BPATH_FOREACH_PATH_RELOAD_EDITED = (1 << 9),
 };
-ENUM_OPERATORS(eBPathForeachFlag, BKE_BPATH_FOREACH_PATH_RELOAD_EDITED)
+ENUM_OPERATORS(eBPathForeachFlag)
 
 struct BPathForeachPathData;
 
@@ -250,3 +252,5 @@ void BKE_bpath_list_restore(Main *bmain, eBPathForeachFlag flag, void *path_list
 void BKE_bpath_list_free(void *path_list_handle);
 
 /** \} */
+
+}  // namespace blender

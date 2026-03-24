@@ -20,10 +20,10 @@ function(unset_cache_variables pattern)
 endfunction()
 
 # Clear cached variables with values containing `contents`.
-function(unset_cached_varables_containting contents msg)
+function(unset_cached_variables_containing contents msg)
   get_cmake_property(_cache_variables CACHE_VARIABLES)
-  set(_found)
-  set(_print_msg)
+  set(_found "")
+  set(_print_msg "")
   foreach(_cache_variable ${_cache_variables})
     # Skip "_" prefixed variables, these are used for internal book-keeping,
     # not under user control.

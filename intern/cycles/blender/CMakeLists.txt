@@ -5,12 +5,11 @@
 set(INC
   ..
   ../../../source/blender/makesrna
-  ${CMAKE_BINARY_DIR}/source/blender/makesrna/intern
+  # RNA_prototypes.hh
+  ${CMAKE_BINARY_DIR}/source/blender/makesrna
 )
 
 set(INC_SYS
-  ${Epoxy_INCLUDE_DIRS}
-  ${PYTHON_INCLUDE_DIRS}
 )
 
 set(SRC
@@ -30,7 +29,6 @@ set(SRC
   curves.cpp
   logging.cpp
   python.cpp
-  sdf.cpp
   session.cpp
   shader.cpp
   sync.cpp
@@ -54,9 +52,11 @@ set(SRC
 
 set(LIB
   PRIVATE bf::blenkernel
+  PRIVATE bf::depsgraph
   PRIVATE bf::blenlib
   PRIVATE bf::dna
   PRIVATE bf::imbuf
+  PRIVATE bf::geometry
   PRIVATE bf::gpu
   PRIVATE bf::intern::guardedalloc
   PRIVATE bf::intern::clog
@@ -71,9 +71,10 @@ set(LIB
   cycles_subd
   cycles_util
 
-  ${Epoxy_LIBRARIES}
-  ${PYTHON_LINKFLAGS}
-  ${PYTHON_LIBRARIES}
+  bf::dependencies::epoxy
+  bf::dependencies::optional::python
+  bf::dependencies::optional::openimagedenoise
+  bf::dependencies::optional::openvdb
 )
 
 set(ADDON_FILES
@@ -104,25 +105,9 @@ if(WITH_TBB)
   add_definitions(-DWITH_TBB)
 endif()
 
-if(WITH_OPENVDB)
-  list(APPEND INC
-    ../../openvdb
-  )
-  list(APPEND LIB
-    ${OPENVDB_LIBRARIES}
-  )
-endif()
-
-if(WITH_OPENIMAGEDENOISE)
-  add_definitions(-DWITH_OPENIMAGEDENOISE)
-  list(APPEND INC_SYS
-    ${OPENIMAGEDENOISE_INCLUDE_DIRS}
-  )
-endif()
-
 if(WITH_CYCLES_OSL)
   list(APPEND LIB
-    ${OSL_LIBRARIES}
+    bf::dependencies::optional::osl
   )
 endif()
 

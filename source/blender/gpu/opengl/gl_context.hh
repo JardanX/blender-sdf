@@ -20,8 +20,7 @@
 
 #include <mutex>
 
-namespace blender {
-namespace gpu {
+namespace blender::gpu {
 
 class GLVaoCache;
 
@@ -117,7 +116,7 @@ class GLContext : public Context {
   void process_frame_timings();
 
  public:
-  GLContext(void *ghost_window, GLSharedOrphanLists &shared_orphan_list);
+  GLContext(GHOST_IWindow *ghost_window, GLSharedOrphanLists &shared_orphan_list);
   ~GLContext();
 
   static void check_error(const char *info);
@@ -173,5 +172,4 @@ class GLContext : public Context {
   MEM_CXX_CLASS_ALLOC_FUNCS("GLContext")
 };
 
-}  // namespace gpu
-}  // namespace blender
+}  // namespace blender::gpu

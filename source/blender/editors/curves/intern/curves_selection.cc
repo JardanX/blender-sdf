@@ -211,10 +211,9 @@ static bke::GSpanAttributeWriter &selection_attribute_writer_by_name(
   return selections[0];
 }
 
-void foreach_selection_attribute_writer(
-    bke::CurvesGeometry &curves,
-    bke::AttrDomain selection_domain,
-    blender::FunctionRef<void(bke::GSpanAttributeWriter &selection)> fn)
+void foreach_selection_attribute_writer(bke::CurvesGeometry &curves,
+                                        bke::AttrDomain selection_domain,
+                                        FunctionRef<void(bke::GSpanAttributeWriter &selection)> fn)
 {
   Vector<bke::GSpanAttributeWriter> selection_writers = init_selection_writers(curves,
                                                                                selection_domain);
@@ -329,19 +328,14 @@ bke::GSpanAttributeWriter ensure_selection_attribute(bke::CurvesGeometry &curves
     selection_attr.finish();
     attributes.remove(attribute_name);
   }
-  const int domain_size = attributes.domain_size(selection_domain);
   switch (create_type) {
     case bke::AttrType::Bool:
-      attributes.add(attribute_name,
-                     selection_domain,
-                     bke::AttrType::Bool,
-                     bke::AttributeInitVArray(VArray<bool>::from_single(true, domain_size)));
+      attributes.add(
+          attribute_name, selection_domain, bke::AttrType::Bool, bke::AttributeInitValue(true));
       break;
     case bke::AttrType::Float:
-      attributes.add(attribute_name,
-                     selection_domain,
-                     bke::AttrType::Float,
-                     bke::AttributeInitVArray(VArray<float>::from_single(1.0f, domain_size)));
+      attributes.add(
+          attribute_name, selection_domain, bke::AttrType::Float, bke::AttributeInitValue(1.0f));
       break;
     default:
       BLI_assert_unreachable();

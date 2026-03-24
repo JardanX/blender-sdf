@@ -314,9 +314,9 @@ class POSE_OT_selection_set_paste(_PoseModeOnlyMixin, Operator):
 
 
 def _uniqify(name, other_names):
-    # :arg name: The name to make unique.
+    # :param name: The name to make unique.
     # :type name: str
-    # :arg other_names: The name to make unique.
+    # :param other_names: The name to make unique.
     # :type other_names: str
     # :return: Return a unique name with ``.xxx`` suffix if necessary.
     # :rtype: str
@@ -345,10 +345,14 @@ def _uniqify(name, other_names):
 
     # Construct the list of numbers already in use.
     offset = len(name) + 1
-    others = (n[offset:] for n in other_names
-              if n.startswith(name + '.'))
-    numbers = sorted(int(suffix) for suffix in others
-                     if suffix.isdigit())
+    others = (
+        n[offset:] for n in other_names
+        if n.startswith(name + '.')
+    )
+    numbers = sorted(
+        int(suffix) for suffix in others
+        if suffix.isdigit()
+    )
 
     # Find the first unused number.
     min_index = 1
@@ -384,7 +388,7 @@ def _to_json(context):
 def _from_json(context, as_json):
     # Add the selection sets (one or more) from JSON to the current rig.
     #
-    # :arg as_json: The JSON contents to load.
+    # :param as_json: The JSON contents to load.
     # :type as_json: str
     import json
 

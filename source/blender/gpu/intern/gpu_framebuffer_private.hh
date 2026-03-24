@@ -15,7 +15,9 @@
 
 #include "GPU_framebuffer.hh"
 
-namespace blender::gpu {
+namespace blender {
+
+namespace gpu {
 class Texture;
 }
 
@@ -61,7 +63,7 @@ inline GPUAttachmentType &operator--(GPUAttachmentType &a)
   return a;
 }
 
-namespace blender::gpu {
+namespace gpu {
 
 #ifndef NDEBUG
 #  define DEBUG_NAME_LEN 64
@@ -160,6 +162,12 @@ class FrameBuffer {
     dirty_state_ = true;
   }
 
+  /** \brief Get the size of the framebuffer. */
+  int2 size_get() const
+  {
+    return int2(width_, height_);
+  }
+
   /* Sets the size for frame-buffer with no attachments. */
   void default_size_set(int width, int height)
   {
@@ -238,12 +246,12 @@ class FrameBuffer {
     return attachments_[GPU_FB_DEPTH_STENCIL_ATTACHMENT];
   }
 
-  blender::gpu::Texture *depth_tex() const
+  gpu::Texture *depth_tex() const
   {
     return depth_attachment().tex;
   };
 
-  blender::gpu::Texture *color_tex(int slot) const
+  gpu::Texture *color_tex(int slot) const
   {
     return attachments_[GPU_FB_COLOR_ATTACHMENT0 + slot].tex;
   };
@@ -271,4 +279,5 @@ class FrameBuffer {
 
 #undef DEBUG_NAME_LEN
 
-}  // namespace blender::gpu
+}  // namespace gpu
+}  // namespace blender
