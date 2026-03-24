@@ -37,8 +37,8 @@ bool aabb_overlaps_tile(float3 bmin, float3 bmax, float4 tile_ndc, float4x4 view
     proj_max = max(proj_max, ndc);
   }
 
-  if (behind_count == 8) return false;
-  if (behind_count > 0) return true;
+  if (behind_count == 8) { return false; }
+  if (behind_count > 0) { return true; }
 
   return !(proj_max.x < tile_ndc.x || proj_min.x > tile_ndc.z ||
            proj_max.y < tile_ndc.y || proj_min.y > tile_ndc.w);
@@ -48,7 +48,7 @@ void main()
 {
   int local_idx = int(gl_LocalInvocationID.y * kTileSize + gl_LocalInvocationID.x);
 
-  if (local_idx == 0) s_tileObjCount = 0u;
+  if (local_idx == 0) { s_tileObjCount = 0u; }
   barrier();
 
   ViewMatrices vm = drw_view();
@@ -60,11 +60,11 @@ void main()
       tile_hi / float2(screen_size) * 2.0f - 1.0f);
 
   for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
-    if (objects[i]._pad2 == 0) continue;
-    if (!aabb_overlaps_tile(objects[i].bbox_min.xyz, objects[i].bbox_max.xyz, tile_ndc, viewproj)) continue;
+    if (objects[i]._pad2 == 0) { continue; }
+    if (!aabb_overlaps_tile(objects[i].bbox_min.xyz, objects[i].bbox_max.xyz, tile_ndc, viewproj)) { continue; }
 
     uint slot = atomicAdd(s_tileObjCount, 1u);
-    if (slot < uint(kMaxTileObjects)) s_tileObjList[slot] = i;
+    if (slot < uint(kMaxTileObjects)) { s_tileObjList[slot] = i; }
   }
   barrier();
 

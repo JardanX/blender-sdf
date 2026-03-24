@@ -11,6 +11,8 @@
 
 #include "rna_internal.hh"
 
+using namespace blender;
+
 #include "DNA_object_types.h"
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
@@ -422,10 +424,12 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   rna_def_animdata_common(srna);
 }
 
+namespace blender {
 void RNA_def_sdf_group(BlenderRNA *brna)
 {
   rna_def_sdf_group_member(brna);
   rna_def_sdf_group(brna);
 }
 
+}  // namespace blender
 #endif

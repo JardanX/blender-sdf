@@ -90,7 +90,7 @@ void main()
   int tileY = int(gl_GlobalInvocationID.y);
   int tilesX = (screen_size.x + 7) / 8;
   int tilesY = (screen_size.y + 7) / 8;
-  if (tileX >= tilesX || tileY >= tilesY) return;
+  if (tileX >= tilesX || tileY >= tilesY) { return; }
 
   int tileIdx = tileX + tileY * tilesX;
   int tile_count = min(tile_prim_counts[tileIdx], kMaxTileObjects);
@@ -172,7 +172,7 @@ void main()
 
     if (d >= 1e9f) {
       t += max(aabb_skip, cone_epsilon);
-      if (t > t_exit) break;
+      if (t > t_exit) { break; }
       continue;
     }
 
@@ -193,7 +193,7 @@ void main()
     d_safe = d;
     cone_r_safe = cone_r;
     t += d;
-    if (t > t_exit) break;
+    if (t > t_exit) { break; }
   }
 
   /* Traversed full range without finding surface — tile is empty */

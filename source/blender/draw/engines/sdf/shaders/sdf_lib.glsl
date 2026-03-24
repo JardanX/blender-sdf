@@ -437,13 +437,13 @@ void toggleBezierRoot(float t,
                       float2 p,
                       inout int winding)
 {
-  if (t < 0.0f || t > 1.0f) return;
+  if (t < 0.0f || t > 1.0f) { return; }
   float u = 1.0f - t;
   float2 q = u * u * a + 2.0f * u * t * b + t * t * c;
   float2 v = 2.0f * (u * (b - a) + t * (c - b));
   float cr = v.x * (p.y - q.y) - v.y * (p.x - q.x);
-  if (v.y > 0.0f && p.y != c.y && cr > 0.0f) winding--;
-  if (v.y < 0.0f && p.y != a.y && cr < 0.0f) winding++;
+  if (v.y > 0.0f && p.y != c.y && cr > 0.0f) { winding--; }
+  if (v.y < 0.0f && p.y != a.y && cr < 0.0f) { winding++; }
 }
 
 void toggleBezierWinding(float2 a,
@@ -454,7 +454,7 @@ void toggleBezierWinding(float2 a,
 {
   float y0 = min(min(a.y, b.y), c.y);
   float y1 = max(max(a.y, b.y), c.y);
-  if (p.y < y0 || p.y > y1) return;
+  if (p.y < y0 || p.y > y1) { return; }
 
   float A = a.y - 2.0f * b.y + c.y;
   float B = 2.0f * (b.y - a.y);
@@ -512,8 +512,8 @@ float sdPolygon2D(float2 p, int ps, int pc)
       /* Winding number (non-zero rule) */
       float vj_y = vi.y + e.y;
       float cross_val = e.x * w.y - e.y * w.x;
-      if (vi.y <= p.y && vj_y > p.y && cross_val > 0.0f) winding++;
-      if (vi.y > p.y && vj_y <= p.y && cross_val < 0.0f) winding--;
+      if (vi.y <= p.y && vj_y > p.y && cross_val > 0.0f) { winding++; }
+      if (vi.y > p.y && vj_y <= p.y && cross_val < 0.0f) { winding--; }
     }
   }
   return (winding != 0) ? -d : d;
@@ -528,7 +528,7 @@ float sdPolygon2DRounded(float2 p, int ps, int pc)
     float4 ed = polygon_points[ps + i].vi_edge;
     float4 ad = polygon_points[ps + i].arc_data;
     float4 ab = polygon_points[ps + i].arc_bounds;
-    if (ab.w < 0.0f) continue;
+    if (ab.w < 0.0f) { continue; }
 
     float2 vi = ed.xy, edge = ed.zw;
     float R_signed = ad.x, R = abs(R_signed);
@@ -547,8 +547,8 @@ float sdPolygon2DRounded(float2 p, int ps, int pc)
       d = min(d, length(w - seg_dir * t));
 
       float cross_val = seg_dir.x * w.y - seg_dir.y * w.x;
-      if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) winding++;
-      if (seg_a.y > p.y && seg_b.y <= p.y && cross_val < 0.0f) winding--;
+      if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) { winding++; }
+      if (seg_a.y > p.y && seg_b.y <= p.y && cross_val < 0.0f) { winding--; }
     }
 
     /* Arc: distance + winding */
@@ -1103,11 +1103,11 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
         return opSmoothUnion(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) return opSmoothChamferUnion(d1, d2, k, k2, k3);
+        if (has_smooth) { return opSmoothChamferUnion(d1, d2, k, k2, k3); }
         return opChamferUnion(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_ROUND) {
-        if (has_smooth) return opSmoothRoundUnion(d1, d2, k, k2, k3);
+        if (has_smooth) { return opSmoothRoundUnion(d1, d2, k, k2, k3); }
         return opRoundUnion(d1, d2, k);
       }
     }
@@ -1119,11 +1119,11 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
         return opSmoothSubtraction(d2, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) return opSmoothChamferSubtraction(d2, d1, k, k2, k3);
+        if (has_smooth) { return opSmoothChamferSubtraction(d2, d1, k, k2, k3); }
         return opChamferSubtraction(d2, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_ROUND) {
-        if (has_smooth) return opSmoothRoundSubtraction(d2, d1, k, k2, k3);
+        if (has_smooth) { return opSmoothRoundSubtraction(d2, d1, k, k2, k3); }
         return opRoundSubtraction(d2, d1, k);
       }
     }
@@ -1135,11 +1135,11 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
         return opSmoothIntersection(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) return opSmoothChamferIntersection(d1, d2, k, k2, k3);
+        if (has_smooth) { return opSmoothChamferIntersection(d1, d2, k, k2, k3); }
         return opChamferIntersection(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_ROUND) {
-        if (has_smooth) return opSmoothRoundIntersection(d1, d2, k, k2, k3);
+        if (has_smooth) { return opSmoothRoundIntersection(d1, d2, k, k2, k3); }
         return opRoundIntersection(d1, d2, k);
       }
     }
@@ -1152,12 +1152,12 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
         subtracted = opSmoothSubtraction(d2, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) subtracted = opSmoothChamferSubtraction(d2, d1, k, k2, k3);
-        else subtracted = opChamferSubtraction(d2, d1, k);
+        if (has_smooth) { subtracted = opSmoothChamferSubtraction(d2, d1, k, k2, k3); }
+        else { subtracted = opChamferSubtraction(d2, d1, k); }
       }
       else {
-        if (has_smooth) subtracted = opSmoothRoundSubtraction(d2, d1, k, k2, k3);
-        else subtracted = opRoundSubtraction(d2, d1, k);
+        if (has_smooth) { subtracted = opSmoothRoundSubtraction(d2, d1, k, k2, k3); }
+        else { subtracted = opRoundSubtraction(d2, d1, k); }
       }
     }
     else {
@@ -1172,12 +1172,12 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
         carved = opSmoothSubtraction(d1, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) carved = opSmoothChamferSubtraction(d1, d2, k, k2, k3);
-        else carved = opChamferSubtraction(d1, d2, k);
+        if (has_smooth) { carved = opSmoothChamferSubtraction(d1, d2, k, k2, k3); }
+        else { carved = opChamferSubtraction(d1, d2, k); }
       }
       else {
-        if (has_smooth) carved = opSmoothRoundSubtraction(d1, d2, k, k2, k3);
-        else carved = opRoundSubtraction(d1, d2, k);
+        if (has_smooth) { carved = opSmoothRoundSubtraction(d1, d2, k, k2, k3); }
+        else { carved = opRoundSubtraction(d1, d2, k); }
       }
     }
     else {
@@ -1219,18 +1219,18 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
       /* Inward (or subtraction): subtract shape, cap at limit */
       float d_sub;
       if (shell_k_bot > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) d_sub = opSmoothSubtraction(d2, d1, shell_k_bot);
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_sub = opChamferSubtraction(d2, d1, shell_k_bot);
-        else if (bt == SDF_BLEND_TYPE_ROUND) d_sub = opRoundSubtraction(d2, d1, shell_k_bot);
-        else d_sub = max(d1, -d2);
+        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_sub = opSmoothSubtraction(d2, d1, shell_k_bot); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_sub = opChamferSubtraction(d2, d1, shell_k_bot); }
+        else if (bt == SDF_BLEND_TYPE_ROUND) { d_sub = opRoundSubtraction(d2, d1, shell_k_bot); }
+        else { d_sub = max(d1, -d2); }
       }
       else { d_sub = max(d1, -d2); }
       float lim = d1 + h;
       if (lk_top > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothUnion(d_sub, lim, lk_top);
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferUnion(d_sub, lim, lk_top);
-        else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundUnion(d_sub, lim, lk_top);
-        else d_shell = min(d_sub, lim);
+        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_shell = opSmoothUnion(d_sub, lim, lk_top); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_shell = opChamferUnion(d_sub, lim, lk_top); }
+        else if (bt == SDF_BLEND_TYPE_ROUND) { d_shell = opRoundUnion(d_sub, lim, lk_top); }
+        else { d_shell = min(d_sub, lim); }
       }
       else { d_shell = min(d_sub, lim); }
     }
@@ -1238,18 +1238,18 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
       /* Outward: union = top edge, intersection = bottom edge */
       float d_union;
       if (shell_k_top > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) d_union = opSmoothUnion(d1, d2, shell_k_top);
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_union = opChamferUnion(d1, d2, shell_k_top);
-        else if (bt == SDF_BLEND_TYPE_ROUND) d_union = opRoundUnion(d1, d2, shell_k_top);
-        else d_union = min(d1, d2);
+        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_union = opSmoothUnion(d1, d2, shell_k_top); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_union = opChamferUnion(d1, d2, shell_k_top); }
+        else if (bt == SDF_BLEND_TYPE_ROUND) { d_union = opRoundUnion(d1, d2, shell_k_top); }
+        else { d_union = min(d1, d2); }
       }
       else { d_union = min(d1, d2); }
       float lim = d1 - h;
       if (lk_bot > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) d_shell = opSmoothIntersection(d_union, lim, lk_bot);
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) d_shell = opChamferIntersection(d_union, lim, lk_bot);
-        else if (bt == SDF_BLEND_TYPE_ROUND) d_shell = opRoundIntersection(d_union, lim, lk_bot);
-        else d_shell = max(d_union, lim);
+        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_shell = opSmoothIntersection(d_union, lim, lk_bot); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_shell = opChamferIntersection(d_union, lim, lk_bot); }
+        else if (bt == SDF_BLEND_TYPE_ROUND) { d_shell = opRoundIntersection(d_union, lim, lk_bot); }
+        else { d_shell = max(d_union, lim); }
       }
       else { d_shell = max(d_union, lim); }
     }
@@ -1456,9 +1456,9 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
 
   if (mtype == SDF_MOD_MIRROR) {
     int mirrors = 1;
-    if ((mflags & SDF_MOD_MIRROR_X) != 0) mirrors *= 2;
-    if ((mflags & SDF_MOD_MIRROR_Y) != 0) mirrors *= 2;
-    if ((mflags & SDF_MOD_MIRROR_Z) != 0) mirrors *= 2;
+    if ((mflags & SDF_MOD_MIRROR_X) != 0) { mirrors *= 2; }
+    if ((mflags & SDF_MOD_MIRROR_Y) != 0) { mirrors *= 2; }
+    if ((mflags & SDF_MOD_MIRROR_Z) != 0) { mirrors *= 2; }
 
     float3 mirror_origin = fork_mod.params.yzw;
     float offset = fork_mod.params.x;
@@ -1468,7 +1468,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
 
     bool first = true;
     for (int i = 0; i < 8; i++) {
-      if (i >= mirrors) break;
+      if (i >= mirrors) { break; }
       float3 cell_p = p;
       int flip_idx = i;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
@@ -1504,7 +1504,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f);
+      else { final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f); }
     }
   }
   else if (mtype == SDF_MOD_ARRAY) {
@@ -1518,7 +1518,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       if (spacing > 0.0001f) {
         dir = offset / spacing;
         id = round(dot(p, dir) / spacing);
-      } else id = 0.0f;
+      } else { id = 0.0f; }
     } else {
       float a = (2.0f * SDF_PI) / max(count, 1e-4f);
       id = round(atan(p.y, p.x) / a);
@@ -1531,12 +1531,12 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       if (mflags == SDF_MOD_ARRAY_LINEAR) {
         cid = clamp(cid, 0.0f, max(0.0f, count - 1.0f));
       }
-      if (cid == last_cid) continue;
+      if (cid == last_cid) { continue; }
       last_cid = cid;
 
       float3 cell_p = p;
       if (mflags == SDF_MOD_ARRAY_LINEAR) {
-        if (spacing > 0.0001f) cell_p -= dir * cid * spacing;
+        if (spacing > 0.0001f) { cell_p -= dir * cid * spacing; }
       } else {
         float a = (2.0f * SDF_PI) / count;
         float final_a = atan(p.y, p.x) - cid * a;
@@ -1569,7 +1569,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
       float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
 
       if (first) { final_d = d; first = false; }
-      else final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f);
+      else { final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f); }
     }
   }
 

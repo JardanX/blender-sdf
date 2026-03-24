@@ -27,22 +27,22 @@ int cell_vert(int cx, int cy, int cz)
 void emit_quad(int a, int b, int c, int d, bool flip)
 {
   int ti = atomicAdd(dc_counters[1], 2);
-  if (ti + 1 >= max_tris) return;
+  if (ti + 1 >= max_tris) { return; }
   if (flip) {
-    dc_triangles[ti] = ivec4(a, c, b, 0);
-    dc_triangles[ti + 1] = ivec4(a, d, c, 0);
+    dc_triangles[ti] = int4(a, c, b, 0);
+    dc_triangles[ti + 1] = int4(a, d, c, 0);
   }
   else {
-    dc_triangles[ti] = ivec4(a, b, c, 0);
-    dc_triangles[ti + 1] = ivec4(a, c, d, 0);
+    dc_triangles[ti] = int4(a, b, c, 0);
+    dc_triangles[ti + 1] = int4(a, c, d, 0);
   }
 }
 
 void main()
 {
-  ivec3 cid = ivec3(gl_GlobalInvocationID.xyz);
+  int3 cid = int3(gl_GlobalInvocationID.xyz);
   int N = grid_verts - 1;
-  if (cid.x >= N || cid.y >= N || cid.z >= N) return;
+  if (cid.x >= N || cid.y >= N || cid.z >= N) { return; }
 
   /* Only emit for inner cells (avoids duplicates at chunk boundaries) */
   if (cid.x < inner_start || cid.y < inner_start || cid.z < inner_start ||
@@ -60,7 +60,7 @@ void main()
       int b = cell_vert(cid.x, cid.y - 1, cid.z);
       int c = cell_vert(cid.x, cid.y - 1, cid.z - 1);
       int d = cell_vert(cid.x, cid.y, cid.z - 1);
-      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) emit_quad(a, b, c, d, v0 < 0.0);
+      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) { emit_quad(a, b, c, d, v0 < 0.0); }
     }
   }
 
@@ -71,7 +71,7 @@ void main()
       int b = cell_vert(cid.x, cid.y, cid.z - 1);
       int c = cell_vert(cid.x - 1, cid.y, cid.z - 1);
       int d = cell_vert(cid.x - 1, cid.y, cid.z);
-      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) emit_quad(a, b, c, d, v0 < 0.0);
+      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) { emit_quad(a, b, c, d, v0 < 0.0); }
     }
   }
 
@@ -82,7 +82,7 @@ void main()
       int b = cell_vert(cid.x - 1, cid.y, cid.z);
       int c = cell_vert(cid.x - 1, cid.y - 1, cid.z);
       int d = cell_vert(cid.x, cid.y - 1, cid.z);
-      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) emit_quad(a, b, c, d, v0 < 0.0);
+      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) { emit_quad(a, b, c, d, v0 < 0.0); }
     }
   }
 }

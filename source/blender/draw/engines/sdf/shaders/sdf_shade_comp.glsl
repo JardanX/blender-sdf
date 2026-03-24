@@ -12,7 +12,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_shade_comp)
 
 void main()
 {
-  int2 pixel = ivec2(gl_GlobalInvocationID.xy);
+  int2 pixel = int2(gl_GlobalInvocationID.xy);
   if (pixel.x >= screen_size.x || pixel.y >= screen_size.y) {
     return;
   }
@@ -56,27 +56,31 @@ void main()
   bool d_same = (id_d == obj_id) && (raw_d.w > 0.0f);
 
   bool use_right;
-  if (r_same && !l_same) use_right = true;
-  else if (l_same && !r_same) use_right = false;
-  else use_right = abs(depth_r - depth0) < abs(depth_l - depth0);
+  if (r_same && !l_same) { use_right = true; }
+  else if (l_same && !r_same) { use_right = false; }
+  else { use_right = abs(depth_r - depth0) < abs(depth_l - depth0); }
 
   bool use_up;
-  if (u_same && !d_same) use_up = true;
-  else if (d_same && !u_same) use_up = false;
-  else use_up = abs(depth_u - depth0) < abs(depth_d - depth0);
+  if (u_same && !d_same) { use_up = true; }
+  else if (d_same && !u_same) { use_up = false; }
+  else { use_up = abs(depth_u - depth0) < abs(depth_d - depth0); }
 
   float3 h = use_right ? raw_r.xyz : raw_l.xyz;
   float3 v = use_up ? raw_u.xyz : raw_d.xyz;
 
   float3 normal;
-  if (use_right && use_up)
+  if (use_right && use_up) {
     normal = normalize(cross(h - p0, v - p0));
-  else if (use_right && !use_up)
+  }
+  else if (use_right && !use_up) {
     normal = normalize(cross(v - p0, h - p0));
-  else if (!use_right && use_up)
+  }
+  else if (!use_right && use_up) {
     normal = normalize(cross(v - p0, h - p0));
-  else
+  }
+  else {
     normal = normalize(cross(h - p0, v - p0));
+  }
 
   if (any(isnan(normal)) || dot(normal, normal) < 0.5f) {
     normal = float3(0.0f, 0.0f, 1.0f);
