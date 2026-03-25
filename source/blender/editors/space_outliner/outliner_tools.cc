@@ -25,6 +25,7 @@
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_volume_types.h"
 #include "DNA_world_types.h"
@@ -47,6 +48,7 @@
 #include "BKE_fcurve.hh"
 #include "BKE_global.hh"
 #include "BKE_grease_pencil.hh"
+#include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
@@ -134,7 +136,6 @@ static void get_element_operation_type(
 
       case ID_ME:
       case ID_CU_LEGACY:
-      case ID_MB:
       case ID_LT:
       case ID_LA:
       case ID_AR:
@@ -166,11 +167,14 @@ static void get_element_operation_type(
       case ID_CV:
       case ID_PT:
       case ID_VO:
+      case ID_SF:
+      case ID_SG:
       case ID_GP:
         is_standard_id = true;
         break;
       case ID_WM:
       case ID_SCR:
+      case ID_MB:
         /* Those are ignored here. */
         /* NOTE: while Screens should be manageable here, deleting a screen used by a workspace
          * will cause crashes when trying to use that workspace, so for now let's play minimal,
@@ -297,12 +301,7 @@ static void unlink_material_fn(bContext * /*C*/,
       matar = cu->mat;
       break;
     }
-    case ID_MB: {
-      MetaBall *mb = id_cast<MetaBall *>(tsep->id);
-      totcol = mb->totcol;
-      matar = mb->mat;
-      break;
-    }
+    /* MATHOPS: Removed — MetaBall material case */
     case ID_CV: {
       Curves *curves = id_cast<Curves *>(tsep->id);
       totcol = curves->totcol;
@@ -319,6 +318,12 @@ static void unlink_material_fn(bContext * /*C*/,
       Volume *volume = id_cast<Volume *>(tsep->id);
       totcol = volume->totcol;
       matar = volume->mat;
+      break;
+    }
+    case ID_SF: {
+      SDF *sdf = id_cast<SDF *>(tsep->id);
+      totcol = sdf->totcol;
+      matar = sdf->mat;
       break;
     }
     default:
@@ -966,6 +971,11 @@ static void object_deselect_fn(bContext *C,
 static void outliner_object_delete_fn(bContext *C, ReportList *reports, Scene *scene, Object *ob)
 {
   if (ob) {
+    if (ob->type == OB_EMPTY && ob->id.properties &&
+        IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal"))
+    {
+      return;
+    }
     Main *bmain = CTX_data_main(C);
     if (ob->id.tag & ID_TAG_INDIRECT) {
       BKE_reportf(
@@ -982,6 +992,19 @@ static void outliner_object_delete_fn(bContext *C, ReportList *reports, Scene *s
                   ob->id.name + 2,
                   scene->id.name + 2);
       return;
+    }
+
+    if (ob->type == OB_SDF && ob->data) {
+      SDF *sdf = id_cast<SDF *>(ob->data);
+      for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod;
+           mod = mod->next)
+      {
+        if (mod->type == SDF_MOD_MIRROR && mod->mirror_ob) {
+          Object *mirror = mod->mirror_ob;
+          mod->mirror_ob = nullptr;
+          BKE_id_delete(bmain, mirror);
+        }
+      }
     }
 
     /* Check also library later. */

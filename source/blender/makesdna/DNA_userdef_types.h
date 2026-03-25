@@ -863,7 +863,8 @@ struct UserDef {
   unsigned int dupflag = USER_DUP_MESH | USER_DUP_CURVE | USER_DUP_SURF | USER_DUP_LATTICE |
                          USER_DUP_FONT | USER_DUP_MBALL | USER_DUP_LAMP | USER_DUP_ARM |
                          USER_DUP_CAMERA | USER_DUP_SPEAKER | USER_DUP_ACT | USER_DUP_LIGHTPROBE |
-                         USER_DUP_GPENCIL | USER_DUP_CURVES | USER_DUP_POINTCLOUD;
+                         USER_DUP_GPENCIL | USER_DUP_CURVES | USER_DUP_POINTCLOUD |
+                         USER_DUP_SDF;
   /** #eUserPref_PrefFlag preferences for the preferences. */
   char pref_flag = USER_PREF_FLAG_SAVE;
   char savetime = 2;

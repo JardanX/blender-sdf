@@ -573,6 +573,20 @@ static void outliner_sort(ListBaseT<TreeElement> *lb)
   if (last_te == nullptr) {
     return;
   }
+
+  TreeElement *first_te_check = static_cast<TreeElement *>(lb->first);
+  if (first_te_check && first_te_check->parent) {
+    TreeStoreElem *parent_tselem = TREESTORE(first_te_check->parent);
+    if (parent_tselem->type == TSE_SOME_ID && parent_tselem->id &&
+        GS(parent_tselem->id->name) == ID_SG)
+    {
+      for (TreeElement &te_iter : *lb) {
+        outliner_sort(&te_iter.subtree);
+      }
+      return;
+    }
+  }
+
   TreeStoreElem *last_tselem = TREESTORE(last_te);
 
   /* Check if we are expanding Armature data and if there are bone collections. */
@@ -651,6 +665,20 @@ static void outliner_collections_children_sort(ListBaseT<TreeElement> *lb)
   if (last_te == nullptr) {
     return;
   }
+
+  TreeElement *first_te_check = static_cast<TreeElement *>(lb->first);
+  if (first_te_check && first_te_check->parent) {
+    TreeStoreElem *parent_tselem = TREESTORE(first_te_check->parent);
+    if (parent_tselem->type == TSE_SOME_ID && parent_tselem->id &&
+        GS(parent_tselem->id->name) == ID_SG)
+    {
+      for (TreeElement &te_iter : *lb) {
+        outliner_collections_children_sort(&te_iter.subtree);
+      }
+      return;
+    }
+  }
+
   TreeStoreElem *last_tselem = TREESTORE(last_te);
 
   /* Sorting rules: only object lists. */

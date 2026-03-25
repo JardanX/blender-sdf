@@ -1621,7 +1621,7 @@ static SDFGroup *sdf_group_drop_find(bContext *C, const int xy[2])
   mval[1] = xy[1] - region->winrct.ymin;
 
   float view_mval[2];
-  UI_view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
+  ui::view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
 
   TreeElement *te = outliner_find_item_at_y(space_outliner, &space_outliner->tree, view_mval[1]);
   if (!te) {
@@ -1675,7 +1675,7 @@ static bool sdf_group_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
   }
 
   /* Check that the object isn't already in this group. */
-  SDF *sdf_data = (ob->data && ob->type == OB_SDF) ? static_cast<SDF *>(ob->data) : nullptr;
+  SDF *sdf_data = (ob->data && ob->type == OB_SDF) ? id_cast<SDF *>(ob->data) : nullptr;
   if (sdf_data && sdf_data->sdf_group == group) {
     if (changed) {
       ED_region_tag_redraw_no_rebuild(region);
@@ -1688,7 +1688,7 @@ static bool sdf_group_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
   mval[0] = event->xy[0] - region->winrct.xmin;
   mval[1] = event->xy[1] - region->winrct.ymin;
   float view_mval[2];
-  UI_view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
+  ui::view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
 
   TreeElement *te = outliner_find_item_at_y(
       space_outliner, &space_outliner->tree, view_mval[1]);
@@ -1726,7 +1726,7 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  ListBase *lb = static_cast<ListBase *>(event->customdata);
+  ListBaseT<wmDrag> *lb = static_cast<ListBaseT<wmDrag> *>(event->customdata);
   wmDrag *drag = static_cast<wmDrag *>(lb->first);
 
   SDFGroup *group = sdf_group_drop_find(C, event->xy);
@@ -1734,22 +1734,24 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  LISTBASE_FOREACH (wmDragID *, drag_id, &drag->ids) {
-    if (!drag_id->id || GS(drag_id->id->name) != ID_OB) {
+  for (wmDragID &drag_id : drag->ids) {
+    if (!drag_id.id || GS(drag_id.id->name) != ID_OB) {
       continue;
     }
 
-    Object *ob = (Object *)drag_id->id;
+    Object *ob = (Object *)drag_id.id;
     if (ob->type != OB_SDF || !ob->data) {
       continue;
     }
 
-    SDF *sdf_data = static_cast<SDF *>(ob->data);
+    SDF *sdf_data = id_cast<SDF *>(ob->data);
 
-    /* Remove from old group first. */
     if (sdf_data->sdf_group && sdf_data->sdf_group != group) {
       SDFGroup *old_group = sdf_data->sdf_group;
-      LISTBASE_FOREACH (SDFGroupMember *, member, &old_group->members) {
+      for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
+           member;
+           member = member->next)
+      {
         if (member->object == ob) {
           BKE_sdf_group_member_remove(old_group, member);
           break;
@@ -1758,12 +1760,10 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       DEG_id_tag_update(&old_group->id, ID_RECALC_GEOMETRY);
     }
 
-    /* Skip if already in target group. */
     if (sdf_data->sdf_group == group) {
       continue;
     }
 
-    /* Add to new group. */
     BKE_sdf_group_member_add(group, ob);
   }
 

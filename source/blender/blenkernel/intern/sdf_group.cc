@@ -8,7 +8,6 @@
 
 #include "MEM_guardedalloc.h"
 
-#include "DNA_defaults.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
@@ -28,14 +27,14 @@
 
 #include "BLO_read_write.hh"
 
+namespace blender {
+
 static void sdf_group_init_data(ID *id)
 {
-  SDFGroup *group = (SDFGroup *)id;
-  BLI_assert(MEMCMP_STRUCT_AFTER_IS_ZERO(group, id));
+  SDFGroup *group = id_cast<SDFGroup *>(id);
+  INIT_DEFAULT_STRUCT_AFTER(group, id);
 
-  MEMCPY_STRUCT_AFTER(group, DNA_struct_default_get(SDFGroup), id);
-
-  group->runtime = new blender::bke::SDFGroupRuntime();
+  group->runtime = new bke::SDFGroupRuntime();
 }
 
 static void sdf_group_copy_data(Main * /*bmain*/,
@@ -44,18 +43,18 @@ static void sdf_group_copy_data(Main * /*bmain*/,
                                 const ID *id_src,
                                 const int /*flag*/)
 {
-  SDFGroup *group_dst = (SDFGroup *)id_dst;
-  const SDFGroup *group_src = (const SDFGroup *)id_src;
+  SDFGroup *group_dst = id_cast<SDFGroup *>(id_dst);
+  const SDFGroup *group_src = id_cast<const SDFGroup *>(id_src);
 
   BLI_duplicatelist(&group_dst->members, &group_src->members);
   BLI_duplicatelist(&group_dst->modifiers, &group_src->modifiers);
 
-  group_dst->runtime = new blender::bke::SDFGroupRuntime();
+  group_dst->runtime = new bke::SDFGroupRuntime();
 }
 
 static void sdf_group_free_data(ID *id)
 {
-  SDFGroup *group = (SDFGroup *)id;
+  SDFGroup *group = id_cast<SDFGroup *>(id);
   BKE_animdata_free(&group->id, false);
   BLI_freelistN(&group->members);
   BLI_freelistN(&group->modifiers);
@@ -64,39 +63,41 @@ static void sdf_group_free_data(ID *id)
 
 static void sdf_group_foreach_id(ID *id, LibraryForeachIDData *data)
 {
-  SDFGroup *group = (SDFGroup *)id;
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  SDFGroup *group = id_cast<SDFGroup *>(id);
+  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+       member = member->next)
+  {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, member->object, IDWALK_CB_NOP);
   }
-  LISTBASE_FOREACH (SDFModifier *, mod, &group->modifiers) {
+  for (SDFModifier *mod = (SDFModifier *)group->modifiers.first; mod; mod = mod->next) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mod->mirror_ob, IDWALK_CB_NOP);
   }
 }
 
 static void sdf_group_blend_write(BlendWriter *writer, ID *id, const void *id_address)
 {
-  SDFGroup *group = (SDFGroup *)id;
+  SDFGroup *group = id_cast<SDFGroup *>(id);
 
-  BLO_write_id_struct(writer, SDFGroup, id_address, &group->id);
+  writer->write_id_struct(id_address, group);
   BKE_id_blend_write(writer, &group->id);
 
-  BLO_write_struct_list(writer, SDFGroupMember, &group->members);
-  BLO_write_struct_list(writer, SDFModifier, &group->modifiers);
+  writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFGroupMember>(), &group->members);
+  writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFModifier>(), &group->modifiers);
 }
 
 static void sdf_group_blend_read_data(BlendDataReader *reader, ID *id)
 {
-  SDFGroup *group = (SDFGroup *)id;
+  SDFGroup *group = id_cast<SDFGroup *>(id);
 
   BLO_read_struct_list(reader, SDFGroupMember, &group->members);
   BLO_read_struct_list(reader, SDFModifier, &group->modifiers);
 
-  group->runtime = new blender::bke::SDFGroupRuntime();
+  group->runtime = new bke::SDFGroupRuntime();
 }
 
 static void sdf_group_blend_read_after_liblink(BlendLibReader * /*reader*/, ID *id)
 {
-  SDFGroup *group = (SDFGroup *)id;
+  SDFGroup *group = id_cast<SDFGroup *>(id);
   BKE_sdf_group_cleanup_null_members(group);
 }
 
@@ -139,15 +140,14 @@ SDFGroup *BKE_sdf_group_add(Main *bmain, const char *name)
 
 SDFGroupMember *BKE_sdf_group_member_add(SDFGroup *group, Object *ob)
 {
-  SDFGroupMember *member = static_cast<SDFGroupMember *>(
-      MEM_callocN(sizeof(SDFGroupMember), "SDFGroupMember"));
+  SDFGroupMember *member = MEM_new<SDFGroupMember>(__func__);
   member->object = ob;
   member->order = group->totmember;
   BLI_addtail(&group->members, member);
   group->totmember++;
 
   if (ob && ob->type == OB_SDF && ob->data) {
-    SDF *sdf = static_cast<SDF *>(ob->data);
+    SDF *sdf = id_cast<SDF *>(ob->data);
     sdf->sdf_group = group;
     sdf->group_order = member->order;
     id_us_plus(&group->id);
@@ -161,15 +161,16 @@ SDFGroupMember *BKE_sdf_group_member_insert_after(SDFGroup *group,
                                                    Object *new_ob)
 {
   SDFGroupMember *after_member = nullptr;
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+       member = member->next)
+  {
     if (member->object == after_ob) {
       after_member = member;
       break;
     }
   }
 
-  SDFGroupMember *new_member = static_cast<SDFGroupMember *>(
-      MEM_callocN(sizeof(SDFGroupMember), "SDFGroupMember"));
+  SDFGroupMember *new_member = MEM_new<SDFGroupMember>(__func__);
   new_member->object = new_ob;
 
   if (after_member) {
@@ -181,7 +182,7 @@ SDFGroupMember *BKE_sdf_group_member_insert_after(SDFGroup *group,
   group->totmember++;
 
   if (new_ob && new_ob->type == OB_SDF && new_ob->data) {
-    SDF *sdf = static_cast<SDF *>(new_ob->data);
+    SDF *sdf = id_cast<SDF *>(new_ob->data);
     sdf->sdf_group = group;
     id_us_plus(&group->id);
   }
@@ -193,7 +194,7 @@ SDFGroupMember *BKE_sdf_group_member_insert_after(SDFGroup *group,
 void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member)
 {
   if (member->object && member->object->type == OB_SDF && member->object->data) {
-    SDF *sdf = static_cast<SDF *>(member->object->data);
+    SDF *sdf = id_cast<SDF *>(member->object->data);
     if (sdf->sdf_group == group) {
       id_us_min(&group->id);
       sdf->sdf_group = nullptr;
@@ -202,7 +203,7 @@ void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member)
   }
 
   BLI_remlink(&group->members, member);
-  MEM_freeN(member);
+  MEM_delete(member);
   group->totmember--;
 
   BKE_sdf_group_reindex_members(group);
@@ -230,30 +231,44 @@ void BKE_sdf_group_member_move(SDFGroup *group, SDFGroupMember *member, int dire
 
 void BKE_sdf_group_cleanup_null_members(SDFGroup *group)
 {
-  LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &group->members) {
+  SDFGroupMember *member_next;
+  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+       member = member_next)
+  {
+    member_next = member->next;
     if (member->object == nullptr) {
       BLI_remlink(&group->members, member);
-      MEM_freeN(member);
+      MEM_delete(member);
       group->totmember--;
     }
   }
   int i = 0;
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+       member = member->next)
+  {
     member->order = i++;
   }
 }
 
 void BKE_sdf_groups_cleanup_all_null_members(Main *bmain)
 {
-  LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+  for (SDFGroup *group = (SDFGroup *)bmain->sdf_groups.first; group;
+       group = (SDFGroup *)group->id.next)
+  {
     BKE_sdf_group_cleanup_null_members(group);
   }
 }
 
 void BKE_sdf_groups_remove_object(Main *bmain, Object *ob)
 {
-  LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
-    LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &group->members) {
+  for (SDFGroup *group = (SDFGroup *)bmain->sdf_groups.first; group;
+       group = (SDFGroup *)group->id.next)
+  {
+    SDFGroupMember *member_next;
+    for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+         member = member_next)
+    {
+      member_next = member->next;
       if (member->object == ob) {
         BKE_sdf_group_member_remove(group, member);
       }
@@ -263,19 +278,23 @@ void BKE_sdf_groups_remove_object(Main *bmain, Object *ob)
 
 void BKE_sdf_groups_after_lib_link(Main *bmain)
 {
-  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
-    SDF *sdf = (SDF *)id;
+  for (SDF *sdf = static_cast<SDF *>(bmain->sdfs.first); sdf;
+       sdf = static_cast<SDF *>(sdf->id.next))
+  {
     sdf->sdf_group = nullptr;
     sdf->group_order = 0;
   }
 
-  LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
-
+  for (SDFGroup *group = (SDFGroup *)bmain->sdf_groups.first; group;
+       group = (SDFGroup *)group->id.next)
+  {
     int member_order = 0;
-    LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+         member = member->next)
+    {
       member->order = member_order;
       if (member->object && member->object->type == OB_SDF && member->object->data) {
-        SDF *sdf = static_cast<SDF *>(member->object->data);
+        SDF *sdf = id_cast<SDF *>(member->object->data);
         sdf->sdf_group = group;
         sdf->group_order = member_order;
       }
@@ -288,10 +307,12 @@ void BKE_sdf_groups_after_lib_link(Main *bmain)
 void BKE_sdf_group_reindex_members(SDFGroup *group)
 {
   int i = 0;
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+       member = member->next)
+  {
     member->order = i;
     if (member->object && member->object->type == OB_SDF && member->object->data) {
-      SDF *sdf = static_cast<SDF *>(member->object->data);
+      SDF *sdf = id_cast<SDF *>(member->object->data);
       sdf->group_order = i;
     }
     i++;
@@ -326,7 +347,7 @@ static const char *sdf_group_modifier_type_name(int type)
 
 SDFModifier *BKE_sdf_group_modifier_add(SDFGroup *group, int type)
 {
-  SDFModifier *mod = static_cast<SDFModifier *>(MEM_callocN(sizeof(SDFModifier), "SDFModifier"));
+  SDFModifier *mod = MEM_new<SDFModifier>(__func__);
   mod->type = type;
   mod->show_viewport = 1;
 
@@ -379,7 +400,7 @@ SDFModifier *BKE_sdf_group_modifier_add(SDFGroup *group, int type)
 void BKE_sdf_group_modifier_remove(SDFGroup *group, SDFModifier *mod)
 {
   BLI_remlink(&group->modifiers, mod);
-  MEM_freeN(mod);
+  MEM_delete(mod);
   group->totmodifier--;
 }
 
@@ -400,3 +421,5 @@ void BKE_sdf_group_modifier_move(SDFGroup *group, SDFModifier *mod, int directio
     }
   }
 }
+
+}  // namespace blender

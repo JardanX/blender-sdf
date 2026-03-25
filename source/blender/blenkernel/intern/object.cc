@@ -44,6 +44,7 @@
 #include "DNA_pointcloud_types.h"
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_shader_fx_types.h"
 #include "DNA_view3d_types.h"
 
@@ -105,7 +106,6 @@
 #include "BKE_linestyle.h"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
-#include "BKE_mball.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_modifier.hh"
@@ -113,6 +113,7 @@
 #include "BKE_node.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
+#include "BKE_sdf.hh"
 #include "BKE_paint.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcache.h"
@@ -1725,8 +1726,7 @@ bool BKE_object_is_in_editmode(const Object *ob)
       return (id_cast<bArmature *>(ob->data))->edbo != nullptr;
     case OB_FONT:
       return (id_cast<Curve *>(ob->data))->editfont != nullptr;
-    case OB_MBALL:
-      return (id_cast<MetaBall *>(ob->data))->editelems != nullptr;
+    /* MATHOPS: Removed — Metaball edit mode */
     case OB_LATTICE:
       return (id_cast<Lattice *>(ob->data))->editlatt != nullptr;
     case OB_SURF:
@@ -1756,8 +1756,7 @@ bool BKE_object_data_is_in_editmode(const Object *ob, const ID *id)
     case ID_CU_LEGACY:
       return (((id_cast<const Curve *>(id))->editnurb != nullptr) ||
               ((id_cast<const Curve *>(id))->editfont != nullptr));
-    case ID_MB:
-      return (id_cast<const MetaBall *>(id))->editelems != nullptr;
+    /* MATHOPS: Removed — Metaball edit mode */
     case ID_LT:
       return (id_cast<const Lattice *>(id))->editlatt != nullptr;
     case ID_AR:
@@ -1800,10 +1799,7 @@ char *BKE_object_data_editmode_flush_ptr_get(ID *id)
       }
       break;
     }
-    case ID_MB: {
-      MetaBall *mb = id_cast<MetaBall *>(id);
-      return &mb->needs_flush_to_id;
-    }
+    /* MATHOPS: Removed — Metaball edit mode flush */
     case ID_LT: {
       EditLatt *editlatt = (id_cast<Lattice *>(id))->editlatt;
       if (editlatt) {
@@ -1943,8 +1939,8 @@ static const char *get_obdata_defname(int type)
       return DATA_("Surf");
     case OB_FONT:
       return DATA_("Text");
-    case OB_MBALL:
-      return DATA_("Mball");
+    case OB_SDF:
+      return DATA_("SDF");
     case OB_CAMERA:
       return DATA_("Camera");
     case OB_LAMP:
@@ -2014,8 +2010,8 @@ void *BKE_object_obdata_add_from_type(Main *bmain, int type, const char *name)
       return BKE_curve_add(bmain, name, OB_SURF);
     case OB_FONT:
       return BKE_curve_add(bmain, name, OB_FONT);
-    case OB_MBALL:
-      return BKE_mball_add(bmain, name);
+    case OB_SDF:
+      return BKE_sdf_add(bmain, name);
     case OB_CAMERA:
       return BKE_camera_add(bmain, name);
     case OB_LAMP:
@@ -2052,8 +2048,8 @@ int BKE_object_obdata_to_type(const ID *id)
       return OB_MESH;
     case ID_CU_LEGACY:
       return reinterpret_cast<const Curve *>(id)->ob_type;
-    case ID_MB:
-      return OB_MBALL;
+    case ID_SF:
+      return OB_SDF;
     case ID_LA:
       return OB_LAMP;
     case ID_SPK:
@@ -2537,8 +2533,8 @@ Object *BKE_object_duplicate(Main *bmain,
         id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
       }
       break;
-    case OB_MBALL:
-      if (dupflag & USER_DUP_MBALL) {
+    case OB_SDF:
+      if (dupflag & USER_DUP_SDF) {
         id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
       }
       break;
@@ -3476,8 +3472,27 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
     case OB_SURF:
     case OB_FONT:
       return BKE_curve_minmax(id_cast<const Curve *>(ob->data), true);
-    case OB_MBALL:
-      return BKE_object_evaluated_geometry_bounds(ob);
+    case OB_SDF: {
+      const SDF *sdf = id_cast<const SDF *>(ob->data);
+      float3 half_size;
+      switch (sdf->sdf_type) {
+        case SDF_TYPE_CAPSULE: {
+          float r = sdf->size[0];
+          float h = std::max(sdf->size[1] - sdf->bevel, 0.0f) + r;
+          half_size = {r, r, h};
+          break;
+        }
+        case SDF_TYPE_TORUS: {
+          float outer = sdf->size[0] + sdf->size[1];
+          half_size = {outer, outer, sdf->size[1]};
+          break;
+        }
+        default:
+          half_size = float3(sdf->size[0], sdf->size[1], sdf->size[2]) + float3(sdf->bevel);
+          break;
+      }
+      return Bounds<float3>{-half_size, half_size};
+    }
     case OB_LATTICE:
       return BKE_lattice_minmax(id_cast<const Lattice *>(ob->data));
     case OB_ARMATURE:
@@ -4830,11 +4845,11 @@ bool BKE_object_supports_material_slots(Object *ob)
               OB_CURVES_LEGACY,
               OB_SURF,
               OB_FONT,
-              OB_MBALL,
               OB_CURVES,
               OB_POINTCLOUD,
               OB_VOLUME,
-              OB_GREASE_PENCIL);
+              OB_GREASE_PENCIL,
+              OB_SDF);
 }
 
 /** \} */

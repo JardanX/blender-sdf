@@ -2473,7 +2473,7 @@ static void move_to_collection_menu_draw(const bContext *C, Menu *menu)
     RNA_boolean_set(&sdf_ptr, "is_new", true);
 
     /* List existing SDF groups. */
-    LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+    for (SDFGroup *group = static_cast<SDFGroup *>(bmain->sdf_groups.first); group; group = reinterpret_cast<SDFGroup *>(group->id.next)) {
       sdf_ptr = layout.op(ot_sdf, group->id.name + 2, ICON_SDF_GROUP);
       RNA_string_set(&sdf_ptr, "group_name", group->id.name + 2);
     }

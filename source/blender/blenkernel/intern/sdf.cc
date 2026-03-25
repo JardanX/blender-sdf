@@ -8,7 +8,6 @@
 
 #include "MEM_guardedalloc.h"
 
-#include "DNA_defaults.h"
 #include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_group_types.h"
@@ -38,14 +37,14 @@
 
 #include "BLO_read_write.hh"
 
+namespace blender {
+
 static void sdf_init_data(ID *id)
 {
-  SDF *sdf = (SDF *)id;
-  BLI_assert(MEMCMP_STRUCT_AFTER_IS_ZERO(sdf, id));
+  SDF *sdf = id_cast<SDF *>(id);
+  INIT_DEFAULT_STRUCT_AFTER(sdf, id);
 
-  MEMCPY_STRUCT_AFTER(sdf, DNA_struct_default_get(SDF), id);
-
-  sdf->runtime = new blender::bke::SDFRuntime();
+  sdf->runtime = new bke::SDFRuntime();
 }
 
 static void sdf_copy_data(Main *bmain,
@@ -57,10 +56,10 @@ static void sdf_copy_data(Main *bmain,
   SDF *sdf_dst = (SDF *)id_dst;
   const SDF *sdf_src = (const SDF *)id_src;
 
-  sdf_dst->mat = static_cast<Material **>(MEM_dupallocN(sdf_src->mat));
+  sdf_dst->mat = MEM_dupalloc(sdf_src->mat);
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
   BLI_duplicatelist(&sdf_dst->polygon_points, &sdf_src->polygon_points);
-  sdf_dst->runtime = new blender::bke::SDFRuntime();
+  sdf_dst->runtime = new bke::SDFRuntime();
   sdf_dst->runtime->proxy_batch = nullptr;
   sdf_dst->runtime->proxy_hash = 0;
 }
@@ -72,9 +71,9 @@ static void sdf_free_data(ID *id)
   BKE_animdata_free(&sdf->id, false);
   BLI_freelistN(&sdf->modifiers);
   BLI_freelistN(&sdf->polygon_points);
-  MEM_SAFE_FREE(sdf->mat);
+  MEM_SAFE_DELETE(sdf->mat);
   if (sdf->runtime && sdf->runtime->proxy_batch) {
-    GPU_batch_discard(static_cast<blender::gpu::Batch *>(sdf->runtime->proxy_batch));
+    GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
   }
   delete sdf->runtime;
 }
@@ -87,7 +86,7 @@ static void sdf_foreach_id(ID *id, LibraryForeachIDData *data)
   }
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->sdf_group, IDWALK_CB_USER);
 
-  LISTBASE_FOREACH (SDFModifier *, mod, &sdf->modifiers) {
+  for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod; mod = mod->next) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mod->mirror_ob, IDWALK_CB_NOP);
   }
 }
@@ -96,11 +95,11 @@ static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
 {
   SDF *sdf = (SDF *)id;
 
-  BLO_write_id_struct(writer, SDF, id_address, &sdf->id);
+  writer->write_id_struct(id_address, sdf);
   BKE_id_blend_write(writer, &sdf->id);
   BLO_write_pointer_array(writer, sdf->totcol, sdf->mat);
-  BLO_write_struct_list(writer, SDFModifier, &sdf->modifiers);
-  BLO_write_struct_list(writer, SDFPolygonPoint, &sdf->polygon_points);
+  writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFModifier>(), &sdf->modifiers);
+  writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFPolygonPoint>(), &sdf->polygon_points);
 }
 
 static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
@@ -111,7 +110,7 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_struct_list(reader, SDFModifier, &sdf->modifiers);
   BLO_read_struct_list(reader, SDFPolygonPoint, &sdf->polygon_points);
 
-  sdf->runtime = new blender::bke::SDFRuntime();
+  sdf->runtime = new bke::SDFRuntime();
 }
 
 IDTypeInfo IDType_ID_SF = {
@@ -181,7 +180,7 @@ static const char *sdf_modifier_type_name(int type)
 
 SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
 {
-  SDFModifier *mod = static_cast<SDFModifier *>(MEM_callocN(sizeof(SDFModifier), "SDFModifier"));
+  SDFModifier *mod = MEM_new<SDFModifier>(__func__);
   mod->type = type;
   mod->show_viewport = 1;
 
@@ -234,7 +233,7 @@ SDFModifier *BKE_sdf_modifier_add(SDF *sdf, int type)
 void BKE_sdf_modifier_remove(SDF *sdf, SDFModifier *mod)
 {
   BLI_remlink(&sdf->modifiers, mod);
-  MEM_freeN(mod);
+  MEM_delete(mod);
   sdf->totmodifier--;
 }
 
@@ -259,10 +258,9 @@ void BKE_sdf_modifier_move(SDF *sdf, SDFModifier *mod, int direction)
 int BKE_sdf_next_index(Main *bmain)
 {
   int max_idx = 0;
-  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
-    SDF *sdf = (SDF *)id;
-    if (sdf->sdf_index > max_idx) {
-      max_idx = sdf->sdf_index;
+  for (SDF &sdf : bmain->sdfs) {
+    if (sdf.sdf_index > max_idx) {
+      max_idx = sdf.sdf_index;
     }
   }
   return max_idx + 1;
@@ -276,10 +274,10 @@ void BKE_sdf_reindex_all(Main *bmain)
     return;
   }
 
-  blender::Vector<SDF *> all_sdfs(count);
+  Vector<SDF *> all_sdfs(count);
   int i = 0;
-  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
-    all_sdfs[i++] = (SDF *)id;
+  for (SDF &sdf : bmain->sdfs) {
+    all_sdfs[i++] = &sdf;
   }
 
   std::stable_sort(all_sdfs.begin(), all_sdfs.end(), [](const SDF *a, const SDF *b) {
@@ -293,21 +291,19 @@ void BKE_sdf_reindex_all(Main *bmain)
 
 void BKE_sdf_shift_indices_from(Main *bmain, int from_index, const SDF *skip)
 {
-  LISTBASE_FOREACH (ID *, id, &bmain->sdfs) {
-    SDF *sdf = (SDF *)id;
-    if (sdf == skip) {
+  for (SDF &sdf : bmain->sdfs) {
+    if (&sdf == skip) {
       continue;
     }
-    if (sdf->sdf_index >= from_index) {
-      sdf->sdf_index++;
+    if (sdf.sdf_index >= from_index) {
+      sdf.sdf_index++;
     }
   }
 }
 
 SDFPolygonPoint *BKE_sdf_polygon_point_add(SDF *sdf, float x, float y, float corner)
 {
-  SDFPolygonPoint *pt = static_cast<SDFPolygonPoint *>(
-      MEM_callocN(sizeof(SDFPolygonPoint), "SDFPolygonPoint"));
+  SDFPolygonPoint *pt = MEM_new<SDFPolygonPoint>(__func__);
   pt->co[0] = x;
   pt->co[1] = y;
   pt->corner = corner;
@@ -319,7 +315,7 @@ SDFPolygonPoint *BKE_sdf_polygon_point_add(SDF *sdf, float x, float y, float cor
 void BKE_sdf_polygon_point_remove(SDF *sdf, SDFPolygonPoint *point)
 {
   BLI_remlink(&sdf->polygon_points, point);
-  MEM_freeN(point);
+  MEM_delete(point);
   sdf->totpolygon--;
 }
 
@@ -334,7 +330,7 @@ void BKE_sdf_polygon_init_triangle(SDF *sdf)
 
 void BKE_sdf_editmode_enter(Object *ob)
 {
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
   if (sdf->sdf_type != SDF_TYPE_POLYGON || sdf->totpolygon < 3) {
     return;
   }
@@ -345,8 +341,8 @@ void BKE_sdf_editmode_enter(Object *ob)
   BMesh *bm = BM_mesh_create(&allocsize, &create_params);
 
   /* Create vertices from polygon points */
-  blender::Vector<BMVert *> verts;
-  LISTBASE_FOREACH (SDFPolygonPoint *, pt, &sdf->polygon_points) {
+  Vector<BMVert *> verts;
+  for (SDFPolygonPoint *pt = static_cast<SDFPolygonPoint *>(sdf->polygon_points.first); pt; pt = pt->next) {
     float co[3] = {pt->co[0], pt->co[1], 0.0f};
     BMVert *v = BM_vert_create(bm, co, nullptr, BM_CREATE_NOP);
     verts.append(v);
@@ -364,7 +360,7 @@ void BKE_sdf_editmode_enter(Object *ob)
 
 void BKE_sdf_editmode_load(Object *ob)
 {
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
   BMEditMesh *em = sdf->runtime->edit_mesh;
   if (!em || !em->bm) {
     return;
@@ -386,7 +382,7 @@ void BKE_sdf_editmode_load(Object *ob)
 
 void BKE_sdf_editmode_exit(Object *ob)
 {
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
   BMEditMesh *em = sdf->runtime->edit_mesh;
   if (em) {
     BKE_editmesh_free_data(em);
@@ -394,3 +390,5 @@ void BKE_sdf_editmode_exit(Object *ob)
     sdf->runtime->edit_mesh = nullptr;
   }
 }
+
+}  // namespace blender

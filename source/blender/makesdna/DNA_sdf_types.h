@@ -139,73 +139,65 @@ typedef struct SDF {
 #endif
 
   ID id;
-  struct AnimData *adt; /* Must be immediately after id. */
+  struct AnimData *adt = nullptr;
 
-  int sdf_type; /* eSDFType */
-  char _pad0[4];
+  int sdf_type = 0; /* eSDFType */
+  char _pad0[4] = {};
 
-  float size[3];
-  float bevel;
-  float color[4];
+  float size[3] = {1.0f, 1.0f, 1.0f};
+  float bevel = 0.0f;
+  float color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
 
-  /* CSG */
-  float blend;
-  int blend_type;    /* eSDFBlendType */
-  int csg_operation; /* eSDFCSGOperation */
-  float shell_distance;
-  int shell_mode; /* eSDFShellMode */
-  int shell_op;   /* eSDFShellOp */
-  float shell_blend_top;
-  float shell_blend_bottom;
-  float chamfer_k2;
-  float chamfer_k3;
+  float blend = 0.1f;
+  int blend_type = 1;    /* eSDFBlendType: SDF_BLEND_SMOOTH */
+  int csg_operation = 0; /* eSDFCSGOperation */
+  float shell_distance = 0.2f;
+  int shell_mode = 0; /* eSDFShellMode */
+  int shell_op = 0;   /* eSDFShellOp */
+  float shell_blend_top = 0.1f;
+  float shell_blend_bottom = 0.1f;
+  float chamfer_k2 = 0.01f;
+  float chamfer_k3 = 0.01f;
 
-  /* Box properties */
-  float box_corners[4]; /* Per-corner bevel (normalized 0–1) */
-  float box_edge_top;
-  float box_edge_bottom;
-  float box_taper;
-  int box_corner_mode; /* eSDFBoxMode */
-  int box_edge_mode;   /* eSDFBoxMode */
+  float box_corners[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float box_edge_top = 0.0f;
+  float box_edge_bottom = 0.0f;
+  float box_taper = 0.0f;
+  int box_corner_mode = 0; /* eSDFBoxMode */
+  int box_edge_mode = 0;   /* eSDFBoxMode */
 
-  /* N-Gon properties */
-  int ngon_sides;
-  float ngon_corner;
-  float ngon_edge_top;
-  float ngon_edge_bottom;
-  float ngon_taper;
-  int ngon_edge_mode; /* eSDFBoxMode */
-  float ngon_star;
+  int ngon_sides = 6;
+  float ngon_corner = 0.0f;
+  float ngon_edge_top = 0.0f;
+  float ngon_edge_bottom = 0.0f;
+  float ngon_taper = 0.0f;
+  int ngon_edge_mode = 0; /* eSDFBoxMode */
+  float ngon_star = 0.0f;
 
-  /* Polygon properties */
-  ListBase polygon_points; /* SDFPolygonPoint */
-  int totpolygon;
-  float polygon_edge_top;
-  float polygon_edge_bottom;
-  float polygon_taper;
-  int polygon_edge_mode; /* eSDFBoxMode */
-  char _pad5[4];
+  ListBase polygon_points = {}; /* SDFPolygonPoint */
+  int totpolygon = 0;
+  float polygon_edge_top = 0.0f;
+  float polygon_edge_bottom = 0.0f;
+  float polygon_taper = 0.0f;
+  int polygon_edge_mode = 0; /* eSDFBoxMode */
+  char _pad5[4] = {};
 
-  /* Torus */
-  float torus_angle; /* Radians, 2*PI = full torus */
-  char _pad4[4];
+  float torus_angle = 6.2831853f;
+  char _pad4[4] = {};
 
-  /* Group */
-  struct SDFGroup *sdf_group;
-  int group_order;
-  int sdf_index;
+  struct SDFGroup *sdf_group = nullptr;
+  int group_order = 0;
+  int sdf_index = 0;
 
-  /* Modifiers */
-  ListBase modifiers; /* SDFModifier */
-  int totmodifier;
-  char _pad3[4];
+  ListBase modifiers = {}; /* SDFModifier */
+  int totmodifier = 0;
+  char _pad3[4] = {};
 
-  /* Materials */
-  struct Material **mat;
-  short totcol;
-  char _pad2[6];
+  struct Material **mat = nullptr;
+  short totcol = 0;
+  char _pad2[6] = {};
 
-  SDFRuntimeHandle *runtime; /* Keep last. */
+  SDFRuntimeHandle *runtime = nullptr;
 } SDF;
 
 

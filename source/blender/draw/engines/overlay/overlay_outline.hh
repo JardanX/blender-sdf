@@ -39,7 +39,7 @@ namespace blender::draw::overlay {
 static inline uint64_t sdf_polygon_proxy_hash(const SDF *sdf)
 {
   uint64_t h = uint64_t(sdf->totpolygon);
-  LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf->polygon_points) {
+  for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf->polygon_points.first); pt; pt = pt->next) {
     uint32_t bx, by, bc;
     memcpy(&bx, &pt->co[0], 4);
     memcpy(&by, &pt->co[1], 4);
@@ -70,7 +70,7 @@ static inline gpu::Batch *sdf_polygon_proxy_ensure(const SDF *sdf)
   /* Compute 2D AABB of polygon points. */
   float2 bb_min(FLT_MAX);
   float2 bb_max(-FLT_MAX);
-  LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf->polygon_points) {
+  for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf->polygon_points.first); pt; pt = pt->next) {
     bb_min.x = math::min(bb_min.x, pt->co[0]);
     bb_min.y = math::min(bb_min.y, pt->co[1]);
     bb_max.x = math::max(bb_max.x, pt->co[0]);
@@ -319,7 +319,7 @@ class Outline : Overlay {
         }
         break;
       case OB_SDF: {
-        const SDF *sdf = static_cast<const SDF *>(ob_ref.object->data);
+        const SDF *sdf = id_cast<const SDF *>(ob_ref.object->data);
         const float bev = sdf->bevel;
         float3 scale;
         gpu::Batch *sdf_geom = nullptr;

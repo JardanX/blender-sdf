@@ -4564,11 +4564,11 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     /* Migrate SDF viewport defaults to correct values.
      * Previous versions had wrong fallback values written into saved files by the draw engine;
      * this versioning block corrects them once at load time. */
-    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
-      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
-        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
-          if (sl->spacetype == SPACE_VIEW3D) {
-            View3D *v3d = (View3D *)sl;
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = (View3D *)&sl;
             View3DShading &s = v3d->shading;
 
             /* Resolution scale: 0 or any sub-minimum value means uninitialized.
@@ -4603,9 +4603,9 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 127)) {
-    LISTBASE_FOREACH (SDF *, sdf, &bmain->sdfs) {
-      BLI_listbase_clear(&sdf->polygon_points);
-      sdf->totpolygon = 0;
+    for (SDF &sdf : bmain->sdfs) {
+      BLI_listbase_clear(&sdf.polygon_points);
+      sdf.totpolygon = 0;
     }
   }
 

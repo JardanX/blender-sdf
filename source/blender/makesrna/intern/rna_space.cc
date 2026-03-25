@@ -4874,6 +4874,128 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_update(prop,
                           NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING,
                           "rna_SpaceView3D_shading_use_compositor_update");
+
+  /* SDF draw engine settings. */
+  prop = RNA_def_property(srna, "sdf_resolution", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_resolution");
+  RNA_def_property_range(prop, 1, 4);
+  RNA_def_property_ui_range(prop, 1, 4, 1, -1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Levels Resolution", "Voxel quality level (1=512, 2=1024, 3=2048, 4=4096)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_use_bvh", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_use_bvh", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Use BVH", "Use Bounding Volume Hierarchy for faster sphere tracing");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_use_cone_trace", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_use_cone_trace", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Cone Trace Pre-Pass", "Coarse cone tracing per tile to skip empty space before per-pixel sphere tracing");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  static const EnumPropertyItem sdf_bvh_debug_view_items[] = {
+      {0, "NONE", 0, "None", "No debug view"},
+      {1, "SHAPE_COUNT", 0, "Shape Count", "Number of shapes tested per pixel"},
+      {2, "SHAPE_COUNT_TILE", 0, "Shape Count per Tile", "Maximum number of shapes tested in 8x8 tile"},
+      {3, "STEP_COUNT", 0, "Step Count", "Number of march steps per pixel"},
+      {4, "STEP_COUNT_TILE", 0, "Step Count per Tile", "Maximum number of march steps in 8x8 tile"},
+      {5, "CONE_HEATMAP", 0, "Cone Heatmap", "Steps saved by cone trace pre-pass (green=many, red=none)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_bvh_debug_view", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_bvh_debug_view");
+  RNA_def_property_enum_items(prop, sdf_bvh_debug_view_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "BVH Debug View", "Visualize BVH performance and structure");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_max_steps", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_max_steps");
+  RNA_def_property_range(prop, 1, 1024);
+  RNA_def_property_ui_range(prop, 1, 256, 1, -1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Max Steps", "Maximum number of ray marching steps");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_ray_epsilon", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_ray_epsilon");
+  RNA_def_property_range(prop, 0.0f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0001f, 0.1f, 10, 4);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Epsilon", "Distance at which a ray is considered to have hit a surface");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_over_relaxation", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_over_relaxation");
+  RNA_def_property_range(prop, 1.0f, 2.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 1.8f, 1, 2);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Over-Relaxation", "Sphere tracing relaxation factor (1.0 = classic, higher = faster but may overshoot thin features)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_cone_aperture", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_cone_aperture");
+  RNA_def_property_range(prop, 0.5f, 8.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 4.0f, 1, 2);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Cone Aperture", "Cone march termination radius multiplier (higher = earlier termination, more skip but less precise)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_cone_steps", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_cone_steps");
+  RNA_def_property_range(prop, 4, 128);
+  RNA_def_property_ui_range(prop, 8, 64, 1, -1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Cone Steps", "Max cone march steps per tile (more = better empty-space skipping but slower cone pass)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_resolution_scale", PROP_FLOAT, PROP_PERCENTAGE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_resolution_scale");
+  RNA_def_property_range(prop, 20.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 20.0f, 100.0f, 5, 0);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Resolution Scale", "Viewport render resolution as percentage of full size (lower = faster, upscaled to viewport)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_adaptive_resolution", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_adaptive_resolution", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Adaptive Resolution", "Render at quarter resolution during viewport navigation, full resolution when static");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_frustum_cull", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_frustum_cull", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Frustum Cull", "Skip SDF objects outside the camera frustum");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  static const EnumPropertyItem sdf_debug_grid_items[] = {
+      {0, "OFF", 0, "Off", "No debug overlay"},
+      {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},
+      {2, "SCENE_BOUNDS", 0, "Scene Bounds", "Scene AABB, padded AABB, and atlas grid bounds"},
+      {3, "BVH_BOUNDS", 0, "BVH Bounds", "BVH node AABBs and per-object oriented bounding boxes"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_surface_margin", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_surface_margin");
+  RNA_def_property_range(prop, 50, 300);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Surface Margin", "Multiplier for brick classification threshold. Increase to fill holes at surface edges");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_debug_grid", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_debug_grid");
+  RNA_def_property_enum_items(prop, sdf_debug_grid_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "SDF Debug Grid", "Debug visualization for the sparse brick grid");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 }
 
 static void rna_def_space_view3d_overlay(BlenderRNA *brna)
@@ -4985,6 +5107,12 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   prop = RNA_def_property(srna, "show_stats", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_STATS);
   RNA_def_property_ui_text(prop, "Show Statistics", "Display scene statistics overlay text");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sdf_perf", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_SDF_PERF);
+  RNA_def_property_ui_text(
+      prop, "SDF Performance", "Display SDF draw engine performance overlay (FPS, pass timings)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "show_performance", PROP_BOOLEAN, PROP_NONE);

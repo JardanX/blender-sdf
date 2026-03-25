@@ -16,8 +16,6 @@
 #include "DNA_sdf_types.h"
 #include "BLI_math_base.h"
 
-using namespace blender;
-
 #ifdef RNA_RUNTIME
 
 #  include "MEM_guardedalloc.h"
@@ -33,14 +31,17 @@ using namespace blender;
 
 #  include "WM_api.hh"
 #  include "WM_types.hh"
-nusing namespace blender;
+
+namespace blender {
 
 static void rna_SDFGroup_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
 
   SDFGroup *group = (SDFGroup *)ptr->owner_id;
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+       member = member->next)
+  {
     if (member->object) {
       DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
     }
@@ -110,7 +111,9 @@ static SDFModifier *rna_SDFGroup_modifier_new(SDFGroup *group, int type)
   SDFModifier *mod = BKE_sdf_group_modifier_add(group, type);
 
   DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+       member = member->next)
+  {
     if (member->object) {
       DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
     }
@@ -135,7 +138,9 @@ static void rna_SDFGroup_modifier_remove(SDFGroup *group,
   mod_ptr->data = nullptr;
 
   DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+       member = member->next)
+  {
     if (member->object) {
       DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
     }
@@ -161,7 +166,9 @@ static void rna_SDFGroup_modifier_move(SDFGroup *group,
   }
 
   DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
-  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+       member = member->next)
+  {
     if (member->object) {
       DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
     }
@@ -174,6 +181,8 @@ static bool rna_SDFGroupMember_object_poll(PointerRNA * /*ptr*/, PointerRNA valu
   Object *ob = (Object *)value.owner_id;
   return (ob->type == OB_SDF);
 }
+
+}  // namespace blender
 
 #else
 

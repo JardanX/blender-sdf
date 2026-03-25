@@ -28,6 +28,8 @@
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_speaker_types.h"
 #include "DNA_vfont_types.h"
 
@@ -92,8 +94,11 @@
 #include "BKE_object_types.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcloud.hh"
+#include "BKE_idprop.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_sdf.hh"
+#include "BKE_sdf_group.hh"
 #include "BKE_vfont.hh"
 #include "BKE_volume.hh"
 
@@ -1302,7 +1307,7 @@ void OBJECT_OT_metaball_add(wmOperatorType *ot)
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
-  ot->prop = RNA_def_enum(ot->srna, "type", rna_enum_metaelem_type_items, 0, "Primitive", "");
+  /* MATHOPS: Removed — metaball primitive enum no longer available */
 
   add_unit_props_radius_ex(ot, 2.0f);
   add_generic_props(ot, true);
@@ -2491,6 +2496,13 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
       continue;
     }
 
+    /* SDF mirror empties are managed by the mirror modifier. */
+    if (ob->type == OB_EMPTY && ob->id.properties &&
+        IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal"))
+    {
+      continue;
+    }
+
     if (!BKE_lib_override_library_id_is_user_deletable(bmain, &ob->id)) {
       BKE_reportf(op->reports,
                   RPT_WARNING,
@@ -2499,7 +2511,8 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
       continue;
     }
 
-    if (ID_REAL_USERS(ob) <= 1 && ID_EXTRA_USERS(ob) == 0 &&
+    /* MATHOPS: Skip the expensive indirect-use scan for SDF objects. */
+    if (ob->type != OB_SDF && ID_REAL_USERS(ob) <= 1 && ID_EXTRA_USERS(ob) == 0 &&
         BKE_library_ID_is_indirectly_used(bmain, ob))
     {
       BKE_reportf(op->reports,
@@ -2529,7 +2542,23 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
   }
 
   if (tagged_count > 0) {
+    /* Remove SDF objects from their groups BEFORE deletion. */
+    for (Object &del_ob : bmain->objects) {
+      if ((del_ob.id.tag & ID_TAG_DOIT) && del_ob.type == OB_SDF) {
+        BKE_sdf_groups_remove_object(bmain, &del_ob);
+        SDF *sdf = id_cast<SDF *>(del_ob.data);
+        for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod;
+             mod = mod->next)
+        {
+          if (mod->type == SDF_MOD_MIRROR && mod->mirror_ob) {
+            mod->mirror_ob->id.tag |= ID_TAG_DOIT;
+          }
+        }
+      }
+    }
+
     BKE_id_multi_tagged_delete(bmain);
+    BKE_sdf_reindex_all(bmain);
   }
 
   if (confirm) {
@@ -2559,6 +2588,21 @@ static wmOperatorStatus object_delete_invoke(bContext *C,
                                              wmOperator *op,
                                              const wmEvent * /*event*/)
 {
+  /* If all selected objects are protected SDF mirror empties, cancel silently. */
+  bool has_deletable = false;
+  CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+    if (!(ob->type == OB_EMPTY && ob->id.properties &&
+          IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal")))
+    {
+      has_deletable = true;
+      break;
+    }
+  }
+  CTX_DATA_END;
+  if (!has_deletable) {
+    return OPERATOR_CANCELLED;
+  }
+
   if (RNA_boolean_get(op->ptr, "confirm")) {
     return WM_operator_confirm_ex(C,
                                   op,
@@ -4671,6 +4715,77 @@ static void object_add_sync_rigid_body(Main *bmain, Object *object_src, Object *
   }
 }
 
+/** Add duplicated SDF object to the same group as the original, right after it. */
+static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
+{
+  if (object_src->type != OB_SDF || !object_src->data) {
+    return;
+  }
+  SDF *sdf_src = id_cast<SDF *>(object_src->data);
+  SDFGroup *group = sdf_src->sdf_group;
+  if (!group) {
+    return;
+  }
+
+  /* The copy system already set sdf_group and incremented user count
+   * via foreach_id + IDWALK_CB_USER. Undo that so member_insert_after can
+   * set it cleanly with a single id_us_plus. */
+  if (object_new->data) {
+    SDF *sdf_new = id_cast<SDF *>(object_new->data);
+    if (sdf_new->sdf_group) {
+      id_us_min(&sdf_new->sdf_group->id);
+      sdf_new->sdf_group = nullptr;
+    }
+  }
+
+  BKE_sdf_group_member_insert_after(group, object_src, object_new);
+}
+
+/** Create new mirror empties for duplicated SDF objects. */
+static void object_add_sync_sdf_mirrors(Main *bmain,
+                                        Scene *scene,
+                                        ViewLayer * /*view_layer*/,
+                                        Object *ob_new)
+{
+  if (ob_new->type != OB_SDF || !ob_new->data) {
+    return;
+  }
+  SDF *sdf = id_cast<SDF *>(ob_new->data);
+  for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod; mod = mod->next)
+  {
+    if (mod->type != SDF_MOD_MIRROR || !mod->mirror_ob) {
+      continue;
+    }
+    Object *old_empty = mod->mirror_ob;
+
+    char name[MAX_ID_NAME - 2];
+    SNPRINTF(name, "%s_Mirror", ob_new->id.name + 2);
+
+    Object *empty = BKE_object_add_only_object(bmain, OB_EMPTY, name);
+    empty->empty_drawtype = OB_PLAINAXES;
+    empty->empty_drawsize = 0.5f;
+    empty->dtx |= OB_DRAW_IN_FRONT;
+
+    copy_v3_v3(empty->loc, old_empty->loc);
+    copy_v3_v3(empty->rot, old_empty->rot);
+    copy_v3_v3(empty->scale, old_empty->scale);
+
+    empty->parent = ob_new;
+
+    if (!empty->id.properties) {
+      IDPropertyTemplate val = {0};
+      empty->id.properties = IDP_New(IDP_GROUP, &val, "IDPropertyGroup");
+    }
+    IDPropertyTemplate ival = {0};
+    ival.i = 1;
+    IDP_AddToGroup(empty->id.properties, IDP_New(IDP_INT, &ival, "sdf_mirror_internal"));
+
+    BKE_collection_object_add_from(bmain, scene, ob_new, empty);
+
+    mod->mirror_ob = empty;
+  }
+}
+
 /**
  * - Assumes `id.new` is correct.
  * - Leaves selection of base/object unaltered.
@@ -4719,6 +4834,8 @@ static Base *object_add_duplicate_internal(Main *bmain,
     object_add_sync_local_view(base_src, base_new);
   }
   object_add_sync_rigid_body(bmain, ob, object_new);
+  object_add_sync_sdf_group(ob, object_new);
+  object_add_sync_sdf_mirrors(bmain, scene, view_layer, object_new);
   return base_new;
 }
 
@@ -4812,6 +4929,8 @@ static wmOperatorStatus duplicate_exec(bContext *C, wmOperator *op)
     if (link.object_new) {
       object_add_sync_base_collection(bmain, scene, view_layer, link.base_src, link.object_new);
       object_add_sync_rigid_body(bmain, link.base_src->object, link.object_new);
+      object_add_sync_sdf_group(link.base_src->object, link.object_new);
+      object_add_sync_sdf_mirrors(bmain, scene, view_layer, link.object_new);
     }
   }
 

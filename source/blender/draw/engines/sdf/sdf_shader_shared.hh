@@ -8,9 +8,8 @@
 #  include "GPU_shader_shared_utils.hh"
 #endif
 
-/* GPU-side SDF object data */
-struct SDFObjectGPU {
-  float4x4 inverse_matrix; /* Rotation-only (scale baked into sdf_size) */
+struct [[host_shared]] SDFObjectGPU {
+  float4x4 inverse_matrix;
   float4 position;
   float4 sdf_size;
   float4 bbox_min;
@@ -29,24 +28,23 @@ struct SDFObjectGPU {
   float chamfer_k3;
   int modifier_start;
   int modifier_count;
-  int group_id;     /* -1 = ungrouped */
-  int group_first;  /* 1 = base shape in group */
+  int group_id;
+  int group_first;
   int group_order;
   int original_index;
   int polygon_point_start;
   int polygon_point_count;
-  int _pad2; /* scratch: visibility flag */
-  int _pad3; /* scratch: max group blend (intBitsToFloat) */
+  int _pad2;
+  int _pad3;
   int _pad4;
   int _pad5;
   float4 color;
   float4 box_corners;
-  float4 box_edges;   /* x=top, y=bottom, z=tapTop, w=tapBot */
-  int4 box_modes;     /* x=corner_mode, y=edge_mode, z=ngon_sides, w=0 */
+  float4 box_edges;
+  int4 box_modes;
 };
 
-/* GPU-side SDF group */
-struct SDFGroupGPU {
+struct [[host_shared]] SDFGroupGPU {
   int csg_operation;
   int blend_type;
   float blend;
@@ -62,26 +60,24 @@ struct SDFGroupGPU {
   float4 color;
 };
 
-/* GPU-side SDF modifier */
-struct SDFModifierGPU {
-  int4 header; /* x=type, y=flags */
+struct [[host_shared]] SDFModifierGPU {
+  int4 header;
   float4 params;
   float4 params2;
 };
 
-/* Per-edge precomputed polygon data (CPU → GPU) */
-struct SDFPolygonPointGPU {
-  float4 vi_edge;    /* vi.x, vi.y, edge.x, edge.y  (edge = vj - vi) */
-  float4 arc_data;   /* R_signed, C.x, C.y, t_trim_start */
-  float4 arc_bounds; /* t_trim_end, ang_mid, ang_half_span, flags */
+struct [[host_shared]] SDFPolygonPointGPU {
+  float4 vi_edge;
+  float4 arc_data;
+  float4 arc_bounds;
 };
 
-struct BVHNodeGPU {
-  float4 min_and_left;  /* xyz=AABB min, w=left_child or -1 */
-  float4 max_and_right; /* xyz=AABB max, w=right_child or obj_idx */
+struct [[host_shared]] BVHNodeGPU {
+  float4 min_and_left;
+  float4 max_and_right;
 };
 
-struct SdfAabbNodeGPU {
+struct [[host_shared]] SdfAabbNodeGPU {
   float4 bounds_min;
   float4 bounds_max;
   int parent;
@@ -90,9 +86,7 @@ struct SdfAabbNodeGPU {
   int shape_index;
 };
 
-/* Dual Contouring output vertex */
-struct DCVertexGPU {
-  float4 position; /* xyz = position, w = unused */
-  float4 normal;   /* xyz = normal, w = unused */
+struct [[host_shared]] DCVertexGPU {
+  float4 position;
+  float4 normal;
 };
-

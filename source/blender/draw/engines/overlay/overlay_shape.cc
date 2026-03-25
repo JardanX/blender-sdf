@@ -913,7 +913,7 @@ ShapeCache::ShapeCache()
   {
     constexpr int lat_seg = 32;
     constexpr int lon_seg = 24;
-    const float pi = math::numbers::pi;
+    const float pi = M_PI;
     const float pi2 = 2.0f * pi;
     Vector<VertexPos> verts;
 
@@ -952,7 +952,7 @@ ShapeCache::ShapeCache()
   /* SDF solid cylinder: radius 1, z in [-1, 1], capped. */
   {
     constexpr int segments = 32;
-    const float pi2 = 2.0f * math::numbers::pi;
+    const float pi2 = 2.0f * M_PI;
     Vector<VertexPos> verts;
 
     for (int i = 0; i < segments; i++) {
@@ -982,7 +982,7 @@ ShapeCache::ShapeCache()
   /* SDF solid cone: base radius 1 at z=-1, apex at z=1. */
   {
     constexpr int segments = 32;
-    const float pi2 = 2.0f * math::numbers::pi;
+    const float pi2 = 2.0f * M_PI;
     Vector<VertexPos> verts;
 
     for (int i = 0; i < segments; i++) {
@@ -1006,8 +1006,8 @@ ShapeCache::ShapeCache()
   {
     constexpr int seg = 24;
     constexpr int ring_count = 12;
-    const float pi2 = 2.0f * math::numbers::pi;
-    const float pi_half = math::numbers::pi * 0.5f;
+    const float pi2 = 2.0f * M_PI;
+    const float pi_half = M_PI * 0.5f;
     Vector<VertexPos> verts;
 
     /* Cylinder body. */
@@ -1071,7 +1071,7 @@ ShapeCache::ShapeCache()
   {
     constexpr int major_seg = 32;
     constexpr int minor_seg = 16;
-    const float pi2 = 2.0f * math::numbers::pi;
+    const float pi2 = 2.0f * M_PI;
     Vector<VertexPos> verts;
 
     for (int i = 0; i < major_seg; i++) {
@@ -1104,7 +1104,7 @@ ShapeCache::ShapeCache()
   }
   /* SDF N-Gon prisms: regular n-sided prisms for sides 3–32. */
   {
-    const float pi2 = 2.0f * math::numbers::pi;
+    const float pi2 = 2.0f * M_PI;
     for (int sides = sdf_ngon_min_sides; sides <= sdf_ngon_max_sides; sides++) {
       Vector<VertexPos> verts;
       for (int i = 0; i < sides; i++) {
