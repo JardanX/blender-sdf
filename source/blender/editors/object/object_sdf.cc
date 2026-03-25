@@ -100,7 +100,7 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
   Object *ob = add_type(C, OB_SDF, name, loc, rot, false, local_view_bits);
   if (ob && ob->data) {
     Main *bmain = CTX_data_main(C);
-    SDF *sdf_data = static_cast<SDF *>(ob->data);
+    SDF *sdf_data = id_cast<SDF *>(ob->data);
     sdf_data->sdf_type = type;
     sdf_data->sdf_index = BKE_sdf_next_index(bmain);
 
@@ -138,7 +138,7 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
     SDFGroup *group = nullptr;
     Object *active = CTX_data_active_object(C);
     if (active && active->type == OB_SDF && active->data) {
-      group = static_cast<SDF *>(active->data)->sdf_group;
+      group = id_cast<SDF *>(active->data)->sdf_group;
     }
     if (!group) {
       group = static_cast<SDFGroup *>(bmain->sdf_groups.last);
@@ -184,10 +184,12 @@ static wmOperatorStatus object_sdf_group_add_exec(bContext *C, wmOperator * /*op
 
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = static_cast<SDF *>(ob->data);
+      SDF *sdf = id_cast<SDF *>(ob->data);
       if (sdf->sdf_group) {
         SDFGroup *old_group = sdf->sdf_group;
-        LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &old_group->members) {
+        SDFGroupMember *member_next;
+        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first); member; member = member_next) {
+          member_next = member->next;
           if (member->object == ob) {
             BKE_sdf_group_member_remove(old_group, member);
             break;
@@ -229,10 +231,12 @@ static wmOperatorStatus object_sdf_group_assign_exec(bContext *C, wmOperator *op
 
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = static_cast<SDF *>(ob->data);
+      SDF *sdf = id_cast<SDF *>(ob->data);
       if (sdf->sdf_group && sdf->sdf_group != target) {
         SDFGroup *old_group = sdf->sdf_group;
-        LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &old_group->members) {
+        SDFGroupMember *member_next;
+        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first); member; member = member_next) {
+          member_next = member->next;
           if (member->object == ob) {
             BKE_sdf_group_member_remove(old_group, member);
             break;
@@ -279,7 +283,7 @@ static wmOperatorStatus object_sdf_set_csg_exec(bContext *C, wmOperator *op)
   if (!ob || ob->type != OB_SDF || !ob->data) {
     return OPERATOR_CANCELLED;
   }
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
   sdf->csg_operation = csg_op;
 
   DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
@@ -310,7 +314,7 @@ static wmOperatorStatus object_sdf_set_blend_exec(bContext *C, wmOperator *op)
   if (!ob || ob->type != OB_SDF || !ob->data) {
     return OPERATOR_CANCELLED;
   }
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
   sdf->blend_type = blend_type;
 
   DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
@@ -351,7 +355,7 @@ static SDFGroup *sdf_group_from_operator(bContext *C, wmOperator *op)
 
   Object *ob = CTX_data_active_object(C);
   if (ob && ob->type == OB_SDF && ob->data) {
-    return static_cast<SDF *>(ob->data)->sdf_group;
+    return id_cast<SDF *>(ob->data)->sdf_group;
   }
 
   return nullptr;
@@ -467,11 +471,13 @@ static wmOperatorStatus move_to_sdf_group_exec(bContext *C, wmOperator *op)
   int moved_count = 0;
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = static_cast<SDF *>(ob->data);
+      SDF *sdf = id_cast<SDF *>(ob->data);
       /* Remove from previous group first. */
       if (sdf->sdf_group && sdf->sdf_group != target) {
         SDFGroup *old_group = sdf->sdf_group;
-        LISTBASE_FOREACH_MUTABLE (SDFGroupMember *, member, &old_group->members) {
+        SDFGroupMember *member_next;
+        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first); member; member = member_next) {
+          member_next = member->next;
           if (member->object == ob) {
             BKE_sdf_group_member_remove(old_group, member);
             break;
@@ -586,7 +592,7 @@ static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOpera
   }
 
   int i = 0;
-  LISTBASE_FOREACH (SDFGroup *, g, &bmain->sdf_groups) {
+  for (SDFGroup *g = reinterpret_cast<SDFGroup *>(bmain->sdf_groups.first); g; g = reinterpret_cast<SDFGroup *>(g->id.next)) {
     g->group_order = i++;
   }
 
@@ -644,7 +650,7 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
 {
   SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
 
   if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
       (event->type == RIGHTMOUSE && event->val == KM_PRESS))
@@ -654,7 +660,7 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
     ED_area_status_text(CTX_wm_area(C), nullptr);
     ED_workspace_status_text(C, nullptr);
-    MEM_freeN(data);
+    MEM_delete(data);
     return OPERATOR_CANCELLED;
   }
 
@@ -667,7 +673,7 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
     ED_area_status_text(CTX_wm_area(C), nullptr);
     ED_workspace_status_text(C, nullptr);
-    MEM_freeN(data);
+    MEM_delete(data);
     return OPERATOR_FINISHED;
   }
 
@@ -705,9 +711,9 @@ static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C,
                                                  const wmEvent *event)
 {
   Object *ob = CTX_data_active_object(C);
-  SDF *sdf = static_cast<SDF *>(ob->data);
+  SDF *sdf = id_cast<SDF *>(ob->data);
 
-  SDFBlendAdjustData *data = MEM_callocN<SDFBlendAdjustData>("SDF Blend Adjust Data");
+  SDFBlendAdjustData *data = MEM_new<SDFBlendAdjustData>(__func__);
   data->init_mval_x = float(event->mval[0]);
   data->init_blend = sdf->blend;
   data->current_blend = sdf->blend;
@@ -725,14 +731,14 @@ static void sdf_blend_adjust_cancel(bContext *C, wmOperator *op)
   SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
   if (ob && ob->type == OB_SDF && ob->data) {
-    SDF *sdf = static_cast<SDF *>(ob->data);
+    SDF *sdf = id_cast<SDF *>(ob->data);
     sdf->blend = data->init_blend;
     DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
   }
   ED_area_status_text(CTX_wm_area(C), nullptr);
   ED_workspace_status_text(C, nullptr);
-  MEM_freeN(data);
+  MEM_delete(data);
 }
 
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot)
@@ -785,7 +791,7 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
   }
 
   Object *ob = add_type(C, OB_MESH, "SDF Mesh", nullptr, nullptr, false, 0);
-  Mesh *mesh_dst = static_cast<Mesh *>(ob->data);
+  Mesh *mesh_dst = id_cast<Mesh *>(ob->data);
   BKE_mesh_nomain_to_mesh(mesh_src, mesh_dst, ob, false);
   blender::bke::mesh_calc_edges(*mesh_dst, false, false);
 

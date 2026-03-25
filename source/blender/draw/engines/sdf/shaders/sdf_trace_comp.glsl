@@ -12,11 +12,20 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_tile_comp)
 COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 #endif
 
-#include "draw_view_lib.glsl"
-#include "sdf_lib.glsl"
-
 #define kFltMax 1e30f
 #define kTileSize 8
+#define kMaxTileObjects 512
+
+#ifdef USE_TILE_CULLING
+shared uint s_tileObjCount;
+shared int s_tileObjList[kMaxTileObjects];
+shared float4 s_coneHitPos;
+#else
+shared float tile_heat[kTileSize * kTileSize];
+#endif
+
+#include "draw_view_lib.glsl"
+#include "sdf_lib.glsl"
 
 float evalObjectDist(float3 world_pos, int idx)
 {
@@ -24,17 +33,6 @@ float evalObjectDist(float3 world_pos, int idx)
   float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
   return evalPrimitive(lp, obj);
 }
-
-#ifdef USE_TILE_CULLING
-
-#define kMaxTileObjects 512
-shared uint s_tileObjCount;
-shared int s_tileObjList[kMaxTileObjects];
-shared float4 s_coneHitPos;
-
-#else
-
-shared float tile_heat[kTileSize * kTileSize];
 
 #define kAabbTreeStackSize 16
 #define kMaxBitfieldBits 128

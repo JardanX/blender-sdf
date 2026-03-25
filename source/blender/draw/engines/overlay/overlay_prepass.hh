@@ -277,7 +277,7 @@ class Prepass : Overlay {
         if (!res.is_selection()) {
           return;
         }
-        const SDF *sdf = static_cast<const SDF *>(ob_ref.object->data);
+        const SDF *sdf = id_cast<const SDF *>(ob_ref.object->data);
         const float bev = sdf->bevel;
         float3 scale;
         switch (sdf->sdf_type) {

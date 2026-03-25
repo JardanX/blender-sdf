@@ -45,12 +45,9 @@ class RENDER_PT_context(Panel):
 
 # ---------------------------------------------------------------------------
 # MATHOPS: Wrapper panels for organized Render Properties
-# Order: Path Tracer (10) → SDF Ray Marcher (20)
-#        → Simplify (80) → Color Management (200)
 # ---------------------------------------------------------------------------
 
 class RENDER_PT_proximity_cycles(Panel):
-    """Cycles path tracer settings"""
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "render"
@@ -72,7 +69,6 @@ class RENDER_PT_proximity_cycles(Panel):
             cscene = scene.cycles
             layout.prop(cscene, "device")
 
-            # Open Shading Language toggle (CPU or OptiX with OSL support).
             try:
                 from cycles import engine as cycles_engine
                 if cycles_engine.with_osl():

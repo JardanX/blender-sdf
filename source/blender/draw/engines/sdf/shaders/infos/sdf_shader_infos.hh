@@ -5,6 +5,7 @@
 #ifdef GPU_SHADER
 #  pragma once
 #  include "gpu_shader_compat.hh"
+#  include "sdf_shader_shared.hh"
 #endif
 
 #include "gpu_shader_create_info.hh"
@@ -16,6 +17,8 @@
 GPU_SHADER_CREATE_INFO(sdf_trace_comp)
 LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
+DEFINE_VALUE("kTileSize", "8")
+DEFINE_VALUE("kMaxTileObjects", "512")
 STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])
@@ -52,6 +55,8 @@ GPU_SHADER_CREATE_END()
 GPU_SHADER_CREATE_INFO(sdf_tile_cull_comp)
 LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
+DEFINE_VALUE("kTileSize", "8")
+DEFINE_VALUE("kMaxTileObjects", "512")
 STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(5, write, int, tile_prim_counts[])
 STORAGE_BUF(6, write, int, tile_prim_lists[])
@@ -102,6 +107,8 @@ GPU_SHADER_CREATE_INFO(sdf_trace_tile_comp)
 LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
 DEFINE("USE_TILE_CULLING")
+DEFINE_VALUE("kTileSize", "8")
+DEFINE_VALUE("kMaxTileObjects", "512")
 STORAGE_BUF(0, read, SDFObjectGPU, objects[])
 STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(2, read, SDFGroupGPU, groups[])

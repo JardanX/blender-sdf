@@ -9,6 +9,8 @@
  * \brief SDF (Signed Distance Field) data-block.
  */
 
+namespace blender {
+
 struct Depsgraph;
 struct Main;
 struct Object;
@@ -18,7 +20,7 @@ struct SDF;
 struct SDFModifier;
 struct SDFPolygonPoint;
 
-namespace blender::bke {
+namespace bke {
 
 struct SDFRuntime {
   BMEditMesh *edit_mesh = nullptr;
@@ -26,7 +28,7 @@ struct SDFRuntime {
   uint64_t proxy_hash = 0;
 };
 
-}  // namespace blender::bke
+}  // namespace bke
 
 SDF *BKE_sdf_add(Main *bmain, const char *name);
 void BKE_sdf_data_update(Depsgraph *depsgraph, Scene *scene, Object *ob);
@@ -46,3 +48,5 @@ void BKE_sdf_polygon_init_triangle(SDF *sdf);
 void BKE_sdf_editmode_enter(Object *ob);
 void BKE_sdf_editmode_load(Object *ob);
 void BKE_sdf_editmode_exit(Object *ob);
+
+}  // namespace blender

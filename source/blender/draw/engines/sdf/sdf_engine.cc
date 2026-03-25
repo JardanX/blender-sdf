@@ -9,7 +9,6 @@
  */
 
 #include <algorithm>
-#include <chrono>
 
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -125,7 +124,6 @@ class Instance : public DrawEngine {
   gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
 
-  BatchHandle shader_compile_batch_ = 0;
   bool shaders_compiled_ = false;
 
   gpu::Texture *comp_color_tx_ = nullptr;
@@ -218,13 +216,13 @@ class Instance : public DrawEngine {
 
     sync_sdf_settings();
 
-    if (!shaders_compiled_ && shader_compile_batch_ == 0) {
-      const GPUShaderCreateInfo *infos[SH_COUNT];
+    if (!shaders_compiled_) {
       for (int i = 0; i < SH_COUNT; i++) {
-        infos[i] = GPU_shader_create_info_get(shader_info_names_[i]);
+        if (shaders_[i] == nullptr) {
+          shaders_[i] = GPU_shader_create_from_info_name(shader_info_names_[i]);
+        }
       }
-      shader_compile_batch_ = GPU_shader_batch_create_from_infos({infos, SH_COUNT},
-                                                                  CompilationPriority::High);
+      shaders_compiled_ = true;
     }
   }
 
@@ -269,7 +267,7 @@ class Instance : public DrawEngine {
       return;
     }
 
-    const SDF *sdf_data = static_cast<const SDF *>(ob->data);
+    const SDF *sdf_data = id_cast<const SDF *>(ob->data);
     if (sdf_data == nullptr) {
       return;
     }
@@ -322,7 +320,7 @@ class Instance : public DrawEngine {
                               0.0f);
 
     float bevel = 0.0f;
-    LISTBASE_FOREACH (const SDFModifier *, bmod, &sdf_data->modifiers) {
+    for (const SDFModifier *bmod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); bmod; bmod = bmod->next) {
       if (bmod->show_viewport && bmod->type == SDF_MOD_BEVEL) {
         bevel += bmod->params[0];
       }
@@ -380,7 +378,7 @@ class Instance : public DrawEngine {
         case SDF_TYPE_POLYGON: {
           float ps = math::min(scale.x, scale.y);
           float max_xy = 0.0f;
-          LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+          for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
             max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
             max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
           }
@@ -393,7 +391,7 @@ class Instance : public DrawEngine {
           break;
       }
 
-      LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+      for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
         if (!mod->show_viewport) {
           continue;
         }
@@ -603,7 +601,7 @@ class Instance : public DrawEngine {
       float poly_scale = math::min(scale.x, scale.y);
       Vector<float2> pts;
       Vector<float> crn;
-      LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+      for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
         pts.append(float2(pt->co[0] * poly_scale, pt->co[1] * poly_scale));
         crn.append(pt->corner * poly_scale);
       }
@@ -744,7 +742,7 @@ class Instance : public DrawEngine {
     /* Pack modifiers */
     gpu_obj.modifier_start = int(modifiers_.size());
     gpu_obj.modifier_count = 0;
-    LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+    for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
       if (!mod->show_viewport) {
         continue;
       }
@@ -808,7 +806,7 @@ class Instance : public DrawEngine {
       case SDF_TYPE_POLYGON: {
         float ps = math::min(scale.x, scale.y);
         float max_xy = 0.0f;
-        LISTBASE_FOREACH (const SDFPolygonPoint *, pt, &sdf_data->polygon_points) {
+        for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
           max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
           max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
         }
@@ -822,7 +820,7 @@ class Instance : public DrawEngine {
     }
 
     /* Expand for domain modifiers */
-    LISTBASE_FOREACH (const SDFModifier *, mod, &sdf_data->modifiers) {
+    for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
       if (!mod->show_viewport) {
         continue;
       }
@@ -1053,13 +1051,11 @@ class Instance : public DrawEngine {
       return;
     }
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-
     /* Build group GPU data */
     {
       Main *bmain = DEG_get_bmain(draw_ctx_->depsgraph);
 
-      LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+      for (SDFGroup *group = static_cast<SDFGroup *>(bmain->sdf_groups.first); group; group = reinterpret_cast<SDFGroup *>(group->id.next)) {
         BKE_sdf_group_cleanup_null_members(group);
       }
 
@@ -1074,7 +1070,7 @@ class Instance : public DrawEngine {
 
       int g_idx = 0;
       int obj_offset = 0;
-      LISTBASE_FOREACH (SDFGroup *, group, &bmain->sdf_groups) {
+      for (SDFGroup *group = static_cast<SDFGroup *>(bmain->sdf_groups.first); group; group = reinterpret_cast<SDFGroup *>(group->id.next)) {
         SDFGroupGPU gpu_grp = {};
         gpu_grp.csg_operation = group->csg_operation;
         gpu_grp.blend_type = group->blend_type;
@@ -1102,7 +1098,7 @@ class Instance : public DrawEngine {
         group_index_map.add(group, g_idx);
 
         int member_order = 0;
-        LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member; member = member->next) {
           if (member->object) {
             object_membership_map.add_overwrite(member->object, {g_idx, member_order});
           }
@@ -1517,11 +1513,6 @@ class Instance : public DrawEngine {
 
     needs_upload_ = true;
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    GPU_profile_add_group_cpu(
-        "SDF BVH",
-        std::chrono::duration_cast<std::chrono::nanoseconds>(start_time.time_since_epoch()).count(),
-        std::chrono::duration_cast<std::chrono::nanoseconds>(end_time.time_since_epoch()).count());
   }
 
   void draw(Manager & /*manager*/) final
@@ -1822,15 +1813,6 @@ class Instance : public DrawEngine {
   void ensure_shaders()
   {
     if (shaders_compiled_) {
-      return;
-    }
-
-    if (shader_compile_batch_ != 0) {
-      Vector<gpu::Shader *> result = GPU_shader_batch_finalize(shader_compile_batch_);
-      for (int i = 0; i < SH_COUNT; i++) {
-        shaders_[i] = result[i];
-      }
-      shaders_compiled_ = true;
       return;
     }
 
@@ -2440,9 +2422,6 @@ class Instance : public DrawEngine {
  public:
   ~Instance() override
   {
-    if (shader_compile_batch_ != 0) {
-      GPU_shader_batch_cancel(shader_compile_batch_);
-    }
     for (int i = 0; i < SH_COUNT; i++) {
       GPU_SHADER_FREE_SAFE(shaders_[i]);
     }

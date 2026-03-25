@@ -16,7 +16,6 @@
 #include "RNA_enum_types.hh"
 
 #include "rna_internal.hh"
-using namespace blender;
 
 #ifdef RNA_RUNTIME
 
@@ -30,7 +29,7 @@ using namespace blender;
 #  include "BKE_displist.h"
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_grease_pencil.hh"
-#  include "BKE_icons.h"
+#  include "BKE_icons.hh"
 #  include "BKE_idtype.hh"
 #  include "BKE_image.hh"
 #  include "BKE_lattice.hh"
@@ -40,11 +39,11 @@ using namespace blender;
 #  include "BKE_lightprobe.h"
 #  include "BKE_linestyle.h"
 #  include "BKE_main_invariants.hh"
-#  include "BKE_mask.h"
+#  include "BKE_mask.hh"
 #  include "BKE_material.hh"
 
 #  include "BKE_mesh.hh"
-#  include "BKE_movieclip.h"
+#  include "BKE_movieclip.hh"
 #  include "BKE_node.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
@@ -53,8 +52,8 @@ using namespace blender;
 #  include "BKE_scene.hh"
 #  include "BKE_sdf.hh"
 #  include "BKE_sdf_group.hh"
-#  include "BKE_sound.h"
-#  include "BKE_speaker.h"
+#  include "BKE_sound.hh"
+#  include "BKE_speaker.hh"
 #  include "BKE_text.h"
 #  include "BKE_texture.h"
 #  include "BKE_vfont.hh"
@@ -94,8 +93,9 @@ using namespace blender;
 #  include "DNA_volume_types.h"
 #  include "DNA_world_types.h"
 
-#  include "ED_node.hh"
 #  include "ED_screen.hh"
+
+#  include "NOD_defaults.hh"
 
 #  include "BLT_translation.hh"
 
@@ -105,6 +105,8 @@ using namespace blender;
 
 #  include "WM_api.hh"
 #  include "WM_types.hh"
+
+namespace blender {
 
 static void rna_idname_validate(const char *name, char *r_name)
 {
@@ -227,7 +229,7 @@ static void rna_Main_scenes_remove(
         }
       }
 
-      LISTBASE_FOREACH (wmWindow *, win, &wm->windows) {
+      for (wmWindow *win = static_cast<wmWindow *>(wm->windows.first); win; win = win->next) {
         if (WM_window_get_active_scene(win) == scene) {
 #  ifdef WITH_PYTHON
           BPy_BEGIN_ALLOW_THREADS;
@@ -310,7 +312,7 @@ static Material *rna_Main_materials_new(Main *bmain, const char *name)
   Material *material = BKE_material_add(bmain, safe_name);
   id_us_min(&material->id);
 
-  ED_node_shader_default(nullptr, bmain, &material->id);
+  nodes::node_tree_shader_default(nullptr, bmain, &material->id);
 
   WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
 
@@ -329,7 +331,7 @@ static void rna_Main_materials_gpencil_remove(Main * /*bmain*/, PointerRNA *id_p
   ID *id = static_cast<ID *>(id_ptr->data);
   Material *ma = (Material *)id;
   if (ma->gp_style) {
-    MEM_SAFE_FREE(ma->gp_style);
+    MEM_SAFE_DELETE(ma->gp_style);
   }
 }
 
@@ -569,7 +571,7 @@ static World *rna_Main_worlds_new(Main *bmain, const char *name)
   World *world = BKE_world_add(bmain, safe_name);
   id_us_min(&world->id);
 
-  ED_node_shader_default(nullptr, bmain, &world->id);
+  nodes::node_tree_shader_default(nullptr, bmain, &world->id);
 
   WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
 
@@ -878,7 +880,7 @@ static SDFGroup *rna_Main_sdf_groups_new(Main *bmain, const char *name)
 #  define RNA_MAIN_ID_TAG_FUNCS_DEF(_func_name, _listbase_name, _id_type) \
     static void rna_Main_##_func_name##_tag(Main *bmain, bool value) \
     { \
-      BKE_main_id_tag_listbase(&bmain->_listbase_name, ID_TAG_DOIT, value); \
+      BKE_main_id_tag_listbase(&bmain->_listbase_name.cast<ID>(), ID_TAG_DOIT, value); \
     }
 
 RNA_MAIN_ID_TAG_FUNCS_DEF(cameras, cameras, ID_CA)
@@ -921,9 +923,15 @@ RNA_MAIN_ID_TAG_FUNCS_DEF(hair_curves, hair_curves, ID_CV)
 RNA_MAIN_ID_TAG_FUNCS_DEF(pointclouds, pointclouds, ID_PT)
 RNA_MAIN_ID_TAG_FUNCS_DEF(volumes, volumes, ID_VO)
 RNA_MAIN_ID_TAG_FUNCS_DEF(sdfs, sdfs, ID_SF)
-RNA_MAIN_ID_TAG_FUNCS_DEF(sdf_groups, sdf_groups, ID_SG)
+static void rna_Main_sdf_groups_tag(Main *bmain, bool value)
+{
+  BKE_main_id_tag_listbase(
+      reinterpret_cast<ListBaseT<ID> *>(&bmain->sdf_groups), ID_TAG_DOIT, value);
+}
 
 #  undef RNA_MAIN_ID_TAG_FUNCS_DEF
+
+}  // namespace blender
 
 #else
 

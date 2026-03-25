@@ -168,6 +168,7 @@ class TreeDisplayViewLayer final : public AbstractTreeDisplay {
                                        TreeElement &);
   void add_layer_collection_objects(ListBaseT<TreeElement> &, LayerCollection &, TreeElement &);
   void add_layer_collection_objects_children(TreeElement &);
+  void add_sdf_groups(Main &bmain, ListBaseT<TreeElement> &tree, TreeElement *parent);
 };
 
 /* -------------------------------------------------------------------- */

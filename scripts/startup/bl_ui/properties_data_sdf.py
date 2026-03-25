@@ -380,9 +380,11 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        row = layout.row(align=True)
-        row.scale_y = 1.6
-        row.prop(sdf, "sdf_type", expand=True, icon_only=True)
+        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+        grid.scale_x = 1.0
+        grid.scale_y = 1.6
+        for item in sdf.bl_rna.properties["sdf_type"].enum_items:
+            grid.prop_enum(sdf, "sdf_type", item.identifier, text="")
 
         layout.separator()
 
@@ -733,9 +735,10 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
 
         if not (sdf.sdf_group and sdf.group_order == 0):
             layout.label(text="CSG Operation")
-            row = layout.row(align=True)
-            row.scale_y = 1.4
-            row.prop(sdf, "csg_operation", expand=True, icon_only=True)
+            grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+            grid.scale_y = 1.4
+            for item in sdf.bl_rna.properties["csg_operation"].enum_items:
+                grid.prop_enum(sdf, "csg_operation", item.identifier, text="")
 
             layout.separator()
 
@@ -746,9 +749,10 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
                 layout.prop(sdf, "shell_op", text="")
 
             layout.label(text="Blend Type")
-            row = layout.row(align=True)
-            row.scale_y = 1.4
-            row.prop(sdf, "blend_type", expand=True, icon_only=True)
+            grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+            grid.scale_y = 1.4
+            for item in sdf.bl_rna.properties["blend_type"].enum_items:
+                grid.prop_enum(sdf, "blend_type", item.identifier, text="")
 
             if sdf.blend_type != 'LINEAR':
                 if sdf.csg_operation == 'SHELL':

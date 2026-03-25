@@ -137,7 +137,9 @@ static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, Pointer
   DEG_id_tag_update(owner, ID_RECALC_GEOMETRY);
   if (GS(owner->name) == ID_SG) {
     SDFGroup *group = (SDFGroup *)owner;
-    LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+         member = member->next)
+    {
       if (member->object) {
         DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
       }
@@ -329,7 +331,10 @@ static void rna_SDF_sdf_group_set(PointerRNA *ptr,
 
   /* Find the Object that owns this SDF. */
   if (old_group) {
-    LISTBASE_FOREACH (SDFGroupMember *, member, &old_group->members) {
+    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
+         member;
+         member = member->next)
+    {
       if (member->object && member->object->type == OB_SDF &&
           member->object->data == (void *)sdf)
       {
@@ -339,16 +344,19 @@ static void rna_SDF_sdf_group_set(PointerRNA *ptr,
     }
   }
   if (!ob) {
-    LISTBASE_FOREACH (Object *, obj, &bmain->objects) {
-      if (obj->type == OB_SDF && obj->data == (void *)sdf) {
-        ob = obj;
+    for (Object &obj : bmain->objects) {
+      if (obj.type == OB_SDF && obj.data == (void *)sdf) {
+        ob = &obj;
         break;
       }
     }
   }
 
   if (old_group && ob) {
-    LISTBASE_FOREACH (SDFGroupMember *, member, &old_group->members) {
+    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
+         member;
+         member = member->next)
+    {
       if (member->object == ob) {
         BKE_sdf_group_member_remove(old_group, member);
         break;

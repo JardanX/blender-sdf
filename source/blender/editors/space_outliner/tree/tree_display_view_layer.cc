@@ -7,13 +7,22 @@
  */
 
 #include "DNA_collection_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_group_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
+#include "BKE_idprop.hh"
 #include "BKE_layer.hh"
 #include "BKE_library.hh"
+#include "BKE_main.hh"
+#include "BKE_sdf_group.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_string.h"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
 #include "BLI_set.hh"
@@ -81,6 +90,7 @@ ListBaseT<TreeElement> TreeDisplayViewLayer::build_tree(const TreeSourceData &so
         continue;
       }
 
+      add_sdf_groups(*source_data.bmain, tree, nullptr);
       add_view_layer(*scene, tree, static_cast<TreeElement *>(nullptr));
     }
     else {
@@ -96,11 +106,62 @@ ListBaseT<TreeElement> TreeDisplayViewLayer::build_tree(const TreeSourceData &so
       te_view_layer.name = view_layer->name;
       te_view_layer.directdata = view_layer;
 
+      add_sdf_groups(*source_data.bmain, te_view_layer.subtree, &te_view_layer);
       add_view_layer(*scene, te_view_layer.subtree, &te_view_layer);
     }
   }
 
   return tree;
+}
+
+void TreeDisplayViewLayer::add_sdf_groups(Main &bmain,
+                                          ListBaseT<TreeElement> &tree,
+                                          TreeElement *parent)
+{
+  if (BLI_listbase_is_empty(&bmain.sdf_groups)) {
+    return;
+  }
+
+  for (SDFGroup *group = static_cast<SDFGroup *>(bmain.sdf_groups.first); group;
+       group = reinterpret_cast<SDFGroup *>(group->id.next))
+  {
+    BKE_sdf_group_cleanup_null_members(group);
+
+    TreeElement *te_group = add_element(
+        &tree, &group->id, nullptr, parent, TSE_SOME_ID, 0, false);
+    if (!te_group) {
+      continue;
+    }
+
+    TreeStoreElem *tselem = TREESTORE(te_group);
+    if (!tselem->used) {
+      tselem->flag &= ~TSE_CLOSED;
+    }
+
+    BKE_view_layer_synced_ensure(scene_, view_layer_);
+    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+         member = member->next)
+    {
+      if (!member->object) {
+        continue;
+      }
+      Base *base = BKE_view_layer_base_find(view_layer_, member->object);
+      if (!base) {
+        continue;
+      }
+      TreeElement *te_member = add_element(
+          &te_group->subtree,
+          reinterpret_cast<ID *>(member->object),
+          nullptr,
+          te_group,
+          TSE_SOME_ID,
+          0,
+          false);
+      if (te_member) {
+        te_member->directdata = base;
+      }
+    }
+  }
 }
 
 void TreeDisplayViewLayer::add_view_layer(Scene &scene,
@@ -113,6 +174,14 @@ void TreeDisplayViewLayer::add_view_layer(Scene &scene,
     /* Show objects in the view layer. */
     BKE_view_layer_synced_ensure(&scene, view_layer_);
     for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
+      if (base.object->type == OB_SDF) {
+        continue;
+      }
+      if (base.object->type == OB_EMPTY && base.object->id.properties &&
+          IDP_GetPropertyFromGroup(base.object->id.properties, "sdf_mirror_internal"))
+      {
+        continue;
+      }
       TreeElement *te_object = add_element(
           &tree, reinterpret_cast<ID *>(base.object), nullptr, parent, TSE_SOME_ID, 0);
       te_object->directdata = &base;
@@ -180,6 +249,14 @@ void TreeDisplayViewLayer::add_layer_collection_objects(ListBaseT<TreeElement> &
 {
   BKE_view_layer_synced_ensure(scene_, view_layer_);
   for (CollectionObject &cob : lc.collection->gobject) {
+    if (cob.ob->type == OB_SDF) {
+      continue;
+    }
+    if (cob.ob->type == OB_EMPTY && cob.ob->id.properties &&
+        IDP_GetPropertyFromGroup(cob.ob->id.properties, "sdf_mirror_internal"))
+    {
+      continue;
+    }
     Base *base = BKE_view_layer_base_find(view_layer_, cob.ob);
     TreeElement *te_object = add_element(
         &tree, reinterpret_cast<ID *>(base->object), nullptr, &ten, TSE_SOME_ID, 0);

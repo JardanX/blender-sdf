@@ -2624,6 +2624,11 @@ def register():
         panel.COMPAT_ENGINES.add('CYCLES')
 
     for cls in classes:
+        if (cls.__name__.startswith('CYCLES_RENDER_PT_') and
+                not hasattr(cls, 'bl_parent_id') and
+                getattr(cls, 'bl_context', '') == 'render'):
+            cls.bl_parent_id = "RENDER_PT_proximity_cycles"
+
         register_class(cls)
 
 
@@ -2639,3 +2644,5 @@ def unregister():
 
     for cls in classes:
         unregister_class(cls)
+        if getattr(cls, 'bl_parent_id', None) == "RENDER_PT_proximity_cycles":
+            del cls.bl_parent_id

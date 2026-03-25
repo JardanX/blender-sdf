@@ -1077,9 +1077,6 @@ void DRW_sdf_perf_info_get(const char **r_text, bool *r_active)
   static char perf_text_buf[1024];
 
   uint64_t bvh_cpu = 0, raymarch_gpu = 0, raymarch_cpu = 0, fxaa_gpu = 0, fxaa_cpu = 0;
-  GPU_profile_get_latest_time("SDF BVH", nullptr, &bvh_cpu);
-  GPU_profile_get_latest_time("SDF Raymarch", &raymarch_gpu, &raymarch_cpu);
-  GPU_profile_get_latest_time("SDF FXAA", &fxaa_gpu, &fxaa_cpu);
 
   int vram_total = 0, vram_free = 0;
   GPU_mem_stats_get(&vram_total, &vram_free);

@@ -192,10 +192,10 @@ def unregister():
     from bpy.utils import unregister_class
     for mod in reversed(_modules_loaded):
         for cls in reversed(mod.classes):
-            if cls.is_registered:
+            if getattr(cls, "is_registered", False):
                 unregister_class(cls)
     for cls in reversed(classes):
-        if cls.is_registered:
+        if getattr(cls, "is_registered", False):
             unregister_class(cls)
 
     try:

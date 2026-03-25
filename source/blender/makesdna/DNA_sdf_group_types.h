@@ -31,10 +31,10 @@ typedef struct SDFGroupRuntimeHandle SDFGroupRuntimeHandle;
 #endif
 
 typedef struct SDFGroupMember {
-  struct SDFGroupMember *next, *prev;
-  struct Object *object;
-  int order;
-  char _pad[4];
+  struct SDFGroupMember *next = nullptr, *prev = nullptr;
+  struct Object *object = nullptr;
+  int order = 0;
+  char _pad[4] = {};
 } SDFGroupMember;
 
 typedef struct SDFGroup {
@@ -44,33 +44,30 @@ typedef struct SDFGroup {
 #endif
 
   ID id;
-  struct AnimData *adt; /* Must be immediately after id. */
+  struct AnimData *adt = nullptr;
 
-  /* Group-level CSG */
-  int csg_operation; /* eSDFCSGOperation */
-  int blend_type;    /* eSDFBlendType */
-  float blend;
-  float shell_distance;
-  int shell_mode; /* eSDFShellMode */
-  int shell_op;   /* eSDFShellOp */
-  float shell_blend_top;
-  float shell_blend_bottom;
-  float chamfer_k2;
-  float chamfer_k3;
+  int csg_operation = 0;
+  int blend_type = 1;
+  float blend = 0.1f;
+  float shell_distance = 0.2f;
+  int shell_mode = 0;
+  int shell_op = 0;
+  float shell_blend_top = 0.1f;
+  float shell_blend_bottom = 0.1f;
+  float chamfer_k2 = 0.01f;
+  float chamfer_k3 = 0.01f;
 
-  float color[4];
+  float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
-  /* Members */
-  ListBase members; /* SDFGroupMember */
-  int totmember;
-  int group_order;
+  ListBase members = {};
+  int totmember = 0;
+  int group_order = 0;
 
-  /* Modifier stack */
-  ListBase modifiers; /* SDFModifier */
-  int totmodifier;
-  char _pad1[4];
+  ListBase modifiers = {};
+  int totmodifier = 0;
+  char _pad1[4] = {};
 
-  SDFGroupRuntimeHandle *runtime; /* Keep last. */
+  SDFGroupRuntimeHandle *runtime = nullptr;
 } SDFGroup;
 
 }  // namespace blender
