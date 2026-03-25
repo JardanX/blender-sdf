@@ -1348,12 +1348,17 @@ class CyclesMeshSettings(bpy.types.PropertyGroup):
             description="Cycles mesh settings",
             type=cls,
         )
-        # MATHOPS: MetaBall.cycles removed (MetaBall RNA deleted)
+        bpy.types.MetaBall.cycles = PointerProperty(
+            name="Cycles Mesh Settings",
+            description="Cycles mesh settings",
+            type=cls,
+        )
 
     @classmethod
     def unregister(cls):
         del bpy.types.Mesh.cycles
         del bpy.types.Curve.cycles
+        del bpy.types.MetaBall.cycles
 
 
 class CyclesObjectSettings(bpy.types.PropertyGroup):

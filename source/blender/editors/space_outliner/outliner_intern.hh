@@ -138,6 +138,7 @@ struct TreeElementIcon {
         ID_OB, \
         ID_ME, \
         ID_CU_LEGACY, \
+        ID_MB, \
         ID_NT, \
         ID_MA, \
         ID_TE, \
@@ -160,8 +161,6 @@ struct TreeElementIcon {
         ID_CV, \
         ID_PT, \
         ID_VO, \
-        ID_SF, \
-        ID_SG, \
         ID_GP) || /* Only in blend-file mode ... :/ */ \
    ELEM(GS((_id)->name), \
         ID_SCR, \
@@ -476,7 +475,6 @@ void OUTLINER_OT_scene_drop(wmOperatorType *ot);
 void OUTLINER_OT_material_drop(wmOperatorType *ot);
 void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
-void OUTLINER_OT_sdf_group_drop(wmOperatorType *ot);
 
 /* ...................................................... */
 
