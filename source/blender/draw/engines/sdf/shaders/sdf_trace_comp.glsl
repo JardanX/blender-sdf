@@ -14,7 +14,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 
 #define kFltMax 1e30f
 #define kTileSize 8
-#define kMaxTileObjects 512
+#define kMaxTileObjects 128
 
 #ifdef USE_TILE_CULLING
 shared uint s_tileObjCount;

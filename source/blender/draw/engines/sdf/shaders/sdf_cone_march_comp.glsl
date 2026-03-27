@@ -13,7 +13,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_cone_march_comp)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-#define kMaxTileObjects 512
+#define kMaxTileObjects 128
 
 float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float out_aabb_skip)
 {
