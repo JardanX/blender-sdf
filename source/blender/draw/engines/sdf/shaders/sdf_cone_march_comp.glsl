@@ -209,6 +209,8 @@ void main()
     tile_far_hint[tileIdx] = t_exit;
   }
   else {
+    /* No progress — center ray missed all AABBs, tile is empty */
+    tile_prim_counts[tileIdx] = 0;
     tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
     tile_far_hint[tileIdx] = 0.0f;
   }
