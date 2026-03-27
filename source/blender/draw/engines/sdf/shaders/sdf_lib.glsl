@@ -1044,22 +1044,7 @@ float sdSphere(float3 p, float r)
   return length(p) - r;
 }
 
-/**
- * Common primitive data struct for cross-shader evaluation.
- */
-struct SDFPrimitiveData {
-  int sdf_type;
-  float3 size;
-  float bevel;
-  float4 box_corners;
-  float4 box_edges;
-  int4 box_modes;
-  int modifier_start;
-  int modifier_count;
-  int polygon_point_start;
-  int polygon_point_count;
-  float4x4 inverse_matrix;
-};
+/* SDFPrimitiveData removed — eval functions take SDFObjectGPU directly. */
 
 /* ---- CSG dispatch ---- */
 
@@ -1279,12 +1264,9 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
   return d1; /* Fallback for unknown ops. */
 }
 
-/**
- * Evaluate the base primitive shape only.
- */
-float evalPrimitiveOnly(SDFPrimitiveData obj, float3 local_pos)
+float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
 {
-  float3 size = obj.size;
+  float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
   float dist;
 
@@ -1415,7 +1397,7 @@ float applyDistanceModifiers(float dist, int mod_start, int mod_count)
  * Evaluate the full SDF for an object with robust branching for CSG modifiers.
  * Uses exact CSG distance evaluation for up to ONE Array/Mirror for artifact-free smooth blending.
  */
-float evalObjectSDF(SDFPrimitiveData obj, float3 p)
+float evalObjectSDF(SDFObjectGPU obj, float3 p)
 {
   int fork_idx = -1;
   /* Find the highest (applied last to geometry, evaluated first in domain) forking modifier. */
@@ -1580,20 +1562,7 @@ float evalObjectSDF(SDFPrimitiveData obj, float3 p)
 
 float evalPrimitive(float3 local_pos, SDFObjectGPU obj)
 {
-  SDFPrimitiveData prim_data;
-  prim_data.sdf_type = obj.sdf_type;
-  prim_data.size = obj.sdf_size.xyz;
-  prim_data.bevel = obj.bevel;
-  prim_data.box_corners = obj.box_corners;
-  prim_data.box_edges = obj.box_edges;
-  prim_data.box_modes = obj.box_modes;
-  prim_data.modifier_start = obj.modifier_start;
-  prim_data.modifier_count = obj.modifier_count;
-  prim_data.polygon_point_start = obj.polygon_point_start;
-  prim_data.polygon_point_count = obj.polygon_point_count;
-  prim_data.inverse_matrix = obj.inverse_matrix;
-
-  return evalObjectSDF(prim_data, local_pos);
+  return evalObjectSDF(obj, local_pos);
 }
 
 void flushGroup(int gid, float grp_dist, float3 grp_color,
