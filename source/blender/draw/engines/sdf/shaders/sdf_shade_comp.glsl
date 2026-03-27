@@ -18,7 +18,7 @@ void main()
   }
 
   float4 gbuf = imageLoad(gbuf_pos_img, pixel);
-  if (gbuf.w == 0.0f) {
+  if (gbuf.w < 0.5f) {
     imageStore(out_color_img, pixel, float4(0.0));
     imageStore(out_depth_img, pixel, float4(0.0));
     return;

@@ -546,6 +546,10 @@ void main()
         t_prev = cone_skip_target - skip_d;
       }
     }
+    else if (cone_skip_target > t_enter + sdf_ray_epsilon * 8.0f) {
+      /* Near/on surface at skip point — back off slightly but still skip bulk of empty space */
+      t = cone_skip_target - sdf_ray_epsilon * 8.0f;
+    }
   }
 
 #endif
