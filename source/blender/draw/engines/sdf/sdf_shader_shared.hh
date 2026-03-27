@@ -44,6 +44,15 @@ struct [[host_shared]] SDFObjectGPU {
   int4 box_modes;
 };
 
+struct [[host_shared]] SDFObjectAABB {
+  float4 bbox_min;
+  float4 bbox_max;
+  int group_id;
+  float max_group_blend;
+  int _pad0;
+  int _pad1;
+};
+
 struct [[host_shared]] SDFGroupGPU {
   int csg_operation;
   int blend_type;
