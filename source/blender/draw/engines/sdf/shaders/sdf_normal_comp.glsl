@@ -2,7 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Normal pass: fused tetrahedron CD — single object loop, 4 evals per object. */
+/* Normal pass: fused tetrahedron CD — single object loop, 4 evals per object.
+ * Tetrahedron weights sum to zero, cancelling surface-distance bias. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -81,10 +82,11 @@ void main()
     }
 
     SDFObjectGPU obj = objects[i];
-    float3 lp0 = (obj.inverse_matrix * float4(s0 - obj.position.xyz, 1.0f)).xyz;
-    float3 lp1 = (obj.inverse_matrix * float4(s1 - obj.position.xyz, 1.0f)).xyz;
-    float3 lp2 = (obj.inverse_matrix * float4(s2 - obj.position.xyz, 1.0f)).xyz;
-    float3 lp3 = (obj.inverse_matrix * float4(s3 - obj.position.xyz, 1.0f)).xyz;
+    float3 obj_off = obj.position.xyz;
+    float3 lp0 = (obj.inverse_matrix * float4(s0 - obj_off, 1.0f)).xyz;
+    float3 lp1 = (obj.inverse_matrix * float4(s1 - obj_off, 1.0f)).xyz;
+    float3 lp2 = (obj.inverse_matrix * float4(s2 - obj_off, 1.0f)).xyz;
+    float3 lp3 = (obj.inverse_matrix * float4(s3 - obj_off, 1.0f)).xyz;
     float d0 = evalPrimitive(lp0, obj);
     float d1 = evalPrimitive(lp1, obj);
     float d2 = evalPrimitive(lp2, obj);

@@ -11,7 +11,7 @@
 #include "gpu_shader_create_info.hh"
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Trace Compute Shader (Pass 1: sphere tracing → G-buffer)
+/** \name SDF Trace Compute Shader (Pass 1: sphere tracing -> G-buffer)
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_trace_comp)
@@ -49,6 +49,24 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF AABB Project Pass (pre-projects object AABBs to screen space)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_aabb_project_comp)
+LOCAL_GROUP_SIZE(64)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(9, write, int4, screen_aabbs[])
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(draw_view)
+COMPUTE_SOURCE("sdf_aabb_project_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Tile Cull Pass (builds per-tile primitive lists)
  * \{ */
 
@@ -57,13 +75,12 @@ LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
 DEFINE_VALUE("kTileSize", "8")
 DEFINE_VALUE("kMaxTileObjects", "128")
-STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(9, read, int4, screen_aabbs[])
 STORAGE_BUF(5, write, int, tile_prim_counts[])
 STORAGE_BUF(6, write, int, tile_prim_lists[])
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int2, screen_size)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
-ADDITIONAL_INFO(draw_view)
 COMPUTE_SOURCE("sdf_tile_cull_comp.glsl")
 GPU_SHADER_CREATE_END()
 
@@ -163,6 +180,7 @@ PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(float, sdf_ray_epsilon)
 PUSH_CONSTANT(int2, screen_size)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(draw_view)
 COMPUTE_SOURCE("sdf_normal_comp.glsl")
 GPU_SHADER_CREATE_END()
 
@@ -308,5 +326,29 @@ GPU_SHADER_CREATE_END()
 
 /** \} */
 
-/* MATHOPS: Removed — SDF Selection March (sdf_select_march_frag.glsl deleted) */
+/* -------------------------------------------------------------------- */
+/** \name SDF DC Vertex Color (samples SDF color at each DC vertex position)
+ * \{ */
 
+GPU_SHADER_CREATE_INFO(sdf_dc_vertex_color_comp)
+LOCAL_GROUP_SIZE(64)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(2, read, SDFGroupGPU, groups[])
+STORAGE_BUF(3, read, SDFPolygonPointGPU, polygon_points[])
+STORAGE_BUF(4, read, float4, dc_positions[])
+STORAGE_BUF(5, write, float4, dc_colors[])
+STORAGE_BUF(6, read, SdfAabbNodeGPU, aabb_nodes[])
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(int, vert_count)
+PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, bvh_root)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_dc_vertex_color_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* MATHOPS: Removed - SDF Selection March (sdf_select_march_frag.glsl deleted) */
