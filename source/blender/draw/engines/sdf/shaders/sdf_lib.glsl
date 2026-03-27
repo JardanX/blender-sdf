@@ -1587,6 +1587,21 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
   }
 }
 
+void flushGroupDist(int gid, float grp_dist, inout float scene_dist)
+{
+  if (scene_dist >= 1e9f) {
+    scene_dist = grp_dist;
+  }
+  else {
+    SDFGroupGPU grp = groups[gid];
+    scene_dist = combineCSG(
+        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+        grp.shell_distance, grp.shell_mode, grp.shell_op,
+        grp.shell_blend_top, grp.shell_blend_bottom,
+        grp.chamfer_k2, grp.chamfer_k3);
+  }
+}
+
 /** \} */
 
 /** \} */
