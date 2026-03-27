@@ -17,6 +17,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_string.h"
+#include "BLI_color.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -50,6 +51,8 @@
 
 #include "UI_interface.hh"
 
+#include "BKE_attribute.h"
+#include "BKE_attribute.hh"
 #include "BKE_mesh.h"
 #include "BKE_mesh.hh"
 
@@ -765,10 +768,11 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
   Vector<float3> positions;
   Vector<float3> normals;
   Vector<int3> tris;
+  Vector<float4> colors;
   int vert_count = 0, tri_count = 0;
 
   std::string err = draw::sdf::sdf_dual_contour_to_mesh(
-      grid_res, positions, normals, tris, &vert_count, &tri_count);
+      grid_res, positions, normals, tris, colors, &vert_count, &tri_count);
 
   if (!err.empty()) {
     BKE_reportf(op->reports, RPT_ERROR, "SDF to Mesh: %s", err.c_str());
@@ -795,6 +799,27 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
   BKE_mesh_nomain_to_mesh(mesh_src, mesh_dst, ob, false);
   blender::bke::mesh_calc_edges(*mesh_dst, false, false);
 
+  /* Vertex color attribute */
+  if (colors.size() >= vert_count) {
+    const char *color_name = "SDF Color";
+    if (mesh_dst->attributes_for_write().add(
+            color_name,
+            bke::AttrDomain::Point,
+            bke::AttrType::ColorFloat,
+            bke::AttributeInitDefaultValue()))
+    {
+      bke::SpanAttributeWriter<ColorGeometry4f> col_attr =
+          mesh_dst->attributes_for_write().lookup_or_add_for_write_span<ColorGeometry4f>(
+              color_name, bke::AttrDomain::Point);
+      for (int i = 0; i < vert_count; i++) {
+        col_attr.span[i] = ColorGeometry4f(colors[i].x, colors[i].y, colors[i].z, colors[i].w);
+      }
+      col_attr.finish();
+      BKE_id_attributes_active_color_set(&mesh_dst->id, color_name);
+      BKE_id_attributes_default_color_set(&mesh_dst->id, color_name);
+    }
+  }
+
   DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
   BKE_reportf(op->reports, RPT_INFO, "Generated mesh: %d verts, %d tris", vert_count, tri_count);
@@ -815,12 +840,12 @@ void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot)
   RNA_def_int(ot->srna,
               "resolution",
               64,
-              8,
-              512,
+              1,
+              256,
               "Resolution",
-              "Voxels per Blender unit (uniform detail regardless of scene size)",
-              8,
-              512);
+              "Voxels per Blender unit",
+              1,
+              256);
 }
 
 }  // namespace blender::ed::object
