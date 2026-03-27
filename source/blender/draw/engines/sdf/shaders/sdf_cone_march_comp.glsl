@@ -29,20 +29,17 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
   for (int u = 0; u < tile_count; u++) {
     int i = tile_prim_lists[base_offset + u];
 
-    /* Partial reads: group_id + AABB only */
-    int gid = objects[i].group_id;
+    SDFObjectAABB aabb = object_aabbs[i];
+    int gid = aabb.group_id;
 
-    /* Group boundary flush */
     if (gid != cur_group && grp_has_hit) {
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
       grp_has_hit = false;
       grp_dist = 1e10f;
     }
 
-    /* AABB skip (partial read) */
-    float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
-    float max_group_blend = intBitsToFloat(objects[i]._pad3);
-    float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
+    float da = point_aabb_dist(world_pos, aabb.bbox_min.xyz, aabb.bbox_max.xyz);
+    float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
     if (da > skip_threshold) {
       out_aabb_skip = min(out_aabb_skip, da);
       cur_group = gid;

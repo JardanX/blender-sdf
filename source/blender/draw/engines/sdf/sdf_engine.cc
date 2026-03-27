@@ -155,6 +155,10 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *object_ssbo_ = nullptr;
   int object_ssbo_count_ = 0;
 
+  Vector<SDFObjectAABB> object_aabbs_;
+  gpu::StorageBuf *object_aabb_ssbo_ = nullptr;
+  int object_aabb_ssbo_count_ = 0;
+
   Vector<SDFModifierGPU> modifiers_;
   gpu::StorageBuf *modifier_ssbo_ = nullptr;
   int modifier_ssbo_count_ = 0;
@@ -1521,6 +1525,23 @@ class Instance : public DrawEngine {
       bvh_tree_.create_proxy(bounds, i);
     }
 
+    /* Hot AABB buffer (must be after compaction + AABB expansion) */
+    {
+      const int n = int(objects_.size());
+      object_aabbs_.resize(n);
+      for (int i = 0; i < n; i++) {
+        SDFObjectAABB &a = object_aabbs_[i];
+        a.bbox_min = objects_[i].bbox_min;
+        a.bbox_max = objects_[i].bbox_max;
+        a.group_id = objects_[i].group_id;
+        float blend_val;
+        memcpy(&blend_val, &objects_[i]._pad3, sizeof(float));
+        a.max_group_blend = blend_val;
+        a._pad0 = 0;
+        a._pad1 = 0;
+      }
+    }
+
     needs_upload_ = true;
 
   }
@@ -1865,6 +1886,21 @@ class Instance : public DrawEngine {
       GPU_storagebuf_update(object_ssbo_, objects_.data());
     }
 
+    /* AABB hot buffer */
+    const size_t aabb_buf_size = count * sizeof(SDFObjectAABB);
+    if (object_aabb_ssbo_ != nullptr && object_aabb_ssbo_count_ != count) {
+      GPU_storagebuf_free(object_aabb_ssbo_);
+      object_aabb_ssbo_ = nullptr;
+    }
+    if (object_aabb_ssbo_ == nullptr) {
+      object_aabb_ssbo_ = GPU_storagebuf_create_ex(
+          aabb_buf_size, object_aabbs_.data(), GPU_USAGE_DYNAMIC, "sdf_object_aabbs_ssbo");
+      object_aabb_ssbo_count_ = count;
+    }
+    else {
+      GPU_storagebuf_update(object_aabb_ssbo_, object_aabbs_.data());
+    }
+
     const int mod_count = math::max(int(modifiers_.size()), 1);
     const size_t mod_buf_size = mod_count * sizeof(SDFModifierGPU);
 
@@ -2040,6 +2076,12 @@ class Instance : public DrawEngine {
         GPU_storagebuf_bind(bvh_nodes_ssbo_, slot);
       }
     }
+    if (object_aabb_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "object_aabbs");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(object_aabb_ssbo_, slot);
+      }
+    }
   }
 
   static constexpr int kMaxTileObjects = 128;
@@ -2185,6 +2227,12 @@ class Instance : public DrawEngine {
     }
     if (group_ssbo_) {
       GPU_storagebuf_bind(group_ssbo_, GPU_shader_get_ssbo_binding(sh, "groups"));
+    }
+    if (object_aabb_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "object_aabbs");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(object_aabb_ssbo_, slot);
+      }
     }
     if (cone_hit_ssbo_) {
       GPU_storagebuf_bind(cone_hit_ssbo_, GPU_shader_get_ssbo_binding(sh, "tile_hit_pos"));
@@ -2558,6 +2606,9 @@ class Instance : public DrawEngine {
     }
     if (object_ssbo_) {
       GPU_storagebuf_free(object_ssbo_);
+    }
+    if (object_aabb_ssbo_) {
+      GPU_storagebuf_free(object_aabb_ssbo_);
     }
     if (modifier_ssbo_) {
       GPU_storagebuf_free(modifier_ssbo_);

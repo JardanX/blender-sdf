@@ -217,8 +217,9 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
   for (uint u = 0u; u < n; u++) {
     int i = s_tileObjList[u];
 
-    /* Partial read: group_id for boundary detection */
-    int gid = objects[i].group_id;
+    /* Hot buffer: 48 bytes instead of 256 for AABB skip path */
+    SDFObjectAABB aabb = object_aabbs[i];
+    int gid = aabb.group_id;
 
     /* Group boundary: flush previous group into scene */
     if (gid != cur_group && grp_has_hit) {
@@ -232,10 +233,8 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
       grp_winner_id = -1.0f;
     }
 
-    /* Partial read: AABB + blend threshold only */
-    float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
-    float max_group_blend = intBitsToFloat(objects[i]._pad3);
-    float skip_threshold = max(sdf_ray_epsilon, max_group_blend);
+    float da = point_aabb_dist(world_pos, aabb.bbox_min.xyz, aabb.bbox_max.xyz);
+    float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
     if (da > skip_threshold) {
       out_aabb_skip = min(out_aabb_skip, da);
       cur_group = gid;

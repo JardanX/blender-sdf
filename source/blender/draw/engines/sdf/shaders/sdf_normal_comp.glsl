@@ -59,7 +59,8 @@ void main()
 
   for (int u = 0; u < nc; u++) {
     int i = s_candidates[u];
-    int gid = objects[i].group_id;
+    SDFObjectAABB n_aabb = object_aabbs[i];
+    int gid = n_aabb.group_id;
 
     if (gid != cur_group && grp_has_hit) {
       if (sd0 >= 1e9f) { sd0 = gd0; sd1 = gd1; sd2 = gd2; sd3 = gd3; }
@@ -74,8 +75,8 @@ void main()
       gd0 = 1e10f; gd1 = 1e10f; gd2 = 1e10f; gd3 = 1e10f;
     }
 
-    float da = point_aabb_dist(p, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
-    float skip = max(margin, intBitsToFloat(objects[i]._pad3) + margin);
+    float da = point_aabb_dist(p, n_aabb.bbox_min.xyz, n_aabb.bbox_max.xyz);
+    float skip = max(margin, n_aabb.max_group_blend + margin);
     if (da > skip) {
       cur_group = gid;
       continue;
