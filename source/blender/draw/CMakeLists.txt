@@ -348,6 +348,7 @@ set(GLSL_SRC
   engines/workbench/workbench_shader_shared.hh
 
   engines/sdf/shaders/sdf_trace_comp.glsl
+  engines/sdf/shaders/sdf_aabb_project_comp.glsl
   engines/sdf/shaders/sdf_tile_cull_comp.glsl
   engines/sdf/shaders/sdf_cone_march_comp.glsl
   engines/sdf/shaders/sdf_normal_comp.glsl

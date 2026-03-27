@@ -1589,6 +1589,12 @@ class Instance : public DrawEngine {
       needs_upload_ = false;
     }
 
+    GPU_debug_group_begin("SDF AABB Project");
+    draw_aabb_project();
+    GPU_debug_group_end();
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+
     GPU_debug_group_begin("SDF Tile Cull");
     draw_tile_cull();
     GPU_debug_group_end();
@@ -2132,9 +2138,6 @@ class Instance : public DrawEngine {
     int tiles_y = (render_size_.y + 7) / 8;
     int total_tiles = tiles_x * tiles_y;
     ensure_tile_ssbos(total_tiles);
-
-    draw_aabb_project();
-    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
     gpu::Shader *sh = tile_cull_sh_;
     GPU_shader_bind(sh);

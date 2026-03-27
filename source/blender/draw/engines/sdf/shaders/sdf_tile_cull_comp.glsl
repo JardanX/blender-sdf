@@ -44,6 +44,41 @@ void main()
   }
   barrier();
 
+  /* Bitonic sort — CSG evaluation requires ascending index order */
+  {
+    uint n = min(s_tileObjCount, uint(kMaxTileObjects));
+
+    for (uint i = n + uint(local_idx); i < uint(kMaxTileObjects); i += 64u) {
+      s_tileObjList[i] = 0x7FFFFFFF;
+    }
+    barrier();
+
+    for (uint k = 2u; k <= uint(kMaxTileObjects); k <<= 1u) {
+      for (uint j = k >> 1u; j > 0u; j >>= 1u) {
+        for (uint t = uint(local_idx); t < uint(kMaxTileObjects) / 2u; t += 64u) {
+          uint block = t / j;
+          uint offset = t & (j - 1u);
+          uint i = block * 2u * j + offset;
+          uint partner = i + j;
+          bool ascending = ((i & k) == 0u);
+          int a = s_tileObjList[i];
+          int b = s_tileObjList[partner];
+          int lo = min(a, b);
+          int hi = max(a, b);
+          s_tileObjList[i] = ascending ? lo : hi;
+          s_tileObjList[partner] = ascending ? hi : lo;
+        }
+        barrier();
+      }
+    }
+
+    if (local_idx == 0) {
+      s_tileObjCount = n;
+    }
+  }
+  barrier();
+
+  /* Write to SSBOs */
   int tilesX = (screen_size.x + kTileSize - 1) / kTileSize;
   int tileIdx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * tilesX;
   uint n = min(s_tileObjCount, uint(kMaxTileObjects));
