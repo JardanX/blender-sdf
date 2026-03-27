@@ -198,18 +198,15 @@ float evalSceneDistBVH(float3 world_pos)
 
 #ifdef USE_TILE_CULLING
 
-/* Single-pass evaluation over flat sorted tile-visible list.
- * Deferred struct load: only bbox/group loaded for AABB skip path. */
-float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_skip, out float out_obj_id)
+/* Distance-only tile evaluation (color resolved in separate pass). */
+float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj_id)
 {
   float scene_dist = 1e10f;
-  out_color = float3(0.5f);
   out_aabb_skip = 1e30f;
   out_obj_id = -1.0f;
 
   int cur_group = -2;
   float grp_dist = 1e10f;
-  float3 grp_color = float3(0.5f);
   bool grp_has_hit = false;
   float grp_winner_id = -1.0f;
 
@@ -221,13 +218,9 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
     SDFObjectAABB aabb = object_aabbs[i];
     int gid = aabb.group_id;
 
-    /* Group boundary: flush previous group into scene */
     if (gid != cur_group && grp_has_hit) {
-      float prev = scene_dist;
-      flushGroup(cur_group, grp_dist, grp_color, scene_dist, out_color);
-      if (prev >= 1e9f || grp_dist < prev) {
-        out_obj_id = grp_winner_id;
-      }
+      flushGroupDist(cur_group, grp_dist, scene_dist);
+      if (scene_dist < 1e9f) { out_obj_id = grp_winner_id; }
       grp_has_hit = false;
       grp_dist = 1e10f;
       grp_winner_id = -1.0f;
@@ -241,18 +234,15 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
       continue;
     }
 
-    /* Full struct load: only when AABB test passes */
     SDFObjectGPU obj = objects[i];
     float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
     cur_group = gid;
 
     if (gid < 0) {
-      /* Ungrouped: combine directly into scene */
       if (scene_dist >= 1e9f) {
         if (obj.csg_operation == 0) {
           scene_dist = d;
-          out_color = obj.color.rgb;
           out_obj_id = float(obj.original_index);
         }
       }
@@ -264,19 +254,12 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
         if (obj.csg_operation == 0 && d < prev) {
           out_obj_id = float(obj.original_index);
         }
-        if (obj.csg_operation == 0) {
-          float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
-          out_color = mix(out_color, obj.color.rgb, t);
-        }
       }
     }
     else {
-      /* Grouped: accumulate into group CSG chain, track per-object winner.
-       * Allow all ops except subtract to initialize (subtract needs a base). */
       if (!grp_has_hit) {
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL) {
           grp_dist = d;
-          grp_color = obj.color.rgb;
           grp_winner_id = float(obj.original_index);
           grp_has_hit = true;
         }
@@ -289,19 +272,14 @@ float evalSceneTile(float3 world_pos, out float3 out_color, out float out_aabb_s
         if (obj.csg_operation == 0 && d < prev) {
           grp_winner_id = float(obj.original_index);
         }
-        if (obj.csg_operation == 0) {
-          float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
-          grp_color = mix(grp_color, obj.color.rgb, t);
-        }
       }
     }
   }
 
-  /* Flush final group */
   if (grp_has_hit) {
-    float prev = scene_dist;
-    flushGroup(cur_group, grp_dist, grp_color, scene_dist, out_color);
-    if (prev >= 1e9f || grp_dist < prev) {
+    float prev_s = scene_dist;
+    flushGroupDist(cur_group, grp_dist, scene_dist);
+    if (prev_s >= 1e9f || grp_dist < prev_s) {
       out_obj_id = grp_winner_id;
     }
   }
@@ -521,7 +499,6 @@ void main()
   float t = t_enter;
   bool hit = false;
   float3 hit_pos;
-  float3 hit_color;
   float hit_obj_id = -1.0f;
   int steps_taken = 0;
   float omega = sdf_over_relaxation;
@@ -535,10 +512,9 @@ void main()
    * Handles both surface approach AND empty-space skipping (booleans). */
   if (cone_skip_target > 0.0f) {
     float3 skip_pos = ray_origin + ray_dir * cone_skip_target;
-    float3 skip_color;
     float skip_aabb;
     float skip_id;
-    float skip_d = evalSceneTile(skip_pos, skip_color, skip_aabb, skip_id);
+    float skip_d = evalSceneTile(skip_pos, skip_aabb, skip_id);
     if (skip_d > sdf_ray_epsilon * 2.0f) {
       t = cone_skip_target;
       if (skip_d < 1e9f) {
@@ -558,13 +534,11 @@ void main()
     if (t > t_exit) { break; }
     float3 pos = ray_origin + ray_dir * t;
 
-    /* Combined evaluation + empty-space skip */
-    float3 color;
     float d;
     float aabb_skip;
     float cur_obj_id;
 #ifdef USE_TILE_CULLING
-    d = evalSceneTile(pos, color, aabb_skip, cur_obj_id);
+    d = evalSceneTile(pos, aabb_skip, cur_obj_id);
 
     if (d >= 1e9f) {
       t += max(aabb_skip, sdf_ray_epsilon);
@@ -580,6 +554,7 @@ void main()
       d = max(aabb_skip, sdf_ray_epsilon * 10.0f);
     }
 #else
+    float3 color;
     d = evalSceneBVH(pos, color, aabb_skip, cur_obj_id);
 
     /* If no AABB contains this point, skip by nearest AABB distance */
@@ -631,7 +606,6 @@ void main()
       else {
         hit_pos = pos + ray_dir * d;
       }
-      hit_color = color;
       hit_obj_id = cur_obj_id;
       break;
     }
@@ -781,5 +755,5 @@ void main()
 
   /* Output G-buffer */
   imageStore(gbuf_pos_img, pixel, float4(hit_pos, 1.0));
-  imageStore(gbuf_color_img, pixel, float4(hit_color, hit_obj_id));
+  imageStore(gbuf_color_img, pixel, float4(0.0f, 0.0f, 0.0f, hit_obj_id));
 }

@@ -162,6 +162,34 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Color Resolve (evaluates color at trace hit positions)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_color_resolve_comp)
+LOCAL_GROUP_SIZE(8, 8)
+DO_STATIC_COMPILATION()
+DEFINE_VALUE("kTileSize", "8")
+DEFINE_VALUE("kMaxTileObjects", "128")
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(2, read, SDFGroupGPU, groups[])
+STORAGE_BUF(5, read, int, tile_prim_counts[])
+STORAGE_BUF(6, read, int, tile_prim_lists[])
+STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
+STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
+IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
+IMAGE(1, SFLOAT_16_16_16_16, read_write, image2D, gbuf_color_img)
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(float, sdf_ray_epsilon)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_color_resolve_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Normal Compute Shader (tetrahedron CD at hit positions)
  * \{ */
 

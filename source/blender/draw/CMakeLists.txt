@@ -351,6 +351,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_aabb_project_comp.glsl
   engines/sdf/shaders/sdf_tile_cull_comp.glsl
   engines/sdf/shaders/sdf_cone_march_comp.glsl
+  engines/sdf/shaders/sdf_color_resolve_comp.glsl
   engines/sdf/shaders/sdf_normal_comp.glsl
   engines/sdf/shaders/sdf_shade_comp.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
@@ -359,6 +360,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_grid_eval_comp.glsl
   engines/sdf/shaders/sdf_dc_contour_comp.glsl
   engines/sdf/shaders/sdf_dc_triangulate_comp.glsl
+  engines/sdf/shaders/sdf_dc_vertex_color_comp.glsl
 
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/sdf_shader_shared.hh

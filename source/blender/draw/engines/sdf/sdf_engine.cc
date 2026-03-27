@@ -99,6 +99,7 @@ class Instance : public DrawEngine {
     SH_AABB_PROJECT_COMP,
     SH_TILE_CULL_COMP,
     SH_CONE_MARCH_COMP,
+    SH_COLOR_RESOLVE_COMP,
     SH_NORMAL_COMP,
     SH_SHADE_COMP,
     SH_BLIT,
@@ -112,6 +113,7 @@ class Instance : public DrawEngine {
       "sdf_aabb_project_comp",
       "sdf_tile_cull_comp",
       "sdf_cone_march_comp",
+      "sdf_color_resolve_comp",
       "sdf_normal_comp",
       "sdf_shade_comp",
       "sdf_blit",
@@ -125,6 +127,7 @@ class Instance : public DrawEngine {
   gpu::Shader *&aabb_project_sh_ = shaders_[SH_AABB_PROJECT_COMP];
   gpu::Shader *&tile_cull_sh_ = shaders_[SH_TILE_CULL_COMP];
   gpu::Shader *&cone_march_sh_ = shaders_[SH_CONE_MARCH_COMP];
+  gpu::Shader *&color_resolve_sh_ = shaders_[SH_COLOR_RESOLVE_COMP];
   gpu::Shader *&normal_comp_sh_ = shaders_[SH_NORMAL_COMP];
   gpu::Shader *&shade_comp_sh_ = shaders_[SH_SHADE_COMP];
   gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
@@ -1634,6 +1637,12 @@ class Instance : public DrawEngine {
 
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
 
+    GPU_debug_group_begin("SDF Color Resolve");
+    draw_color_resolve();
+    GPU_debug_group_end();
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+
     GPU_debug_group_begin("SDF Normal");
     draw_normal();
     GPU_debug_group_end();
@@ -2337,6 +2346,45 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_unbind(comp_color_tx_);
     GPU_texture_image_unbind(comp_depth_tx_);
+    GPU_texture_image_unbind(gbuf_pos_tx_);
+    GPU_texture_image_unbind(gbuf_color_tx_);
+    GPU_shader_unbind();
+  }
+
+  void draw_color_resolve()
+  {
+    if (debug_bvh_views_ != 0) {
+      return;
+    }
+    gpu::Shader *sh = color_resolve_sh_;
+    if (!sh) {
+      return;
+    }
+    GPU_shader_bind(sh);
+
+    GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
+    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
+
+    bind_ssbos(sh);
+
+    if (tile_prim_counts_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+    }
+    if (tile_prim_lists_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+    }
+
+    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
+    GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
+
+    int dispatch_x = (render_size_.x + 7) / 8;
+    int dispatch_y = (render_size_.y + 7) / 8;
+    GPU_compute_dispatch(sh, dispatch_x, dispatch_y, 1);
+
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
