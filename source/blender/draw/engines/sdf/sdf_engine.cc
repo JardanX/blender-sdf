@@ -2752,6 +2752,7 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
                                       Vector<float3> &out_positions,
                                       Vector<float3> &out_normals,
                                       Vector<int3> &out_tris,
+                                      Vector<float4> &out_colors,
                                       int *out_vert_count,
                                       int *out_tri_count)
 {
@@ -2799,11 +2800,13 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   fflush(stderr);
 
   /* Compile shaders (cached) */
-  static gpu::Shader *grid_sh = nullptr, *dc_sh = nullptr, *tri_sh = nullptr;
+  static gpu::Shader *grid_sh = nullptr, *dc_sh = nullptr, *tri_sh = nullptr,
+                      *color_sh = nullptr;
   if (!grid_sh) grid_sh = GPU_shader_create_from_info_name("sdf_grid_eval_comp");
   if (!dc_sh) dc_sh = GPU_shader_create_from_info_name("sdf_dc_contour_comp");
   if (!tri_sh) tri_sh = GPU_shader_create_from_info_name("sdf_dc_triangulate_comp");
-  if (!grid_sh || !dc_sh || !tri_sh) return "Shader compile failed";
+  if (!color_sh) color_sh = GPU_shader_create_from_info_name("sdf_dc_vertex_color_comp");
+  if (!grid_sh || !dc_sh || !tri_sh || !color_sh) return "Shader compile failed";
 
   /* Global output buffers. Readback = verts + tris transferred from GPU→CPU.
    * 4M verts (128 MB) + 8M tris (128 MB) = 256 MB. PCIe transfer ~20ms.
@@ -2827,12 +2830,17 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   gpu::StorageBuf *cell_ssbo = GPU_storagebuf_create_ex(
       padded_cells_total * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "dc_cell_verts");
 
+  /* Color output buffer (one float4 per vertex) */
+  gpu::StorageBuf *color_ssbo = GPU_storagebuf_create_ex(
+      global_max_verts * sizeof(float4), nullptr, GPU_USAGE_DYNAMIC, "dc_colors");
+
   auto cleanup = [&]() {
     GPU_storagebuf_free(grid_ssbo);
     GPU_storagebuf_free(vert_ssbo);
     GPU_storagebuf_free(counter_ssbo);
     GPU_storagebuf_free(cell_ssbo);
     GPU_storagebuf_free(tri_ssbo);
+    GPU_storagebuf_free(color_ssbo);
   };
 
   /* Pre-bind SSBO slots that don't change between chunks */
@@ -2961,6 +2969,41 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     return "DC produced 0 vertices";
   }
 
+  /* Vertex color pass: evaluate SDF color at each DC vertex position */
+  {
+    fprintf(stderr, "SDF DC: vertex color pass (%d verts)...\n", vert_count); fflush(stderr);
+    GPU_shader_bind(color_sh);
+    int col_obj_slot = GPU_shader_get_ssbo_binding(color_sh, "objects");
+    int col_mod_slot = GPU_shader_get_ssbo_binding(color_sh, "sdf_modifiers");
+    int col_grp_slot = GPU_shader_get_ssbo_binding(color_sh, "groups");
+    int col_poly_slot = s_polygon_ssbo ?
+                            GPU_shader_get_ssbo_binding(color_sh, "polygon_points") :
+                            -1;
+    int col_pos_slot = GPU_shader_get_ssbo_binding(color_sh, "dc_positions");
+    int col_out_slot = GPU_shader_get_ssbo_binding(color_sh, "dc_colors");
+    int col_bvh_slot = GPU_shader_get_ssbo_binding(color_sh, "aabb_nodes");
+
+    GPU_storagebuf_bind(s_object_ssbo, col_obj_slot);
+    GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
+    GPU_storagebuf_bind(s_group_ssbo, col_grp_slot);
+    if (col_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, col_poly_slot);
+    GPU_storagebuf_bind(vert_ssbo, col_pos_slot);
+    GPU_storagebuf_bind(color_ssbo, col_out_slot);
+    if (has_bvh && col_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, col_bvh_slot);
+
+    GPU_shader_uniform_1i(color_sh, "object_count", s_object_count);
+    GPU_shader_uniform_1i(color_sh, "group_count", s_group_count);
+    GPU_shader_uniform_1i(color_sh, "vert_count", vert_count);
+    GPU_shader_uniform_1i(color_sh, "use_bvh", has_bvh);
+    GPU_shader_uniform_1i(color_sh, "bvh_root", s_bvh_root);
+
+    int color_groups = (vert_count + 63) / 64;
+    GPU_compute_dispatch(color_sh, color_groups, 1, 1);
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+    GPU_shader_unbind();
+    fprintf(stderr, "SDF DC: vertex color pass done\n"); fflush(stderr);
+  }
+
   fprintf(stderr, "SDF DC: reading vertices (%d, %zu MB)...\n",
           global_max_verts, (size_t)global_max_verts * sizeof(DCVertexGPU) / (1024 * 1024));
   fflush(stderr);
@@ -2974,6 +3017,16 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     out_positions[i] = float3(gpu_verts[i].position);
     out_normals[i] = float3(gpu_verts[i].normal);
   }
+
+  /* Read back vertex colors */
+  fprintf(stderr, "SDF DC: reading colors (%d verts)...\n", vert_count); fflush(stderr);
+  Vector<float4> gpu_colors(global_max_verts);
+  GPU_storagebuf_read(color_ssbo, gpu_colors.data());
+  out_colors.resize(vert_count);
+  for (int i = 0; i < vert_count; i++) {
+    out_colors[i] = gpu_colors[i];
+  }
+  fprintf(stderr, "SDF DC: colors done\n"); fflush(stderr);
 
   fprintf(stderr, "SDF DC: reading triangles (%d, %zu MB)...\n",
           global_max_tris, (size_t)global_max_tris * sizeof(int) * 4 / (1024 * 1024));

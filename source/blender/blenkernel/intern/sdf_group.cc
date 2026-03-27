@@ -209,6 +209,36 @@ void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member)
   BKE_sdf_group_reindex_members(group);
 }
 
+void BKE_sdf_group_member_move_to(SDFGroup *group,
+                                   SDFGroupMember *member,
+                                   SDFGroupMember *target,
+                                   bool before)
+{
+  if (member == target) {
+    return;
+  }
+  BLI_remlink(&group->members, member);
+  if (before) {
+    BLI_insertlinkbefore(&group->members, target, member);
+  }
+  else {
+    BLI_insertlinkafter(&group->members, target, member);
+  }
+  BKE_sdf_group_reindex_members(group);
+}
+
+SDFGroupMember *BKE_sdf_group_member_find_by_object(SDFGroup *group, Object *ob)
+{
+  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
+       member = member->next)
+  {
+    if (member->object == ob) {
+      return member;
+    }
+  }
+  return nullptr;
+}
+
 void BKE_sdf_group_member_move(SDFGroup *group, SDFGroupMember *member, int direction)
 {
   if (direction == -1) {

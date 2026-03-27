@@ -2,15 +2,14 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Normal pass: 3-tap coplanar CD + SDF unit-length constraint.
- * Offsets (eps,0,0), (0,eps,0), (-eps,-eps,0) sum to zero (bias cancels).
- * gx, gy exact from samples. gz from |grad|=1 constraint, sign from view ray. */
+/* Normal pass: fused tetrahedron CD with distance screening.
+ * Single object loop: AABB once, struct load once, center eval for screening,
+ * 4 tetrahedron evals only for near-surface objects. */
 
 #include "infos/sdf_shader_infos.hh"
 
 COMPUTE_SHADER_CREATE_INFO(sdf_normal_comp)
 
-#include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
 shared int s_candidates[kMaxTileObjects];
@@ -46,16 +45,12 @@ void main()
   float3 p = gbuf.xyz;
   float eps = sdf_ray_epsilon * 5.0f;
   float margin = eps * 1.5f;
+  float grad_thresh = eps * 50.0f;
+  const float2 k = float2(1.0f, -1.0f);
 
-  /* 3 coplanar offsets with zero sum. */
-  float3 s0 = p + float3(eps, 0.0f, 0.0f);
-  float3 s1 = p + float3(0.0f, eps, 0.0f);
-  float3 s2 = p + float3(-eps, -eps, 0.0f);
-
-  /* 3 scene distance accumulators. */
-  float sd0 = 1e10f, sd1 = 1e10f, sd2 = 1e10f;
+  float sd0 = 1e10f, sd1 = 1e10f, sd2 = 1e10f, sd3 = 1e10f;
   int cur_group = -2;
-  float g0 = 1e10f, g1 = 1e10f, g2 = 1e10f;
+  float gd0 = 1e10f, gd1 = 1e10f, gd2 = 1e10f, gd3 = 1e10f;
   bool grp_has_hit = false;
 
   for (int u = 0; u < nc; u++) {
@@ -64,103 +59,79 @@ void main()
     int gid = n_aabb.group_id;
 
     if (gid != cur_group && grp_has_hit) {
-      if (sd0 >= 1e9f) { sd0 = g0; sd1 = g1; sd2 = g2; }
+      if (sd0 >= 1e9f) { sd0 = gd0; sd1 = gd1; sd2 = gd2; sd3 = gd3; }
       else {
         SDFGroupGPU grp = groups[cur_group];
-        sd0 = combineCSG(sd0, g0, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
-        sd1 = combineCSG(sd1, g1, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
-        sd2 = combineCSG(sd2, g2, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+        sd0 = combineCSG(sd0, gd0, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+        sd1 = combineCSG(sd1, gd1, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+        sd2 = combineCSG(sd2, gd2, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+        sd3 = combineCSG(sd3, gd3, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
       }
       grp_has_hit = false;
-      g0 = 1e10f; g1 = 1e10f; g2 = 1e10f;
+      gd0 = 1e10f; gd1 = 1e10f; gd2 = 1e10f; gd3 = 1e10f;
     }
 
     float da = point_aabb_dist(p, n_aabb.bbox_min.xyz, n_aabb.bbox_max.xyz);
-    float skip = max(margin, n_aabb.max_group_blend + margin);
-    if (da > skip) {
+    if (da > max(margin, n_aabb.max_group_blend + margin)) {
       cur_group = gid;
       continue;
     }
 
-    float d0, d1, d2;
-    float grad_thresh = eps * 50.0f;
+    SDFObjectGPU obj = objects[i];
+    float3 off = obj.position.xyz;
+    float4x4 inv = obj.inverse_matrix;
+    float dc = evalPrimitive((inv * float4(p - off, 1.0f)).xyz, obj);
 
-    if (da > grad_thresh) {
-      /* Medium distance: AABB proxy, skip evalPrimitive entirely.
-       * Constant across all samples → zero gradient contribution. */
-      d0 = da; d1 = da; d2 = da;
+    float d0, d1, d2, d3;
+    if (abs(dc) < max(grad_thresh, n_aabb.max_group_blend)) {
+      d0 = evalPrimitive((inv * float4(p + k.xyy * eps - off, 1.0f)).xyz, obj);
+      d1 = evalPrimitive((inv * float4(p + k.yyx * eps - off, 1.0f)).xyz, obj);
+      d2 = evalPrimitive((inv * float4(p + k.yxy * eps - off, 1.0f)).xyz, obj);
+      d3 = evalPrimitive((inv * float4(p + k.xxx * eps - off, 1.0f)).xyz, obj);
     }
     else {
-      /* Close to AABB: need actual SDF evaluation. */
-      SDFObjectGPU obj = objects[i];
-      float3 obj_off = obj.position.xyz;
-      float3 lp_c = (obj.inverse_matrix * float4(p - obj_off, 1.0f)).xyz;
-      float dc = evalPrimitive(lp_c, obj);
-
-      if (abs(dc) < max(grad_thresh, n_aabb.max_group_blend)) {
-        d0 = evalPrimitive((obj.inverse_matrix * float4(s0 - obj_off, 1.0f)).xyz, obj);
-        d1 = evalPrimitive((obj.inverse_matrix * float4(s1 - obj_off, 1.0f)).xyz, obj);
-        d2 = evalPrimitive((obj.inverse_matrix * float4(s2 - obj_off, 1.0f)).xyz, obj);
-      }
-      else {
-        d0 = dc; d1 = dc; d2 = dc;
-      }
+      d0 = dc; d1 = dc; d2 = dc; d3 = dc;
     }
     cur_group = gid;
 
+    int cop = obj.csg_operation, cbt = obj.blend_type, csm = obj.shell_mode, cso = obj.shell_op;
+    float cbl = obj.blend, csd = obj.shell_distance, cst = obj.shell_blend_top, csb = obj.shell_blend_bottom, ck2 = obj.chamfer_k2, ck3 = obj.chamfer_k3;
+
     if (gid < 0) {
-      if (sd0 >= 1e9f) { sd0 = d0; sd1 = d1; sd2 = d2; }
+      if (sd0 >= 1e9f) { sd0 = d0; sd1 = d1; sd2 = d2; sd3 = d3; }
       else {
-        sd0 = combineCSG(sd0, d0, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        sd1 = combineCSG(sd1, d1, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        sd2 = combineCSG(sd2, d2, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+        sd0 = combineCSG(sd0, d0, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        sd1 = combineCSG(sd1, d1, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        sd2 = combineCSG(sd2, d2, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        sd3 = combineCSG(sd3, d3, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
       }
     }
     else {
       if (!grp_has_hit) {
-        g0 = d0; g1 = d1; g2 = d2;
+        gd0 = d0; gd1 = d1; gd2 = d2; gd3 = d3;
         grp_has_hit = true;
       }
       else {
-        g0 = combineCSG(g0, d0, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        g1 = combineCSG(g1, d1, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        g2 = combineCSG(g2, d2, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+        gd0 = combineCSG(gd0, d0, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        gd1 = combineCSG(gd1, d1, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        gd2 = combineCSG(gd2, d2, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        gd3 = combineCSG(gd3, d3, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
       }
     }
   }
 
   if (grp_has_hit) {
-    if (sd0 >= 1e9f) { sd0 = g0; sd1 = g1; sd2 = g2; }
+    if (sd0 >= 1e9f) { sd0 = gd0; sd1 = gd1; sd2 = gd2; sd3 = gd3; }
     else {
       SDFGroupGPU grp = groups[cur_group];
-      sd0 = combineCSG(sd0, g0, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
-      sd1 = combineCSG(sd1, g1, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
-      sd2 = combineCSG(sd2, g2, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+      sd0 = combineCSG(sd0, gd0, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+      sd1 = combineCSG(sd1, gd1, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+      sd2 = combineCSG(sd2, gd2, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
+      sd3 = combineCSG(sd3, gd3, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance, grp.shell_mode, grp.shell_op, grp.shell_blend_top, grp.shell_blend_bottom, grp.chamfer_k2, grp.chamfer_k3);
     }
   }
 
-  /* Recover gx, gy from zero-sum samples (bias-free). */
-  float inv3eps = 1.0f / (3.0f * eps);
-  float gx = (2.0f * sd0 - sd1 - sd2) * inv3eps;
-  float gy = (2.0f * sd1 - sd0 - sd2) * inv3eps;
-
-  /* gz from SDF unit-length constraint. */
-  float gz_sq = max(0.0f, 1.0f - gx * gx - gy * gy);
-  float gz = sqrt(gz_sq);
-
-  /* Sign from view ray: normal faces toward camera. */
-  ViewMatrices vm = drw_view();
-  float3 cam_pos = vm.viewinv[3].xyz;
-  float3 view_dir = normalize(p - cam_pos);
-  /* For ortho: viewinv[2] is the view direction, viewinv[3] may be far away. */
-  bool is_ortho = (vm.winmat[3][3] == 1.0f);
-  if (is_ortho) {
-    view_dir = -normalize(vm.viewinv[2].xyz);
-  }
-  float sign_test = gx * view_dir.x + gy * view_dir.y + gz * view_dir.z;
-  if (sign_test > 0.0f) { gz = -gz; }
-
-  float3 n = float3(gx, gy, gz);
+  float3 n = k.xyy * sd0 + k.yyx * sd1 + k.yxy * sd2 + k.xxx * sd3;
   float nl = length(n);
   n = nl > 1e-8f ? n / nl : float3(0.0f, 0.0f, 1.0f);
   if (any(isnan(n))) { n = float3(0.0f, 0.0f, 1.0f); }

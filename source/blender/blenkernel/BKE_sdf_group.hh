@@ -30,6 +30,11 @@ SDFGroupMember *BKE_sdf_group_member_insert_after(SDFGroup *group,
                                                    Object *new_ob);
 void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member);
 void BKE_sdf_group_member_move(SDFGroup *group, SDFGroupMember *member, int direction);
+void BKE_sdf_group_member_move_to(SDFGroup *group,
+                                   SDFGroupMember *member,
+                                   SDFGroupMember *target,
+                                   bool before);
+SDFGroupMember *BKE_sdf_group_member_find_by_object(SDFGroup *group, Object *ob);
 void BKE_sdf_group_reindex_members(SDFGroup *group);
 void BKE_sdf_group_cleanup_null_members(SDFGroup *group);
 void BKE_sdf_groups_cleanup_all_null_members(Main *bmain);

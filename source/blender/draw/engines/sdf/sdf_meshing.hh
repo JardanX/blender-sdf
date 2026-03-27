@@ -19,6 +19,7 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
                                       Vector<float3> &out_positions,
                                       Vector<float3> &out_normals,
                                       Vector<int3> &out_tris,
+                                      Vector<float4> &out_colors,
                                       int *out_vert_count,
                                       int *out_tri_count);
 

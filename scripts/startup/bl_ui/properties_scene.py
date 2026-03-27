@@ -441,19 +441,6 @@ class SCENE_PT_custom_props(SceneButtonsPanel, PropertyPanel, Panel):
     _property_type = bpy.types.Scene
 
 
-class SCENE_OT_sdf_set_bake_resolution(bpy.types.Operator):
-    """Set the SDF bake resolution preset"""
-    bl_idname = "scene.sdf_set_bake_resolution"
-    bl_label = "Set Bake Resolution"
-    bl_options = {'REGISTER', 'INTERNAL'}
-
-    resolution: IntProperty(name="Resolution", default=64, min=8, max=512)
-
-    def execute(self, context):
-        context.scene["sdf_bake_resolution"] = self.resolution
-        return {'FINISHED'}
-
-
 class SCENE_PT_sdf_bake(SceneButtonsPanel, Panel):
     bl_label = "SDF to Mesh"
     bl_options = {'DEFAULT_CLOSED'}
@@ -464,42 +451,13 @@ class SCENE_PT_sdf_bake(SceneButtonsPanel, Panel):
         layout.use_property_decorate = False
 
         scene = context.scene
-        res = scene.get("sdf_bake_resolution", 64)
+        layout.prop(scene, "sdf_bake_resolution", text="Resolution")
 
-        # --- Resolution presets (choose before baking) ---
-        box = layout.box()
-        box.label(text="Resolution", icon='MESH_GRID')
-
-        row = box.row(align=True)
-        row.scale_y = 1.3
-        for value in (32, 64, 128, 256):
-            sub = row.row(align=True)
-            sub.active = (res == value)
-            op = sub.operator(
-                "scene.sdf_set_bake_resolution",
-                text=str(value),
-                depress=(res == value),
-            )
-            op.resolution = value
-
-        # Custom resolution field
-        row2 = box.row(align=True)
-        row2.prop(scene, '["sdf_bake_resolution"]', text="Custom")
-
-        layout.separator()
-
-        # --- Bake button (after resolution is confirmed) ---
         col = layout.column(align=True)
-        col.scale_y = 1.6
-        op = col.operator(
-            "object.sdf_to_mesh",
-            text=f"Bake to Mesh  ({res}\u00b3)",
-            icon='MESH_DATA',
-        )
-        op.resolution = res
-
-        col.separator(factor=0.5)
-        col.label(text="GPU Dual Contouring", icon='INFO')
+        col.scale_y = 1.4
+        col.enabled = scene.sdf_bake_resolution > 0
+        op = col.operator("object.sdf_to_mesh", text="Bake")
+        op.resolution = max(scene.sdf_bake_resolution, 1)
 
 
 classes = (
@@ -519,7 +477,6 @@ classes = (
     SCENE_PT_rigid_body_field_weights,
     SCENE_PT_animation,
     SCENE_PT_custom_props,
-    SCENE_OT_sdf_set_bake_resolution,
     SCENE_PT_sdf_bake,
 )
 
@@ -527,3 +484,6 @@ if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
+    bpy.types.Scene.sdf_bake_resolution = IntProperty(
+        name="Resolution", default=64, min=0, max=256, soft_min=0, soft_max=256,
+    )

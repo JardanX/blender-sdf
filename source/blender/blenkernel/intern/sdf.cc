@@ -62,6 +62,14 @@ static void sdf_copy_data(Main *bmain,
   sdf_dst->runtime = new bke::SDFRuntime();
   sdf_dst->runtime->proxy_batch = nullptr;
   sdf_dst->runtime->proxy_hash = 0;
+
+  /* Copy is not a member of any group — clear stale pointer */
+  sdf_dst->sdf_group = nullptr;
+  sdf_dst->group_order = 0;
+
+  if (bmain) {
+    sdf_dst->sdf_index = BKE_sdf_next_index(bmain);
+  }
 }
 
 static void sdf_free_data(ID *id)
