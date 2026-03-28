@@ -2483,6 +2483,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
+    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
 
     bind_ssbos(sh);
 
@@ -2507,6 +2508,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
+    GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
   }
 

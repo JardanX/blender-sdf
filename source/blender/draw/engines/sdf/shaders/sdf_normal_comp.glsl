@@ -60,6 +60,17 @@ float4 evalObjectGrad(float3 world_pos, int i)
   float3 off = obj.position.xyz;
   float4x4 inv = obj.inverse_matrix;
 
+  /* Fast path: no modifiers (most common case).
+   * Skip fork detection, domain mods, invertDomainModifiersGrad. */
+  if (obj.modifier_count == 0) {
+    float3 lp = (inv * float4(world_pos - off, 1.0f)).xyz;
+    float4 dg = evalPrimitiveGrad(lp, obj);
+    float3x3 inv3 = float3x3(inv[0].xyz, inv[1].xyz, inv[2].xyz);
+    float3 gw = transpose(inv3) * dg.yzw;
+    float gl = max(length(gw), 1e-8f);
+    return float4(dg.x, gw / gl);
+  }
+
   /* Transform to local space */
   float3 p = (inv * float4(world_pos - off, 1.0f)).xyz;
   float3 orig_p = p;
@@ -342,9 +353,8 @@ void main()
   }
 
   float3 p = gbuf.xyz;
-  float margin = sdf_ray_epsilon * 10.0f;
+  float margin = sdf_ray_epsilon * 1.5f;
 
-  /* Scene gradient accumulation (mirrors combineCSG logic from trace) */
   float4 scene_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
 
   int cur_group = -2;
@@ -356,7 +366,6 @@ void main()
     SDFObjectAABB n_aabb = object_aabbs[i];
     int gid = n_aabb.group_id;
 
-    /* Flush previous group */
     if (gid != cur_group && grp_has_hit) {
       if (scene_dg.x >= 1e9f) {
         scene_dg = grp_dg;
@@ -373,14 +382,12 @@ void main()
       grp_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
     }
 
-    /* AABB proximity check */
     float da = point_aabb_dist(p, n_aabb.bbox_min.xyz, n_aabb.bbox_max.xyz);
     if (da > max(margin, n_aabb.max_group_blend + margin)) {
       cur_group = gid;
       continue;
     }
 
-    /* Evaluate analytical gradient */
     float4 dg = evalObjectGrad(p, i);
     cur_group = gid;
 
@@ -396,23 +403,26 @@ void main()
     float ck3 = objects[i].chamfer_k3;
 
     if (gid < 0) {
-      /* Ungrouped: must match trace's evalSceneTile logic exactly. */
       if (scene_dg.x >= 1e9f) {
-        if (cop == SDF_CSG_OP_UNION) {
-          scene_dg = dg;
-        }
+        if (cop == SDF_CSG_OP_UNION) { scene_dg = dg; }
+      }
+      else if (cop == SDF_CSG_OP_UNION && cbl <= 0.0001f) {
+        /* Sharp union fast path: skip combineCSGGrad entirely. */
+        scene_dg = (dg.x < scene_dg.x) ? dg : scene_dg;
       }
       else {
         scene_dg = combineCSGGrad(scene_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
       }
     }
     else {
-      /* Grouped: skip subtract/shell as first (can't subtract from nothing). */
       if (!grp_has_hit) {
         if (cop != SDF_CSG_OP_SUBTRACT && cop != SDF_CSG_OP_SHELL) {
           grp_dg = dg;
           grp_has_hit = true;
         }
+      }
+      else if (cop == SDF_CSG_OP_UNION && cbl <= 0.0001f) {
+        grp_dg = (dg.x < grp_dg.x) ? dg : grp_dg;
       }
       else {
         grp_dg = combineCSGGrad(grp_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
@@ -420,7 +430,6 @@ void main()
     }
   }
 
-  /* Flush last group */
   if (grp_has_hit) {
     if (scene_dg.x >= 1e9f) {
       scene_dg = grp_dg;
