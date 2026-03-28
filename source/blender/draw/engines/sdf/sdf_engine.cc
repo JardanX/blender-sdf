@@ -143,6 +143,8 @@ class Instance : public DrawEngine {
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
   int2 render_size_ = int2(0);
+  int2 prev_render_size_ = int2(0);
+  int2 texture_size_ = int2(0);
   int2 viewport_size_ = int2(0);
   int2 fxaa_size_ = int2(0);
   float resolution_scale_ = 1.0f;
@@ -150,6 +152,7 @@ class Instance : public DrawEngine {
   bool scene_changed_ = false;
   bool view_changed_ = false;
   int scroll_cooldown_ = 0;
+  bool compute_valid_ = false;
   uint64_t prev_data_hash_ = 0;
   uint64_t prev_mesh_hash_ = 0;
   Vector<float4x4> mesh_transforms_;
@@ -1595,7 +1598,18 @@ class Instance : public DrawEngine {
       prev_mesh_hash_ = mh;
 
       const float4x4 &cur_viewmat = View::default_get().viewmat();
-      view_changed_ = (cur_viewmat != prev_viewmat_);
+      {
+        const float eps = 1e-6f;
+        bool vdiff = false;
+        for (int c = 0; c < 4 && !vdiff; c++) {
+          for (int r = 0; r < 4 && !vdiff; r++) {
+            if (math::abs(cur_viewmat[c][r] - prev_viewmat_[c][r]) > eps) {
+              vdiff = true;
+            }
+          }
+        }
+        view_changed_ = vdiff;
+      }
       prev_viewmat_ = cur_viewmat;
 
       if (scene_changed_ || view_changed_ || mesh_changed) {
@@ -1613,47 +1627,56 @@ class Instance : public DrawEngine {
       needs_upload_ = false;
     }
 
-    GPU_debug_group_begin("SDF AABB Project");
-    draw_aabb_project();
-    GPU_debug_group_end();
+    ensure_compute_targets();
 
-    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+    bool res_changed = (render_size_ != prev_render_size_);
+    bool need_compute = !compute_valid_ || scene_changed_ || view_changed_ || res_changed;
 
-    GPU_debug_group_begin("SDF Tile Cull");
-    draw_tile_cull();
-    GPU_debug_group_end();
+    if (need_compute) {
+      GPU_debug_group_begin("SDF AABB Project");
+      draw_aabb_project();
+      GPU_debug_group_end();
 
-    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
-    GPU_debug_group_begin("SDF Cone March");
-    draw_cone_march();
-    GPU_debug_group_end();
+      GPU_debug_group_begin("SDF Tile Cull");
+      draw_tile_cull();
+      GPU_debug_group_end();
 
-    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
-    GPU_debug_group_begin("SDF Trace");
-    draw_trace();
-    GPU_debug_group_end();
+      GPU_debug_group_begin("SDF Cone March");
+      draw_cone_march();
+      GPU_debug_group_end();
 
-    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
-    GPU_debug_group_begin("SDF Color Resolve");
-    draw_color_resolve();
-    GPU_debug_group_end();
+      GPU_debug_group_begin("SDF Trace");
+      draw_trace();
+      GPU_debug_group_end();
 
-    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
 
-    GPU_debug_group_begin("SDF Normal");
-    draw_normal();
-    GPU_debug_group_end();
+      GPU_debug_group_begin("SDF Color Resolve");
+      draw_color_resolve();
+      GPU_debug_group_end();
 
-    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
 
-    GPU_debug_group_begin("SDF Shade");
-    draw_shade();
-    GPU_debug_group_end();
+      GPU_debug_group_begin("SDF Normal");
+      draw_normal();
+      GPU_debug_group_end();
 
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+
+      GPU_debug_group_begin("SDF Shade");
+      draw_shade();
+      GPU_debug_group_end();
+
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+
+      compute_valid_ = true;
+    }
 
     GPU_debug_group_begin("SDF Blit");
     draw_blit();
@@ -1663,9 +1686,11 @@ class Instance : public DrawEngine {
     draw_fxaa();
     GPU_debug_group_end();
 
+    prev_render_size_ = render_size_;
+
     DRW_submission_end();
 
-    if (adaptive_resolution_ && render_size_ != viewport_size_) {
+    if (adaptive_resolution_ && render_size_ != texture_size_) {
       DRW_viewport_request_redraw();
     }
 
@@ -2020,19 +2045,25 @@ class Instance : public DrawEngine {
   void ensure_compute_targets()
   {
     const int2 vp = int2(draw_ctx_->viewport_size_get());
+    viewport_size_ = vp;
+
+    /* Compute dispatch size (may be smaller than texture during interaction) */
     float scale = resolution_scale_;
     bool is_interacting = scroll_cooldown_ > 0;
     if (adaptive_resolution_ && is_interacting) {
       scale *= 0.25f;
       scale = math::max(scale, 0.1f);
     }
-    int2 scaled = int2(math::max(int(vp.x * scale), 1),
-                       math::max(int(vp.y * scale), 1));
-    viewport_size_ = vp;
+    render_size_ = int2(math::max(int(vp.x * scale), 1),
+                        math::max(int(vp.y * scale), 1));
 
-    if (comp_color_tx_ != nullptr && render_size_ == scaled) {
+    /* Textures sized to full viewport — only reallocate on viewport resize */
+    int2 tex_size = int2(math::max(int(vp.x * resolution_scale_), 1),
+                         math::max(int(vp.y * resolution_scale_), 1));
+    if (comp_color_tx_ != nullptr && texture_size_ == tex_size) {
       return;
     }
+    compute_valid_ = false;
 
     if (comp_color_tx_) {
       GPU_texture_free(comp_color_tx_);
@@ -2049,14 +2080,14 @@ class Instance : public DrawEngine {
     if (gbuf_normal_tx_) {
       GPU_texture_free(gbuf_normal_tx_);
     }
-    render_size_ = scaled;
+    texture_size_ = tex_size;
 
     eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
-    comp_color_tx_ = GPU_texture_create_2d("sdf_comp_color", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
-    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
-    gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
-    gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
-    gbuf_normal_tx_ = GPU_texture_create_2d("sdf_gbuf_normal", scaled.x, scaled.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    comp_color_tx_ = GPU_texture_create_2d("sdf_comp_color", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
+    gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
+    gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    gbuf_normal_tx_ = GPU_texture_create_2d("sdf_gbuf_normal", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
   }
 
   void bind_ssbos(gpu::Shader *sh)
@@ -2110,48 +2141,40 @@ class Instance : public DrawEngine {
 
   void ensure_tile_ssbos(int total_tiles)
   {
-    if (tile_prim_counts_ssbo_ != nullptr && tile_prim_counts_ssbo_tiles_ != total_tiles) {
+    /* Grow-only: allocate at peak tile count to avoid thrashing on resolution transitions */
+    if (total_tiles <= tile_prim_counts_ssbo_tiles_) {
+      return;
+    }
+
+    if (tile_prim_counts_ssbo_) {
       GPU_storagebuf_free(tile_prim_counts_ssbo_);
-      tile_prim_counts_ssbo_ = nullptr;
     }
-    if (tile_prim_counts_ssbo_ == nullptr && total_tiles > 0) {
-      tile_prim_counts_ssbo_ = GPU_storagebuf_create_ex(
-          total_tiles * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_prim_counts");
-      tile_prim_counts_ssbo_tiles_ = total_tiles;
-    }
-
-    if (tile_prim_lists_ssbo_ != nullptr && tile_prim_lists_ssbo_tiles_ != total_tiles) {
+    if (tile_prim_lists_ssbo_) {
       GPU_storagebuf_free(tile_prim_lists_ssbo_);
-      tile_prim_lists_ssbo_ = nullptr;
     }
-    if (tile_prim_lists_ssbo_ == nullptr && total_tiles > 0) {
-      tile_prim_lists_ssbo_ = GPU_storagebuf_create_ex(
-          total_tiles * kMaxTileObjects * sizeof(int),
-          nullptr,
-          GPU_USAGE_DYNAMIC,
-          "sdf_tile_prim_lists");
-      tile_prim_lists_ssbo_tiles_ = total_tiles;
-    }
-
-    if (cone_hit_ssbo_ != nullptr && cone_hit_ssbo_count_ != total_tiles) {
+    if (cone_hit_ssbo_) {
       GPU_storagebuf_free(cone_hit_ssbo_);
-      cone_hit_ssbo_ = nullptr;
     }
-    if (cone_hit_ssbo_ == nullptr && total_tiles > 0) {
-      cone_hit_ssbo_ = GPU_storagebuf_create_ex(
-          total_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
-      cone_hit_ssbo_count_ = total_tiles;
+    if (tile_far_hint_ssbo_) {
+      GPU_storagebuf_free(tile_far_hint_ssbo_);
     }
 
-    if (tile_far_hint_ssbo_ != nullptr && tile_far_hint_ssbo_count_ != total_tiles) {
-      GPU_storagebuf_free(tile_far_hint_ssbo_);
-      tile_far_hint_ssbo_ = nullptr;
-    }
-    if (tile_far_hint_ssbo_ == nullptr && total_tiles > 0) {
-      tile_far_hint_ssbo_ = GPU_storagebuf_create_ex(
-          total_tiles * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_far_hint");
-      tile_far_hint_ssbo_count_ = total_tiles;
-    }
+    tile_prim_counts_ssbo_ = GPU_storagebuf_create_ex(
+        total_tiles * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_prim_counts");
+    tile_prim_lists_ssbo_ = GPU_storagebuf_create_ex(
+        total_tiles * kMaxTileObjects * sizeof(int),
+        nullptr,
+        GPU_USAGE_DYNAMIC,
+        "sdf_tile_prim_lists");
+    cone_hit_ssbo_ = GPU_storagebuf_create_ex(
+        total_tiles * sizeof(float[4]), nullptr, GPU_USAGE_DYNAMIC, "sdf_cone_hit_ssbo");
+    tile_far_hint_ssbo_ = GPU_storagebuf_create_ex(
+        total_tiles * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_far_hint");
+
+    tile_prim_counts_ssbo_tiles_ = total_tiles;
+    tile_prim_lists_ssbo_tiles_ = total_tiles;
+    cone_hit_ssbo_count_ = total_tiles;
+    tile_far_hint_ssbo_count_ = total_tiles;
   }
 
   void draw_aabb_project()
@@ -2404,19 +2427,6 @@ class Instance : public DrawEngine {
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
-    bind_ssbos(sh);
-
-    if (tile_prim_counts_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
-    }
-    if (tile_prim_lists_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
-    }
-
-    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
@@ -2522,11 +2532,13 @@ class Instance : public DrawEngine {
     }
     GPU_shader_uniform_3fv(blit_sh_, "bg_color", bg);
 
-    float uv_sc[2] = {1.0f, 1.0f};
+    float uv_sc[2] = {float(render_size_.x) / float(texture_size_.x),
+                       float(render_size_.y) / float(texture_size_.y)};
     GPU_shader_uniform_2fv(blit_sh_, "uv_scale", uv_sc);
 
+    bool upscaling = render_size_ != texture_size_;
     int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
-    GPU_texture_filter_mode(comp_color_tx_, false);
+    GPU_texture_filter_mode(comp_color_tx_, upscaling);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh_, "depth_tx");
     GPU_texture_filter_mode(comp_depth_tx_, false);
