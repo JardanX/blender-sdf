@@ -1044,6 +1044,20 @@ float sdSphere(float3 p, float r)
   return length(p) - r;
 }
 
+/**
+ * Ellipsoid SDF — Quilez gradient-corrected approximation.
+ */
+float sdEllipsoid(float3 p, float3 r)
+{
+  float k0 = length(p / r);
+  if (k0 < 0.0001f) {
+    return -min(min(r.x, r.y), r.z);
+  }
+  float k1 = length(p / (r * r));
+  return k0 * (k0 - 1.0f) / k1;
+}
+
+
 /* SDFPrimitiveData removed — eval functions take SDFObjectGPU directly. */
 
 /* ---- CSG dispatch ---- */
@@ -1270,8 +1284,15 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
   float bevel = obj.bevel;
   float dist;
 
-  if (obj.sdf_type == 1) { /* SPHERE */
-    dist = sdSphere(local_pos, size.x - bevel);
+  if (obj.sdf_type == 1) { /* SPHERE / ELLIPSOID */
+    float3 r = size - float3(bevel);
+    r = max(r, float3(0.001f));
+    if (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f) {
+      dist = sdSphere(local_pos, r.x);
+    }
+    else {
+      dist = sdEllipsoid(local_pos, r);
+    }
   }
   else if (obj.sdf_type == 2) { /* CYLINDER */
     float3 cyl_size = size - float3(bevel);

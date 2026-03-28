@@ -46,6 +46,14 @@ void hashInsert(int3 p, int value) {
 #define SDF_TYPE_TORUS 5
 
 float sdSphere(float3 p, float r) { return length(p) - r; }
+float sdEllipsoid(float3 p, float3 r) {
+  float k0 = length(p / r);
+  if (k0 < 0.0001f) {
+    return -min(min(r.x, r.y), r.z);
+  }
+  float k1 = length(p / (r * r));
+  return k0 * (k0 - 1.0f) / k1;
+}
 float sdCapsule(float3 p, float3 size) {
   float h = size.y;
   float r = size.x;
@@ -61,7 +69,15 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj) {
   float3 size = obj.sdf_size.xyz;
   float bevel = obj.bevel;
   if (obj.sdf_type == SDF_TYPE_SPHERE) {
-    return sdSphere(local_pos, size.x - bevel) - bevel;
+    float3 r = max(size - float3(bevel), float3(0.001f));
+    float d;
+    if (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f) {
+      d = sdSphere(local_pos, r.x);
+    }
+    else {
+      d = sdEllipsoid(local_pos, r);
+    }
+    return d - bevel;
   }
   if (obj.sdf_type == SDF_TYPE_CAPSULE) {
     float3 cap_size = max(size - float3(bevel), float3(0.001f));
