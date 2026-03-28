@@ -286,7 +286,7 @@ class Prepass : Overlay {
             geom_single = const_cast<gpu::Batch *>(res.shapes.cube_solid.get());
             break;
           case SDF_TYPE_SPHERE:
-            scale = float3(sdf->size[0] + bev);
+            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
             geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
             break;
           case SDF_TYPE_CYLINDER:

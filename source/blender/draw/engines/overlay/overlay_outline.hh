@@ -329,7 +329,7 @@ class Outline : Overlay {
             sdf_geom = const_cast<gpu::Batch *>(res.shapes.cube_solid.get());
             break;
           case SDF_TYPE_SPHERE:
-            scale = float3(sdf->size[0] + bev);
+            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
             sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
             break;
           case SDF_TYPE_CYLINDER:
