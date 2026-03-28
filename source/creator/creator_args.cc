@@ -779,6 +779,7 @@ static void print_help(bArgs *ba, bool all)
   BLI_args_print_arg_doc(ba, "--debug-gpu-shader-no-preprocessor");
   BLI_args_print_arg_doc(ba, "--debug-gpu-shader-no-dce");
   BLI_args_print_arg_doc(ba, "--debug-gpu-no-texture-pool");
+  BLI_args_print_arg_doc(ba, "--debug-gpu-sdf");
   if (defs.with_renderdoc) {
     BLI_args_print_arg_doc(ba, "--debug-gpu-renderdoc");
   }
@@ -1537,6 +1538,15 @@ static int arg_handle_debug_gpu_set(int /*argc*/, const char ** /*argv*/, void *
   const char *gpu_filter = "gpu.*";
   CLG_type_filter_include(gpu_filter, strlen(gpu_filter));
   G.debug |= G_DEBUG_GPU;
+  return 0;
+}
+
+static const char arg_handle_debug_gpu_sdf_set_doc[] =
+    "\n"
+    "\tForce SDF compute every frame (disable caching for GPU profiling).";
+static int arg_handle_debug_gpu_sdf_set(int /*argc*/, const char ** /*argv*/, void * /*data*/)
+{
+  G.debug |= G_DEBUG_GPU_SDF | G_DEBUG_GPU;
   return 0;
 }
 
@@ -3116,6 +3126,7 @@ void main_args_setup(bContext *C, bArgs *ba, bool all)
                CB_EX(arg_handle_debug_mode_generic_set, jobs),
                reinterpret_cast<void *>(G_DEBUG_JOBS));
   BLI_args_add(ba, nullptr, "--debug-gpu", CB(arg_handle_debug_gpu_set), nullptr);
+  BLI_args_add(ba, nullptr, "--debug-gpu-sdf", CB(arg_handle_debug_gpu_sdf_set), nullptr);
   BLI_args_add(ba,
                nullptr,
                "--debug-gpu-compile-shaders",
