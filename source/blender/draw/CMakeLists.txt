@@ -363,6 +363,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_dc_vertex_color_comp.glsl
 
   engines/sdf/shaders/sdf_lib.glsl
+  engines/sdf/shaders/sdf_grad_lib.glsl
   engines/sdf/sdf_shader_shared.hh
 
   intern/shaders/osd_patch_basis.glsl
