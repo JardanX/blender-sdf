@@ -56,6 +56,9 @@
 #include "BKE_mesh.h"
 #include "BKE_mesh.hh"
 
+#include "BLI_index_mask.hh"
+#include "GEO_mesh_merge_by_distance.hh"
+
 #include "object_intern.hh"
 
 #include "sdf_meshing.hh"
@@ -381,9 +384,11 @@ static wmOperatorStatus object_sdf_group_remove_member_exec(bContext *C, wmOpera
 
   BKE_sdf_group_member_remove(group, member);
 
+  Main *bmain = CTX_data_main(C);
   DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
+  DEG_relations_tag_update(bmain);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_OB_ACTIVE, nullptr);
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
 
   return OPERATOR_FINISHED;
 }
@@ -420,9 +425,11 @@ static wmOperatorStatus object_sdf_group_reorder_exec(bContext *C, wmOperator *o
 
   BKE_sdf_group_member_move(group, member, direction);
 
+  Main *bmain = CTX_data_main(C);
   DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
+  DEG_relations_tag_update(bmain);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_OB_ACTIVE, nullptr);
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
 
   return OPERATOR_FINISHED;
 }
@@ -599,8 +606,9 @@ static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOpera
     g->group_order = i++;
   }
 
+  DEG_relations_tag_update(bmain);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_OB_ACTIVE, nullptr);
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
 
   return OPERATOR_FINISHED;
 }
@@ -762,7 +770,6 @@ void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot)
 
 static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
 {
-  Main *bmain = CTX_data_main(C);
   const int grid_res = RNA_int_get(op->ptr, "resolution");
 
   Vector<float3> positions;
@@ -779,50 +786,80 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  Mesh *mesh_src = BKE_mesh_new_nomain(vert_count, 0, tri_count, tri_count * 3);
-  mesh_src->vert_positions_for_write().copy_from(positions.as_span());
+  const float cell_size = 1.0f / float(grid_res);
 
-  MutableSpan<int> offsets = mesh_src->face_offsets_for_write();
+  Mesh *mesh_raw = BKE_mesh_new_nomain(vert_count, 0, tri_count, tri_count * 3);
+  mesh_raw->vert_positions_for_write().copy_from(positions.as_span());
+
+  MutableSpan<int> offsets = mesh_raw->face_offsets_for_write();
   for (int i = 0; i <= tri_count; i++) {
     offsets[i] = i * 3;
   }
 
-  MutableSpan<int> cverts = mesh_src->corner_verts_for_write();
+  MutableSpan<int> cverts = mesh_raw->corner_verts_for_write();
   for (int i = 0; i < tri_count; i++) {
     cverts[i * 3 + 0] = tris[i].x;
-    cverts[i * 3 + 1] = tris[i].y;
-    cverts[i * 3 + 2] = tris[i].z;
+    cverts[i * 3 + 1] = tris[i].z;
+    cverts[i * 3 + 2] = tris[i].y;
   }
 
-  Object *ob = add_type(C, OB_MESH, "SDF Mesh", nullptr, nullptr, false, 0);
-  Mesh *mesh_dst = id_cast<Mesh *>(ob->data);
-  BKE_mesh_nomain_to_mesh(mesh_src, mesh_dst, ob, false);
-  blender::bke::mesh_calc_edges(*mesh_dst, false, false);
-
-  /* Vertex color attribute */
+  /* Add vertex colors before merge so they get interpolated */
   if (colors.size() >= vert_count) {
     const char *color_name = "SDF Color";
-    if (mesh_dst->attributes_for_write().add(
+    if (mesh_raw->attributes_for_write().add(
             color_name,
             bke::AttrDomain::Point,
             bke::AttrType::ColorFloat,
             bke::AttributeInitDefaultValue()))
     {
       bke::SpanAttributeWriter<ColorGeometry4f> col_attr =
-          mesh_dst->attributes_for_write().lookup_or_add_for_write_span<ColorGeometry4f>(
+          mesh_raw->attributes_for_write().lookup_or_add_for_write_span<ColorGeometry4f>(
               color_name, bke::AttrDomain::Point);
       for (int i = 0; i < vert_count; i++) {
         col_attr.span[i] = ColorGeometry4f(colors[i].x, colors[i].y, colors[i].z, colors[i].w);
       }
       col_attr.finish();
-      BKE_id_attributes_active_color_set(&mesh_dst->id, color_name);
-      BKE_id_attributes_default_color_set(&mesh_dst->id, color_name);
+      BKE_id_attributes_active_color_set(&mesh_raw->id, color_name);
+      BKE_id_attributes_default_color_set(&mesh_raw->id, color_name);
     }
   }
 
+  bke::mesh_calc_edges(*mesh_raw, false, false);
+
+  /* Weld duplicate vertices at chunk boundaries */
+  Mesh *mesh_clean = mesh_raw;
+  {
+    const float merge_dist = cell_size * 0.1f;
+    std::optional<Mesh *> merged = geometry::mesh_merge_by_distance_all(
+        *mesh_clean, IndexMask(mesh_clean->verts_num), merge_dist);
+    if (merged.has_value()) {
+      int old_verts = mesh_clean->verts_num;
+      int old_faces = mesh_clean->faces_num;
+      BKE_id_free(nullptr, &mesh_clean->id);
+      mesh_clean = *merged;
+      fprintf(stderr,
+              "SDF DC cleanup: merged %d->%d verts, %d->%d faces\n",
+              old_verts, mesh_clean->verts_num,
+              old_faces, mesh_clean->faces_num);
+    }
+  }
+
+  /* Validate mesh (removes degenerate faces, fixes indices) */
+  bke::mesh_validate(*mesh_clean);
+
+  Object *ob = add_type(C, OB_MESH, "SDF Mesh", nullptr, nullptr, false, 0);
+  Mesh *mesh_dst = id_cast<Mesh *>(ob->data);
+  BKE_mesh_nomain_to_mesh(mesh_clean, mesh_dst, ob, false);
+
+  mesh_dst->tag_positions_changed();
+
   DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  BKE_reportf(op->reports, RPT_INFO, "Generated mesh: %d verts, %d tris", vert_count, tri_count);
+  BKE_reportf(op->reports,
+              RPT_INFO,
+              "Generated mesh: %d verts, %d tris (raw: %d verts, %d tris)",
+              mesh_dst->verts_num, mesh_dst->faces_num,
+              vert_count, tri_count);
   return OPERATOR_FINISHED;
 }
 

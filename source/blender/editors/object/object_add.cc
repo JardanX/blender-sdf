@@ -4715,6 +4715,29 @@ static void object_add_sync_rigid_body(Main *bmain, Object *object_src, Object *
   }
 }
 
+/** Resolve actual new SDF data for a duplicated object.
+ * Before copy_object_set_idnew() remaps, ob_new->data may still point to the
+ * source SDF. Follow id.newid to find the actual new copy. For linked
+ * duplicates (no data copy), returns the shared SDF and sets is_linked. */
+static SDF *sdf_resolve_new_data(Object *object_src, Object *object_new, bool *r_is_linked)
+{
+  *r_is_linked = false;
+  if (!object_new->data) {
+    return nullptr;
+  }
+  ID *new_data_id = static_cast<ID *>(object_new->data);
+  SDF *sdf_src = id_cast<SDF *>(object_src->data);
+
+  if (new_data_id == &sdf_src->id) {
+    if (sdf_src->id.newid) {
+      return id_cast<SDF *>(sdf_src->id.newid);
+    }
+    *r_is_linked = true;
+    return sdf_src;
+  }
+  return id_cast<SDF *>(new_data_id);
+}
+
 /** Add duplicated SDF object to the same group as the original, right after it. */
 static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
 {
@@ -4727,30 +4750,64 @@ static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
     return;
   }
 
-  /* The copy system already set sdf_group and incremented user count
-   * via foreach_id + IDWALK_CB_USER. Undo that so member_insert_after can
-   * set it cleanly with a single id_us_plus. */
-  if (object_new->data) {
-    SDF *sdf_new = id_cast<SDF *>(object_new->data);
-    if (sdf_new->sdf_group) {
-      id_us_min(&sdf_new->sdf_group->id);
-      sdf_new->sdf_group = nullptr;
+  bool is_linked = false;
+  SDF *sdf_new = sdf_resolve_new_data(object_src, object_new, &is_linked);
+  if (!sdf_new) {
+    return;
+  }
+
+  /* Clean up auto-assigned group from copy system */
+  if (!is_linked && sdf_new->sdf_group) {
+    id_us_min(&sdf_new->sdf_group->id);
+    sdf_new->sdf_group = nullptr;
+  }
+
+  /* Add member directly: can't use BKE_sdf_group_member_insert_after
+   * because it reads new_ob->data which may not be remapped yet. */
+  SDFGroupMember *after_member = nullptr;
+  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
+       member = member->next)
+  {
+    if (member->object == object_src) {
+      after_member = member;
+      break;
     }
   }
 
-  BKE_sdf_group_member_insert_after(group, object_src, object_new);
+  SDFGroupMember *new_member = MEM_new<SDFGroupMember>(__func__);
+  new_member->object = object_new;
+
+  if (after_member) {
+    BLI_insertlinkafter(&group->members, after_member, new_member);
+  }
+  else {
+    BLI_addtail(&group->members, new_member);
+  }
+  group->totmember++;
+
+  if (!is_linked) {
+    sdf_new->sdf_group = group;
+    id_us_plus(&group->id);
+  }
+
+  BKE_sdf_group_reindex_members(group);
 }
 
 /** Create new mirror empties for duplicated SDF objects. */
 static void object_add_sync_sdf_mirrors(Main *bmain,
                                         Scene *scene,
                                         ViewLayer * /*view_layer*/,
+                                        Object *ob_src,
                                         Object *ob_new)
 {
-  if (ob_new->type != OB_SDF || !ob_new->data) {
+  if (ob_new->type != OB_SDF || !ob_new->data || !ob_src->data) {
     return;
   }
-  SDF *sdf = id_cast<SDF *>(ob_new->data);
+  bool is_linked = false;
+  SDF *sdf = sdf_resolve_new_data(ob_src, ob_new, &is_linked);
+  if (!sdf || is_linked) {
+    return;
+  }
   for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod; mod = mod->next)
   {
     if (mod->type != SDF_MOD_MIRROR || !mod->mirror_ob) {
@@ -4835,7 +4892,7 @@ static Base *object_add_duplicate_internal(Main *bmain,
   }
   object_add_sync_rigid_body(bmain, ob, object_new);
   object_add_sync_sdf_group(ob, object_new);
-  object_add_sync_sdf_mirrors(bmain, scene, view_layer, object_new);
+  object_add_sync_sdf_mirrors(bmain, scene, view_layer, ob, object_new);
   return base_new;
 }
 
@@ -4930,7 +4987,7 @@ static wmOperatorStatus duplicate_exec(bContext *C, wmOperator *op)
       object_add_sync_base_collection(bmain, scene, view_layer, link.base_src, link.object_new);
       object_add_sync_rigid_body(bmain, link.base_src->object, link.object_new);
       object_add_sync_sdf_group(link.base_src->object, link.object_new);
-      object_add_sync_sdf_mirrors(bmain, scene, view_layer, link.object_new);
+      object_add_sync_sdf_mirrors(bmain, scene, view_layer, link.base_src->object, link.object_new);
     }
   }
 
