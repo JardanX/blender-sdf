@@ -190,7 +190,7 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Normal Compute Shader (tetrahedron CD at hit positions)
+/** \name SDF Normal Compute Shader (analytical gradient)
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_normal_comp)
@@ -210,9 +210,9 @@ IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(float, sdf_ray_epsilon)
+PUSH_CONSTANT(int, debug_fd_normals)
 PUSH_CONSTANT(int2, screen_size)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
-ADDITIONAL_INFO(draw_view)
 COMPUTE_SOURCE("sdf_normal_comp.glsl")
 GPU_SHADER_CREATE_END()
 

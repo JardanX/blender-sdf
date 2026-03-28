@@ -4915,6 +4915,12 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "BVH Debug View", "Visualize BVH performance and structure");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "sdf_fd_normals", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_fd_normals", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "FD Normals", "Use brute-force finite-difference normals instead of analytical gradients");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   prop = RNA_def_property(srna, "sdf_max_steps", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "sdf_max_steps");
   RNA_def_property_range(prop, 1, 1024);

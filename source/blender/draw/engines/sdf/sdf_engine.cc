@@ -152,7 +152,9 @@ class Instance : public DrawEngine {
   bool adaptive_resolution_ = false;
   bool scene_changed_ = false;
   bool view_changed_ = false;
+  bool mesh_changed_ = false;
   int scroll_cooldown_ = 0;
+  int idle_frames_ = 0;
   bool compute_valid_ = false;
   uint64_t prev_data_hash_ = 0;
   uint64_t prev_mesh_hash_ = 0;
@@ -209,6 +211,7 @@ class Instance : public DrawEngine {
   int use_matcap_flip_ = 0;
   int use_bvh_ = 1;
   int debug_bvh_views_ = 0;
+  int debug_fd_normals_ = 0;
   int use_cone_trace_ = 0;
   int sdf_max_steps_ = 256;
   float sdf_ray_epsilon_ = 0.001f;
@@ -1632,7 +1635,8 @@ class Instance : public DrawEngine {
         }
       };
       hash_mesh(mesh_transforms_.data(), mesh_transforms_.size() * sizeof(float4x4));
-      bool mesh_changed = (mh != prev_mesh_hash_);
+      mesh_changed_ = (mh != prev_mesh_hash_);
+      bool mesh_changed = mesh_changed_;
       prev_mesh_hash_ = mh;
 
       const View &view = View::default_get();
@@ -1657,13 +1661,18 @@ class Instance : public DrawEngine {
 
       if (scene_changed_ || view_changed_ || mesh_changed) {
         scroll_cooldown_ = 3;
+        idle_frames_ = 0;
       }
       else if (scroll_cooldown_ > 0) {
         scroll_cooldown_--;
+        idle_frames_ = 0;
+      }
+      else {
+        idle_frames_++;
       }
     }
 
-    if (needs_upload_) {
+    if (needs_upload_ && (scene_changed_ || mesh_changed_ || !compute_valid_)) {
       GPU_debug_group_begin("SDF Upload");
       upload_objects();
       GPU_debug_group_end();
@@ -1764,6 +1773,7 @@ class Instance : public DrawEngine {
 
     use_bvh_ = 1;
     debug_bvh_views_ = s.sdf_bvh_debug_view;
+    debug_fd_normals_ = s.sdf_fd_normals ? 1 : 0;
     use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 512;
     sdf_ray_epsilon_ = s.sdf_ray_epsilon > 0.0f ? s.sdf_ray_epsilon : 0.0001f;
@@ -2094,9 +2104,9 @@ class Instance : public DrawEngine {
     const int2 vp = int2(draw_ctx_->viewport_size_get());
     viewport_size_ = vp;
 
-    /* Compute dispatch size (may be smaller than texture during interaction) */
+    /* Stay at low res until idle for 2+ frames (avoids GPU stall on re-grab) */
     float scale = resolution_scale_;
-    bool is_interacting = scroll_cooldown_ > 0;
+    bool is_interacting = scroll_cooldown_ > 0 || idle_frames_ < 2;
     if (adaptive_resolution_ && is_interacting) {
       scale *= 0.25f;
       scale = math::max(scale, 0.1f);
@@ -2488,6 +2498,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_1i(sh, "debug_fd_normals", debug_fd_normals_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     int dispatch_x = (render_size_.x + 7) / 8;

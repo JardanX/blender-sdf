@@ -224,6 +224,7 @@ class RENDER_PT_proximity_raymarcher(Panel):
         col.prop(shading, "sdf_cone_aperture")
         col.prop(shading, "sdf_cone_steps")
         col.prop(shading, "sdf_bvh_debug_view")
+        col.prop(shading, "sdf_fd_normals")
 
 
 # ---------------------------------------------------------------------------
