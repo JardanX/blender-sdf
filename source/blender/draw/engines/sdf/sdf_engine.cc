@@ -16,6 +16,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 
+#include "BKE_global.hh"
 #include "BKE_main.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -155,8 +156,10 @@ class Instance : public DrawEngine {
   bool compute_valid_ = false;
   uint64_t prev_data_hash_ = 0;
   uint64_t prev_mesh_hash_ = 0;
+  uint64_t prev_shading_hash_ = 0;
   Vector<float4x4> mesh_transforms_;
   float4x4 prev_viewmat_ = float4x4::identity();
+  float4x4 prev_winmat_ = float4x4::identity();
 
   gpu::StorageBuf *object_ssbo_ = nullptr;
   int object_ssbo_count_ = 0;
@@ -370,6 +373,9 @@ class Instance : public DrawEngine {
       float3 local_extent;
       float3 sz = float3(gpu_obj.sdf_size);
       switch (sdf_data->sdf_type) {
+        case SDF_TYPE_SPHERE:
+          local_extent = sz + float3(bevel + aabb_pad);
+          break;
         case SDF_TYPE_CAPSULE: {
           float r = sz.x;
           float h = math::max(sz.y - bevel, 0.0f);
@@ -1565,6 +1571,38 @@ class Instance : public DrawEngine {
 
     sync_shading();
 
+    /* Detect shading changes (matcap, lighting, studiolight) */
+    bool shading_changed = false;
+    {
+      uint64_t sh = 0xcbf29ce484222325ULL;
+      auto hash_shading = [&](const void *data, size_t size) {
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < size; i++) {
+          sh ^= p[i];
+          sh *= 0x100000001b3ULL;
+        }
+      };
+      hash_shading(&lighting_type_, sizeof(lighting_type_));
+      hash_shading(&use_specular_, sizeof(use_specular_));
+      hash_shading(&use_matcap_flip_, sizeof(use_matcap_flip_));
+      hash_shading(studio_light_dir_, sizeof(studio_light_dir_));
+      hash_shading(studio_light_col_, sizeof(studio_light_col_));
+      hash_shading(studio_light_spec_, sizeof(studio_light_spec_));
+      hash_shading(&studio_ambient_, sizeof(studio_ambient_));
+      hash_shading(current_matcap_.data(), current_matcap_.size());
+      hash_shading(&debug_bvh_views_, sizeof(debug_bvh_views_));
+      hash_shading(&use_cone_trace_, sizeof(use_cone_trace_));
+      hash_shading(&sdf_max_steps_, sizeof(sdf_max_steps_));
+      hash_shading(&sdf_ray_epsilon_, sizeof(sdf_ray_epsilon_));
+      hash_shading(&sdf_over_relaxation_, sizeof(sdf_over_relaxation_));
+      hash_shading(&sdf_cone_aperture_, sizeof(sdf_cone_aperture_));
+      hash_shading(&sdf_cone_steps_, sizeof(sdf_cone_steps_));
+      hash_shading(&use_frustum_cull_, sizeof(use_frustum_cull_));
+      hash_shading(&fxaa_enabled_, sizeof(fxaa_enabled_));
+      shading_changed = (sh != prev_shading_hash_);
+      prev_shading_hash_ = sh;
+    }
+
     DRW_submission_start();
 
     /* Detect scene and view changes for adaptive resolution */
@@ -1597,13 +1635,17 @@ class Instance : public DrawEngine {
       bool mesh_changed = (mh != prev_mesh_hash_);
       prev_mesh_hash_ = mh;
 
-      const float4x4 &cur_viewmat = View::default_get().viewmat();
+      const View &view = View::default_get();
+      const float4x4 &cur_viewmat = view.viewmat();
+      const float4x4 &cur_winmat = view.winmat();
       {
         const float eps = 1e-6f;
         bool vdiff = false;
         for (int c = 0; c < 4 && !vdiff; c++) {
           for (int r = 0; r < 4 && !vdiff; r++) {
-            if (math::abs(cur_viewmat[c][r] - prev_viewmat_[c][r]) > eps) {
+            if (math::abs(cur_viewmat[c][r] - prev_viewmat_[c][r]) > eps ||
+                math::abs(cur_winmat[c][r] - prev_winmat_[c][r]) > eps)
+            {
               vdiff = true;
             }
           }
@@ -1611,6 +1653,7 @@ class Instance : public DrawEngine {
         view_changed_ = vdiff;
       }
       prev_viewmat_ = cur_viewmat;
+      prev_winmat_ = cur_winmat;
 
       if (scene_changed_ || view_changed_ || mesh_changed) {
         scroll_cooldown_ = 3;
@@ -1630,7 +1673,9 @@ class Instance : public DrawEngine {
     ensure_compute_targets();
 
     bool res_changed = (render_size_ != prev_render_size_);
-    bool need_compute = !compute_valid_ || scene_changed_ || view_changed_ || res_changed;
+    bool force_compute = (G.debug & G_DEBUG_GPU_SDF) != 0;
+    bool need_compute = force_compute || !compute_valid_ || scene_changed_ || view_changed_ ||
+                         res_changed || shading_changed;
 
     if (need_compute) {
       GPU_debug_group_begin("SDF AABB Project");
@@ -1690,7 +1735,9 @@ class Instance : public DrawEngine {
 
     DRW_submission_end();
 
-    if (adaptive_resolution_ && render_size_ != texture_size_) {
+    if ((G.debug & G_DEBUG_GPU_SDF) ||
+        (adaptive_resolution_ && render_size_ != texture_size_))
+    {
       DRW_viewport_request_redraw();
     }
 
@@ -2427,6 +2474,19 @@ class Instance : public DrawEngine {
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
+    bind_ssbos(sh);
+
+    if (tile_prim_counts_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+    }
+    if (tile_prim_lists_ssbo_) {
+      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
+                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+    }
+
+    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
+    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
@@ -2536,9 +2596,8 @@ class Instance : public DrawEngine {
                        float(render_size_.y) / float(texture_size_.y)};
     GPU_shader_uniform_2fv(blit_sh_, "uv_scale", uv_sc);
 
-    bool upscaling = render_size_ != texture_size_;
     int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
-    GPU_texture_filter_mode(comp_color_tx_, upscaling);
+    GPU_texture_filter_mode(comp_color_tx_, false);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh_, "depth_tx");
     GPU_texture_filter_mode(comp_depth_tx_, false);
