@@ -101,7 +101,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         if (obj.csg_operation == 0 && d < prev) {
           grp_winner_id = float(obj.original_index);
         }
-        else if (obj.csg_operation != 0 && -d < prev) {
+        else if (obj.csg_operation != 0 && -d > prev) {
           grp_winner_id = float(obj.original_index);
         }
         if (obj.csg_operation == 0) {
@@ -248,7 +248,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         if (obj.csg_operation == 0 && d < prev) {
           out_obj_id = float(obj.original_index);
         }
-        else if (obj.csg_operation != 0 && obj.blend < 0.001f && (prev + d) < 0.0f) {
+        else if (obj.csg_operation != 0 && -d > prev) {
           out_obj_id = float(obj.original_index);
         }
       }
@@ -269,7 +269,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         if (obj.csg_operation == 0 && d < prev) {
           grp_winner_id = float(obj.original_index);
         }
-        else if (obj.csg_operation != 0 && obj.blend < 0.001f && (prev + d) < 0.0f) {
+        else if (obj.csg_operation != 0 && -d > prev) {
           grp_winner_id = float(obj.original_index);
         }
       }
