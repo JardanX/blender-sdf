@@ -14,11 +14,8 @@
 
 #include "draw_sculpt.hh"
 
-#include "DNA_sdf_types.h"
-
-#include "BKE_sdf.hh"
-
 #include "overlay_base.hh"
+
 /* MATHOPS: Removed — Grease Pencil overlay */
 // #include "overlay_grease_pencil.hh"
 #include "overlay_particle.hh"
@@ -273,78 +270,9 @@ class Prepass : Overlay {
       /* MATHOPS: Removed — Grease Pencil overlay */
       // case OB_GREASE_PENCIL:
       //   ...
-      case OB_SDF: {
-        if (!res.is_selection()) {
-          return;
-        }
-        const SDF *sdf = id_cast<const SDF *>(ob_ref.object->data);
-        const float bev = sdf->bevel;
-        float3 scale;
-        switch (sdf->sdf_type) {
-          case SDF_TYPE_BOX:
-            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.cube_solid.get());
-            break;
-          case SDF_TYPE_SPHERE:
-            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
-            break;
-          case SDF_TYPE_CYLINDER:
-            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_cylinder_solid.get());
-            break;
-          case SDF_TYPE_CONE:
-            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[1] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_cone_solid.get());
-            break;
-          case SDF_TYPE_CAPSULE: {
-            float r = sdf->size[0] + bev;
-            float h = sdf->size[1] + bev;
-            scale = float3(r, r, math::max(h, r));
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_capsule_solid.get());
-            break;
-          }
-          case SDF_TYPE_TORUS: {
-            float major = sdf->size[0];
-            float minor = sdf->size[1] + bev;
-            float s = major + minor;
-            scale = float3(s, s, minor);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_torus_solid.get());
-            break;
-          }
-          case SDF_TYPE_NGON: {
-            int idx = math::clamp(sdf->ngon_sides - ShapeCache::sdf_ngon_min_sides,
-                                  0,
-                                  ShapeCache::sdf_ngon_max_sides - ShapeCache::sdf_ngon_min_sides);
-            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_ngon_solids[idx].get());
-            break;
-          }
-          case SDF_TYPE_POLYGON: {
-            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
-            geom_single = sdf_polygon_proxy_ensure(sdf);
-            break;
-          }
-          default:
-            scale = float3(sdf->size[0] + bev);
-            geom_single = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
-            break;
-        }
-        float4x4 scaled_mat = float4x4(ob_ref.object->object_to_world()) *
-                               math::from_scale<float4x4>(scale);
-        float3 bounds_center = float3(0.0f);
-        float3 bounds_half = scale;
-        ResourceHandleRange sdf_handle = manager.resource_handle(
-            ob_ref, &scaled_mat, &bounds_center, &bounds_half);
-        select::ID sel_id = res.select_id(ob_ref);
-        if (res.is_selection()) {
-          mesh_ps_->draw_expand(geom_single, GPU_PRIM_TRIS, 1, 1, sdf_handle, sel_id.get());
-        }
-        else {
-          mesh_ps_->draw(geom_single, sdf_handle, sel_id.get());
-        }
+      case OB_SDF:
+        /* SDF picking handled by Sdfs overlay (analytical sphere-trace). */
         return;
-      }
       default:
         break;
     }

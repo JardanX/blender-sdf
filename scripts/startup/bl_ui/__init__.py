@@ -185,7 +185,10 @@ def register():
 
     bpy.app.handlers.translation_update_post.append(translation_update)
 
-    # done...
+    from bpy.props import IntProperty
+    bpy.types.Scene.sdf_bake_resolution = IntProperty(
+        name="Resolution", default=64, min=0, max=256, soft_min=0, soft_max=256,
+    )
 
 
 def unregister():
@@ -202,6 +205,7 @@ def unregister():
         bpy.app.handlers.translation_update_post.remove(translation_update)
     except ValueError:
         pass
+    del bpy.types.Scene.sdf_bake_resolution
 
 # Define a default UIList, when a list does not need any custom drawing...
 # Keep in sync with its #defined name in UI_interface.hh

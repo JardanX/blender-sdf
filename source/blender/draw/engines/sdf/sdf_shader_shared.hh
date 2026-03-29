@@ -29,13 +29,13 @@ struct [[host_shared]] SDFObjectGPU {
   int modifier_start;
   int modifier_count;
   int group_id;
-  int group_first;
-  int group_order;
+  int _pad6;
+  int _pad7;
   int original_index;
   int polygon_point_start;
   int polygon_point_count;
   int _pad2;
-  int _pad3;
+  float max_group_blend;
   int _pad4;
   int _pad5;
   float4 color;

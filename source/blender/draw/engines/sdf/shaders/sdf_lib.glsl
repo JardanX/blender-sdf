@@ -391,7 +391,7 @@ float sdBezier2D(float2 A, float2 B, float2 C, float2 pos)
   float2 c = a * 2.0f;
   float2 d = A - pos;
 
-  float kk = 1.0f / dot(b, b);
+  float kk = 1.0f / max(dot(b, b), 1e-12f);
   float kx = kk * dot(a, b);
   float ky = kk * (2.0f * dot(a, a) + dot(d, b)) / 3.0f;
   float kz = kk * dot(d, a);
@@ -617,8 +617,8 @@ float sdAdvancedPolygon(float3 p,
   float d2d = sdPolygon2DRounded(p.xy / tapFactor, ps, pc) * tapFactor;
 
   float dz = abs(p.z) - halfH;
-  float edgeR = (p.z > 0.0f) ? edgeTop * min(halfH, halfH)
-                              : edgeBot * min(halfH, halfH);
+  float edgeR = (p.z > 0.0f) ? edgeTop * halfH
+                              : edgeBot * halfH;
 
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
@@ -1281,7 +1281,8 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
 float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
 {
   float3 size = obj.sdf_size.xyz;
-  float bevel = obj.bevel;
+  float min_dim = min(size.x, min(size.y, size.z));
+  float bevel = max(obj.bevel, min(0.005f, min_dim * 0.5f));
   float dist;
 
   if (obj.sdf_type == 1) { /* SPHERE / ELLIPSOID */

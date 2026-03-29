@@ -26,20 +26,14 @@ struct Engine : public DrawEngine::Pointer {
   DrawEngine *create_instance() final;
 };
 
-void sdf_atlas_params_get(float *voxel_size,
-                          float3 *origin,
-                          float3 *extent,
-                          int3 *grid_resolution,
-                          int *bricks_per_axis);
-
 int sdf_object_count_get();
-gpu::StorageBuf *sdf_objects_ssbo_get();
-gpu::StorageBuf *sdf_modifiers_ssbo_get();
-gpu::StorageBuf *sdf_polygon_ssbo_get();
-gpu::StorageBuf *sdf_groups_ssbo_get();
 int sdf_group_count_get();
 
-/* Maps depsgraph iteration order to sorted sdf_objects[] order. */
 const int *sdf_depsgraph_to_sorted_get(int *out_count);
+
+gpu::Texture *sdf_depth_texture_get();
+gpu::Texture *sdf_gbuf_color_texture_get();
+
+float2 sdf_uv_scale_get();
 
 }  // namespace blender::draw::sdf

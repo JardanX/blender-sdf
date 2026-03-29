@@ -97,11 +97,6 @@ void SdfAabbTree::update_proxy(int proxy, const SdfAabb &bounds)
   nodes_[proxy].moved = true;
 }
 
-SdfAabb SdfAabbTree::get_bounds(int proxy) const
-{
-  return nodes_[proxy].bounds;
-}
-
 void SdfAabbTree::insert_leaf(int leaf)
 {
   if (root_ == null_node) {

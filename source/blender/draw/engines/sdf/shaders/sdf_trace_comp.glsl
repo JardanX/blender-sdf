@@ -27,13 +27,6 @@ shared float tile_heat[kTileSize * kTileSize];
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-float evalObjectDist(float3 world_pos, int idx)
-{
-  SDFObjectGPU obj = objects[idx];
-  float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-  return evalPrimitive(lp, obj);
-}
-
 #define kAabbTreeStackSize 16
 #define kMaxBitfieldBits 128
 #define kBitfieldWords (kMaxBitfieldBits / 32)
@@ -106,6 +99,9 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
         if (obj.csg_operation == 0 && d < prev) {
+          grp_winner_id = float(obj.original_index);
+        }
+        else if (obj.csg_operation != 0 && -d < prev) {
           grp_winner_id = float(obj.original_index);
         }
         if (obj.csg_operation == 0) {
@@ -194,8 +190,6 @@ float evalSceneDistBVH(float3 world_pos)
   return evalSceneBVH(world_pos, dummy_color, dummy_skip, dummy_id);
 }
 
-#endif
-
 #ifdef USE_TILE_CULLING
 
 /* Distance-only tile evaluation (color resolved in separate pass). */
@@ -254,6 +248,9 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         if (obj.csg_operation == 0 && d < prev) {
           out_obj_id = float(obj.original_index);
         }
+        else if (obj.csg_operation != 0 && obj.blend < 0.001f && (prev + d) < 0.0f) {
+          out_obj_id = float(obj.original_index);
+        }
       }
     }
     else {
@@ -270,6 +267,9 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
         if (obj.csg_operation == 0 && d < prev) {
+          grp_winner_id = float(obj.original_index);
+        }
+        else if (obj.csg_operation != 0 && obj.blend < 0.001f && (prev + d) < 0.0f) {
           grp_winner_id = float(obj.original_index);
         }
       }
@@ -585,7 +585,7 @@ void main()
 
     float adaptive_epsilon = sdf_ray_epsilon * (1.0f + t * 0.001f);
 
-    if (!sor_fail && d < adaptive_epsilon) {
+    if (!sor_fail && abs_d < adaptive_epsilon) {
       hit = true;
       /* Surface projection with angle correction.
        * cos_theta estimated from distance decrease rate. Distance-adaptive clamp:

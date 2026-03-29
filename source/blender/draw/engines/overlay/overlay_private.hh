@@ -413,15 +413,6 @@ class ShapeCache {
   BatchPtr lightprobe_planar;
   BatchPtr lightprobe_grid;
 
-  /* SDF proxy meshes (solid surfaces for picking/outline). */
-  BatchPtr sdf_sphere_solid;
-  BatchPtr sdf_cylinder_solid;
-  BatchPtr sdf_cone_solid;
-  BatchPtr sdf_capsule_solid;
-  BatchPtr sdf_torus_solid;
-  static constexpr int sdf_ngon_min_sides = 3;
-  static constexpr int sdf_ngon_max_sides = 32;
-  BatchPtr sdf_ngon_solids[32 - 3 + 1];
 
   ShapeCache();
 

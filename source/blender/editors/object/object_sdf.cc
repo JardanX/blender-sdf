@@ -32,6 +32,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
+#include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_report.hh"
@@ -47,7 +48,9 @@
 #include "WM_types.hh"
 
 #include "ED_object.hh"
+#include "ED_outliner.hh"
 #include "ED_screen.hh"
+#include "ED_select_utils.hh"
 
 #include "UI_interface.hh"
 
@@ -64,6 +67,23 @@
 #include "sdf_meshing.hh"
 
 namespace blender::ed::object {
+
+static void remove_from_current_sdf_group(Object *ob)
+{
+  SDF *sdf = id_cast<SDF *>(ob->data);
+  if (!sdf || !sdf->sdf_group) return;
+  SDFGroup *old_group = sdf->sdf_group;
+  SDFGroupMember *member_next;
+  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
+       member; member = member_next)
+  {
+    member_next = member->next;
+    if (member->object == ob) {
+      BKE_sdf_group_member_remove(old_group, member);
+      break;
+    }
+  }
+}
 
 /* SDF Add */
 
@@ -103,9 +123,18 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
     name = sdf_type_name(type);
   }
 
+  /* Capture active group before add_type changes the active object */
+  Main *bmain = CTX_data_main(C);
+  SDFGroup *active_group = nullptr;
+  {
+    Object *active = CTX_data_active_object(C);
+    if (active && active->type == OB_SDF && active->data) {
+      active_group = id_cast<SDF *>(active->data)->sdf_group;
+    }
+  }
+
   Object *ob = add_type(C, OB_SDF, name, loc, rot, false, local_view_bits);
   if (ob && ob->data) {
-    Main *bmain = CTX_data_main(C);
     SDF *sdf_data = id_cast<SDF *>(ob->data);
     sdf_data->sdf_type = type;
     sdf_data->sdf_index = BKE_sdf_next_index(bmain);
@@ -141,11 +170,7 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         break;
     }
 
-    SDFGroup *group = nullptr;
-    Object *active = CTX_data_active_object(C);
-    if (active && active->type == OB_SDF && active->data) {
-      group = id_cast<SDF *>(active->data)->sdf_group;
-    }
+    SDFGroup *group = active_group;
     if (!group) {
       group = static_cast<SDFGroup *>(bmain->sdf_groups.last);
     }
@@ -190,18 +215,7 @@ static wmOperatorStatus object_sdf_group_add_exec(bContext *C, wmOperator * /*op
 
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = id_cast<SDF *>(ob->data);
-      if (sdf->sdf_group) {
-        SDFGroup *old_group = sdf->sdf_group;
-        SDFGroupMember *member_next;
-        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first); member; member = member_next) {
-          member_next = member->next;
-          if (member->object == ob) {
-            BKE_sdf_group_member_remove(old_group, member);
-            break;
-          }
-        }
-      }
+      remove_from_current_sdf_group(ob);
       BKE_sdf_group_member_add(group, ob);
     }
   }
@@ -238,18 +252,8 @@ static wmOperatorStatus object_sdf_group_assign_exec(bContext *C, wmOperator *op
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
       SDF *sdf = id_cast<SDF *>(ob->data);
-      if (sdf->sdf_group && sdf->sdf_group != target) {
-        SDFGroup *old_group = sdf->sdf_group;
-        SDFGroupMember *member_next;
-        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first); member; member = member_next) {
-          member_next = member->next;
-          if (member->object == ob) {
-            BKE_sdf_group_member_remove(old_group, member);
-            break;
-          }
-        }
-      }
       if (sdf->sdf_group != target) {
+        remove_from_current_sdf_group(ob);
         BKE_sdf_group_member_add(target, ob);
       }
     }
@@ -482,19 +486,8 @@ static wmOperatorStatus move_to_sdf_group_exec(bContext *C, wmOperator *op)
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
     if (ob->type == OB_SDF && ob->data) {
       SDF *sdf = id_cast<SDF *>(ob->data);
-      /* Remove from previous group first. */
-      if (sdf->sdf_group && sdf->sdf_group != target) {
-        SDFGroup *old_group = sdf->sdf_group;
-        SDFGroupMember *member_next;
-        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first); member; member = member_next) {
-          member_next = member->next;
-          if (member->object == ob) {
-            BKE_sdf_group_member_remove(old_group, member);
-            break;
-          }
-        }
-      }
       if (sdf->sdf_group != target) {
+        remove_from_current_sdf_group(ob);
         BKE_sdf_group_member_add(target, ob);
         moved_count++;
       }
@@ -627,6 +620,80 @@ void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot)
   RNA_def_int(ot->srna, "direction", -1, -1, 1, "Direction", "Move direction (-1=up, 1=down)", -1, 1);
 }
 
+/* SDF Group Cycle */
+
+static bool sdf_group_cycle_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_SDF || !ob->data) {
+    return false;
+  }
+  SDF *sdf = id_cast<SDF *>(ob->data);
+  return sdf->sdf_group != nullptr;
+}
+
+static wmOperatorStatus object_sdf_group_cycle_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  const int direction = RNA_int_get(op->ptr, "direction");
+
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_SDF || !ob->data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  SDF *sdf = id_cast<SDF *>(ob->data);
+  SDFGroup *group = sdf->sdf_group;
+  if (!group) {
+    return OPERATOR_CANCELLED;
+  }
+
+  SDFGroupMember *current = BKE_sdf_group_member_find_by_object(group, ob);
+  if (!current) {
+    return OPERATOR_CANCELLED;
+  }
+
+  SDFGroupMember *target = (direction > 0) ? current->next : current->prev;
+  if (!target) {
+    target = (direction > 0) ? static_cast<SDFGroupMember *>(group->members.first)
+                             : static_cast<SDFGroupMember *>(group->members.last);
+  }
+  if (!target || !target->object || target == current) {
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_view_layer_synced_ensure(scene, view_layer);
+  Base *base_new = BKE_view_layer_base_find(view_layer, target->object);
+  if (!base_new) {
+    return OPERATOR_CANCELLED;
+  }
+
+  base_deselect_all(scene, view_layer, nullptr, SEL_DESELECT);
+  base_select(base_new, BA_SELECT);
+  base_activate(C, base_new);
+
+  DEG_id_tag_update(&scene->id, ID_RECALC_SELECT);
+  WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+  ED_outliner_select_sync_from_object_tag(C);
+
+  return OPERATOR_FINISHED;
+}
+
+void OBJECT_OT_sdf_group_cycle(wmOperatorType *ot)
+{
+  ot->name = "Cycle SDF Group Member";
+  ot->description = "Cycle through SDF group members";
+  ot->idname = "OBJECT_OT_sdf_group_cycle";
+
+  ot->exec = object_sdf_group_cycle_exec;
+  ot->poll = sdf_group_cycle_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna, "direction", 1, -1, 1, "Direction", "Cycle direction (-1=previous, 1=next)", -1, 1);
+}
+
 /* SDF Blend Adjust (Modal) */
 
 struct SDFBlendAdjustData {
@@ -661,6 +728,13 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
 {
   SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_SDF || !ob->data) {
+    MEM_delete(data);
+    op->customdata = nullptr;
+    ED_area_status_text(CTX_wm_area(C), nullptr);
+    ED_workspace_status_text(C, nullptr);
+    return OPERATOR_CANCELLED;
+  }
   SDF *sdf = id_cast<SDF *>(ob->data);
 
   if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
@@ -833,14 +907,8 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
     std::optional<Mesh *> merged = geometry::mesh_merge_by_distance_all(
         *mesh_clean, IndexMask(mesh_clean->verts_num), merge_dist);
     if (merged.has_value()) {
-      int old_verts = mesh_clean->verts_num;
-      int old_faces = mesh_clean->faces_num;
       BKE_id_free(nullptr, &mesh_clean->id);
       mesh_clean = *merged;
-      fprintf(stderr,
-              "SDF DC cleanup: merged %d->%d verts, %d->%d faces\n",
-              old_verts, mesh_clean->verts_num,
-              old_faces, mesh_clean->faces_num);
     }
   }
 
