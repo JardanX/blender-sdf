@@ -574,8 +574,10 @@ void main()
     steps_taken++;
     float abs_d = abs(d);
 
-    /* Proper over-relaxation from Keinert et al. 2014 */
-    bool sor_fail = omega > 1.0f && (abs_d + prev_radius) < step_length;
+    /* Over-relaxation (Keinert et al. 2014).
+     * Margin ensures SOR triggers consistently at the boundary (linear SDF),
+     * preventing per-pixel divergence that causes banding in axis-aligned views. */
+    bool sor_fail = omega > 1.0f && (abs_d + prev_radius) < step_length * 1.01f;
     if (sor_fail) {
       step_length -= omega * step_length;
       omega = 1.0f;

@@ -85,6 +85,8 @@ static const SDFObjectGPU *s_objects_cpu = nullptr;
 static int s_objects_cpu_count = 0;
 static const SDFPolygonPointGPU *s_polygon_pts_cpu = nullptr;
 static int s_polygon_pts_count = 0;
+static const SDFModifierGPU *s_modifiers_cpu = nullptr;
+static int s_modifier_count = 0;
 
 class Instance : public DrawEngine {
  private:
@@ -1764,6 +1766,8 @@ class Instance : public DrawEngine {
     s_objects_cpu_count = int(objects_.size());
     s_polygon_pts_cpu = polygon_points_.data();
     s_polygon_pts_count = int(polygon_points_.size());
+    s_modifiers_cpu = modifiers_.data();
+    s_modifier_count = int(modifiers_.size());
     s_group_count = int(groups_gpu_.size());
   }
 
@@ -2835,29 +2839,75 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
     if (s_objects_cpu[i].original_index == sdf_index) {
       const SDFObjectGPU &obj = s_objects_cpu[i];
       float3 sz(obj.sdf_size);
-      float b = obj.bevel;
-      float blend_pad = (obj.blend_type != 0) ? obj.blend : 0.0f;
-      float shell_pad = fabsf(obj.shell_distance);
-      float pad = blend_pad + shell_pad;
 
+      /* Tight extent per type (bevel rounds but doesn't expand). */
       float3 ext;
       switch (obj.sdf_type) {
         case SDF_TYPE_CONE:
-          ext = float3(sz.x + b, sz.x + b, sz.y + b);
+          ext = float3(sz.x, sz.x, sz.y);
           break;
         case SDF_TYPE_CAPSULE:
-          ext = float3(sz.x, sz.x, math::max(sz.y - b, 0.0f) + sz.x);
+          ext = float3(sz.x, sz.x, sz.y + sz.x);
           break;
         case SDF_TYPE_TORUS:
           ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y);
           break;
         case SDF_TYPE_NGON:
-          ext = float3(sz.x + b, sz.x + b, sz.z + b);
+          ext = float3(sz.x, sz.x, sz.z);
           break;
         default:
-          ext = sz + float3(b);
+          ext = sz;
           break;
       }
+
+      /* Apply modifiers that change extent. */
+      for (int mi = obj.modifier_start; mi < obj.modifier_start + obj.modifier_count; mi++) {
+        if (mi < 0 || mi >= s_modifier_count) {
+          break;
+        }
+        const SDFModifierGPU &mod = s_modifiers_cpu[mi];
+        int mtype = mod.header.x;
+        if (mtype == SDF_MOD_ELONGATE) {
+          ext += float3(mod.params.x, mod.params.y, mod.params.z);
+        }
+        else if (mtype == SDF_MOD_TWIST) {
+          float xy = math::sqrt(ext.x * ext.x + ext.y * ext.y);
+          ext.x = xy;
+          ext.y = xy;
+        }
+        else if (mtype == SDF_MOD_BEND) {
+          float k = mod.params.x;
+          int axis = int(mod.params.y);
+          if (fabsf(k) > 0.0001f) {
+            float R = 1.0f / k;
+            float3 ne(0);
+            for (int c = 0; c < 8; c++) {
+              float cx = (c & 1) ? ext.x : -ext.x;
+              float cy = (c & 2) ? ext.y : -ext.y;
+              float cz = (c & 4) ? ext.z : -ext.z;
+              float drive = (axis == 0) ? cx : (axis == 1) ? cy : cz;
+              float curve = (axis == 0) ? cy : (axis == 1) ? cz : cx;
+              float fv = (axis == 0) ? cz : (axis == 1) ? cx : cy;
+              float th = k * drive;
+              float bd = (R + curve) * sinf(th);
+              float bc = -R + (R + curve) * cosf(th);
+              float3 bent;
+              if (axis == 0) { bent = float3(fabsf(bd), fabsf(bc), fabsf(fv)); }
+              else if (axis == 1) { bent = float3(fabsf(fv), fabsf(bd), fabsf(bc)); }
+              else { bent = float3(fabsf(bc), fabsf(fv), fabsf(bd)); }
+              ne = math::max(ne, bent);
+            }
+            ext = ne;
+          }
+        }
+        else if (mtype == SDF_MOD_HOLLOW || mtype == SDF_MOD_ONION) {
+          ext += float3(mod.params.x);
+        }
+        else if (mtype == SDF_MOD_ROUND) {
+          ext += float3(mod.params.x);
+        }
+      }
+
       out_min = -ext;
       out_max = ext;
       out_rot = math::transpose(obj.inverse_matrix);
