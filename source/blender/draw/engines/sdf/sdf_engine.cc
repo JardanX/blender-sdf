@@ -1478,7 +1478,9 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
-    /* Intersection: expand to scene bounds (must be evaluated everywhere). */
+    /* Intersection/Push: expand to scene bounds (must be evaluated everywhere).
+     * Applies to per-object intersection/push AND members of groups whose
+     * CSG operation clips the scene (intersection or push). */
     {
       float3 smin = float3(1e30f), smax = float3(-1e30f);
       for (int i = 0; i < int(objects_.size()); i++) {
@@ -1486,9 +1488,22 @@ class Instance : public DrawEngine {
         smax = math::max(smax, new_maxs[i]);
       }
       for (int i = 0; i < int(objects_.size()); i++) {
-        if (objects_[i].csg_operation == SDF_CSG_INTERSECT) {
+        if (objects_[i].csg_operation == SDF_CSG_INTERSECT ||
+            objects_[i].csg_operation == SDF_CSG_PUSH)
+        {
           objects_[i].bbox_min = float4(smin, 0.0f);
           objects_[i].bbox_max = float4(smax, 0.0f);
+        }
+      }
+      for (int g = 0; g < int(groups_gpu_.size()); g++) {
+        int grp_op = groups_gpu_[g].csg_operation;
+        if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH) {
+          int start = groups_gpu_[g].first_object;
+          int count = groups_gpu_[g].object_count;
+          for (int i = start; i < start + count; i++) {
+            objects_[i].bbox_min = float4(smin, 0.0f);
+            objects_[i].bbox_max = float4(smax, 0.0f);
+          }
         }
       }
     }

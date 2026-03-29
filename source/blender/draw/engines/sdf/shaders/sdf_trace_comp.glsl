@@ -78,7 +78,17 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       if (!is_shape_near(m)) { continue; }
 
       float aabb_skip_thresh = max(sdf_ray_epsilon, objects[m].blend);
-      if (point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz) > aabb_skip_thresh) {
+      float bvh_da = point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz);
+      if (bvh_da > aabb_skip_thresh) {
+        /* Intersection/push must still clip when far from AABB */
+        int bvh_op = objects[m].csg_operation;
+        if ((bvh_op == SDF_CSG_OP_INTERSECT || bvh_op == SDF_CSG_OP_PUSH) && grp_has_hit) {
+          grp_dist = combineCSG(
+              grp_dist, bvh_da, bvh_op, objects[m].blend_type, objects[m].blend,
+              objects[m].shell_distance, objects[m].shell_mode, objects[m].shell_op,
+              objects[m].shell_blend_top, objects[m].shell_blend_bottom,
+              objects[m].chamfer_k2, objects[m].chamfer_k3);
+        }
         continue;
       }
 
@@ -98,11 +108,14 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        if (obj.csg_operation == 0 && d < prev) {
-          grp_winner_id = float(obj.original_index);
+        if (obj.csg_operation == 1) {
+          if (-d > prev) { grp_winner_id = float(obj.original_index); }
         }
-        else if (obj.csg_operation != 0 && -d > prev) {
-          grp_winner_id = float(obj.original_index);
+        else if (obj.csg_operation == 2) {
+          if (d > prev) { grp_winner_id = float(obj.original_index); }
+        }
+        else if (obj.csg_operation != 1 && obj.csg_operation != 2) {
+          if (d < prev) { grp_winner_id = float(obj.original_index); }
         }
         if (obj.csg_operation == 0) {
           float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
@@ -150,7 +163,18 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
     float ungrouped_skip_thresh = max(0.0f, objects[i].blend);
     if (da > ungrouped_skip_thresh) {
-      out_aabb_skip = min(out_aabb_skip, da);
+      /* Intersection/push must still clip when far from AABB */
+      int ung_op = objects[i].csg_operation;
+      if ((ung_op == SDF_CSG_OP_INTERSECT || ung_op == SDF_CSG_OP_PUSH) && scene_dist < 1e9f) {
+        scene_dist = combineCSG(
+            scene_dist, da, ung_op, objects[i].blend_type, objects[i].blend,
+            objects[i].shell_distance, objects[i].shell_mode, objects[i].shell_op,
+            objects[i].shell_blend_top, objects[i].shell_blend_bottom,
+            objects[i].chamfer_k2, objects[i].chamfer_k3);
+      }
+      else {
+        out_aabb_skip = min(out_aabb_skip, da);
+      }
       continue;
     }
 
@@ -223,6 +247,29 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
     float da = point_aabb_dist(world_pos, aabb.bbox_min.xyz, aabb.bbox_max.xyz);
     float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
     if (da > skip_threshold) {
+      /* Intersection/push must still clip even when far from AABB.
+       * Outside the shape, distance is positive → clips accumulated SDF. */
+      SDFObjectGPU skip_obj = objects[i];
+      int skip_op = skip_obj.csg_operation;
+      if (skip_op == SDF_CSG_OP_INTERSECT || skip_op == SDF_CSG_OP_PUSH) {
+        float d = da;
+        if (gid < 0 && scene_dist < 1e9f) {
+          scene_dist = combineCSG(
+              scene_dist, d, skip_op, skip_obj.blend_type, skip_obj.blend,
+              skip_obj.shell_distance, skip_obj.shell_mode, skip_obj.shell_op,
+              skip_obj.shell_blend_top, skip_obj.shell_blend_bottom,
+              skip_obj.chamfer_k2, skip_obj.chamfer_k3);
+        }
+        else if (gid >= 0 && grp_has_hit) {
+          grp_dist = combineCSG(
+              grp_dist, d, skip_op, skip_obj.blend_type, skip_obj.blend,
+              skip_obj.shell_distance, skip_obj.shell_mode, skip_obj.shell_op,
+              skip_obj.shell_blend_top, skip_obj.shell_blend_bottom,
+              skip_obj.chamfer_k2, skip_obj.chamfer_k3);
+        }
+        cur_group = gid;
+        continue;
+      }
       out_aabb_skip = min(out_aabb_skip, da);
       cur_group = gid;
       continue;
@@ -245,11 +292,14 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         scene_dist = combineCSG(
             scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        if (obj.csg_operation == 0 && d < prev) {
-          out_obj_id = float(obj.original_index);
+        if (obj.csg_operation == 1) {
+          if (-d > prev) { out_obj_id = float(obj.original_index); }
         }
-        else if (obj.csg_operation != 0 && -d > prev) {
-          out_obj_id = float(obj.original_index);
+        else if (obj.csg_operation == 2) {
+          if (d > prev) { out_obj_id = float(obj.original_index); }
+        }
+        else if (obj.csg_operation != 1 && obj.csg_operation != 2) {
+          if (d < prev) { out_obj_id = float(obj.original_index); }
         }
       }
     }
@@ -266,11 +316,14 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        if (obj.csg_operation == 0 && d < prev) {
-          grp_winner_id = float(obj.original_index);
+        if (obj.csg_operation == 1) {
+          if (-d > prev) { grp_winner_id = float(obj.original_index); }
         }
-        else if (obj.csg_operation != 0 && -d > prev) {
-          grp_winner_id = float(obj.original_index);
+        else if (obj.csg_operation == 2) {
+          if (d > prev) { grp_winner_id = float(obj.original_index); }
+        }
+        else if (obj.csg_operation != 1 && obj.csg_operation != 2) {
+          if (d < prev) { grp_winner_id = float(obj.original_index); }
         }
       }
     }
