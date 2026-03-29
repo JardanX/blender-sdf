@@ -694,6 +694,10 @@ float opSmoothIntersection(float d1, float d2, float k)
 #define SDF_CSG_OP_PUSH 4
 #define SDF_CSG_OP_AVOID 5
 
+/** Shell op IDs (must match eSDFShellOp in DNA_sdf_types.h). */
+#define SDF_SHELL_OP_UNION 0
+#define SDF_SHELL_OP_SUBTRACTION 1
+
 /* ---- Color blend factor ---- */
 
 float colorBlendFactor(float d_prev, float d_new, int blend_type, float blend)
@@ -706,7 +710,8 @@ float colorBlendFactor(float d_prev, float d_new, int blend_type, float blend)
 }
 
 /* CSG-aware color blend factor: returns how much of the NEW shape's color to mix in. */
-float csgColorFactor(float d_prev, float d_new, int csg_op, int blend_type, float blend)
+float csgColorFactor(float d_prev, float d_new, int csg_op, int blend_type, float blend,
+                     float shell_dist, int shell_op)
 {
   bool has_blend = (blend_type > 0 && blend > 0.0f);
 
@@ -723,11 +728,12 @@ float csgColorFactor(float d_prev, float d_new, int csg_op, int blend_type, floa
     return smoothstep(0.0f, 1.0f, 1.0f - h);
   }
   else if (csg_op == SDF_CSG_OP_SHELL) {
-    /* Shell surface is defined by the new shape. */
-    float d_shell = abs(d_new);
-    if (!has_blend) { return (d_shell < d_prev) ? 1.0f : 0.0f; }
-    float h = clamp(0.5f + 0.5f * (d_shell - d_prev) / blend, 0.0f, 1.0f);
-    return smoothstep(0.0f, 1.0f, 1.0f - h);
+    /* Shell band: abs(d_new) < thickness means inside the shell region. */
+    float sd = (shell_op == SDF_SHELL_OP_SUBTRACTION) ? -shell_dist : shell_dist;
+    float thickness = abs(sd);
+    float d_from_band = abs(d_new) - thickness;
+    if (!has_blend) { return (d_from_band < 0.0f) ? 1.0f : 0.0f; }
+    return smoothstep(0.0f, 1.0f, clamp(-d_from_band / max(blend, 0.001f), 0.0f, 1.0f));
   }
 
   /* Union, Push, Avoid: color follows whichever shape is closer. */
@@ -1103,9 +1109,6 @@ float sdEllipsoid(float3 p, float3 r)
 #define SDF_SHELL_MODE_NORMAL 0
 #define SDF_SHELL_MODE_PUSH 1
 #define SDF_SHELL_MODE_AVOID 2
-
-#define SDF_SHELL_OP_UNION 0
-#define SDF_SHELL_OP_SUBTRACTION 1
 
 /** Blend type IDs (must match eSDFBlendType in DNA_sdf_types.h). */
 #define SDF_BLEND_TYPE_LINEAR 0
@@ -1631,7 +1634,8 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
         grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
         grp.chamfer_k2, grp.chamfer_k3);
-    float t = csgColorFactor(prev, grp_dist, grp.csg_operation, grp.blend_type, grp.blend);
+    float t = csgColorFactor(prev, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+                             grp.shell_distance, grp.shell_op);
     out_color = mix(out_color, grp_color, t);
   }
 }

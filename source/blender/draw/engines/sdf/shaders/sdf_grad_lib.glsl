@@ -105,10 +105,10 @@ float4 sdgCone(float3 p, float r, float h)
   float dl2 = length(delta);
   float3 grad;
   if (dl2 > 1e-6f) {
-    grad = float3(radial * delta.x, delta.y) / dl2;
+    grad = s * float3(radial * delta.x, delta.y) / dl2;
   }
   else {
-    grad = float3(radial * k.y, -k.x) / sqrt(m);
+    grad = s * float3(radial * k.y, -k.x) / sqrt(m);
   }
 
   return float4(dist, grad);
@@ -146,7 +146,7 @@ float4 sdgCappedTorus(float3 p, float2 sc, float ra, float rb)
 
   float3 grad;
   if (sc.y * ap.x > sc.x * ap.y) {
-    grad = float3(sign(p.x) * (p.x - sign(p.x) * ra * sc.x),
+    grad = float3(p.x - sign(p.x) * ra * sc.x,
                   p.y - ra * sc.y,
                   p.z);
   }
