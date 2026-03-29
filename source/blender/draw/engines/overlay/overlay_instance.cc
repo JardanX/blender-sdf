@@ -852,6 +852,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.attribute_viewer.draw_line(framebuffer, manager, view);
     layer.armatures.draw_line(framebuffer, manager, view);
     layer.sculpts.draw_line(framebuffer, manager, view);
+    layer.sdfs.draw_line(framebuffer, manager, view);
     /* MATHOPS: Removed — Grease Pencil overlay */
     // layer.grease_pencil.draw_line(framebuffer, manager, view);
     /* NOTE: Temporarily moved after grid drawing (See #136764). */

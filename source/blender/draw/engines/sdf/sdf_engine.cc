@@ -81,6 +81,10 @@ static gpu::Texture *s_depth_tx = nullptr;
 static gpu::Texture *s_gbuf_color_tx = nullptr;
 static int2 s_render_size = {0, 0};
 static int2 s_texture_size = {0, 0};
+static const SDFObjectGPU *s_objects_cpu = nullptr;
+static int s_objects_cpu_count = 0;
+static const SDFPolygonPointGPU *s_polygon_pts_cpu = nullptr;
+static int s_polygon_pts_count = 0;
 
 class Instance : public DrawEngine {
  private:
@@ -1756,6 +1760,10 @@ class Instance : public DrawEngine {
     s_gbuf_color_tx = gbuf_color_tx_;
     s_render_size = render_size_;
     s_texture_size = texture_size_;
+    s_objects_cpu = objects_.data();
+    s_objects_cpu_count = int(objects_.size());
+    s_polygon_pts_cpu = polygon_points_.data();
+    s_polygon_pts_count = int(polygon_points_.size());
     s_group_count = int(groups_gpu_.size());
   }
 
@@ -2818,6 +2826,46 @@ float2 sdf_uv_scale_get()
   }
   return float2(float(s_render_size.x) / float(s_texture_size.x),
                 float(s_render_size.y) / float(s_texture_size.y));
+}
+
+bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
+                         float4x4 &out_rot, float3 &out_pos)
+{
+  for (int i = 0; i < s_objects_cpu_count; i++) {
+    if (s_objects_cpu[i].original_index == sdf_index) {
+      const SDFObjectGPU &obj = s_objects_cpu[i];
+      float3 sz(obj.sdf_size);
+      float b = obj.bevel;
+      float blend_pad = (obj.blend_type != 0) ? obj.blend : 0.0f;
+      float shell_pad = fabsf(obj.shell_distance);
+      float pad = blend_pad + shell_pad;
+
+      float3 ext;
+      switch (obj.sdf_type) {
+        case SDF_TYPE_CONE:
+          ext = float3(sz.x + b, sz.x + b, sz.y + b);
+          break;
+        case SDF_TYPE_CAPSULE:
+          ext = float3(sz.x, sz.x, math::max(sz.y - b, 0.0f) + sz.x);
+          break;
+        case SDF_TYPE_TORUS:
+          ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y);
+          break;
+        case SDF_TYPE_NGON:
+          ext = float3(sz.x + b, sz.x + b, sz.z + b);
+          break;
+        default:
+          ext = sz + float3(b);
+          break;
+      }
+      out_min = -ext;
+      out_max = ext;
+      out_rot = math::transpose(obj.inverse_matrix);
+      out_pos = float3(obj.position);
+      return true;
+    }
+  }
+  return false;
 }
 
 DrawEngine *Engine::create_instance()

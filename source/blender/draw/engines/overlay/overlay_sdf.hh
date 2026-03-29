@@ -22,6 +22,7 @@
 #include "GPU_state.hh"
 #include "GPU_storage_buffer.hh"
 #include "GPU_texture.hh"
+#include "GPU_immediate.hh"
 #include "GPU_uniform_buffer.hh"
 
 #include "draw_view.hh"
@@ -36,6 +37,45 @@
 
 namespace blender::draw::overlay {
 
+static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max)
+{
+  float3 sz(sdf->size[0], sdf->size[1], sdf->size[2]);
+  float3 ext = sz;
+  switch (sdf->sdf_type) {
+    case SDF_TYPE_CONE:
+      ext = float3(sz.x, sz.x, sz.y);
+      break;
+    case SDF_TYPE_CAPSULE:
+      ext = float3(sz.x, sz.x, sz.y + sz.x);
+      break;
+    case SDF_TYPE_TORUS:
+      ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y);
+      break;
+    case SDF_TYPE_NGON:
+      ext = float3(sz.x, sz.x, sz.z);
+      break;
+    case SDF_TYPE_POLYGON: {
+      float3 mn(1e30f), mx(-1e30f);
+      for (const SDFPolygonPoint *pt =
+               static_cast<const SDFPolygonPoint *>(sdf->polygon_points.first);
+           pt; pt = pt->next)
+      {
+        mn.x = math::min(mn.x, pt->co[0]);
+        mn.y = math::min(mn.y, pt->co[1]);
+        mx.x = math::max(mx.x, pt->co[0]);
+        mx.y = math::max(mx.y, pt->co[1]);
+      }
+      out_min = float3(mn.x, mn.y, -sz.z);
+      out_max = float3(mx.x, mx.y, sz.z);
+      return;
+    }
+    default:
+      break;
+  }
+  out_min = -ext;
+  out_max = ext;
+}
+
 class Sdfs : Overlay {
  private:
   const SelectionType selection_type_;
@@ -46,7 +86,8 @@ class Sdfs : Overlay {
     uint32_t outline_packed_id;
     uint32_t select_id;
     float4x4 object_to_world;
-    float3 local_extent;
+    float3 bb_min;
+    float3 bb_max;
   };
   Vector<SdfEntry> entries_;
   int max_sdf_index_ = 0;
@@ -60,6 +101,7 @@ class Sdfs : Overlay {
 
   /* SSBO of sorted GPU indices of selected objects only (for outline trace). */
   gpu::StorageBuf *selected_indices_ssbo_ = nullptr;
+  int selected_count_ = 0;
 
   gpu::StorageBuf *outline_ids_ssbo_ = nullptr;
   gpu::StorageBuf **select_output_buf_ = nullptr;
@@ -136,8 +178,25 @@ class Sdfs : Overlay {
     }
 
     float4x4 obmat = float4x4(ob_ref.object->object_to_world());
-    float3 ext = float3(sdf_data->size[0], sdf_data->size[1], sdf_data->size[2]);
-    entries_.append({idx, packed_id, sel_id.get(), obmat, ext});
+
+    /* Store polygon point bounds for BB (other types computed from engine data). */
+    float3 poly_min(0), poly_max(0);
+    if (sdf_data->sdf_type == SDF_TYPE_POLYGON && sdf_data->totpolygon >= 3) {
+      poly_min = float3(1e30f);
+      poly_max = float3(-1e30f);
+      for (const SDFPolygonPoint *pt =
+               static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first);
+           pt; pt = pt->next)
+      {
+        poly_min.x = math::min(poly_min.x, pt->co[0]);
+        poly_min.y = math::min(poly_min.y, pt->co[1]);
+        poly_max.x = math::max(poly_max.x, pt->co[0]);
+        poly_max.y = math::max(poly_max.y, pt->co[1]);
+      }
+      poly_min.z = -sdf_data->size[2];
+      poly_max.z = sdf_data->size[2];
+    }
+    entries_.append({idx, packed_id, sel_id.get(), obmat, poly_min, poly_max});
   }
 
   void end_sync(Resources &res, const State & /*state*/) final
@@ -254,6 +313,91 @@ class Sdfs : Overlay {
     GPU_texture_unbind(depth_tx);
     GPU_texture_unbind(gbuf_tx);
     GPU_shader_unbind();
+
+  }
+
+  void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
+  {
+    if (!enabled_ || !has_selected_) {
+      return;
+    }
+
+    /* Count selected and find the single selected entry. */
+    const SdfEntry *sel = nullptr;
+    int sel_count = 0;
+    for (const SdfEntry &e : entries_) {
+      if (e.outline_packed_id != 0u) {
+        sel = &e;
+        sel_count++;
+      }
+    }
+    if (sel_count != 1 || !sel) {
+      return;
+    }
+
+    float3 lo, hi;
+    float4x4 rot;
+    float3 obj_pos;
+
+    if (sel->bb_min.x < sel->bb_max.x) {
+      /* Polygon: use stored point bounds, transform by object matrix. */
+      lo = sel->bb_min;
+      hi = sel->bb_max;
+      /* Extract rotation-only from object matrix (strip scale). */
+      float3 sx = math::normalize(float3(sel->object_to_world[0]));
+      float3 sy = math::normalize(float3(sel->object_to_world[1]));
+      float3 sz = math::normalize(float3(sel->object_to_world[2]));
+      rot = float4x4(float4(sx, 0), float4(sy, 0), float4(sz, 0), float4(0, 0, 0, 1));
+      obj_pos = float3(sel->object_to_world[3]);
+      /* Scale the bounds by object scale. */
+      float3 scl(math::length(float3(sel->object_to_world[0])),
+                 math::length(float3(sel->object_to_world[1])),
+                 math::length(float3(sel->object_to_world[2])));
+      lo *= scl;
+      hi *= scl;
+    }
+    else if (!sdf::sdf_object_bbox_get(sel->sdf_index, lo, hi, rot, obj_pos)) {
+      return;
+    }
+
+    GPU_framebuffer_bind(framebuffer);
+    GPU_depth_test(GPU_DEPTH_ALWAYS);
+    GPU_depth_mask(false);
+    GPU_blend(GPU_BLEND_ALPHA);
+    GPU_line_width(1.0f);
+
+    /* Local corners → world via rotation + position (no scale, already in sdf_size). */
+    float3 lc[8] = {
+        {lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z},
+        {hi.x, hi.y, lo.z}, {lo.x, hi.y, lo.z},
+        {lo.x, lo.y, hi.z}, {hi.x, lo.y, hi.z},
+        {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z},
+    };
+    float3 wc[8];
+    for (int i = 0; i < 8; i++) {
+      float4 rp = rot * float4(lc[i], 1.0f);
+      wc[i] = float3(rp.x, rp.y, rp.z) + obj_pos;
+    }
+    int edges[12][2] = {
+        {0,1},{1,2},{2,3},{3,0},
+        {4,5},{5,6},{6,7},{7,4},
+        {0,4},{1,5},{2,6},{3,7},
+    };
+
+    uint pos = GPU_vertformat_attr_add_legacy(
+        immVertexFormat(), "pos", GPU_COMP_F32, 3, GPU_FETCH_FLOAT);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+    immUniformColor4f(1.0f, 0.65f, 0.0f, 0.8f);
+
+    immBegin(GPU_PRIM_LINES, 24);
+    for (int i = 0; i < 12; i++) {
+      immVertex3fv(pos, wc[edges[i][0]]);
+      immVertex3fv(pos, wc[edges[i][1]]);
+    }
+    immEnd();
+
+    immUnbindProgram();
+    GPU_blend(GPU_BLEND_NONE);
   }
 
   void draw(Framebuffer & /*framebuffer*/, Manager & /*manager*/, View & /*view*/) final
