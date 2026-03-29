@@ -88,6 +88,7 @@ class Sdfs : Overlay {
     float4x4 object_to_world;
     float3 bb_min;
     float3 bb_max;
+    const SDF *sdf_data;
   };
   Vector<SdfEntry> entries_;
   int max_sdf_index_ = 0;
@@ -196,7 +197,7 @@ class Sdfs : Overlay {
       poly_min.z = -sdf_data->size[2];
       poly_max.z = sdf_data->size[2];
     }
-    entries_.append({idx, packed_id, sel_id.get(), obmat, poly_min, poly_max});
+    entries_.append({idx, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data});
   }
 
   void end_sync(Resources &res, const State & /*state*/) final
@@ -366,33 +367,119 @@ class Sdfs : Overlay {
     GPU_blend(GPU_BLEND_ALPHA);
     GPU_line_width(1.0f);
 
-    /* Local corners → world via rotation + position (no scale, already in sdf_size). */
+    /* Collect transforms (rotation + position) for base + modifier copies. */
+    struct CopyXform {
+      float4x4 r;
+      float3 p;
+    };
+    Vector<CopyXform> copies;
+    copies.append({rot, obj_pos});
+
+    if (sel->sdf_data) {
+      float4x4 inv_rot = math::transpose(rot);
+      for (const SDFModifier *mod = static_cast<const SDFModifier *>(
+               sel->sdf_data->modifiers.first);
+           mod; mod = mod->next)
+      {
+        if (!mod->show_viewport) {
+          continue;
+        }
+        if (mod->type == SDF_MOD_MIRROR) {
+          float offset = mod->params[0];
+          float3 world_org(0);
+          if (mod->mirror_ob) {
+            world_org = float3(mod->mirror_ob->object_to_world()[3]) - obj_pos;
+          }
+          float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
+
+          auto do_mirror = [&](int axis_idx) {
+            float disp = 2.0f * local_org[axis_idx] + offset;
+            float3 local_disp(0);
+            local_disp[axis_idx] = disp;
+            float3 world_disp = float3(rot * float4(local_disp, 0.0f));
+            int cur = int(copies.size());
+            for (int ci = 0; ci < cur; ci++) {
+              copies.append({copies[ci].r, copies[ci].p + world_disp});
+            }
+          };
+          if (mod->flag & SDF_MOD_MIRROR_X) { do_mirror(0); }
+          if (mod->flag & SDF_MOD_MIRROR_Y) { do_mirror(1); }
+          if (mod->flag & SDF_MOD_MIRROR_Z) { do_mirror(2); }
+        }
+        else if (mod->type == SDF_MOD_ARRAY) {
+          int count = int(mod->params[0]);
+          if (count < 2) {
+            continue;
+          }
+          if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
+            float3 off(mod->params[1], mod->params[2], mod->params[3]);
+            float3 world_off = float3(rot * float4(off, 0.0f));
+            int cur = int(copies.size());
+            for (int ci = 0; ci < cur; ci++) {
+              for (int ai = 1; ai < count; ai++) {
+                copies.append({copies[ci].r, copies[ci].p + world_off * float(ai)});
+              }
+            }
+          }
+          else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
+            float radius = mod->params[1];
+            int cur = int(copies.size());
+            for (int ci = 0; ci < cur; ci++) {
+              /* Base copy is at local (radius, 0, 0). Shift base position. */
+              float3 base_local_off(radius, 0, 0);
+              float3 base_world_off = float3(copies[ci].r * float4(base_local_off, 0.0f));
+              copies[ci].p += base_world_off;
+
+              for (int ai = 1; ai < count; ai++) {
+                float angle = 2.0f * float(M_PI) * float(ai) / float(count);
+                float ca = cosf(angle), sa = sinf(angle);
+                /* Copy center at (radius*cos(θ), radius*sin(θ), 0) in local space. */
+                float3 local_pos(radius * ca, radius * sa, 0);
+                float3 world_pos = float3(copies[ci].r * float4(local_pos, 0.0f))
+                                   + (copies[ci].p - base_world_off);
+                /* Rotation around local Z by θ. */
+                float4x4 arr_rot = float4x4(
+                    float4(ca, sa, 0, 0),
+                    float4(-sa, ca, 0, 0),
+                    float4(0, 0, 1, 0),
+                    float4(0, 0, 0, 1));
+                copies.append({copies[ci].r * arr_rot, world_pos});
+              }
+            }
+          }
+        }
+      }
+    }
+
+    /* Draw BB at each copy. */
     float3 lc[8] = {
         {lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z},
         {hi.x, hi.y, lo.z}, {lo.x, hi.y, lo.z},
         {lo.x, lo.y, hi.z}, {hi.x, lo.y, hi.z},
         {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z},
     };
-    float3 wc[8];
-    for (int i = 0; i < 8; i++) {
-      float4 rp = rot * float4(lc[i], 1.0f);
-      wc[i] = float3(rp.x, rp.y, rp.z) + obj_pos;
-    }
     int edges[12][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
         {0,4},{1,5},{2,6},{3,7},
     };
 
-    uint pos = GPU_vertformat_attr_add_legacy(
+    uint pos_attr = GPU_vertformat_attr_add_legacy(
         immVertexFormat(), "pos", GPU_COMP_F32, 3, GPU_FETCH_FLOAT);
     immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
     immUniformColor4f(1.0f, 0.65f, 0.0f, 0.8f);
 
-    immBegin(GPU_PRIM_LINES, 24);
-    for (int i = 0; i < 12; i++) {
-      immVertex3fv(pos, wc[edges[i][0]]);
-      immVertex3fv(pos, wc[edges[i][1]]);
+    immBegin(GPU_PRIM_LINES, 24 * int(copies.size()));
+    for (const CopyXform &cx : copies) {
+      float3 wc[8];
+      for (int i = 0; i < 8; i++) {
+        float4 rp = cx.r * float4(lc[i], 1.0f);
+        wc[i] = float3(rp.x, rp.y, rp.z) + cx.p;
+      }
+      for (int i = 0; i < 12; i++) {
+        immVertex3fv(pos_attr, wc[edges[i][0]]);
+        immVertex3fv(pos_attr, wc[edges[i][1]]);
+      }
     }
     immEnd();
 

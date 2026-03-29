@@ -686,6 +686,14 @@ float opSmoothIntersection(float d1, float d2, float k)
   return mix(d2, d1, h) + k * h * (1.0f - h);
 }
 
+/** CSG operation IDs (must match eSDFCSGOperation in DNA_sdf_types.h). */
+#define SDF_CSG_OP_UNION 0
+#define SDF_CSG_OP_SUBTRACT 1
+#define SDF_CSG_OP_INTERSECT 2
+#define SDF_CSG_OP_SHELL 3
+#define SDF_CSG_OP_PUSH 4
+#define SDF_CSG_OP_AVOID 5
+
 /* ---- Color blend factor ---- */
 
 float colorBlendFactor(float d_prev, float d_new, int blend_type, float blend)
@@ -695,6 +703,35 @@ float colorBlendFactor(float d_prev, float d_new, int blend_type, float blend)
     return smoothstep(0.0f, 1.0f, 1.0f - h);
   }
   return (d_new < d_prev) ? 1.0f : 0.0f;
+}
+
+/* CSG-aware color blend factor: returns how much of the NEW shape's color to mix in. */
+float csgColorFactor(float d_prev, float d_new, int csg_op, int blend_type, float blend)
+{
+  bool has_blend = (blend_type > 0 && blend > 0.0f);
+
+  if (csg_op == SDF_CSG_OP_SUBTRACT) {
+    /* Carved surface shows the subtractor's color in the blend zone. */
+    if (!has_blend) { return (-d_new > d_prev) ? 1.0f : 0.0f; }
+    float h = clamp(0.5f - 0.5f * (d_prev + d_new) / blend, 0.0f, 1.0f);
+    return smoothstep(0.0f, 1.0f, h);
+  }
+  else if (csg_op == SDF_CSG_OP_INTERSECT) {
+    /* Intersection: color follows the constraining (farther) shape. */
+    if (!has_blend) { return (d_new > d_prev) ? 1.0f : 0.0f; }
+    float h = clamp(0.5f - 0.5f * (d_new - d_prev) / blend, 0.0f, 1.0f);
+    return smoothstep(0.0f, 1.0f, 1.0f - h);
+  }
+  else if (csg_op == SDF_CSG_OP_SHELL) {
+    /* Shell surface is defined by the new shape. */
+    float d_shell = abs(d_new);
+    if (!has_blend) { return (d_shell < d_prev) ? 1.0f : 0.0f; }
+    float h = clamp(0.5f + 0.5f * (d_shell - d_prev) / blend, 0.0f, 1.0f);
+    return smoothstep(0.0f, 1.0f, 1.0f - h);
+  }
+
+  /* Union, Push, Avoid: color follows whichever shape is closer. */
+  return colorBlendFactor(d_prev, d_new, blend_type, blend);
 }
 
 /* ---- Chamfer blend operations ---- */
@@ -1061,14 +1098,6 @@ float sdEllipsoid(float3 p, float3 r)
 /* SDFPrimitiveData removed — eval functions take SDFObjectGPU directly. */
 
 /* ---- CSG dispatch ---- */
-
-/** CSG operation IDs (must match eSDFCSGOperation in DNA_sdf_types.h). */
-#define SDF_CSG_OP_UNION 0
-#define SDF_CSG_OP_SUBTRACT 1
-#define SDF_CSG_OP_INTERSECT 2
-#define SDF_CSG_OP_SHELL 3
-#define SDF_CSG_OP_PUSH 4
-#define SDF_CSG_OP_AVOID 5
 
 /** Shell mode IDs (must match eSDFShellMode in DNA_sdf_types.h). */
 #define SDF_SHELL_MODE_NORMAL 0
@@ -1602,10 +1631,8 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
         grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
         grp.chamfer_k2, grp.chamfer_k3);
-    if (grp.csg_operation == 0) {
-      float t = colorBlendFactor(prev, grp_dist, grp.blend_type, grp.blend);
-      out_color = mix(out_color, grp_color, t);
-    }
+    float t = csgColorFactor(prev, grp_dist, grp.csg_operation, grp.blend_type, grp.blend);
+    out_color = mix(out_color, grp_color, t);
   }
 }
 
