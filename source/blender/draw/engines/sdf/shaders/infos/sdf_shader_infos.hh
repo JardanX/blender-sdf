@@ -6,6 +6,7 @@
 #  pragma once
 #  include "gpu_shader_compat.hh"
 #  include "sdf_shader_shared.hh"
+#  include "select_shader_shared.hh"
 #endif
 
 #include "gpu_shader_create_info.hh"
@@ -136,7 +137,6 @@ STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
 STORAGE_BUF(5, read, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
-STORAGE_BUF(7, read, float, tile_far_hint[])
 IMAGE(0, SFLOAT_16_16_16_16, write, image2D, out_color_img)
 IMAGE(1, SFLOAT_32, write, image2D, out_depth_img)
 IMAGE(2, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
@@ -207,9 +207,6 @@ STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
 IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
 IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
-IMAGE(2, SFLOAT_16_16_16_16, read, image2D, gbuf_color_img)
-PUSH_CONSTANT(int, object_count)
-PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(float, sdf_ray_epsilon)
 PUSH_CONSTANT(int, debug_fd_normals)
 PUSH_CONSTANT(int2, screen_size)
@@ -384,4 +381,40 @@ GPU_SHADER_CREATE_END()
 
 /** \} */
 
-/* MATHOPS: Removed - SDF Selection March (sdf_select_march_frag.glsl deleted) */
+/* -------------------------------------------------------------------- */
+/** \name SDF Outline Prepass (writes packed object IDs for outline detection)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_outline_prepass)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(7, read, uint, outline_ids[])
+SAMPLER(0, sampler2D, sdf_depth_tx)
+SAMPLER(1, sampler2D, sdf_gbuf_color_tx)
+PUSH_CONSTANT(float2, uv_scale)
+FRAGMENT_OUT(0, uint, out_object_id)
+DEPTH_WRITE(DepthWrite::ANY)
+ADDITIONAL_INFO(gpu_fullscreen)
+FRAGMENT_SOURCE("sdf_outline_prepass_frag.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Analytical Pick (sphere-trace for GPU selection)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_analytical_pick)
+DO_STATIC_COMPILATION()
+SAMPLER(0, sampler2D, sdf_depth_tx)
+SAMPLER(1, sampler2D, sdf_gbuf_color_tx)
+STORAGE_BUF(7, read, uint, select_id_map_buf[])
+STORAGE_BUF(6, read_write, uint, out_select_buf[])
+UNIFORM_BUF(4, SelectInfoData, select_info_buf)
+PUSH_CONSTANT(float2, uv_scale)
+DEPTH_WRITE(DepthWrite::ANY)
+TYPEDEF_SOURCE("select_shader_shared.hh")
+ADDITIONAL_INFO(gpu_fullscreen)
+FRAGMENT_SOURCE("sdf_analytical_pick_frag.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */

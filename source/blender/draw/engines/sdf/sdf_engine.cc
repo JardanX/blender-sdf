@@ -77,6 +77,10 @@ static gpu::StorageBuf *s_bvh_ssbo = nullptr;
 static int s_bvh_root = -1;
 static int s_group_count = 0;
 static Vector<int> s_depsgraph_to_sorted;
+static gpu::Texture *s_depth_tx = nullptr;
+static gpu::Texture *s_gbuf_color_tx = nullptr;
+static int2 s_render_size = {0, 0};
+static int2 s_texture_size = {0, 0};
 
 class Instance : public DrawEngine {
  private:
@@ -187,18 +191,13 @@ class Instance : public DrawEngine {
   int bvh_nodes_ssbo_count_ = 0;
 
   gpu::StorageBuf *cone_hit_ssbo_ = nullptr;
-  int cone_hit_ssbo_count_ = 0;
-
   gpu::StorageBuf *tile_far_hint_ssbo_ = nullptr;
-  int tile_far_hint_ssbo_count_ = 0;
-
   gpu::StorageBuf *screen_aabbs_ssbo_ = nullptr;
   int screen_aabbs_ssbo_count_ = 0;
 
   gpu::StorageBuf *tile_prim_counts_ssbo_ = nullptr;
   int tile_prim_counts_ssbo_tiles_ = 0;
   gpu::StorageBuf *tile_prim_lists_ssbo_ = nullptr;
-  int tile_prim_lists_ssbo_tiles_ = 0;
 
   gpu::Batch *fullscreen_batch_ = nullptr;
 
@@ -604,8 +603,6 @@ class Instance : public DrawEngine {
     }
 
     gpu_obj.group_id = -1;
-    gpu_obj.group_first = 0;
-    gpu_obj.group_order = sdf_data->group_order;
     gpu_obj.original_index = sdf_data->sdf_index;
 
     gpu_obj.color = float4(
@@ -1139,13 +1136,14 @@ class Instance : public DrawEngine {
       }
 
       BLI_assert(int(object_ptrs_.size()) == int(objects_.size()));
+      Vector<int> group_orders(int(objects_.size()), 0);
       for (int i = 0; i < int(objects_.size()); i++) {
         Object *eval_ob = object_ptrs_[i];
         Object *orig_ob = DEG_get_original(eval_ob);
         const GroupMembership *membership = object_membership_map.lookup_ptr(orig_ob);
         if (membership) {
           objects_[i].group_id = membership->group_id;
-          objects_[i].group_order = membership->group_order;
+          group_orders[i] = membership->group_order;
         }
       }
 
@@ -1156,11 +1154,10 @@ class Instance : public DrawEngine {
           Vector<std::pair<int64_t, int>> sort_pairs(n);
           for (int i = 0; i < n; i++) {
             if (objects_[i].group_id >= 0) {
-              sort_pairs[i] = {int64_t(objects_[i].group_id) * 100000 + objects_[i].group_order,
-                               i};
+              sort_pairs[i] = {int64_t(objects_[i].group_id) * 1000000LL + group_orders[i], i};
             }
             else {
-              sort_pairs[i] = {int64_t(1000000) + objects_[i].original_index, i};
+              sort_pairs[i] = {int64_t(10000000) + objects_[i].original_index, i};
             }
           }
           std::stable_sort(sort_pairs.begin(), sort_pairs.end());
@@ -1177,7 +1174,7 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Resolve group_first and fix first_object/object_count */
+      /* Fix first_object/object_count per group */
       for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
         int first = -1;
         int count = 0;
@@ -1185,7 +1182,6 @@ class Instance : public DrawEngine {
           if (objects_[i].group_id == gi) {
             if (first == -1) {
               first = i;
-              objects_[i].group_first = 1;
             }
             count++;
           }
@@ -1208,7 +1204,7 @@ class Instance : public DrawEngine {
           max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
         }
         for (int m = start; m < start + cnt; m++) {
-          memcpy(&objects_[m]._pad3, &max_blend, sizeof(float));
+          objects_[m].max_group_blend = max_blend;
         }
       }
       /* Ungrouped objects: store own blend in _pad1 */
@@ -1216,7 +1212,7 @@ class Instance : public DrawEngine {
         if (objects_[i].group_id < 0) {
           float b = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
           b += fabsf(objects_[i].shell_distance);
-          memcpy(&objects_[i]._pad3, &b, sizeof(float));
+          objects_[i].max_group_blend = b;
         }
       }
     }
@@ -1549,9 +1545,7 @@ class Instance : public DrawEngine {
         a.bbox_min = objects_[i].bbox_min;
         a.bbox_max = objects_[i].bbox_max;
         a.group_id = objects_[i].group_id;
-        float blend_val;
-        memcpy(&blend_val, &objects_[i]._pad3, sizeof(float));
-        a.max_group_blend = blend_val;
+        a.max_group_blend = objects_[i].max_group_blend;
         a._pad0 = 0;
         a._pad1 = 0;
       }
@@ -1758,6 +1752,10 @@ class Instance : public DrawEngine {
     s_group_ssbo = group_ssbo_;
     s_bvh_ssbo = bvh_nodes_ssbo_;
     s_bvh_root = bvh_tree_.root();
+    s_depth_tx = comp_depth_tx_;
+    s_gbuf_color_tx = gbuf_color_tx_;
+    s_render_size = render_size_;
+    s_texture_size = texture_size_;
     s_group_count = int(groups_gpu_.size());
   }
 
@@ -2139,11 +2137,13 @@ class Instance : public DrawEngine {
     }
     texture_size_ = tex_size;
 
-    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE |
+                             GPU_TEXTURE_USAGE_ATTACHMENT;
+    eGPUTextureUsage usage_readback = usage | GPU_TEXTURE_USAGE_HOST_READ;
     comp_color_tx_ = GPU_texture_create_2d("sdf_comp_color", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
-    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
+    comp_depth_tx_ = GPU_texture_create_2d("sdf_comp_depth", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_32, usage_readback, nullptr);
     gbuf_pos_tx_ = GPU_texture_create_2d("sdf_gbuf_pos", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_32_32_32_32, usage, nullptr);
-    gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+    gbuf_color_tx_ = GPU_texture_create_2d("sdf_gbuf_color", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage_readback, nullptr);
     gbuf_normal_tx_ = GPU_texture_create_2d("sdf_gbuf_normal", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
   }
 
@@ -2229,9 +2229,6 @@ class Instance : public DrawEngine {
         total_tiles * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "sdf_tile_far_hint");
 
     tile_prim_counts_ssbo_tiles_ = total_tiles;
-    tile_prim_lists_ssbo_tiles_ = total_tiles;
-    cone_hit_ssbo_count_ = total_tiles;
-    tile_far_hint_ssbo_count_ = total_tiles;
   }
 
   void draw_aabb_project()
@@ -2711,6 +2708,13 @@ class Instance : public DrawEngine {
     s_polygon_ssbo = nullptr;
     s_group_ssbo = nullptr;
     s_group_count = 0;
+    s_bvh_ssbo = nullptr;
+    s_bvh_root = -1;
+    s_depth_tx = nullptr;
+    s_gbuf_color_tx = nullptr;
+    s_render_size = {0, 0};
+    s_texture_size = {0, 0};
+    s_object_count = 0;
 
     if (comp_color_tx_) {
       GPU_texture_free(comp_color_tx_);
@@ -2777,39 +2781,9 @@ class Instance : public DrawEngine {
 
 /* Public API */
 
-void sdf_atlas_params_get(
-    float *voxel_size, float3 *origin, float3 *extent, int3 *grid_resolution, int *bricks_per_axis)
-{
-  *voxel_size = 0.01f;
-  *origin = float3(0);
-  *extent = float3(0);
-  *grid_resolution = int3(0);
-  *bricks_per_axis = 0;
-}
-
 int sdf_object_count_get()
 {
   return s_object_count;
-}
-
-gpu::StorageBuf *sdf_objects_ssbo_get()
-{
-  return s_object_ssbo;
-}
-
-gpu::StorageBuf *sdf_modifiers_ssbo_get()
-{
-  return s_modifier_ssbo;
-}
-
-gpu::StorageBuf *sdf_polygon_ssbo_get()
-{
-  return s_polygon_ssbo;
-}
-
-gpu::StorageBuf *sdf_groups_ssbo_get()
-{
-  return s_group_ssbo;
 }
 
 int sdf_group_count_get()
@@ -2825,6 +2799,25 @@ const int *sdf_depsgraph_to_sorted_get(int *out_count)
   }
   *out_count = int(s_depsgraph_to_sorted.size());
   return s_depsgraph_to_sorted.data();
+}
+
+gpu::Texture *sdf_depth_texture_get()
+{
+  return s_depth_tx;
+}
+
+gpu::Texture *sdf_gbuf_color_texture_get()
+{
+  return s_gbuf_color_tx;
+}
+
+float2 sdf_uv_scale_get()
+{
+  if (s_texture_size.x == 0 || s_texture_size.y == 0) {
+    return float2(1.0f);
+  }
+  return float2(float(s_render_size.x) / float(s_texture_size.x),
+                float(s_render_size.y) / float(s_texture_size.y));
 }
 
 DrawEngine *Engine::create_instance()
@@ -2875,21 +2868,12 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   n_chunks.x = (grid_cells.x + CHUNK - 1) / CHUNK;
   n_chunks.y = (grid_cells.y + CHUNK - 1) / CHUNK;
   n_chunks.z = (grid_cells.z + CHUNK - 1) / CHUNK;
-  int total_chunks = n_chunks.x * n_chunks.y * n_chunks.z;
-
-  fprintf(stderr,
-          "SDF DC: %d/unit, cell=%.4f, grid=%dx%dx%d, chunks=%d\n",
-          grid_res, cell_size,
-          grid_cells.x, grid_cells.y, grid_cells.z, total_chunks);
-  fflush(stderr);
 
   /* Compile shaders (cached) */
-  static gpu::Shader *grid_sh = nullptr, *dc_sh = nullptr, *tri_sh = nullptr,
-                      *color_sh = nullptr;
-  if (!grid_sh) grid_sh = GPU_shader_create_from_info_name("sdf_grid_eval_comp");
-  if (!dc_sh) dc_sh = GPU_shader_create_from_info_name("sdf_dc_contour_comp");
-  if (!tri_sh) tri_sh = GPU_shader_create_from_info_name("sdf_dc_triangulate_comp");
-  if (!color_sh) color_sh = GPU_shader_create_from_info_name("sdf_dc_vertex_color_comp");
+  gpu::Shader *grid_sh = GPU_shader_create_from_info_name("sdf_grid_eval_comp");
+  gpu::Shader *dc_sh = GPU_shader_create_from_info_name("sdf_dc_contour_comp");
+  gpu::Shader *tri_sh = GPU_shader_create_from_info_name("sdf_dc_triangulate_comp");
+  gpu::Shader *color_sh = GPU_shader_create_from_info_name("sdf_dc_vertex_color_comp");
   if (!grid_sh || !dc_sh || !tri_sh || !color_sh) return "Shader compile failed";
 
   /* Global output buffers. Readback = verts + tris transferred from GPU→CPU.
@@ -2925,6 +2909,10 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     GPU_storagebuf_free(cell_ssbo);
     GPU_storagebuf_free(tri_ssbo);
     GPU_storagebuf_free(color_ssbo);
+    GPU_shader_free(grid_sh);
+    GPU_shader_free(dc_sh);
+    GPU_shader_free(tri_sh);
+    GPU_shader_free(color_sh);
   };
 
   /* Pre-bind SSBO slots that don't change between chunks */
@@ -2983,9 +2971,9 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
         /* Grid eval */
         GPU_shader_bind(grid_sh);
-        GPU_storagebuf_bind(s_object_ssbo, grid_obj_slot);
-        GPU_storagebuf_bind(s_modifier_ssbo, grid_mod_slot);
-        GPU_storagebuf_bind(s_group_ssbo, grid_grp_slot);
+        if (s_object_ssbo) GPU_storagebuf_bind(s_object_ssbo, grid_obj_slot);
+        if (s_modifier_ssbo) GPU_storagebuf_bind(s_modifier_ssbo, grid_mod_slot);
+        if (s_group_ssbo) GPU_storagebuf_bind(s_group_ssbo, grid_grp_slot);
         if (grid_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, grid_poly_slot);
         GPU_storagebuf_bind(grid_ssbo, grid_val_slot);
         if (has_bvh && grid_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, grid_bvh_slot);
@@ -3028,25 +3016,14 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
         chunk_done++;
       }
     }
-    fprintf(stderr,
-            "SDF DC: layer %d/%d, %d dispatched, %d skipped\r",
-            cz + 1, n_chunks.z, chunk_done - chunk_skipped, chunk_skipped);
-    fflush(stderr);
   }
   GPU_shader_unbind();
 
   /* Single readback at end */
-  fprintf(stderr, "\nSDF DC: readback counters (8 bytes)...\n"); fflush(stderr);
   Vector<int> counters(2);
   GPU_storagebuf_read(counter_ssbo, counters.data());
   int vert_count = math::min(counters[0], global_max_verts);
   int tri_count = math::min(counters[1], global_max_tris);
-
-  fprintf(stderr, "SDF DC: %d verts, %d tris", vert_count, tri_count);
-  if (counters[0] > global_max_verts || counters[1] > global_max_tris) {
-    fprintf(stderr, " (TRUNCATED from %d/%d)", counters[0], counters[1]);
-  }
-  fprintf(stderr, "\n"); fflush(stderr);
 
   if (vert_count == 0) {
     cleanup();
@@ -3055,7 +3032,6 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
   /* Vertex color pass: evaluate SDF color at each DC vertex position */
   {
-    fprintf(stderr, "SDF DC: vertex color pass (%d verts)...\n", vert_count); fflush(stderr);
     GPU_shader_bind(color_sh);
     int col_obj_slot = GPU_shader_get_ssbo_binding(color_sh, "objects");
     int col_mod_slot = GPU_shader_get_ssbo_binding(color_sh, "sdf_modifiers");
@@ -3067,9 +3043,9 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     int col_out_slot = GPU_shader_get_ssbo_binding(color_sh, "dc_colors");
     int col_bvh_slot = GPU_shader_get_ssbo_binding(color_sh, "aabb_nodes");
 
-    GPU_storagebuf_bind(s_object_ssbo, col_obj_slot);
-    GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
-    GPU_storagebuf_bind(s_group_ssbo, col_grp_slot);
+    if (s_object_ssbo) GPU_storagebuf_bind(s_object_ssbo, col_obj_slot);
+    if (s_modifier_ssbo) GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
+    if (s_group_ssbo) GPU_storagebuf_bind(s_group_ssbo, col_grp_slot);
     if (col_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, col_poly_slot);
     GPU_storagebuf_bind(vert_ssbo, col_pos_slot);
     GPU_storagebuf_bind(color_ssbo, col_out_slot);
@@ -3085,15 +3061,10 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     GPU_compute_dispatch(color_sh, color_groups, 1, 1);
     GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     GPU_shader_unbind();
-    fprintf(stderr, "SDF DC: vertex color pass done\n"); fflush(stderr);
   }
 
-  fprintf(stderr, "SDF DC: reading vertices (%d, %zu MB)...\n",
-          global_max_verts, (size_t)global_max_verts * sizeof(DCVertexGPU) / (1024 * 1024));
-  fflush(stderr);
   Vector<DCVertexGPU> gpu_verts(global_max_verts);
   GPU_storagebuf_read(vert_ssbo, gpu_verts.data());
-  fprintf(stderr, "SDF DC: vertices done\n"); fflush(stderr);
 
   out_positions.resize(vert_count);
   out_normals.resize(vert_count);
@@ -3103,21 +3074,15 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   }
 
   /* Read back vertex colors */
-  fprintf(stderr, "SDF DC: reading colors (%d verts)...\n", vert_count); fflush(stderr);
   Vector<float4> gpu_colors(global_max_verts);
   GPU_storagebuf_read(color_ssbo, gpu_colors.data());
   out_colors.resize(vert_count);
   for (int i = 0; i < vert_count; i++) {
     out_colors[i] = gpu_colors[i];
   }
-  fprintf(stderr, "SDF DC: colors done\n"); fflush(stderr);
 
-  fprintf(stderr, "SDF DC: reading triangles (%d, %zu MB)...\n",
-          global_max_tris, (size_t)global_max_tris * sizeof(int) * 4 / (1024 * 1024));
-  fflush(stderr);
   Vector<int4> gpu_tris(global_max_tris);
   GPU_storagebuf_read(tri_ssbo, gpu_tris.data());
-  fprintf(stderr, "SDF DC: triangles done\n"); fflush(stderr);
 
   out_tris.reserve(tri_count);
   for (int i = 0; i < tri_count; i++) {
@@ -3129,9 +3094,6 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
   *out_vert_count = vert_count;
   *out_tri_count = out_tris.size();
-
-  fprintf(stderr, "SDF DC: done — %d verts, %d tris\n", *out_vert_count, *out_tri_count);
-  fflush(stderr);
 
   cleanup();
   return "";

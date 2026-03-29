@@ -10,6 +10,7 @@
 
 #include <cfloat>
 #include <cstring>
+#include <functional>
 
 #include "BLI_assert.h"
 #include "BLI_listbase.h"
@@ -22,10 +23,7 @@
 #include "draw_view.hh"
 
 #include "DNA_object_types.h"
-#include "DNA_sdf_types.h"
 #include "DNA_userdef_types.h"
-
-#include "BKE_sdf.hh"
 
 #include "GPU_batch.hh"
 #include "GPU_shader.hh"
@@ -34,107 +32,8 @@
 #include "GPU_texture.hh"
 #include "GPU_uniform_buffer.hh"
 
+
 namespace blender::draw::overlay {
-
-static inline uint64_t sdf_polygon_proxy_hash(const SDF *sdf)
-{
-  uint64_t h = uint64_t(sdf->totpolygon);
-  for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf->polygon_points.first); pt; pt = pt->next) {
-    uint32_t bx, by, bc;
-    memcpy(&bx, &pt->co[0], 4);
-    memcpy(&by, &pt->co[1], 4);
-    memcpy(&bc, &pt->corner, 4);
-    h = h * 31 + bx;
-    h = h * 31 + by;
-    h = h * 31 + bc;
-  }
-  return h;
-}
-
-static inline gpu::Batch *sdf_polygon_proxy_ensure(const SDF *sdf)
-{
-  if (sdf->totpolygon < 3 || !sdf->runtime) {
-    return nullptr;
-  }
-
-  uint64_t hash = sdf_polygon_proxy_hash(sdf);
-  if (sdf->runtime->proxy_batch && sdf->runtime->proxy_hash == hash) {
-    return static_cast<gpu::Batch *>(sdf->runtime->proxy_batch);
-  }
-
-  if (sdf->runtime->proxy_batch) {
-    GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
-    sdf->runtime->proxy_batch = nullptr;
-  }
-
-  /* Compute 2D AABB of polygon points. */
-  float2 bb_min(FLT_MAX);
-  float2 bb_max(-FLT_MAX);
-  for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf->polygon_points.first); pt; pt = pt->next) {
-    bb_min.x = math::min(bb_min.x, pt->co[0]);
-    bb_min.y = math::min(bb_min.y, pt->co[1]);
-    bb_max.x = math::max(bb_max.x, pt->co[0]);
-    bb_max.y = math::max(bb_max.y, pt->co[1]);
-  }
-
-  /* Box mesh from AABB, z in [-1, 1]. */
-  float x0 = bb_min.x, x1 = bb_max.x;
-  float y0 = bb_min.y, y1 = bb_max.y;
-
-  Vector<VertexPos> verts;
-  /* Front face (y = y1). */
-  verts.append({{x0, y1, -1.0f}});
-  verts.append({{x1, y1, -1.0f}});
-  verts.append({{x1, y1, 1.0f}});
-  verts.append({{x0, y1, -1.0f}});
-  verts.append({{x1, y1, 1.0f}});
-  verts.append({{x0, y1, 1.0f}});
-  /* Back face (y = y0). */
-  verts.append({{x1, y0, -1.0f}});
-  verts.append({{x0, y0, -1.0f}});
-  verts.append({{x0, y0, 1.0f}});
-  verts.append({{x1, y0, -1.0f}});
-  verts.append({{x0, y0, 1.0f}});
-  verts.append({{x1, y0, 1.0f}});
-  /* Right face (x = x1). */
-  verts.append({{x1, y0, -1.0f}});
-  verts.append({{x1, y1, -1.0f}});
-  verts.append({{x1, y1, 1.0f}});
-  verts.append({{x1, y0, -1.0f}});
-  verts.append({{x1, y1, 1.0f}});
-  verts.append({{x1, y0, 1.0f}});
-  /* Left face (x = x0). */
-  verts.append({{x0, y1, -1.0f}});
-  verts.append({{x0, y0, -1.0f}});
-  verts.append({{x0, y0, 1.0f}});
-  verts.append({{x0, y1, -1.0f}});
-  verts.append({{x0, y0, 1.0f}});
-  verts.append({{x0, y1, 1.0f}});
-  /* Top face (z = 1). */
-  verts.append({{x0, y0, 1.0f}});
-  verts.append({{x0, y1, 1.0f}});
-  verts.append({{x1, y1, 1.0f}});
-  verts.append({{x0, y0, 1.0f}});
-  verts.append({{x1, y1, 1.0f}});
-  verts.append({{x1, y0, 1.0f}});
-  /* Bottom face (z = -1). */
-  verts.append({{x0, y1, -1.0f}});
-  verts.append({{x0, y0, -1.0f}});
-  verts.append({{x1, y0, -1.0f}});
-  verts.append({{x0, y1, -1.0f}});
-  verts.append({{x1, y0, -1.0f}});
-  verts.append({{x1, y1, -1.0f}});
-
-  gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(VertexPos::format());
-  GPU_vertbuf_data_alloc(*vbo, verts.size());
-  vbo->data<VertexPos>().copy_from(verts);
-
-  gpu::Batch *batch = GPU_batch_create_ex(
-      GPU_PRIM_TRIS, vbo, nullptr, GPU_BATCH_OWNS_VBO);
-  sdf->runtime->proxy_batch = batch;
-  sdf->runtime->proxy_hash = hash;
-  return batch;
-}
 
 /**
  * Display selected object outline.
@@ -161,6 +60,17 @@ class Outline : Overlay {
   TextureFromPool tmp_depth_tx_ = {"outline_depth_tx"};
 
   Framebuffer prepass_fb_ = {"outline.prepass_fb"};
+
+  /* Callback for SDF overlay to draw into the outline prepass framebuffer. */
+  std::function<void(Framebuffer &, View &, gpu::Texture *)> sdf_outline_callback_;
+
+ public:
+  void set_sdf_outline_callback(std::function<void(Framebuffer &, View &, gpu::Texture *)> cb)
+  {
+    sdf_outline_callback_ = std::move(cb);
+  }
+
+ private:
 
   Vector<FlatObjectRef> flat_objects_;
 
@@ -318,72 +228,9 @@ class Outline : Overlay {
           prepass_volume_ps_->draw(geom, manager.unique_handle(ob_ref));
         }
         break;
-      case OB_SDF: {
-        const SDF *sdf = id_cast<const SDF *>(ob_ref.object->data);
-        const float bev = sdf->bevel;
-        float3 scale;
-        gpu::Batch *sdf_geom = nullptr;
-        switch (sdf->sdf_type) {
-          case SDF_TYPE_BOX:
-            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.cube_solid.get());
-            break;
-          case SDF_TYPE_SPHERE:
-            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
-            break;
-          case SDF_TYPE_CYLINDER:
-            scale = float3(sdf->size[0] + bev, sdf->size[1] + bev, sdf->size[2] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_cylinder_solid.get());
-            break;
-          case SDF_TYPE_CONE:
-            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[1] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_cone_solid.get());
-            break;
-          case SDF_TYPE_CAPSULE: {
-            float r = sdf->size[0] + bev;
-            float h = sdf->size[1] + bev;
-            scale = float3(r, r, math::max(h, r));
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_capsule_solid.get());
-            break;
-          }
-          case SDF_TYPE_TORUS: {
-            float major = sdf->size[0];
-            float minor = sdf->size[1] + bev;
-            float s = major + minor;
-            scale = float3(s, s, minor);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_torus_solid.get());
-            break;
-          }
-          case SDF_TYPE_NGON: {
-            int idx = math::clamp(sdf->ngon_sides - ShapeCache::sdf_ngon_min_sides,
-                                  0,
-                                  ShapeCache::sdf_ngon_max_sides - ShapeCache::sdf_ngon_min_sides);
-            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_ngon_solids[idx].get());
-            break;
-          }
-          case SDF_TYPE_POLYGON: {
-            scale = float3(sdf->size[0] + bev, sdf->size[0] + bev, sdf->size[2] + bev);
-            sdf_geom = sdf_polygon_proxy_ensure(sdf);
-            break;
-          }
-          default:
-            scale = float3(sdf->size[0] + bev);
-            sdf_geom = const_cast<gpu::Batch *>(res.shapes.sdf_sphere_solid.get());
-            break;
-        }
-        if (sdf_geom) {
-          float4x4 scaled_mat = float4x4(ob_ref.object->object_to_world()) *
-                                 math::from_scale<float4x4>(scale);
-          float3 bounds_center = float3(0.0f);
-          float3 bounds_half = scale;
-          ResourceHandleRange sdf_handle = manager.resource_handle(
-              ob_ref, &scaled_mat, &bounds_center, &bounds_half);
-          prepass_mesh_ps_->draw(sdf_geom, sdf_handle);
-        }
+      case OB_SDF:
+        /* SDF outlines handled by Sdfs overlay (fullscreen SDF eval). */
         break;
-      }
       default:
         break;
     }
@@ -451,7 +298,10 @@ class Outline : Overlay {
     manager.submit_only(outline_prepass_ps_, view);
     manager.submit_only(outline_prepass_flat_ps_, view);
 
-
+    /* SDF outline: draw fullscreen SDF eval pass into the same prepass framebuffer. */
+    if (sdf_outline_callback_) {
+      sdf_outline_callback_(prepass_fb_, view, res.depth_tx);
+    }
 
     GPU_framebuffer_bind(framebuffer);
     manager.submit(outline_resolve_ps_, view);

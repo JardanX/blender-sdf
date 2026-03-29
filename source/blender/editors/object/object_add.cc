@@ -2546,6 +2546,7 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
     for (Object &del_ob : bmain->objects) {
       if ((del_ob.id.tag & ID_TAG_DOIT) && del_ob.type == OB_SDF) {
         BKE_sdf_groups_remove_object(bmain, &del_ob);
+        if (!del_ob.data) continue;
         SDF *sdf = id_cast<SDF *>(del_ob.data);
         for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod;
              mod = mod->next)
@@ -4790,7 +4791,14 @@ static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
     id_us_plus(&group->id);
   }
 
+  /* Reindex, then fix up: reindex reads member->object->data which for the
+   * new member may still point to the source SDF (pre-remapping), corrupting
+   * the source's group_order. Restore both orders explicitly. */
   BKE_sdf_group_reindex_members(group);
+  if (!is_linked && after_member) {
+    sdf_src->group_order = after_member->order;
+    sdf_new->group_order = new_member->order;
+  }
 }
 
 /** Create new mirror empties for duplicated SDF objects. */

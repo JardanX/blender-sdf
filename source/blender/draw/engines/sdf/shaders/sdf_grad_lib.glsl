@@ -130,7 +130,9 @@ float4 sdgCapsule(float3 p, float3 size)
 float4 sdgTorus(float3 p, float2 t)
 {
   float h = length(p.xy);
-  float3 grad = normalize(p * float3(h - t.x, h - t.x, h));
+  float3 raw = p * float3(h - t.x, h - t.x, h);
+  float rl = length(raw);
+  float3 grad = (rl > 1e-8f) ? raw / rl : float3(0.0f, 0.0f, sign(p.z));
   float2 q = float2(h - t.x, p.z);
   float d = length(q) - t.y;
   return float4(d, grad);
@@ -154,9 +156,6 @@ float4 sdgCappedTorus(float3 p, float2 sc, float ra, float rb)
                   p.y * (1.0f - ra / lxy),
                   p.z);
   }
-  float outer = max(length(float2(length(float2(
-      (sc.y * abs(p.x) > sc.x * p.y) ? abs(p.x) - ra * sc.x : length(p.xy) - ra,
-      (sc.y * abs(p.x) > sc.x * p.y) ? p.y - ra * sc.y : 0.0f)), p.z)), 1e-8f);
   return float4(d, grad / max(length(grad), 1e-8f));
 }
 
@@ -556,14 +555,13 @@ float4 combineCSGGrad(float4 dg1, float4 dg2, int op, int bt, float k,
 
 /* ---- Master primitive gradient evaluator ---- */
 
-float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj)
+float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
 {
-  /* Distance MUST match evalPrimitiveOnly exactly for correct CSG blend factors.
-   * Gradient direction uses a minimum bevel for edge continuity. */
   float actual_dist = evalPrimitiveOnly(obj, local_pos);
 
   float3 size = obj.sdf_size.xyz;
-  float grad_bevel = obj.bevel;
+  float min_dim = min(size.x, min(size.y, size.z));
+  float grad_bevel = max(obj.bevel, min(0.005f, min_dim * 0.5f));
   float4 dg;
 
   if (obj.sdf_type == 1) {

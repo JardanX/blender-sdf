@@ -4534,6 +4534,10 @@ def km_object_mode(params):
         *_template_items_hide_reveal_actions("object.hide_view_set", "object.hide_view_clear"),
         ("object.hide_collection", {"type": 'H', "value": 'PRESS', "ctrl": True}, None),
         ("object.sdf_blend_adjust", {"type": 'B', "value": 'PRESS'}, None),
+        ("object.sdf_group_cycle", {"type": 'WHEELUPMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("direction", -1)]}),
+        ("object.sdf_group_cycle", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("direction", 1)]}),
         ("sdf.polygon_point_context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
         *_template_items_context_menu("VIEW3D_MT_object_context_menu", params.context_menu_event),
     ])

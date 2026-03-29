@@ -48,6 +48,11 @@ int2 gpu_select_next_get_pick_area_center()
   return int2(BLI_rcti_size_x(&g_state.rect) / 2, BLI_rcti_size_y(&g_state.rect) / 2);
 }
 
+rcti gpu_select_next_get_pick_area_rect()
+{
+  return g_state.rect;
+}
+
 GPUSelectMode gpu_select_next_get_mode()
 {
   return g_state.mode;

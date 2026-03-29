@@ -19,7 +19,7 @@ shared int s_numCandidates;
 /* Evaluate primitive gradient in local space + apply distance modifiers. */
 float4 evalLocalGrad(float3 lp, SDFObjectGPU obj, float scale)
 {
-  float4 dg = evalPrimitiveGrad(lp, obj);
+  float4 dg = evalPrimitiveGrad(lp, obj, sdf_ray_epsilon);
   dg.x *= scale;
   if (obj.modifier_count > 0) {
     dg = applyDistanceModifiersGrad(dg, obj.modifier_start, obj.modifier_count);
@@ -64,7 +64,7 @@ float4 evalObjectGrad(float3 world_pos, int i)
    * Skip fork detection, domain mods, invertDomainModifiersGrad. */
   if (obj.modifier_count == 0) {
     float3 lp = (inv * float4(world_pos - off, 1.0f)).xyz;
-    float4 dg = evalPrimitiveGrad(lp, obj);
+    float4 dg = evalPrimitiveGrad(lp, obj, sdf_ray_epsilon);
     float3x3 inv3 = float3x3(inv[0].xyz, inv[1].xyz, inv[2].xyz);
     float3 gw = transpose(inv3) * dg.yzw;
     float gl = max(length(gw), 1e-8f);
@@ -168,6 +168,7 @@ float4 evalObjectGrad(float3 world_pos, int i)
         }
 
         float bot_scale = top_scale;
+        float3 cell_p_pre_domain = cell_p;
         if (bottom_count > 0) {
           float4 dm = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count, inv);
           cell_p = dm.xyz;
@@ -180,7 +181,7 @@ float4 evalObjectGrad(float3 world_pos, int i)
 
         /* Invert bottom domain modifiers on gradient */
         if (bottom_count > 0) {
-          cell_dg.yzw = invertDomainModifiersGrad(cell_dg.yzw, cell_p,
+          cell_dg.yzw = invertDomainModifiersGrad(cell_dg.yzw, cell_p_pre_domain,
                                                   obj.modifier_start, bottom_count, inv);
         }
 

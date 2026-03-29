@@ -17,7 +17,4 @@
 #include "sdf_shader_shared.hh"
 
 namespace blender::draw::sdf {
-
-static constexpr int SDF_MAX_MARCH_STEPS = 256;
-
 }  // namespace blender::draw::sdf

@@ -482,6 +482,7 @@ void Instance::begin_sync()
     layer.relations.begin_sync(resources, state);
     layer.speakers.begin_sync(resources, state);
     layer.sculpts.begin_sync(resources, state);
+    layer.sdfs.begin_sync(resources, state);
     layer.wireframe.begin_sync(resources, state);
   };
   begin_sync_layer(regular);
@@ -506,6 +507,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
   OverlayLayer &layer = object_is_in_front(ob_ref.object, state) ? infront : regular;
 
   layer.mode_transfer.object_sync(manager, ob_ref, resources, state);
+  layer.sdfs.object_sync(manager, ob_ref, resources, state);
 
   if (needs_prepass) {
     layer.prepass.object_sync(manager, ob_ref, resources, state);
@@ -671,10 +673,17 @@ void Instance::end_sync()
     layer.mesh_uvs.end_sync(resources, state);
     layer.relations.end_sync(resources, state);
     layer.fluids.end_sync(resources, state);
+    layer.sdfs.end_sync(resources, state);
     layer.speakers.end_sync(resources, state);
   };
   end_sync_layer(regular);
   end_sync_layer(infront);
+
+  /* Register SDF outline callback so Sdfs draws into the outline prepass framebuffer. */
+  outline.set_sdf_outline_callback(
+      [this](Framebuffer &fb, View &view, gpu::Texture *scene_depth) {
+        regular.sdfs.draw_outline(fb, view, scene_depth);
+      });
 
   /* WORKAROUND: This prevents bad frame-buffer config inside workbench when xray is enabled.
    * Better find a solution to this chicken-egg problem. */
@@ -888,6 +897,11 @@ void Instance::draw_v3d(Manager &manager, View &view)
     }
 
     regular.prepass.draw_line(resources.overlay_line_fb, manager, view);
+
+    /* SDF selection: read G-buffer and write select IDs. */
+    if (resources.is_selection()) {
+      regular.sdfs.draw(resources.overlay_line_fb, manager, view);
+    }
 
     /* TODO(fclem): Split overlay and rename draw functions. */
     /* TODO(fclem): Draw on line framebuffer. */

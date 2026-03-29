@@ -228,7 +228,8 @@ set(SRC
   engines/select/select_engine.hh
   engines/select/select_instance.hh
   engines/sdf/sdf_engine.h
-  engines/sdf/sdf_marching_cubes.hh
+  engines/sdf/sdf_bvh.hh
+  engines/sdf/sdf_meshing.hh
   engines/sdf/sdf_private.hh
   engines/sdf/sdf_shader_shared.hh
   engines/workbench/workbench_defines.hh
@@ -361,6 +362,8 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_dc_contour_comp.glsl
   engines/sdf/shaders/sdf_dc_triangulate_comp.glsl
   engines/sdf/shaders/sdf_dc_vertex_color_comp.glsl
+  engines/sdf/shaders/sdf_outline_prepass_frag.glsl
+  engines/sdf/shaders/sdf_analytical_pick_frag.glsl
 
   engines/sdf/shaders/sdf_lib.glsl
   engines/sdf/shaders/sdf_grad_lib.glsl

@@ -3478,17 +3478,21 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
       switch (sdf->sdf_type) {
         case SDF_TYPE_CAPSULE: {
           float r = sdf->size[0];
-          float h = std::max(sdf->size[1] - sdf->bevel, 0.0f) + r;
-          half_size = {r, r, h};
+          float cyl_h = std::max(sdf->size[1] - sdf->bevel, 0.0f);
+          half_size = {r, r, cyl_h + r};
           break;
         }
         case SDF_TYPE_TORUS: {
-          float outer = sdf->size[0] + sdf->size[1];
-          half_size = {outer, outer, sdf->size[1]};
+          float major = std::max(sdf->size[0] - sdf->bevel, 0.001f);
+          float minor = sdf->size[1];
+          half_size = {major + minor, major + minor, minor};
           break;
         }
+        case SDF_TYPE_CONE:
+          half_size = {sdf->size[0], sdf->size[0], sdf->size[1]};
+          break;
         default:
-          half_size = float3(sdf->size[0], sdf->size[1], sdf->size[2]) + float3(sdf->bevel);
+          half_size = float3(sdf->size[0], sdf->size[1], sdf->size[2]);
           break;
       }
       return Bounds<float3>{-half_size, half_size};

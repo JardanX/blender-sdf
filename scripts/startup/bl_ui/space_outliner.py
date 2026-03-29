@@ -349,20 +349,21 @@ class OUTLINER_MT_object(Menu):
         ob = context.active_object
         if ob and ob.type == 'SDF' and hasattr(ob.data, 'sdf_group') and ob.data.sdf_group:
             grp = ob.data.sdf_group
-            # Find member index.
-            member_idx = -1
-            for i, m in enumerate(grp.members):
-                if m.object == ob:
-                    member_idx = i
-                    break
-            if member_idx >= 0:
-                layout.separator()
-                op = layout.operator("object.sdf_group_reorder", text="Move Up in Group", icon='TRIA_UP')
-                op.member_index = member_idx
-                op.direction = -1
-                op = layout.operator("object.sdf_group_reorder", text="Move Down in Group", icon='TRIA_DOWN')
-                op.member_index = member_idx
-                op.direction = 1
+            if hasattr(grp, 'members'):
+                # Find member index.
+                member_idx = -1
+                for i, m in enumerate(grp.members):
+                    if m.object == ob:
+                        member_idx = i
+                        break
+                if member_idx >= 0:
+                    layout.separator()
+                    op = layout.operator("object.sdf_group_reorder", text="Move Up in Group", icon='TRIA_UP')
+                    op.member_index = member_idx
+                    op.direction = -1
+                    op = layout.operator("object.sdf_group_reorder", text="Move Down in Group", icon='TRIA_DOWN')
+                    op.member_index = member_idx
+                    op.direction = 1
 
         layout.separator()
 
@@ -542,7 +543,6 @@ class OUTLINER_PT_filter(Panel):
 
         if (
                 bpy.data.curves or
-                bpy.data.metaballs or
                 (hasattr(bpy.data, "hair_curves") and bpy.data.hair_curves) or
                 (hasattr(bpy.data, "pointclouds") and bpy.data.pointclouds) or
                 bpy.data.volumes or

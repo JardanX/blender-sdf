@@ -21,12 +21,6 @@ struct SdfAabb {
     return SdfAabb(math::min(a.min, b.min), math::max(a.max, b.max));
   }
 
-  bool intersects(const SdfAabb &b) const
-  {
-    return min.x <= b.max.x && max.x >= b.min.x && min.y <= b.max.y && max.y >= b.min.y &&
-           min.z <= b.max.z && max.z >= b.min.z;
-  }
-
   bool contains(const SdfAabb &b) const
   {
     return min.x <= b.min.x && min.y <= b.min.y && min.z <= b.min.z && max.x >= b.max.x &&
@@ -113,7 +107,6 @@ class SdfAabbTree {
   int create_proxy(const SdfAabb &bounds, int shape_index);
   void destroy_proxy(int proxy);
   void update_proxy(int proxy, const SdfAabb &bounds);
-  SdfAabb get_bounds(int proxy) const;
 
   void clear();
 
