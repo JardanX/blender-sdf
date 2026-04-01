@@ -1478,32 +1478,27 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
-    /* Intersection/Push: expand to scene bounds (must be evaluated everywhere).
-     * Applies to per-object intersection/push AND members of groups whose
-     * CSG operation clips the scene (intersection or push). */
-    {
-      float3 smin = float3(1e30f), smax = float3(-1e30f);
-      for (int i = 0; i < int(objects_.size()); i++) {
-        smin = math::min(smin, new_mins[i]);
-        smax = math::max(smax, new_maxs[i]);
+    /* Intersection/Push in groups: expand to group bounds so the clipping
+     * object covers all group members. Per-object intersection/push keeps
+     * its own AABB — the init fix prevents ghost surfaces in tiles without it. */
+    for (int g = 0; g < int(groups_gpu_.size()); g++) {
+      SDFGroupGPU &grp = groups_gpu_[g];
+      int start = grp.first_object;
+      int count = grp.object_count;
+      if (count <= 0 || start < 0 || start + count > int(objects_.size())) {
+        continue;
       }
-      for (int i = 0; i < int(objects_.size()); i++) {
+      float3 gmin = float3(1e30f), gmax = float3(-1e30f);
+      for (int i = start; i < start + count; i++) {
+        gmin = math::min(gmin, float3(objects_[i].bbox_min));
+        gmax = math::max(gmax, float3(objects_[i].bbox_max));
+      }
+      for (int i = start; i < start + count; i++) {
         if (objects_[i].csg_operation == SDF_CSG_INTERSECT ||
             objects_[i].csg_operation == SDF_CSG_PUSH)
         {
-          objects_[i].bbox_min = float4(smin, 0.0f);
-          objects_[i].bbox_max = float4(smax, 0.0f);
-        }
-      }
-      for (int g = 0; g < int(groups_gpu_.size()); g++) {
-        int grp_op = groups_gpu_[g].csg_operation;
-        if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH) {
-          int start = groups_gpu_[g].first_object;
-          int count = groups_gpu_[g].object_count;
-          for (int i = start; i < start + count; i++) {
-            objects_[i].bbox_min = float4(smin, 0.0f);
-            objects_[i].bbox_max = float4(smax, 0.0f);
-          }
+          objects_[i].bbox_min = float4(gmin, 0.0f);
+          objects_[i].bbox_max = float4(gmax, 0.0f);
         }
       }
     }

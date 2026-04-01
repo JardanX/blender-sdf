@@ -22,13 +22,6 @@ void main()
     return;
   }
 
-  /* Intersection (2) / push (4) must be in every tile — force fullscreen. */
-  int csg_op = objects[idx].csg_operation;
-  if (csg_op == 2 || csg_op == 4) {
-    screen_aabbs[idx] = int4(0, 0, screen_size.x, screen_size.y);
-    return;
-  }
-
   ViewMatrices vm = drw_view();
   float4x4 viewproj = vm.winmat * vm.viewmat;
 
