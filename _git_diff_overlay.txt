@@ -1,0 +1,101 @@
+﻿diff --git a/source/blender/draw/engines/overlay/overlay_instance.cc b/source/blender/draw/engines/overlay/overlay_instance.cc
+index ab9a8f3b337..c649927ebc4 100644
+--- a/source/blender/draw/engines/overlay/overlay_instance.cc
++++ b/source/blender/draw/engines/overlay/overlay_instance.cc
+@@ -852,6 +852,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
+     layer.attribute_viewer.draw_line(framebuffer, manager, view);
+     layer.armatures.draw_line(framebuffer, manager, view);
+     layer.sculpts.draw_line(framebuffer, manager, view);
++    layer.sdfs.draw_line(framebuffer, manager, view);
+     /* MATHOPS: Removed ΓÇö Grease Pencil overlay */
+     // layer.grease_pencil.draw_line(framebuffer, manager, view);
+     /* NOTE: Temporarily moved after grid drawing (See #136764). */
+diff --git a/source/blender/draw/engines/overlay/overlay_sdf.hh b/source/blender/draw/engines/overlay/overlay_sdf.hh
+index 402ccc8db18..4019d922ea4 100644
+--- a/source/blender/draw/engines/overlay/overlay_sdf.hh
++++ b/source/blender/draw/engines/overlay/overlay_sdf.hh
+@@ -22,6 +22,7 @@
+ #include "GPU_state.hh"
+ #include "GPU_storage_buffer.hh"
+ #include "GPU_texture.hh"
++#include "GPU_immediate.hh"
+ #include "GPU_uniform_buffer.hh"
+ 
+ #include "draw_view.hh"
+@@ -60,6 +61,7 @@ class Sdfs : Overlay {
+ 
+   /* SSBO of sorted GPU indices of selected objects only (for outline trace). */
+   gpu::StorageBuf *selected_indices_ssbo_ = nullptr;
++  int selected_count_ = 0;
+ 
+   gpu::StorageBuf *outline_ids_ssbo_ = nullptr;
+   gpu::StorageBuf **select_output_buf_ = nullptr;
+@@ -254,6 +256,68 @@ class Sdfs : Overlay {
+     GPU_texture_unbind(depth_tx);
+     GPU_texture_unbind(gbuf_tx);
+     GPU_shader_unbind();
++
++  }
++
++  void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
++  {
++    if (!enabled_ || !has_selected_) {
++      return;
++    }
++
++    /* Count selected and find the single selected entry. */
++    const SdfEntry *sel = nullptr;
++    int sel_count = 0;
++    for (const SdfEntry &e : entries_) {
++      if (e.outline_packed_id != 0u) {
++        sel = &e;
++        sel_count++;
++      }
++    }
++    if (sel_count != 1 || !sel) {
++      return;
++    }
++
++    GPU_framebuffer_bind(framebuffer);
++    GPU_depth_test(GPU_DEPTH_ALWAYS);
++    GPU_depth_mask(false);
++    GPU_blend(GPU_BLEND_ALPHA);
++    GPU_line_width(1.0f);
++
++    float3 e = sel->local_extent;
++    float3 c[8] = {
++        {-e.x, -e.y, -e.z}, { e.x, -e.y, -e.z},
++        { e.x,  e.y, -e.z}, {-e.x,  e.y, -e.z},
++        {-e.x, -e.y,  e.z}, { e.x, -e.y,  e.z},
++        { e.x,  e.y,  e.z}, {-e.x,  e.y,  e.z},
++    };
++    int edges[12][2] = {
++        {0,1},{1,2},{2,3},{3,0},
++        {4,5},{5,6},{6,7},{7,4},
++        {0,4},{1,5},{2,6},{3,7},
++    };
++
++    /* Transform corners to world space. */
++    float3 wc[8];
++    for (int i = 0; i < 8; i++) {
++      float4 wp = sel->object_to_world * float4(c[i], 1.0f);
++      wc[i] = float3(wp.x, wp.y, wp.z);
++    }
++
++    uint pos = GPU_vertformat_attr_add_legacy(
++        immVertexFormat(), "pos", GPU_COMP_F32, 3, GPU_FETCH_FLOAT);
++    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
++    immUniformColor4f(1.0f, 0.65f, 0.0f, 0.8f);
++
++    immBegin(GPU_PRIM_LINES, 24);
++    for (int i = 0; i < 12; i++) {
++      immVertex3fv(pos, wc[edges[i][0]]);
++      immVertex3fv(pos, wc[edges[i][1]]);
++    }
++    immEnd();
++
++    immUnbindProgram();
++    GPU_blend(GPU_BLEND_NONE);
+   }
+ 
+   void draw(Framebuffer & /*framebuffer*/, Manager & /*manager*/, View & /*view*/) final
