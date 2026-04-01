@@ -2,11 +2,15 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Tile cull pass: builds per-tile primitive lists from pre-projected AABBs. */
+/* Tile cull pass: builds per-tile primitive lists from pre-projected AABBs.
+ * Two-pass: intersection/push objects get guaranteed slots first,
+ * then regular objects fill remaining slots. */
 
 #include "infos/sdf_shader_infos.hh"
 
 COMPUTE_SHADER_CREATE_INFO(sdf_tile_cull_comp)
+
+#include "sdf_lib.glsl"
 
 shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];
@@ -25,18 +29,37 @@ void main()
   int tile_max_x = min(tile_min_x + kTileSize, screen_size.x);
   int tile_max_y = min(tile_min_y + kTileSize, screen_size.y);
 
+  /* Pass 1: intersection/push objects get guaranteed slots */
   for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
-    int4 aabb = screen_aabbs[i];
-
-    if (aabb.z < aabb.x) {
+    int op = objects[i].csg_operation;
+    if (op != SDF_CSG_OP_INTERSECT && op != SDF_CSG_OP_PUSH) {
       continue;
     }
-
+    int4 aabb = screen_aabbs[i];
+    if (aabb.z < aabb.x) { continue; }
     if (aabb.z < tile_min_x || aabb.x > tile_max_x ||
         aabb.w < tile_min_y || aabb.y > tile_max_y) {
       continue;
     }
+    uint slot = atomicAdd(s_tileObjCount, 1u);
+    if (slot < uint(kMaxTileObjects)) {
+      s_tileObjList[slot] = i;
+    }
+  }
+  barrier();
 
+  /* Pass 2: regular objects fill remaining slots */
+  for (int i = local_idx; i < object_count; i += kTileSize * kTileSize) {
+    int op = objects[i].csg_operation;
+    if (op == SDF_CSG_OP_INTERSECT || op == SDF_CSG_OP_PUSH) {
+      continue;
+    }
+    int4 aabb = screen_aabbs[i];
+    if (aabb.z < aabb.x) { continue; }
+    if (aabb.z < tile_min_x || aabb.x > tile_max_x ||
+        aabb.w < tile_min_y || aabb.y > tile_max_y) {
+      continue;
+    }
     uint slot = atomicAdd(s_tileObjCount, 1u);
     if (slot < uint(kMaxTileObjects)) {
       s_tileObjList[slot] = i;

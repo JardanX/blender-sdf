@@ -1478,32 +1478,7 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
-    /* Intersection/Push in groups: expand to group bounds so the clipping
-     * object covers all group members. Per-object intersection/push keeps
-     * its own AABB — the init fix prevents ghost surfaces in tiles without it. */
-    for (int g = 0; g < int(groups_gpu_.size()); g++) {
-      SDFGroupGPU &grp = groups_gpu_[g];
-      int start = grp.first_object;
-      int count = grp.object_count;
-      if (count <= 0 || start < 0 || start + count > int(objects_.size())) {
-        continue;
-      }
-      float3 gmin = float3(1e30f), gmax = float3(-1e30f);
-      for (int i = start; i < start + count; i++) {
-        gmin = math::min(gmin, float3(objects_[i].bbox_min));
-        gmax = math::max(gmax, float3(objects_[i].bbox_max));
-      }
-      for (int i = start; i < start + count; i++) {
-        if (objects_[i].csg_operation == SDF_CSG_INTERSECT ||
-            objects_[i].csg_operation == SDF_CSG_PUSH)
-        {
-          objects_[i].bbox_min = float4(gmin, 0.0f);
-          objects_[i].bbox_max = float4(gmax, 0.0f);
-        }
-      }
-    }
-
-    /* Fine frustum cull on expanded AABBs */
+    /* Fine frustum cull on expanded AABBs (before intersection expansion) */
     {
       const View &view = View::default_get();
       float4x4 vp = view.winmat() * view.viewmat();
@@ -1535,6 +1510,38 @@ class Instance : public DrawEngine {
           }
         }
         objects_[i]._pad2 = visible ? 1 : 0;
+      }
+    }
+
+    /* Intersection/Push: expand to visible scene bounds.
+     * Runs after frustum cull so only visible objects contribute. */
+    {
+      float3 smin = float3(1e30f), smax = float3(-1e30f);
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i]._pad2 == 0) { continue; }
+        smin = math::min(smin, float3(objects_[i].bbox_min));
+        smax = math::max(smax, float3(objects_[i].bbox_max));
+      }
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i].csg_operation == SDF_CSG_INTERSECT ||
+            objects_[i].csg_operation == SDF_CSG_PUSH)
+        {
+          objects_[i].bbox_min = float4(smin, 0.0f);
+          objects_[i].bbox_max = float4(smax, 0.0f);
+          objects_[i]._pad2 = 1;
+        }
+      }
+      for (int g = 0; g < int(groups_gpu_.size()); g++) {
+        int grp_op = groups_gpu_[g].csg_operation;
+        if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH) {
+          int start = groups_gpu_[g].first_object;
+          int count = groups_gpu_[g].object_count;
+          for (int i = start; i < start + count; i++) {
+            objects_[i].bbox_min = float4(smin, 0.0f);
+            objects_[i].bbox_max = float4(smax, 0.0f);
+            objects_[i]._pad2 = 1;
+          }
+        }
       }
     }
 
@@ -2291,6 +2298,9 @@ class Instance : public DrawEngine {
 
     gpu::Shader *sh = tile_cull_sh_;
     GPU_shader_bind(sh);
+    if (object_ssbo_) {
+      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+    }
     if (screen_aabbs_ssbo_) {
       GPU_storagebuf_bind(screen_aabbs_ssbo_,
                           GPU_shader_get_ssbo_binding(sh, "screen_aabbs"));

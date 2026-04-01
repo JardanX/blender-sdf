@@ -82,14 +82,21 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       int obj_op = objects[m].csg_operation;
       bool must_eval = grp_has_hit &&
                        (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT);
-      if (da > aabb_skip_thresh && !must_eval) {
-        continue;
-      }
 
       SDFObjectGPU obj = objects[m];
-      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-      float d = evalPrimitive(lp, obj);
-      g_numEvaluated++;
+      float d;
+
+      if (da > aabb_skip_thresh) {
+        if (!must_eval) {
+          continue;
+        }
+        d = da;
+      }
+      else {
+        float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+        d = evalPrimitive(lp, obj);
+        g_numEvaluated++;
+      }
 
       if (!grp_has_hit) {
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
@@ -116,6 +123,20 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         }
         else if (obj.csg_operation == SDF_CSG_OP_AVOID) {
           if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+        }
+        else if (obj.csg_operation == SDF_CSG_OP_SHELL) {
+          if (obj.shell_mode == SDF_SHELL_MODE_PUSH) {
+            if (d - grp_dist < sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+          }
+          else if (obj.shell_mode == SDF_SHELL_MODE_AVOID) {
+            if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+          }
+          else if (obj.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+            if (-d > prev) { grp_winner_id = float(obj.original_index); }
+          }
+          else {
+            if (d < prev) { grp_winner_id = float(obj.original_index); }
+          }
         }
         else {
           if (d < prev) { grp_winner_id = float(obj.original_index); }
@@ -160,6 +181,20 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       else if (grp.csg_operation == SDF_CSG_OP_AVOID) {
         if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
       }
+      else if (grp.csg_operation == SDF_CSG_OP_SHELL) {
+        if (grp.shell_mode == SDF_SHELL_MODE_PUSH) {
+          if (grp_dist - scene_dist < sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp.shell_mode == SDF_SHELL_MODE_AVOID) {
+          if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+          if (-grp_dist > prev) { out_obj_id = grp_winner_id; }
+        }
+        else {
+          if (grp_dist < prev) { out_obj_id = grp_winner_id; }
+        }
+      }
       else if (grp.csg_operation == SDF_CSG_OP_UNION) {
         if (grp_dist < prev) { out_obj_id = grp_winner_id; }
       }
@@ -181,15 +216,22 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     bool ungrouped_must_eval = scene_dist < 1e9f &&
                                (ungrouped_op == SDF_CSG_OP_INTERSECT ||
                                 ungrouped_op == SDF_CSG_OP_SUBTRACT);
-    if (da > ungrouped_skip_thresh && !ungrouped_must_eval) {
-      out_aabb_skip = min(out_aabb_skip, da);
-      continue;
-    }
 
     SDFObjectGPU obj = objects[i];
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-    g_numEvaluated++;
+    float d;
+
+    if (da > ungrouped_skip_thresh) {
+      if (!ungrouped_must_eval) {
+        out_aabb_skip = min(out_aabb_skip, da);
+        continue;
+      }
+      d = da;
+    }
+    else {
+      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      d = evalPrimitive(lp, obj);
+      g_numEvaluated++;
+    }
 
     if (scene_dist >= 1e9f) {
       if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
@@ -215,6 +257,20 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       }
       else if (obj.csg_operation == SDF_CSG_OP_AVOID) {
         if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = float(obj.original_index); }
+      }
+      else if (obj.csg_operation == SDF_CSG_OP_SHELL) {
+        if (obj.shell_mode == SDF_SHELL_MODE_PUSH) {
+          if (d - scene_dist < sdf_ray_epsilon) { out_obj_id = float(obj.original_index); }
+        }
+        else if (obj.shell_mode == SDF_SHELL_MODE_AVOID) {
+          if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = float(obj.original_index); }
+        }
+        else if (obj.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+          if (-d > prev) { out_obj_id = float(obj.original_index); }
+        }
+        else {
+          if (d < prev) { out_obj_id = float(obj.original_index); }
+        }
       }
       else if (obj.csg_operation == SDF_CSG_OP_UNION) {
         if (d < prev) { out_obj_id = float(obj.original_index); }
@@ -309,6 +365,20 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         else if (obj.csg_operation == SDF_CSG_OP_AVOID) {
           if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = float(obj.original_index); }
         }
+        else if (obj.csg_operation == SDF_CSG_OP_SHELL) {
+          if (obj.shell_mode == SDF_SHELL_MODE_PUSH) {
+            if (d - scene_dist < sdf_ray_epsilon) { out_obj_id = float(obj.original_index); }
+          }
+          else if (obj.shell_mode == SDF_SHELL_MODE_AVOID) {
+            if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = float(obj.original_index); }
+          }
+          else if (obj.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+            if (-d > prev) { out_obj_id = float(obj.original_index); }
+          }
+          else {
+            if (d < prev) { out_obj_id = float(obj.original_index); }
+          }
+        }
         else {
           if (d < prev) { out_obj_id = float(obj.original_index); }
         }
@@ -339,6 +409,20 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         }
         else if (obj.csg_operation == SDF_CSG_OP_AVOID) {
           if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+        }
+        else if (obj.csg_operation == SDF_CSG_OP_SHELL) {
+          if (obj.shell_mode == SDF_SHELL_MODE_PUSH) {
+            if (d - grp_dist < sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+          }
+          else if (obj.shell_mode == SDF_SHELL_MODE_AVOID) {
+            if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+          }
+          else if (obj.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+            if (-d > prev) { grp_winner_id = float(obj.original_index); }
+          }
+          else {
+            if (d < prev) { grp_winner_id = float(obj.original_index); }
+          }
         }
         else {
           if (d < prev) { grp_winner_id = float(obj.original_index); }
