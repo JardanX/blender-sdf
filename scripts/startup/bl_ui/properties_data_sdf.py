@@ -163,9 +163,13 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
     @classmethod
     def poll(cls, context):
         ob = context.object
-        if ob and ob.type == 'SDF' and ob.data:
-            return ob.data.sdf_type == 'POLYGON'
-        return False
+        if not (ob and ob.type == 'SDF' and ob.data and ob.data.sdf_type == 'POLYGON'):
+            return False
+        view = context.space_data
+        if view and hasattr(view, 'overlay'):
+            if not view.overlay.show_overlays or not view.overlay.show_sdf_ngon:
+                return False
+        return True
 
     def setup(self, context):
         self.gizmos_list = []
