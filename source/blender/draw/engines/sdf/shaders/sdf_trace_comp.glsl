@@ -77,7 +77,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
       if (!is_shape_near(m)) { continue; }
 
-      float da = point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz);
+      float da = point_aabb_dist(world_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz);
       float aabb_skip_thresh = max(sdf_ray_epsilon, objects[m].blend);
       int obj_op = objects[m].csg_operation;
       bool must_eval = grp_has_hit &&
@@ -151,7 +151,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     if (!grp_has_hit) {
       float grp_aabb = 1e30f;
       for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-        grp_aabb = min(grp_aabb, point_aabb_dist(world_pos, objects[m].bbox_min.xyz, objects[m].bbox_max.xyz));
+        grp_aabb = min(grp_aabb, point_aabb_dist(world_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz));
       }
       out_aabb_skip = min(out_aabb_skip, grp_aabb);
       continue;
@@ -210,7 +210,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     if (!is_shape_near(i)) { continue; }
     if (objects[i].group_id >= 0) { continue; }
 
-    float da = point_aabb_dist(world_pos, objects[i].bbox_min.xyz, objects[i].bbox_max.xyz);
+    float da = point_aabb_dist(world_pos, objects[i].orig_bbox_min.xyz, objects[i].orig_bbox_max.xyz);
     float ungrouped_skip_thresh = max(0.0f, objects[i].blend);
     int ungrouped_op = objects[i].csg_operation;
     bool ungrouped_must_eval = scene_dist < 1e9f &&
@@ -323,23 +323,31 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
       grp_winner_id = -1.0f;
     }
 
-    float da = point_aabb_dist(world_pos, aabb.bbox_min.xyz, aabb.bbox_max.xyz);
+    SDFObjectGPU obj = objects[i];
+    float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
     float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
-    int tile_skip_op = objects[i].csg_operation;
+    int tile_skip_op = obj.csg_operation;
     bool tile_must_eval = (tile_skip_op == SDF_CSG_OP_INTERSECT ||
                            tile_skip_op == SDF_CSG_OP_SUBTRACT) &&
                           ((gid >= 0 && grp_has_hit && gid == cur_group) ||
                            (gid < 0 && scene_dist < 1e9f));
-    if (da > skip_threshold && !tile_must_eval) {
-      out_aabb_skip = min(out_aabb_skip, da);
-      cur_group = gid;
-      continue;
-    }
 
-    SDFObjectGPU obj = objects[i];
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-    cur_group = gid;
+    float d;
+
+    if (da > skip_threshold) {
+      if (!tile_must_eval) {
+        out_aabb_skip = min(out_aabb_skip, da);
+        cur_group = gid;
+        continue;
+      }
+      d = da;
+      cur_group = gid;
+    }
+    else {
+      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      d = evalPrimitive(lp, obj);
+      cur_group = gid;
+    }
 
     if (gid < 0) {
       if (scene_dist >= 1e9f) {

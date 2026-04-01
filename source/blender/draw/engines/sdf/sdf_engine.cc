@@ -572,6 +572,8 @@ class Instance : public DrawEngine {
 
       gpu_obj.bbox_min = float4(world_min, 0.0f);
       gpu_obj.bbox_max = float4(world_max, 0.0f);
+      gpu_obj.orig_bbox_min = gpu_obj.bbox_min;
+      gpu_obj.orig_bbox_max = gpu_obj.bbox_max;
 
       float sphere_radius = math::length(local_extent);
       float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);

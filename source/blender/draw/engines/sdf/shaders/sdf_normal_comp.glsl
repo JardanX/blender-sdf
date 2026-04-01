@@ -383,7 +383,8 @@ void main()
       grp_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
     }
 
-    float da = point_aabb_dist(p, n_aabb.bbox_min.xyz, n_aabb.bbox_max.xyz);
+    SDFObjectGPU obj = objects[i];
+    float da = point_aabb_dist(p, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
     if (da > max(margin, n_aabb.max_group_blend + margin)) {
       cur_group = gid;
       continue;
