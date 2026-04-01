@@ -63,7 +63,7 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
     }
     else {
       if (!grp_has_hit) {
-        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL) { grp_dist = d; grp_has_hit = true; }
+        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL && obj.csg_operation != SDF_CSG_OP_INTERSECT) { grp_dist = d; grp_has_hit = true; }
       }
       else {
         grp_dist = combineCSG(

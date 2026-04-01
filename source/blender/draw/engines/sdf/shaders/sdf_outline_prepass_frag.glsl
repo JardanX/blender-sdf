@@ -29,6 +29,15 @@ void main()
     return;
   }
 
+  /* Discard if SDF is behind the scene surface (mesh in front).
+   * Depth-scaled epsilon handles non-linear depth precision at distance. */
+  float scene_d = texture(scene_depth_tx, screen_uv).r;
+  float eps = max(0.0001f, scene_d * 0.005f);
+  if (scene_d > 0.0f && scene_d < 1.0f && sdf_depth > scene_d + eps) {
+    discard;
+    return;
+  }
+
   out_object_id = oid;
   gl_FragDepth = sdf_depth;
 }

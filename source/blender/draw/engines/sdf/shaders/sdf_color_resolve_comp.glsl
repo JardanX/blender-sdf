@@ -94,7 +94,8 @@ void main()
     }
     else {
       if (!grp_has_hit) {
-        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL) {
+        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
+            obj.csg_operation != SDF_CSG_OP_INTERSECT) {
           grp_dist = d;
           grp_color = obj.color.rgb;
           grp_has_hit = true;

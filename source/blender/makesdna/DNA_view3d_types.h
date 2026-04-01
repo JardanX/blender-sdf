@@ -291,6 +291,8 @@ enum {
   V3D_OVERLAY_VIEWER_ATTRIBUTE_TEXT = (1 << 18),
   V3D_OVERLAY_PERFORMANCE = (1 << 19),
   V3D_OVERLAY_SDF_PERF = (1 << 20),
+  V3D_OVERLAY_HIDE_SDF_BBOX = (1 << 21),
+  V3D_OVERLAY_HIDE_SDF_NGON = (1 << 22),
 };
 
 /** #View3DOverlay.edit_flag */

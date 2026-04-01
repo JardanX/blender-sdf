@@ -417,7 +417,8 @@ void main()
     }
     else {
       if (!grp_has_hit) {
-        if (cop != SDF_CSG_OP_SUBTRACT && cop != SDF_CSG_OP_SHELL) {
+        if (cop != SDF_CSG_OP_SUBTRACT && cop != SDF_CSG_OP_SHELL &&
+            cop != SDF_CSG_OP_INTERSECT) {
           grp_dg = dg;
           grp_has_hit = true;
         }
@@ -491,7 +492,7 @@ void main()
           else { sd_acc = combineCSG(sd_acc, dd, co, cb, cl, cs, cm, cx, ct, cv, c2, c3); }
         }
         else {
-          if (!gh) { if (co != SDF_CSG_OP_SUBTRACT && co != SDF_CSG_OP_SHELL) { gd = dd; gh = true; } }
+          if (!gh) { if (co != SDF_CSG_OP_SUBTRACT && co != SDF_CSG_OP_SHELL && co != SDF_CSG_OP_INTERSECT) { gd = dd; gh = true; } }
           else { gd = combineCSG(gd, dd, co, cb, cl, cs, cm, cx, ct, cv, c2, c3); }
         }
       }

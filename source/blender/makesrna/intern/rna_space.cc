@@ -5121,6 +5121,20 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
       prop, "SDF Performance", "Display SDF draw engine performance overlay (FPS, pass timings)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "show_sdf_bbox", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "overlay.flag", V3D_OVERLAY_HIDE_SDF_BBOX);
+  RNA_def_property_ui_text(
+      prop, "SDF Bounding Box", "Show bounding box for selected SDF objects");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sdf_ngon", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "overlay.flag", V3D_OVERLAY_HIDE_SDF_NGON);
+  RNA_def_property_ui_text(
+      prop, "SDF Ngon", "Show ngon polygon point overlays for SDF objects");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "show_performance", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_PERFORMANCE);
   RNA_def_property_ui_text(prop,
