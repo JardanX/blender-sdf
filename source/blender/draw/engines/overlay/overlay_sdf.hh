@@ -79,6 +79,8 @@ static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max
 class Sdfs : Overlay {
  private:
   const SelectionType selection_type_;
+  bool show_bbox_ = true;
+  bool show_ngon_ = true;
 
   /* Per-SDF object data collected during object_sync. */
   struct SdfEntry {
@@ -135,6 +137,10 @@ class Sdfs : Overlay {
     entries_.clear();
     max_sdf_index_ = 0;
     has_selected_ = false;
+    show_bbox_ = state.v3d && !state.hide_overlays &&
+                 !(state.v3d->overlay.flag & V3D_OVERLAY_HIDE_SDF_BBOX);
+    show_ngon_ = state.v3d && !state.hide_overlays &&
+                 !(state.v3d->overlay.flag & V3D_OVERLAY_HIDE_SDF_NGON);
   }
 
   void object_sync(Manager & /*manager*/,
@@ -270,7 +276,7 @@ class Sdfs : Overlay {
 
   }
 
-  void draw_outline(Framebuffer &framebuffer, View & /*view*/, gpu::Texture * /*scene_depth*/)
+  void draw_outline(Framebuffer &framebuffer, View & /*view*/, gpu::Texture *scene_depth)
   {
     if (!enabled_ || !has_selected_) {
       return;
@@ -299,11 +305,17 @@ class Sdfs : Overlay {
     GPU_storagebuf_bind(
         outline_ids_ssbo_, GPU_shader_get_ssbo_binding(outline_sh_, "outline_ids"));
 
-    GPU_texture_filter_mode(depth_tx, true);
+    GPU_texture_filter_mode(depth_tx, false);
     GPU_texture_bind(depth_tx, GPU_shader_get_sampler_binding(outline_sh_, "sdf_depth_tx"));
 
     GPU_texture_filter_mode(gbuf_tx, false);
     GPU_texture_bind(gbuf_tx, GPU_shader_get_sampler_binding(outline_sh_, "sdf_gbuf_color_tx"));
+
+    if (scene_depth) {
+      GPU_texture_filter_mode(scene_depth, false);
+      GPU_texture_bind(scene_depth,
+                       GPU_shader_get_sampler_binding(outline_sh_, "scene_depth_tx"));
+    }
 
     float2 uv_sc = sdf::sdf_uv_scale_get();
     GPU_shader_uniform_2fv(outline_sh_, "uv_scale", &uv_sc.x);
@@ -313,13 +325,16 @@ class Sdfs : Overlay {
 
     GPU_texture_unbind(depth_tx);
     GPU_texture_unbind(gbuf_tx);
+    if (scene_depth) {
+      GPU_texture_unbind(scene_depth);
+    }
     GPU_shader_unbind();
 
   }
 
   void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
   {
-    if (!enabled_ || !has_selected_) {
+    if (!enabled_ || !has_selected_ || !show_bbox_) {
       return;
     }
 
