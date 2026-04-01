@@ -42,6 +42,8 @@ struct [[host_shared]] SDFObjectGPU {
   float4 box_corners;
   float4 box_edges;
   int4 box_modes;
+  float4 orig_bbox_min;
+  float4 orig_bbox_max;
 };
 
 struct [[host_shared]] SDFObjectAABB {

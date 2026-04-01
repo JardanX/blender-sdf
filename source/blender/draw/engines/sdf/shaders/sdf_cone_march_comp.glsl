@@ -38,18 +38,30 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
       grp_dist = 1e10f;
     }
 
-    float da = point_aabb_dist(world_pos, aabb.bbox_min.xyz, aabb.bbox_max.xyz);
-    float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
-    if (da > skip_threshold) {
-      out_aabb_skip = min(out_aabb_skip, da);
-      cur_group = gid;
-      continue;
-    }
-
     SDFObjectGPU obj = objects[i];
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
-    float d = evalPrimitive(lp, obj);
-    cur_group = gid;
+    float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
+    float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
+
+    int obj_op = obj.csg_operation;
+    bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT) &&
+                     ((gid >= 0 && grp_has_hit && gid == cur_group) ||
+                      (gid < 0 && scene_dist < 1e9f));
+
+    float d;
+    if (da > skip_threshold) {
+      if (!must_eval) {
+        out_aabb_skip = min(out_aabb_skip, da);
+        cur_group = gid;
+        continue;
+      }
+      d = da;
+      cur_group = gid;
+    }
+    else {
+      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      d = evalPrimitive(lp, obj);
+      cur_group = gid;
+    }
 
     if (gid < 0) {
       if (scene_dist >= 1e9f) {
