@@ -1264,7 +1264,8 @@ bool BKE_object_supports_modifiers(const Object *ob)
               OB_LATTICE,
               OB_POINTCLOUD,
               OB_VOLUME,
-              OB_GREASE_PENCIL);
+              OB_GREASE_PENCIL,
+              OB_SDF);
 }
 
 bool BKE_object_support_modifier_type_check(const Object *ob, int modifier_type)
@@ -1296,6 +1297,9 @@ bool BKE_object_support_modifier_type_check(const Object *ob, int modifier_type)
     return true;
   }
   if (ob->type == OB_GREASE_PENCIL && (mti->flags & eModifierTypeFlag_AcceptsGreasePencil)) {
+    return true;
+  }
+  if (ob->type == OB_SDF && (mti->flags & eModifierTypeFlag_AcceptsSDF)) {
     return true;
   }
 

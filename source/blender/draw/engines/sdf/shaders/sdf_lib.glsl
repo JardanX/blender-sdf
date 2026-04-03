@@ -922,60 +922,76 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
     if (mtype == SDF_MOD_MIRROR) {
       float offset = smod.params.x;
       float3 origin = smod.params.yzw;
+      float blend = smod.params2.x;
+      int blend_type = smod.header.z;
+      float bk = (blend_type > 0 && blend > 0.001f) ? blend : 0.0f;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
         float3 N = float3(inv_mat[0]);
-        float d = dot(p - origin, N);
-        p -= 2.0f * min(d, 0.0f) * N;
+        float nl2 = max(dot(N, N), 1e-12f);
+        float d = dot(p - origin, N) / nl2;
+        p -= (d - sabs(d, bk)) * N;
         p -= offset * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
         float3 N = float3(inv_mat[1]);
-        float d = dot(p - origin, N);
-        p -= 2.0f * min(d, 0.0f) * N;
+        float nl2 = max(dot(N, N), 1e-12f);
+        float d = dot(p - origin, N) / nl2;
+        p -= (d - sabs(d, bk)) * N;
         p -= offset * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
         float3 N = float3(inv_mat[2]);
-        float d = dot(p - origin, N);
-        p -= 2.0f * min(d, 0.0f) * N;
+        float nl2 = max(dot(N, N), 1e-12f);
+        float d = dot(p - origin, N) / nl2;
+        p -= (d - sabs(d, bk)) * N;
         p -= offset * N;
       }
     }
     else if (mtype == SDF_MOD_TWIST) {
       float k = smod.params.x;
-      float angle = k * p.z;
+      int axis = int(smod.params.y);
+      float drive, r;
+      if (axis == 1) { drive = p.y; r = length(float2(p.x, p.z)); }
+      else if (axis == 2) { drive = p.x; r = length(float2(p.y, p.z)); }
+      else { drive = p.z; r = length(float2(p.x, p.y)); }
+      float angle = k * drive;
       float c = cos(angle);
       float s = sin(angle);
-      p = float3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+      if (axis == 1) { p = float3(c * p.x - s * p.z, p.y, s * p.x + c * p.z); }
+      else if (axis == 2) { p = float3(p.x, c * p.y - s * p.z, s * p.y + c * p.z); }
+      else { p = float3(c * p.x - s * p.y, s * p.x + c * p.y, p.z); }
+      /* Gentle Lipschitz correction: cap at 2x slowdown.
+       * SOR failure detection handles any remaining overshoot. */
+      scale *= 1.0f / min(1.0f + abs(k) * r, 2.0f);
     }
     else if (mtype == SDF_MOD_BEND) {
       float k = smod.params.x;
       int axis = int(smod.params.y);
+      float3 origin = float3(smod.params.z, smod.params.w, smod.params2.x);
+      p -= origin;
       if (abs(k) > 0.0001f) {
-        float R = 1.0f / k;
-        float sg = sign(R);
-        float absR = abs(R);
-        float r;
+        float drive, curve, r;
         if (axis == 1) {
-          float2 rel = float2(p.y, p.z + R);
-          r = length(rel);
-          p.y = atan(rel.x * sg, rel.y * sg) / k;
-          p.z = sg * r - R;
+          drive = p.y; curve = p.z; r = length(float2(p.y, p.z));
+          float a = k * drive; float c = cos(a); float s = sin(a);
+          p.y = c * drive - s * curve;
+          p.z = s * drive + c * curve;
         }
         else if (axis == 2) {
-          float2 rel = float2(p.z, p.x + R);
-          r = length(rel);
-          p.z = atan(rel.x * sg, rel.y * sg) / k;
-          p.x = sg * r - R;
+          drive = p.z; curve = p.x; r = length(float2(p.z, p.x));
+          float a = k * drive; float c = cos(a); float s = sin(a);
+          p.z = c * drive - s * curve;
+          p.x = s * drive + c * curve;
         }
         else {
-          float2 rel = float2(p.x, p.y + R);
-          r = length(rel);
-          p.x = atan(rel.x * sg, rel.y * sg) / k;
-          p.y = sg * r - R;
+          drive = p.x; curve = p.y; r = length(float2(p.x, p.y));
+          float a = k * drive; float c = cos(a); float s = sin(a);
+          p.x = c * drive - s * curve;
+          p.y = s * drive + c * curve;
         }
-        scale *= min(1.0f, absR / max(r, 0.0001f));
+        scale *= 1.0f / (1.0f + abs(k) * r);
       }
+      p += origin;
     }
     else if (mtype == SDF_MOD_ELONGATE) {
       float3 h = smod.params.xyz;
@@ -983,28 +999,67 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
     }
     else if (mtype == SDF_MOD_ARRAY) {
       float count = smod.params.x;
-      float blend = smod.params2.x; /* blend is at params[4] = params2.x */
+      float blend = smod.params2.x;
+      int blend_type = smod.header.z;
+      float bk = (blend_type > 0 && blend > 0.001f) ? blend : 0.0f;
       if (mflags == SDF_MOD_ARRAY_LINEAR) {
         float3 offset = smod.params.yzw;
         float spacing = length(offset);
         if (spacing > 0.0001f && count > 0.5f) {
           float3 dir = offset / spacing;
           float t = dot(p, dir);
-          float id = sround(t / spacing, clamp(blend, 0.0f, 1.0f));
-          id = clamp(id, 0.0f, max(0.0f, count - 1.0f));
-          p = p - dir * id * spacing;
+          float norm_t = t / spacing;
+          float id = clamp(round(norm_t), 0.0f, count - 1.0f);
+          float local = norm_t - id;
+
+          /* Stacked mirrors: odd copies mirrored so both sides of every
+           * boundary converge to the same position — seamless with twist.
+           * Same sabs fold as the mirror modifier at each cell boundary. */
+          if (count > 1.5f && fract(id * 0.5f) > 0.25f) {
+            local = -local;
+          }
+
+          if (count > 1.5f) {
+            /* Right boundary: mirror fold identical to mirror modifier.
+             * d = signed distance from boundary (positive = inside cell). */
+            float d_r = (0.5f - local) * spacing;
+            float pull_r = d_r - sabs(d_r, bk);
+            /* Left boundary */
+            float d_l = (0.5f + local) * spacing;
+            float pull_l = d_l - sabs(d_l, bk);
+            /* Right pull shifts left (toward center), left pull shifts right */
+            local += (pull_r - pull_l) / spacing;
+          }
+
+          /* Reconstruct: replace along-dir component with cell-0-local position */
+          p += dir * (local * spacing - t);
         }
       }
       else if (mflags == SDF_MOD_ARRAY_RADIAL) {
         float radius = smod.params.y;
         if (count > 0.5f) {
-          float a = (2.0f * SDF_PI) / count;
-          float current_a = atan(p.y, p.x);
-          float id = sround(current_a / a, clamp(blend, 0.0f, 1.0f));
-          float final_a = current_a - id * a;
+          float sector = (2.0f * SDF_PI) / count;
+          float angle = atan(p.y, p.x);
+          float norm_a = angle / sector;
+          float id = round(norm_a);
+          float local = norm_a - id;
+
+          if (count > 1.5f && fract(abs(id) * 0.5f) > 0.25f) {
+            local = -local;
+          }
+
+          if (count > 1.5f) {
+            float arc = sector * max(radius, 0.0001f);
+            float d_r = (0.5f - local) * arc;
+            float pull_r = d_r - sabs(d_r, bk);
+            float d_l = (0.5f + local) * arc;
+            float pull_l = d_l - sabs(d_l, bk);
+            local += (pull_r - pull_l) / arc;
+          }
+          float fold_a = local * sector;
           float r = length(p.xy);
-          p.x = r * cos(final_a) - radius;
-          p.y = r * sin(final_a);
+          p.x = r * cos(fold_a) - radius;
+          p.y = r * sin(fold_a);
 
           float3 rot = smod.params2.yzw;
           if (abs(rot.x) > 0.0001f) {
@@ -1453,163 +1508,11 @@ float applyDistanceModifiers(float dist, int mod_start, int mod_count)
  */
 float evalObjectSDF(SDFObjectGPU obj, float3 p)
 {
-  int fork_idx = -1;
-  /* Find the highest (applied last to geometry, evaluated first in domain) forking modifier. */
-  for (int i = obj.modifier_start; i < obj.modifier_start + obj.modifier_count; i++) {
-    SDFModifierGPU smod = sdf_modifiers[i];
-    int mtype = smod.header.x;
-    /* If it has CSG (y), blend_type (z), or blend radius (x), it is configured for true CSG blending. */
-    if ((mtype == SDF_MOD_ARRAY || mtype == SDF_MOD_MIRROR) && (smod.params2.y > 0.0f || smod.params2.z > 0.0f || smod.params2.x > 0.0f)) {
-      fork_idx = i;
-    }
-  }
-
-  if (fork_idx == -1) {
-    float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
-    p = dm.xyz;
-    float d = evalPrimitiveOnly(obj, p) * dm.w;
-    return applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
-  }
-
-  /* Forking path: apply domain modifiers UP TO the forking modifier. */
-  float top_scale = 1.0f;
-  int top_count = (obj.modifier_start + obj.modifier_count) - (fork_idx + 1);
-  if (top_count > 0) {
-    float4 dm = applyDomainModifiers(p, fork_idx + 1, top_count, obj.inverse_matrix);
-    p = dm.xyz;
-    top_scale = dm.w;
-  }
-
-  SDFModifierGPU fork_mod = sdf_modifiers[fork_idx];
-  int mtype = fork_mod.header.x;
-  int mflags = fork_mod.header.y;
-  float blend = fork_mod.params2.x;
-  int csg_op = int(fork_mod.params2.y);
-  int blend_type = int(fork_mod.params2.z);
-
-  float final_d = (csg_op == SDF_CSG_OP_INTERSECT) ? -1e10f : 1e10f;
-  int bottom_count = fork_idx - obj.modifier_start;
-
-  if (mtype == SDF_MOD_MIRROR) {
-    int mirrors = 1;
-    if ((mflags & SDF_MOD_MIRROR_X) != 0) { mirrors *= 2; }
-    if ((mflags & SDF_MOD_MIRROR_Y) != 0) { mirrors *= 2; }
-    if ((mflags & SDF_MOD_MIRROR_Z) != 0) { mirrors *= 2; }
-
-    float3 mirror_origin = fork_mod.params.yzw;
-    float offset = fork_mod.params.x;
-    float3 N_x = float3(obj.inverse_matrix[0]);
-    float3 N_y = float3(obj.inverse_matrix[1]);
-    float3 N_z = float3(obj.inverse_matrix[2]);
-
-    bool first = true;
-    for (int i = 0; i < 8; i++) {
-      if (i >= mirrors) { break; }
-      float3 cell_p = p;
-      int flip_idx = i;
-      if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-        if ((flip_idx & 1) != 0) {
-          float d = dot(cell_p - mirror_origin, N_x);
-          cell_p -= 2.0f * d * N_x;
-        }
-        flip_idx >>= 1;
-        cell_p -= offset * N_x;
-      }
-      if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-        if ((flip_idx & 1) != 0) {
-          float d = dot(cell_p - mirror_origin, N_y);
-          cell_p -= 2.0f * d * N_y;
-        }
-        flip_idx >>= 1;
-        cell_p -= offset * N_y;
-      }
-      if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-        if ((flip_idx & 1) != 0) {
-          float d = dot(cell_p - mirror_origin, N_z);
-          cell_p -= 2.0f * d * N_z;
-        }
-        cell_p -= offset * N_z;
-      }
-
-      float bot_scale = top_scale;
-      if (bottom_count > 0) {
-        float4 dm = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count, obj.inverse_matrix);
-        cell_p = dm.xyz;
-        bot_scale *= dm.w;
-      }
-      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
-
-      if (first) { final_d = d; first = false; }
-      else { final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f); }
-    }
-  }
-  else if (mtype == SDF_MOD_ARRAY) {
-    float count = fork_mod.params.x;
-    float id;
-    float3 dir = float3(1,0,0);
-    float spacing = 1.0f;
-    if (mflags == SDF_MOD_ARRAY_LINEAR) {
-      float3 offset = fork_mod.params.yzw;
-      spacing = length(offset);
-      if (spacing > 0.0001f) {
-        dir = offset / spacing;
-        id = round(dot(p, dir) / spacing);
-      } else { id = 0.0f; }
-    } else {
-      float a = (2.0f * SDF_PI) / max(count, 1e-4f);
-      id = round(atan(p.y, p.x) / a);
-    }
-
-    float last_cid = -9999.0f;
-    bool first = true;
-    for(int i = -1; i <= 1; i++) {
-      float cid = id + float(i);
-      if (mflags == SDF_MOD_ARRAY_LINEAR) {
-        cid = clamp(cid, 0.0f, max(0.0f, count - 1.0f));
-      }
-      if (cid == last_cid) { continue; }
-      last_cid = cid;
-
-      float3 cell_p = p;
-      if (mflags == SDF_MOD_ARRAY_LINEAR) {
-        if (spacing > 0.0001f) { cell_p -= dir * cid * spacing; }
-      } else {
-        float a = (2.0f * SDF_PI) / count;
-        float final_a = atan(p.y, p.x) - cid * a;
-        float r = length(p.xy);
-        float radius = fork_mod.params.y;
-        cell_p.x = r * cos(final_a) - radius;
-        cell_p.y = r * sin(final_a);
-
-        float3 rot = fork_mod.params2.yzw;
-        if (abs(rot.x) > 0.0001f) {
-          float cx = cos(rot.x), sx = sin(rot.x);
-          cell_p = float3(cell_p.x, cx * cell_p.y - sx * cell_p.z, sx * cell_p.y + cx * cell_p.z);
-        }
-        if (abs(rot.y) > 0.0001f) {
-          float cy = cos(rot.y), sy = sin(rot.y);
-          cell_p = float3(cy * cell_p.x + sy * cell_p.z, cell_p.y, -sy * cell_p.x + cy * cell_p.z);
-        }
-        if (abs(rot.z) > 0.0001f) {
-          float cz = cos(rot.z), sz = sin(rot.z);
-          cell_p = float3(cz * cell_p.x - sz * cell_p.y, sz * cell_p.x + cz * cell_p.y, cell_p.z);
-        }
-      }
-
-      float bot_scale = top_scale;
-      if (bottom_count > 0) {
-        float4 dm = applyDomainModifiers(cell_p, obj.modifier_start, bottom_count, obj.inverse_matrix);
-        cell_p = dm.xyz;
-        bot_scale *= dm.w;
-      }
-      float d = applyDistanceModifiers(evalPrimitiveOnly(obj, cell_p) * bot_scale, obj.modifier_start, obj.modifier_count);
-
-      if (first) { final_d = d; first = false; }
-      else { final_d = combineCSG(final_d, d, csg_op, blend_type, blend, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f); }
-    }
-  }
-
-  return final_d;
+  /* All modifiers (mirror, array, twist, etc.) use domain folding — single eval path. */
+  float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
+  p = dm.xyz;
+  float d = evalPrimitiveOnly(obj, p) * dm.w;
+  return applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
 }
 
 /* ---- Cross-shader helpers ---- */

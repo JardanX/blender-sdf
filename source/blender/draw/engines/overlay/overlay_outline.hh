@@ -155,6 +155,10 @@ class Outline : Overlay {
       pass.shader_set(res.shaders->outline_detect.get());
       /* Don't occlude the outline if in xray mode as it causes too much flickering. */
       pass.push_constant("alpha_occlu", state.xray_enabled ? 1.0f : 0.35f);
+      float sdf_op = (state.v3d && !state.hide_overlays) ?
+                          state.v3d->overlay.sdf_outline_opacity :
+                          0.0f;
+      pass.push_constant("sdf_line_opacity", sdf_op);
       pass.push_constant("do_thick_outlines", do_expand);
       pass.push_constant("do_anti_aliasing", do_smooth_lines);
       pass.push_constant("is_xray_wires", state.xray_enabled_and_not_wire);

@@ -688,6 +688,9 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+
+  /** SDF edge outline opacity (always-on black outlines). */
+  float sdf_outline_opacity = 0.5f;
 };
 
 struct View3D_Runtime {
@@ -810,6 +813,7 @@ struct View3D {
   /** Display settings. */
   View3DShading shading;
   View3DOverlay overlay;
+  char _pad_v3d_align[4] = {};
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;

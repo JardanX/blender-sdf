@@ -155,6 +155,7 @@ CREATE_INFO_VARIANT(overlay_outline_prepass_pointcloud_clipped,
 GPU_SHADER_CREATE_INFO(overlay_outline_detect)
 DO_STATIC_COMPILATION()
 PUSH_CONSTANT(float, alpha_occlu)
+PUSH_CONSTANT(float, sdf_line_opacity)
 PUSH_CONSTANT(bool, is_xray_wires)
 PUSH_CONSTANT(bool, do_anti_aliasing)
 PUSH_CONSTANT(bool, do_thick_outlines)

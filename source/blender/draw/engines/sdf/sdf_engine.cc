@@ -26,6 +26,7 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
@@ -54,6 +55,7 @@
 #include "draw_view.hh"
 #include "draw_view_data.hh"
 
+#include "sdf_cpu_eval.hh"
 #include "sdf_private.hh"
 
 #include "sdf_engine.h"
@@ -356,6 +358,11 @@ class Instance : public DrawEngine {
         bevel += bmod->params[0];
       }
     }
+    for (const ModifierData *bmd = static_cast<const ModifierData *>(ob->modifiers.first); bmd; bmd = bmd->next) {
+      if ((bmd->mode & eModifierMode_Realtime) && bmd->type == eModifierType_SDFBevel) {
+        bevel += reinterpret_cast<const SDFBevelModifierData *>(bmd)->radius;
+      }
+    }
     bevel *= math::reduce_min(scale);
     gpu_obj.bevel = bevel;
 
@@ -425,48 +432,46 @@ class Instance : public DrawEngine {
           break;
       }
 
-      for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
-        if (!mod->show_viewport) {
-          continue;
-        }
-        switch (mod->type) {
+      for (int mi = gpu_obj.modifier_start;
+           mi < gpu_obj.modifier_start + gpu_obj.modifier_count; mi++)
+      {
+        const SDFModifierGPU &mod = modifiers_[mi];
+        int mtype = mod.header.x;
+        int mflags = mod.header.y;
+        switch (mtype) {
           case SDF_MOD_MIRROR: {
-            float offset = fabsf(mod->params[0]);
-            float3 world_org;
-            if (mod->mirror_ob != nullptr) {
-              const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
-              world_org = float3(mirror_mat[3]) - float3(mat[3]);
-            }
-            else {
-              world_org = float3(mod->params[1], mod->params[2], mod->params[3]);
-            }
-            float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
-            if ((mod->flag & SDF_MOD_MIRROR_X) != 0) {
+            float offset = fabsf(mod.params.x);
+            float3 local_org = float3(mod.params.y, mod.params.z, mod.params.w);
+            if ((mflags & SDF_MOD_MIRROR_X) != 0) {
               float3 N = float3(inv_rot[0]);
-              float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+              float extent_along = math::dot(local_extent, math::abs(N));
+              float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, extent_along);
               local_extent += math::abs(N) * disp;
             }
-            if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) {
+            if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
               float3 N = float3(inv_rot[1]);
-              float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+              float extent_along = math::dot(local_extent, math::abs(N));
+              float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, extent_along);
               local_extent += math::abs(N) * disp;
             }
-            if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) {
+            if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
               float3 N = float3(inv_rot[2]);
-              float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
+              float extent_along = math::dot(local_extent, math::abs(N));
+              float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, extent_along);
               local_extent += math::abs(N) * disp;
             }
             break;
           }
           case SDF_MOD_ELONGATE:
-            local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
+            local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
             break;
           case SDF_MOD_HOLLOW:
           case SDF_MOD_ONION:
-            local_extent += float3(mod->params[0]);
+            local_extent += float3(mod.params.x);
             break;
           case SDF_MOD_ROUND:
-            local_extent += float3(mod->params[0]);
+          case SDF_MOD_BEVEL:
+            local_extent += float3(mod.params.x);
             break;
           case SDF_MOD_TWIST: {
             float xy = math::sqrt(local_extent.x * local_extent.x +
@@ -476,75 +481,46 @@ class Instance : public DrawEngine {
             break;
           }
           case SDF_MOD_BEND: {
-            float k = mod->params[0];
-            int axis = (int)mod->params[1];
+            float k = mod.params.x;
+            int axis = int(mod.params.y);
+            float3 origin = float3(mod.params.z, mod.params.w, mod.params2.x);
             if (fabsf(k) > 0.0001f) {
-              float R = 1.0f / k;
               float3 new_ext = float3(0.0f);
               for (int c = 0; c < 8; c++) {
-                float cx = (c & 1) ? local_extent.x : -local_extent.x;
-                float cy = (c & 2) ? local_extent.y : -local_extent.y;
-                float cz = (c & 4) ? local_extent.z : -local_extent.z;
+                float3 pt = float3((c & 1) ? local_extent.x : -local_extent.x,
+                                   (c & 2) ? local_extent.y : -local_extent.y,
+                                   (c & 4) ? local_extent.z : -local_extent.z);
+                pt -= origin;
                 float drive, curve, free_val;
-                if (axis == 1) {
-                  drive = cy; curve = cz; free_val = cx;
-                }
-                else if (axis == 2) {
-                  drive = cz; curve = cx; free_val = cy;
-                }
-                else {
-                  drive = cx; curve = cy; free_val = cz;
-                }
-                float theta = k * drive;
-                float bd = (R + curve) * sinf(theta);
-                float bc = -R + (R + curve) * cosf(theta);
+                if (axis == 1) { drive = pt.y; curve = pt.z; free_val = pt.x; }
+                else if (axis == 2) { drive = pt.z; curve = pt.x; free_val = pt.y; }
+                else { drive = pt.x; curve = pt.y; free_val = pt.z; }
+                float a = k * drive;
+                float nd = cosf(a) * drive - sinf(a) * curve;
+                float nc = sinf(a) * drive + cosf(a) * curve;
                 float3 bent;
-                if (axis == 1) {
-                  bent = float3(fabsf(free_val), fabsf(bd), fabsf(bc));
-                }
-                else if (axis == 2) {
-                  bent = float3(fabsf(bc), fabsf(free_val), fabsf(bd));
-                }
-                else {
-                  bent = float3(fabsf(bd), fabsf(bc), fabsf(free_val));
-                }
-                new_ext = math::max(new_ext, bent);
-              }
-              float drive_ext = (axis == 0) ? local_extent.x :
-                                (axis == 1) ? local_extent.y :
-                                              local_extent.z;
-              float curve_ext = (axis == 0) ? local_extent.y :
-                                (axis == 1) ? local_extent.z :
-                                              local_extent.x;
-              float max_angle = fabsf(k) * drive_ext;
-              if (max_angle > float(M_PI_2)) {
-                float outer_r = fabsf(R) + curve_ext;
-                if (axis == 0) {
-                  new_ext.x = math::max(new_ext.x, outer_r);
-                }
-                else if (axis == 1) {
-                  new_ext.y = math::max(new_ext.y, outer_r);
-                }
-                else {
-                  new_ext.z = math::max(new_ext.z, outer_r);
-                }
+                if (axis == 1) { bent = float3(free_val, nd, nc); }
+                else if (axis == 2) { bent = float3(nc, free_val, nd); }
+                else { bent = float3(nd, nc, free_val); }
+                bent += origin;
+                new_ext = math::max(new_ext, math::abs(bent));
               }
               local_extent = new_ext;
             }
             break;
           }
           case SDF_MOD_ARRAY: {
-            float count = mod->params[0];
+            float count = mod.params.x;
             if (count > 0.5f) {
-              if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
-                float3 offset = float3(mod->params[1], mod->params[2], mod->params[3]);
-                local_extent += math::abs(offset) * (count - 1.0f);
+              if (mflags == SDF_MOD_ARRAY_LINEAR) {
+                float3 arr_offset = float3(mod.params.y, mod.params.z, mod.params.w);
+                local_extent += math::abs(arr_offset) * (count - 1.0f);
               }
-              else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
-                float radius = mod->params[1];
+              else if (mflags == SDF_MOD_ARRAY_RADIAL) {
+                float radius = mod.params.y;
                 local_extent.x += radius;
                 local_extent.y += radius;
-                float3 rot_off(mod->params[5], mod->params[6], mod->params[7]);
+                float3 rot_off(mod.params2.y, mod.params2.z, mod.params2.w);
                 if (math::length(rot_off) > 0.0001f) {
                   float r = math::length(local_extent);
                   local_extent = float3(r);
@@ -773,9 +749,11 @@ class Instance : public DrawEngine {
       gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
     }
 
-    /* Pack modifiers */
+    /* Pack modifiers — read from old internal list AND native modifier stack */
     gpu_obj.modifier_start = int(modifiers_.size());
     gpu_obj.modifier_count = 0;
+
+    /* Old internal SDFModifier list (legacy / SDFGroup) */
     for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
       if (!mod->show_viewport) {
         continue;
@@ -800,6 +778,110 @@ class Instance : public DrawEngine {
       gpu_mod.params2 = float4(mod->params[4], mod->params[5], mod->params[6], mod->params[7]);
       modifiers_.append(gpu_mod);
       gpu_obj.modifier_count++;
+    }
+
+    /* Native Blender modifier stack */
+    for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first); md; md = md->next) {
+      if (!(md->mode & eModifierMode_Realtime)) {
+        continue;
+      }
+      SDFModifierGPU gpu_mod = {};
+      bool valid = false;
+      switch (md->type) {
+        case eModifierType_SDFMirror: {
+          const auto &m = *reinterpret_cast<const SDFMirrorModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_MIRROR, m.flag, m.blend_type, 0);
+          float3 world_origin(0.0f);
+          if (m.mirror_object != nullptr) {
+            const float4x4 &mirror_mat = m.mirror_object->object_to_world();
+            world_origin = float3(mirror_mat[3]) - float3(mat[3]);
+          }
+          float3 local_origin = float3(inv_rot * float4(world_origin, 0.0f));
+          gpu_mod.params = float4(m.offset_distance, local_origin.x, local_origin.y, local_origin.z);
+          gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFTwist: {
+          const auto &m = *reinterpret_cast<const SDFTwistModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_TWIST, 0, 0, 0);
+          gpu_mod.params = float4(m.strength, float(m.axis), 0.0f, 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFBend: {
+          const auto &m = *reinterpret_cast<const SDFBendModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_BEND, 0, 0, 0);
+          gpu_mod.params = float4(m.strength, float(m.axis), m.origin[0], m.origin[1]);
+          gpu_mod.params2 = float4(m.origin[2], 0.0f, 0.0f, 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFElongate: {
+          const auto &m = *reinterpret_cast<const SDFElongateModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_ELONGATE, 0, 0, 0);
+          gpu_mod.params = float4(m.elongation[0], m.elongation[1], m.elongation[2], 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFHollow: {
+          const auto &m = *reinterpret_cast<const SDFHollowModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_HOLLOW, 0, 0, 0);
+          gpu_mod.params = float4(m.thickness, 0.0f, 0.0f, 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFRound: {
+          const auto &m = *reinterpret_cast<const SDFRoundModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
+          gpu_mod.params = float4(m.radius, 0.0f, 0.0f, 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFOnion: {
+          const auto &m = *reinterpret_cast<const SDFOnionModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_ONION, 0, 0, 0);
+          gpu_mod.params = float4(m.thickness, 0.0f, 0.0f, 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFBevel: {
+          const auto &m = *reinterpret_cast<const SDFBevelModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
+          gpu_mod.params = float4(m.radius, 0.0f, 0.0f, 0.0f);
+          valid = true;
+          break;
+        }
+        case eModifierType_SDFArray: {
+          const auto &m = *reinterpret_cast<const SDFArrayModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_ARRAY, m.array_type, m.blend_type, 0);
+          if (m.array_type == MOD_SDF_ARRAY_RADIAL) {
+            gpu_mod.params = float4(float(m.count), m.array_radius, 0.0f, 0.0f);
+            gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
+          }
+          else {
+            float3 sz = float3(sdf_data->size);
+            float3 offset(0.0f);
+            if (m.use_relative_offset) {
+              offset += float3(m.relative_offset[0], m.relative_offset[1], m.relative_offset[2]) *
+                        sz * 2.0f;
+            }
+            if (m.use_constant_offset) {
+              offset += float3(m.constant_offset[0], m.constant_offset[1], m.constant_offset[2]);
+            }
+            gpu_mod.params = float4(float(m.count), offset.x, offset.y, offset.z);
+            gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
+          }
+          valid = true;
+          break;
+        }
+        default:
+          break;
+      }
+      if (valid) {
+        modifiers_.append(gpu_mod);
+        gpu_obj.modifier_count++;
+      }
     }
 
     /* Compute AABB */
@@ -853,49 +935,28 @@ class Instance : public DrawEngine {
         break;
     }
 
-    /* Expand for domain modifiers */
-    for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
-      if (!mod->show_viewport) {
-        continue;
-      }
-      switch (mod->type) {
+    /* Expand for domain modifiers (read from packed GPU modifiers) */
+    for (int mi = gpu_obj.modifier_start;
+         mi < gpu_obj.modifier_start + gpu_obj.modifier_count; mi++)
+    {
+      const SDFModifierGPU &mod = modifiers_[mi];
+      int mtype = mod.header.x;
+      int mflags = mod.header.y;
+      switch (mtype) {
         case SDF_MOD_MIRROR: {
-          float offset = fabsf(mod->params[0]);
-          float3 world_org;
-          if (mod->mirror_ob != nullptr) {
-            const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
-            world_org = float3(mirror_mat[3]) - float3(mat[3]);
-          }
-          else {
-            world_org = float3(mod->params[1], mod->params[2], mod->params[3]);
-          }
-          float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
-          if ((mod->flag & SDF_MOD_MIRROR_X) != 0) {
-            float3 N = float3(inv_rot[0]);
-            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
-            local_extent += math::abs(N) * disp;
-          }
-          if ((mod->flag & SDF_MOD_MIRROR_Y) != 0) {
-            float3 N = float3(inv_rot[1]);
-            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
-            local_extent += math::abs(N) * disp;
-          }
-          if ((mod->flag & SDF_MOD_MIRROR_Z) != 0) {
-            float3 N = float3(inv_rot[2]);
-            float disp = 2.0f * fabsf(math::dot(local_org, N)) + offset;
-            local_extent += math::abs(N) * disp;
-          }
+          local_extent *= 2.0f;
           break;
         }
         case SDF_MOD_ELONGATE:
-          local_extent += float3(mod->params[0], mod->params[1], mod->params[2]);
+          local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
           break;
         case SDF_MOD_HOLLOW:
         case SDF_MOD_ONION:
-          local_extent += float3(mod->params[0]);
+          local_extent += float3(mod.params.x);
           break;
         case SDF_MOD_ROUND:
-          local_extent += float3(mod->params[0]);
+        case SDF_MOD_BEVEL:
+          local_extent += float3(mod.params.x);
           break;
         case SDF_MOD_TWIST: {
           float xy = math::sqrt(local_extent.x * local_extent.x +
@@ -905,81 +966,46 @@ class Instance : public DrawEngine {
           break;
         }
         case SDF_MOD_BEND: {
-          float k = mod->params[0];
-          int axis = (int)mod->params[1];
+          float k = mod.params.x;
+          int axis = int(mod.params.y);
+          float3 origin = float3(mod.params.z, mod.params.w, mod.params2.x);
           if (fabsf(k) > 0.0001f) {
-            float R = 1.0f / k;
             float3 new_ext = float3(0.0f);
             for (int c = 0; c < 8; c++) {
-              float cx = (c & 1) ? local_extent.x : -local_extent.x;
-              float cy = (c & 2) ? local_extent.y : -local_extent.y;
-              float cz = (c & 4) ? local_extent.z : -local_extent.z;
+              float3 pt = float3((c & 1) ? local_extent.x : -local_extent.x,
+                                 (c & 2) ? local_extent.y : -local_extent.y,
+                                 (c & 4) ? local_extent.z : -local_extent.z);
+              pt -= origin;
               float drive, curve, free_val;
-              if (axis == 1) {
-                drive = cy;
-                curve = cz;
-                free_val = cx;
-              }
-              else if (axis == 2) {
-                drive = cz;
-                curve = cx;
-                free_val = cy;
-              }
-              else {
-                drive = cx;
-                curve = cy;
-                free_val = cz;
-              }
-              float theta = k * drive;
-              float bd = (R + curve) * sinf(theta);
-              float bc = -R + (R + curve) * cosf(theta);
+              if (axis == 1) { drive = pt.y; curve = pt.z; free_val = pt.x; }
+              else if (axis == 2) { drive = pt.z; curve = pt.x; free_val = pt.y; }
+              else { drive = pt.x; curve = pt.y; free_val = pt.z; }
+              float a = k * drive;
+              float nd = cosf(a) * drive - sinf(a) * curve;
+              float nc = sinf(a) * drive + cosf(a) * curve;
               float3 bent;
-              if (axis == 1) {
-                bent = float3(fabsf(free_val), fabsf(bd), fabsf(bc));
-              }
-              else if (axis == 2) {
-                bent = float3(fabsf(bc), fabsf(free_val), fabsf(bd));
-              }
-              else {
-                bent = float3(fabsf(bd), fabsf(bc), fabsf(free_val));
-              }
-              new_ext = math::max(new_ext, bent);
-            }
-            float drive_ext = (axis == 0) ? local_extent.x :
-                              (axis == 1) ? local_extent.y :
-                                            local_extent.z;
-            float curve_ext = (axis == 0) ? local_extent.y :
-                              (axis == 1) ? local_extent.z :
-                                            local_extent.x;
-            float max_angle = fabsf(k) * drive_ext;
-            if (max_angle > float(M_PI_2)) {
-              float outer_r = fabsf(R) + curve_ext;
-              if (axis == 0) {
-                new_ext.x = math::max(new_ext.x, outer_r);
-              }
-              else if (axis == 1) {
-                new_ext.y = math::max(new_ext.y, outer_r);
-              }
-              else {
-                new_ext.z = math::max(new_ext.z, outer_r);
-              }
+              if (axis == 1) { bent = float3(free_val, nd, nc); }
+              else if (axis == 2) { bent = float3(nc, free_val, nd); }
+              else { bent = float3(nd, nc, free_val); }
+              bent += origin;
+              new_ext = math::max(new_ext, math::abs(bent));
             }
             local_extent = new_ext;
           }
           break;
         }
         case SDF_MOD_ARRAY: {
-          float count = mod->params[0];
+          float count = mod.params.x;
           if (count > 0.5f) {
-            if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
-              float3 offset = float3(mod->params[1], mod->params[2], mod->params[3]);
-              local_extent += math::abs(offset) * (count - 1.0f);
+            if (mflags == SDF_MOD_ARRAY_LINEAR) {
+              float3 arr_offset = float3(mod.params.y, mod.params.z, mod.params.w);
+              local_extent += math::abs(arr_offset) * (count - 1.0f);
             }
-            else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
-              float radius = mod->params[1];
+            else if (mflags == SDF_MOD_ARRAY_RADIAL) {
+              float radius = mod.params.y;
               local_extent.x += radius;
               local_extent.y += radius;
-              float3 rot_off(mod->params[5], mod->params[6], mod->params[7]);
+              float3 rot_off(mod.params2.y, mod.params2.z, mod.params2.w);
               if (math::length(rot_off) > 0.0001f) {
                 float r = math::length(local_extent);
                 local_extent = float3(r);
@@ -1008,6 +1034,8 @@ class Instance : public DrawEngine {
 
     gpu_obj.bbox_min = float4(world_min, 0.0f);
     gpu_obj.bbox_max = float4(world_max, 0.0f);
+    gpu_obj.orig_bbox_min = gpu_obj.bbox_min;
+    gpu_obj.orig_bbox_max = gpu_obj.bbox_max;
 
     /* Early frustum cull — skip objects entirely outside the viewport */
     if (use_frustum_cull_) {
@@ -1801,7 +1829,8 @@ class Instance : public DrawEngine {
     const View3DShading &s = v3d->shading;
 
     use_bvh_ = 1;
-    debug_bvh_views_ = s.sdf_bvh_debug_view;
+    /* Values 1-5 are GPU debug views, 6+ are overlay-only. */
+    debug_bvh_views_ = (s.sdf_bvh_debug_view <= 5) ? s.sdf_bvh_debug_view : 0;
     debug_fd_normals_ = s.sdf_fd_normals ? 1 : 0;
     use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 512;
@@ -2854,86 +2883,100 @@ float2 sdf_uv_scale_get()
                 float(s_render_size.y) / float(s_texture_size.y));
 }
 
+/* Debug: near-surface points from last bbox computation. */
+static Vector<float3> s_bbox_debug_points;
+static float4x4 s_bbox_debug_rot;
+static float3 s_bbox_debug_pos;
+
+void sdf_bbox_debug_points_get(const float3 **pts, int *count,
+                               float4x4 *rot, float3 *pos)
+{
+  *pts = s_bbox_debug_points.data();
+  *count = int(s_bbox_debug_points.size());
+  *rot = s_bbox_debug_rot;
+  *pos = s_bbox_debug_pos;
+}
+
 bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
                          float4x4 &out_rot, float3 &out_pos)
 {
+  s_bbox_debug_points.clear();
+
   for (int i = 0; i < s_objects_cpu_count; i++) {
     if (s_objects_cpu[i].original_index == sdf_index) {
       const SDFObjectGPU &obj = s_objects_cpu[i];
       float3 sz(obj.sdf_size);
+      float3 pos = float3(obj.position);
+      float4x4 rot = math::transpose(obj.inverse_matrix);
 
-      /* Tight extent per type (bevel rounds but doesn't expand). */
+      /* Rotation-stable search region: compute in local space from primitive. */
       float3 ext;
       switch (obj.sdf_type) {
-        case SDF_TYPE_CONE:
-          ext = float3(sz.x, sz.x, sz.y);
-          break;
-        case SDF_TYPE_CAPSULE:
-          ext = float3(sz.x, sz.x, sz.y + sz.x);
-          break;
-        case SDF_TYPE_TORUS:
-          ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y);
-          break;
-        case SDF_TYPE_NGON:
-          ext = float3(sz.x, sz.x, sz.z);
-          break;
-        default:
-          ext = sz;
-          break;
+        case SDF_TYPE_CONE: ext = float3(sz.x, sz.x, sz.y); break;
+        case SDF_TYPE_CAPSULE: ext = float3(sz.x, sz.x, sz.y + sz.x); break;
+        case SDF_TYPE_TORUS: ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y); break;
+        case SDF_TYPE_NGON: ext = float3(sz.x, sz.x, sz.z); break;
+        default: ext = sz; break;
       }
-
-      /* Apply modifiers that change extent. */
+      /* Search region: expand extent by modifiers analytically. */
+      float3 search_ext = ext;
       for (int mi = obj.modifier_start; mi < obj.modifier_start + obj.modifier_count; mi++) {
-        if (mi < 0 || mi >= s_modifier_count) {
-          break;
-        }
+        if (mi < 0 || mi >= s_modifier_count) { break; }
         const SDFModifierGPU &mod = s_modifiers_cpu[mi];
-        int mtype = mod.header.x;
-        if (mtype == SDF_MOD_ELONGATE) {
-          ext += float3(mod.params.x, mod.params.y, mod.params.z);
+        int mt = mod.header.x;
+        if (mt == SDF_MOD_ELONGATE) {
+          search_ext += float3(mod.params.x, mod.params.y, mod.params.z);
         }
-        else if (mtype == SDF_MOD_TWIST) {
-          float xy = math::sqrt(ext.x * ext.x + ext.y * ext.y);
-          ext.x = xy;
-          ext.y = xy;
+        else if (mt == SDF_MOD_TWIST || mt == SDF_MOD_BEND) {
+          float diag = math::length(search_ext);
+          search_ext = float3(diag);
         }
-        else if (mtype == SDF_MOD_BEND) {
-          float k = mod.params.x;
-          int axis = int(mod.params.y);
-          if (fabsf(k) > 0.0001f) {
-            float R = 1.0f / k;
-            float3 ne(0);
-            for (int c = 0; c < 8; c++) {
-              float cx = (c & 1) ? ext.x : -ext.x;
-              float cy = (c & 2) ? ext.y : -ext.y;
-              float cz = (c & 4) ? ext.z : -ext.z;
-              float drive = (axis == 0) ? cx : (axis == 1) ? cy : cz;
-              float curve = (axis == 0) ? cy : (axis == 1) ? cz : cx;
-              float fv = (axis == 0) ? cz : (axis == 1) ? cx : cy;
-              float th = k * drive;
-              float bd = (R + curve) * sinf(th);
-              float bc = -R + (R + curve) * cosf(th);
-              float3 bent;
-              if (axis == 0) { bent = float3(fabsf(bd), fabsf(bc), fabsf(fv)); }
-              else if (axis == 1) { bent = float3(fabsf(fv), fabsf(bd), fabsf(bc)); }
-              else { bent = float3(fabsf(bc), fabsf(fv), fabsf(bd)); }
-              ne = math::max(ne, bent);
+        else if (mt == SDF_MOD_HOLLOW || mt == SDF_MOD_ONION ||
+                 mt == SDF_MOD_ROUND || mt == SDF_MOD_BEVEL) {
+          search_ext += float3(mod.params.x);
+        }
+      }
+      search_ext *= 1.1f;
+      float3 search_min = -search_ext;
+      float3 search_max = search_ext;
+
+      constexpr int RES = 20;
+      float3 cell = (search_max - search_min) / float(RES);
+      float threshold = std::max(cell.x, std::max(cell.y, cell.z)) * 0.6f;
+      float3 bb_min(1e30f), bb_max(-1e30f);
+      bool found = false;
+
+      s_bbox_debug_rot = rot;
+      s_bbox_debug_pos = pos;
+
+      for (int iz = 0; iz <= RES; iz++) {
+        for (int iy = 0; iy <= RES; iy++) {
+          for (int ix = 0; ix <= RES; ix++) {
+            float3 lp = search_min + float3(float(ix), float(iy), float(iz)) * cell;
+            float d = sdf_cpu::evalObjectSDF(obj, s_modifiers_cpu, lp);
+            if (d >= 0.0f && d < threshold) {
+              bb_min = math::min(bb_min, lp);
+              bb_max = math::max(bb_max, lp);
+              s_bbox_debug_points.append(lp);
+              found = true;
             }
-            ext = ne;
           }
         }
-        else if (mtype == SDF_MOD_HOLLOW || mtype == SDF_MOD_ONION) {
-          ext += float3(mod.params.x);
-        }
-        else if (mtype == SDF_MOD_ROUND) {
-          ext += float3(mod.params.x);
-        }
       }
 
-      out_min = -ext;
-      out_max = ext;
-      out_rot = math::transpose(obj.inverse_matrix);
-      out_pos = float3(obj.position);
+      if (!found) {
+        bb_min = -ext;
+        bb_max = ext;
+      }
+      else {
+        bb_min -= cell * 0.25f;
+        bb_max += cell * 0.25f;
+      }
+
+      out_min = bb_min;
+      out_max = bb_max;
+      out_rot = rot;
+      out_pos = pos;
       return true;
     }
   }

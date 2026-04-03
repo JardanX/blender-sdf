@@ -61,6 +61,15 @@ set(SRC
   intern/MOD_grease_pencil_util.cc
   intern/MOD_grease_pencil_weight_angle.cc
   intern/MOD_grease_pencil_weight_proximity.cc
+  intern/MOD_sdf_mirror.cc
+  intern/MOD_sdf_twist.cc
+  intern/MOD_sdf_bend.cc
+  intern/MOD_sdf_elongate.cc
+  intern/MOD_sdf_hollow.cc
+  intern/MOD_sdf_round.cc
+  intern/MOD_sdf_onion.cc
+  intern/MOD_sdf_bevel.cc
+  intern/MOD_sdf_array.cc
   intern/MOD_hook.cc
   intern/MOD_laplaciandeform.cc
   intern/MOD_laplaciansmooth.cc

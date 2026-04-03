@@ -125,6 +125,15 @@ enum ModifierType {
   eModifierType_GreasePencilBuild = 84,
   eModifierType_GreasePencilSimplify = 85,
   eModifierType_GreasePencilTexture = 86,
+  eModifierType_SDFMirror = 87,
+  eModifierType_SDFTwist = 88,
+  eModifierType_SDFBend = 89,
+  eModifierType_SDFElongate = 90,
+  eModifierType_SDFHollow = 91,
+  eModifierType_SDFRound = 92,
+  eModifierType_SDFOnion = 93,
+  eModifierType_SDFBevel = 94,
+  eModifierType_SDFArray = 95,
   NUM_MODIFIER_TYPES,
 };
 
@@ -3571,6 +3580,112 @@ struct GreasePencilTextureModifierData {
   /* Dot texture rotation. */
   float alignment_rotation = 0;
   char _pad[4] = {};
+};
+
+/* SDF Modifier flags */
+
+enum SDFMirrorModifierFlag {
+  MOD_SDF_MIRROR_AXIS_X = (1 << 0),
+  MOD_SDF_MIRROR_AXIS_Y = (1 << 1),
+  MOD_SDF_MIRROR_AXIS_Z = (1 << 2),
+};
+
+enum SDFBlendType {
+  MOD_SDF_BLEND_LINEAR = 0,
+  MOD_SDF_BLEND_SMOOTH = 1,
+  MOD_SDF_BLEND_CHAMFER = 2,
+  MOD_SDF_BLEND_ROUND = 3,
+};
+
+enum SDFArrayType {
+  MOD_SDF_ARRAY_LINEAR = 0,
+  MOD_SDF_ARRAY_RADIAL = 1,
+};
+
+enum SDFBendAxis {
+  MOD_SDF_BEND_X = 0,
+  MOD_SDF_BEND_Y = 1,
+  MOD_SDF_BEND_Z = 2,
+};
+
+enum SDFTwistAxis {
+  MOD_SDF_TWIST_Z = 0,
+  MOD_SDF_TWIST_Y = 1,
+  MOD_SDF_TWIST_X = 2,
+};
+
+struct SDFMirrorModifierData {
+  ModifierData modifier;
+  struct Object *mirror_object = nullptr;
+  /** #SDFMirrorModifierFlag */
+  int flag = MOD_SDF_MIRROR_AXIS_X;
+  /** #SDFBlendType */
+  int blend_type = MOD_SDF_BLEND_SMOOTH;
+  float offset_distance = 0.0f;
+  float blend = 0.1f;
+};
+
+struct SDFTwistModifierData {
+  ModifierData modifier;
+  float strength = 0.0f;
+  int axis = 0; /* 0=Z, 1=Y, 2=X */
+};
+
+struct SDFBendModifierData {
+  ModifierData modifier;
+  float strength = 0.0f;
+  /** #SDFBendAxis */
+  int axis = MOD_SDF_BEND_X;
+  float origin[3] = {0.0f, 0.0f, 0.0f};
+  char _pad[4] = {};
+};
+
+struct SDFElongateModifierData {
+  ModifierData modifier;
+  float elongation[3] = {0.0f, 0.0f, 0.0f};
+  char _pad[4] = {};
+};
+
+struct SDFHollowModifierData {
+  ModifierData modifier;
+  float thickness = 0.1f;
+  char _pad[4] = {};
+};
+
+struct SDFRoundModifierData {
+  ModifierData modifier;
+  float radius = 0.0f;
+  char _pad[4] = {};
+};
+
+struct SDFOnionModifierData {
+  ModifierData modifier;
+  float thickness = 0.1f;
+  char _pad[4] = {};
+};
+
+struct SDFBevelModifierData {
+  ModifierData modifier;
+  float radius = 0.0f;
+  char _pad[4] = {};
+};
+
+struct SDFArrayModifierData {
+  ModifierData modifier;
+  /** #SDFArrayType */
+  int array_type = MOD_SDF_ARRAY_LINEAR;
+  int count = 2;
+
+  int use_relative_offset = 1;
+  int use_constant_offset = 0;
+  float relative_offset[3] = {1.0f, 0.0f, 0.0f};
+  float constant_offset[3] = {0.0f, 0.0f, 0.0f};
+
+  float array_radius = 1.0f;
+  float blend = 0.0f;
+  /** #SDFBlendType */
+  int blend_type = MOD_SDF_BLEND_SMOOTH;
+  float rotation_offset[3] = {0.0f, 0.0f, 0.0f};
 };
 
 }  // namespace blender

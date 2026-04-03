@@ -2547,12 +2547,12 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
       if ((del_ob.id.tag & ID_TAG_DOIT) && del_ob.type == OB_SDF) {
         BKE_sdf_groups_remove_object(bmain, &del_ob);
         if (!del_ob.data) continue;
-        SDF *sdf = id_cast<SDF *>(del_ob.data);
-        for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod;
-             mod = mod->next)
-        {
-          if (mod->type == SDF_MOD_MIRROR && mod->mirror_ob) {
-            mod->mirror_ob->id.tag |= ID_TAG_DOIT;
+        for (ModifierData &md : del_ob.modifiers) {
+          if (md.type == eModifierType_SDFMirror) {
+            auto &m = reinterpret_cast<SDFMirrorModifierData &>(md);
+            if (m.mirror_object) {
+              m.mirror_object->id.tag |= ID_TAG_DOIT;
+            }
           }
         }
       }
@@ -4816,12 +4816,15 @@ static void object_add_sync_sdf_mirrors(Main *bmain,
   if (!sdf || is_linked) {
     return;
   }
-  for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod; mod = mod->next)
-  {
-    if (mod->type != SDF_MOD_MIRROR || !mod->mirror_ob) {
+  for (ModifierData &md : ob_new->modifiers) {
+    if (md.type != eModifierType_SDFMirror) {
       continue;
     }
-    Object *old_empty = mod->mirror_ob;
+    auto &m = reinterpret_cast<SDFMirrorModifierData &>(md);
+    if (!m.mirror_object) {
+      continue;
+    }
+    Object *old_empty = m.mirror_object;
 
     char name[MAX_ID_NAME - 2];
     SNPRINTF(name, "%s_Mirror", ob_new->id.name + 2);
@@ -4847,7 +4850,7 @@ static void object_add_sync_sdf_mirrors(Main *bmain,
 
     BKE_collection_object_add_from(bmain, scene, ob_new, empty);
 
-    mod->mirror_ob = empty;
+    m.mirror_object = empty;
   }
 }
 

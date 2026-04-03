@@ -289,6 +289,15 @@ void modifier_type_init(ModifierTypeInfo *types[])
   INIT_TYPE(GreasePencilShrinkwrap);
   INIT_TYPE(GreasePencilBuild);
   INIT_TYPE(GreasePencilTexture);
+  INIT_TYPE(SDFMirror);
+  INIT_TYPE(SDFTwist);
+  INIT_TYPE(SDFBend);
+  INIT_TYPE(SDFElongate);
+  INIT_TYPE(SDFHollow);
+  INIT_TYPE(SDFRound);
+  INIT_TYPE(SDFOnion);
+  INIT_TYPE(SDFBevel);
+  INIT_TYPE(SDFArray);
 #undef INIT_TYPE
 }
 
