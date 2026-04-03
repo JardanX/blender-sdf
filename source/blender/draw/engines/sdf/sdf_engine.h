@@ -44,4 +44,7 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
 void sdf_bbox_debug_points_get(const float3 **pts, int *count,
                                float4x4 *rot, float3 *pos);
 
+/* Free static shader cache (call on application exit). */
+void sdf_shaders_free();
+
 }  // namespace blender::draw::sdf

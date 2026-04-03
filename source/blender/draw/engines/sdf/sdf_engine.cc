@@ -90,6 +90,58 @@ static int s_polygon_pts_count = 0;
 static const SDFModifierGPU *s_modifiers_cpu = nullptr;
 static int s_modifier_count = 0;
 
+/* Static shader cache — survives engine instance destruction (mode switches). */
+enum ShaderIndex {
+  SH_TRACE_COMP = 0,
+  SH_TRACE_TILE_COMP,
+  SH_AABB_PROJECT_COMP,
+  SH_TILE_CULL_COMP,
+  SH_CONE_MARCH_COMP,
+  SH_COLOR_RESOLVE_COMP,
+  SH_NORMAL_COMP,
+  SH_SHADE_COMP,
+  SH_BLIT,
+  SH_FXAA,
+  SH_COUNT,
+};
+
+static constexpr const char *s_shader_info_names[SH_COUNT] = {
+    "sdf_trace_comp",
+    "sdf_trace_tile_comp",
+    "sdf_aabb_project_comp",
+    "sdf_tile_cull_comp",
+    "sdf_cone_march_comp",
+    "sdf_color_resolve_comp",
+    "sdf_normal_comp",
+    "sdf_shade_comp",
+    "sdf_blit",
+    "sdf_fxaa",
+};
+
+static gpu::Shader *s_shader_cache[SH_COUNT] = {};
+static bool s_shaders_compiled = false;
+
+static void sdf_shaders_ensure()
+{
+  if (s_shaders_compiled) {
+    return;
+  }
+  for (int i = 0; i < SH_COUNT; i++) {
+    if (s_shader_cache[i] == nullptr) {
+      s_shader_cache[i] = GPU_shader_create_from_info_name(s_shader_info_names[i]);
+    }
+  }
+  s_shaders_compiled = true;
+}
+
+void sdf_shaders_free()
+{
+  for (int i = 0; i < SH_COUNT; i++) {
+    GPU_SHADER_FREE_SAFE(s_shader_cache[i]);
+  }
+  s_shaders_compiled = false;
+}
+
 class Instance : public DrawEngine {
  private:
   Vector<SDFObjectGPU> objects_;
@@ -106,47 +158,17 @@ class Instance : public DrawEngine {
   bool needs_upload_ = true;
   bool depth_mode_ = false;
 
-  enum ShaderIndex {
-    SH_TRACE_COMP = 0,
-    SH_TRACE_TILE_COMP,
-    SH_AABB_PROJECT_COMP,
-    SH_TILE_CULL_COMP,
-    SH_CONE_MARCH_COMP,
-    SH_COLOR_RESOLVE_COMP,
-    SH_NORMAL_COMP,
-    SH_SHADE_COMP,
-    SH_BLIT,
-    SH_FXAA,
-    SH_COUNT,
-  };
-
-  static constexpr const char *shader_info_names_[SH_COUNT] = {
-      "sdf_trace_comp",
-      "sdf_trace_tile_comp",
-      "sdf_aabb_project_comp",
-      "sdf_tile_cull_comp",
-      "sdf_cone_march_comp",
-      "sdf_color_resolve_comp",
-      "sdf_normal_comp",
-      "sdf_shade_comp",
-      "sdf_blit",
-      "sdf_fxaa",
-  };
-
-  gpu::Shader *shaders_[SH_COUNT] = {};
-
-  gpu::Shader *&trace_comp_sh_ = shaders_[SH_TRACE_COMP];
-  gpu::Shader *&trace_tile_sh_ = shaders_[SH_TRACE_TILE_COMP];
-  gpu::Shader *&aabb_project_sh_ = shaders_[SH_AABB_PROJECT_COMP];
-  gpu::Shader *&tile_cull_sh_ = shaders_[SH_TILE_CULL_COMP];
-  gpu::Shader *&cone_march_sh_ = shaders_[SH_CONE_MARCH_COMP];
-  gpu::Shader *&color_resolve_sh_ = shaders_[SH_COLOR_RESOLVE_COMP];
-  gpu::Shader *&normal_comp_sh_ = shaders_[SH_NORMAL_COMP];
-  gpu::Shader *&shade_comp_sh_ = shaders_[SH_SHADE_COMP];
-  gpu::Shader *&blit_sh_ = shaders_[SH_BLIT];
-  gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
-
-  bool shaders_compiled_ = false;
+  /* Aliases into static shader cache */
+  gpu::Shader *&trace_comp_sh_ = s_shader_cache[SH_TRACE_COMP];
+  gpu::Shader *&trace_tile_sh_ = s_shader_cache[SH_TRACE_TILE_COMP];
+  gpu::Shader *&aabb_project_sh_ = s_shader_cache[SH_AABB_PROJECT_COMP];
+  gpu::Shader *&tile_cull_sh_ = s_shader_cache[SH_TILE_CULL_COMP];
+  gpu::Shader *&cone_march_sh_ = s_shader_cache[SH_CONE_MARCH_COMP];
+  gpu::Shader *&color_resolve_sh_ = s_shader_cache[SH_COLOR_RESOLVE_COMP];
+  gpu::Shader *&normal_comp_sh_ = s_shader_cache[SH_NORMAL_COMP];
+  gpu::Shader *&shade_comp_sh_ = s_shader_cache[SH_SHADE_COMP];
+  gpu::Shader *&blit_sh_ = s_shader_cache[SH_BLIT];
+  gpu::Shader *&fxaa_sh_ = s_shader_cache[SH_FXAA];
 
   gpu::Texture *comp_color_tx_ = nullptr;
   gpu::Texture *comp_depth_tx_ = nullptr;
@@ -249,14 +271,7 @@ class Instance : public DrawEngine {
 
     sync_sdf_settings();
 
-    if (!shaders_compiled_) {
-      for (int i = 0; i < SH_COUNT; i++) {
-        if (shaders_[i] == nullptr) {
-          shaders_[i] = GPU_shader_create_from_info_name(shader_info_names_[i]);
-        }
-      }
-      shaders_compiled_ = true;
-    }
+    sdf_shaders_ensure();
   }
 
   void begin_sync() final
@@ -1731,7 +1746,7 @@ class Instance : public DrawEngine {
       prev_viewmat_ = cur_viewmat;
       prev_winmat_ = cur_winmat;
 
-      if (scene_changed_ || view_changed_ || mesh_changed) {
+      if (scene_changed_ || view_changed_ || mesh_changed || shading_changed) {
         scroll_cooldown_ = 3;
         idle_frames_ = 0;
       }
@@ -2029,16 +2044,7 @@ class Instance : public DrawEngine {
 
   void ensure_shaders()
   {
-    if (shaders_compiled_) {
-      return;
-    }
-
-    for (int i = 0; i < SH_COUNT; i++) {
-      if (shaders_[i] == nullptr) {
-        shaders_[i] = GPU_shader_create_from_info_name(shader_info_names_[i]);
-      }
-    }
-    shaders_compiled_ = true;
+    sdf_shaders_ensure();
   }
 
   void upload_objects()
@@ -2787,9 +2793,7 @@ class Instance : public DrawEngine {
  public:
   ~Instance() override
   {
-    for (int i = 0; i < SH_COUNT; i++) {
-      GPU_SHADER_FREE_SAFE(shaders_[i]);
-    }
+    /* Shaders live in static cache — do NOT free them here. */
 
     s_object_ssbo = nullptr;
     s_modifier_ssbo = nullptr;
