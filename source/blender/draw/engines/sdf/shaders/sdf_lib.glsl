@@ -927,7 +927,6 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       float bk = (blend_type > 0 && blend > 0.001f) ? blend : 0.0f;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
         float3 N = float3(inv_mat[0]);
-        if (dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
         p -= (d - sabs(d, bk)) * N;
@@ -935,7 +934,6 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
         float3 N = float3(inv_mat[1]);
-        if (dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
         p -= (d - sabs(d, bk)) * N;
@@ -943,7 +941,6 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
         float3 N = float3(inv_mat[2]);
-        if (dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
         p -= (d - sabs(d, bk)) * N;
