@@ -157,13 +157,13 @@ inline DomainResult applyDomainMods(float3 p,
       int sides = m.header.w;
       auto do_mirror = [&](int ax, int bit) {
         float3 N(inv_mat[ax][0], inv_mat[ax][1], inv_mat[ax][2]);
+        float s = ((sides & bit) != 0) ? 1.0f : -1.0f;
+        N *= s;
         float nl2 = std::max(math::dot(N, N), 1e-12f);
         float d = math::dot(p - origin, N) / nl2;
-        float s = ((sides & bit) != 0) ? 1.0f : -1.0f;
-        float sd = s * d;
-        float ad = sabs(sd, bk);
-        p -= s * (sd - ad) * N;
-        p -= s * offset * N;
+        float ad = sabs(d, bk);
+        p -= (d - ad) * N;
+        p -= offset * N;
       };
       if (mflags & SDF_MOD_MIRROR_X) { do_mirror(0, 1); }
       if (mflags & SDF_MOD_MIRROR_Y) { do_mirror(1, 2); }

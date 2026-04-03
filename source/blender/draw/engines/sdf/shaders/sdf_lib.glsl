@@ -928,31 +928,32 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       float bk = (blend_type > 0 && blend > 0.001f) ? blend : 0.0f;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
         float3 N = float3(inv_mat[0]);
+        float s = ((sides & 1) != 0) ? 1.0f : -1.0f;
+        N *= s;
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
-        float s = ((sides & 1) != 0) ? 1.0f : -1.0f;
-        float sd = s * d;
-        p -= s * (sd - sabs(sd, bk)) * N;
-        p -= s * offset * N;
+        p -= (d - sabs(d, bk)) * N;
+        p -= offset * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
         float3 N = float3(inv_mat[1]);
+        float s = ((sides & 2) != 0) ? 1.0f : -1.0f;
+        N *= s;
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
-        float s = ((sides & 2) != 0) ? 1.0f : -1.0f;
-        float sd = s * d;
-        p -= s * (sd - sabs(sd, bk)) * N;
-        p -= s * offset * N;
+        p -= (d - sabs(d, bk)) * N;
+        p -= offset * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
         float3 N = float3(inv_mat[2]);
+        float s = ((sides & 4) != 0) ? 1.0f : -1.0f;
+        N *= s;
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
-        float s = ((sides & 4) != 0) ? 1.0f : -1.0f;
-        float sd = s * d;
-        p -= s * (sd - sabs(sd, bk)) * N;
-        p -= s * offset * N;
+        p -= (d - sabs(d, bk)) * N;
+        p -= offset * N;
       }
+      if (bk > 0.001f) { scale *= 0.5f; }
     }
     else if (mtype == SDF_MOD_TWIST) {
       float k = smod.params.x;
