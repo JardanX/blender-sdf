@@ -440,6 +440,49 @@ const EnumPropertyItem rna_enum_object_modifier_type_items[] = {
      "Soft Body",
      "Simulate soft deformable objects"},
     {eModifierType_Surface, "SURFACE", ICON_MODIFIER, "Surface", ""},
+
+    RNA_ENUM_ITEM_HEADING(N_("SDF"), nullptr),
+    {eModifierType_SDFMirror, "SDF_MIRROR", ICON_MOD_MIRROR, "Mirror", "Mirror SDF across axes"},
+    {eModifierType_SDFTwist,
+     "SDF_TWIST",
+     ICON_MOD_SIMPLEDEFORM,
+     "Twist",
+     "Twist SDF around Z axis"},
+    {eModifierType_SDFBend,
+     "SDF_BEND",
+     ICON_MOD_SIMPLEDEFORM,
+     "Bend",
+     "Bend SDF around an axis"},
+    {eModifierType_SDFElongate,
+     "SDF_ELONGATE",
+     ICON_MOD_LENGTH,
+     "Elongate",
+     "Stretch SDF along axes"},
+    {eModifierType_SDFHollow,
+     "SDF_HOLLOW",
+     ICON_MOD_SOLIDIFY,
+     "Hollow",
+     "Make SDF hollow with wall thickness"},
+    {eModifierType_SDFRound,
+     "SDF_ROUND",
+     ICON_MOD_SMOOTH,
+     "Round",
+     "Additional SDF rounding"},
+    {eModifierType_SDFOnion,
+     "SDF_ONION",
+     ICON_MOD_SOLIDIFY,
+     "Onion",
+     "Concentric SDF shells"},
+    {eModifierType_SDFBevel,
+     "SDF_BEVEL",
+     ICON_MOD_BEVEL,
+     "Bevel",
+     "Bevel/round SDF edges"},
+    {eModifierType_SDFArray,
+     "SDF_ARRAY",
+     ICON_MOD_ARRAY,
+     "Array",
+     "Duplicate SDF geometry"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1134,6 +1177,7 @@ RNA_MOD_OBJECT_SET(GreasePencilOutline, object, OB_EMPTY);
 RNA_MOD_OBJECT_SET(GreasePencilShrinkwrap, target, OB_MESH);
 RNA_MOD_OBJECT_SET(GreasePencilShrinkwrap, aux_target, OB_MESH);
 RNA_MOD_OBJECT_SET(GreasePencilBuild, object, OB_EMPTY);
+RNA_MOD_OBJECT_SET(SDFMirror, mirror_object, OB_EMPTY);
 
 static void rna_HookModifier_object_set(PointerRNA *ptr,
                                         PointerRNA value,
@@ -11208,6 +11252,344 @@ static void rna_def_modifier_grease_pencil_texture(BlenderRNA *brna)
   RNA_define_lib_overridable(false);
 }
 
+/* SDF Modifier RNA definitions */
+
+static void rna_def_modifier_sdf_mirror(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFMirrorModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Mirror Modifier", "Mirror SDF across axes");
+  RNA_def_struct_sdna(srna, "SDFMirrorModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_MIRROR);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "use_axis_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_SDF_MIRROR_AXIS_X);
+  RNA_def_property_ui_text(prop, "X", "Mirror the X axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_axis_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_SDF_MIRROR_AXIS_Y);
+  RNA_def_property_ui_text(prop, "Y", "Mirror the Y axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_axis_z", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_SDF_MIRROR_AXIS_Z);
+  RNA_def_property_ui_text(prop, "Z", "Mirror the Z axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "offset_distance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "offset_distance");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Offset", "Distance offset for the mirror");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "mirror_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "mirror_object");
+  RNA_def_property_ui_text(prop, "Mirror Object", "Object to use as mirror center");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_SDFMirrorModifier_mirror_object_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_SELF_CHECK);
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  static const EnumPropertyItem sdf_blend_type_items[] = {
+      {MOD_SDF_BLEND_LINEAR, "LINEAR", 0, "Linear", "Sharp boolean"},
+      {MOD_SDF_BLEND_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth blend"},
+      {MOD_SDF_BLEND_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer blend"},
+      {MOD_SDF_BLEND_ROUND, "ROUND", 0, "Round", "Round blend"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "blend_type");
+  RNA_def_property_enum_items(prop, sdf_blend_type_items);
+  RNA_def_property_ui_text(prop, "Blend Type", "How to blend the mirror boundary");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "blend", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "blend");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Blend Radius", "Mirror blend radius");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_twist(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem sdf_twist_axis_items[] = {
+      {MOD_SDF_TWIST_Z, "Z", 0, "Z", "Twist around Z axis"},
+      {MOD_SDF_TWIST_Y, "Y", 0, "Y", "Twist around Y axis"},
+      {MOD_SDF_TWIST_X, "X", 0, "X", "Twist around X axis"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SDFTwistModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Twist Modifier", "Twist SDF around an axis");
+  RNA_def_struct_sdna(srna, "SDFTwistModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_SIMPLEDEFORM);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "strength");
+  RNA_def_property_range(prop, -5.0f, 5.0f);
+  RNA_def_property_ui_range(prop, -5.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Strength", "Twist strength (radians per unit)");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "axis", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "axis");
+  RNA_def_property_enum_items(prop, sdf_twist_axis_items);
+  RNA_def_property_ui_text(prop, "Axis", "Twist axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_bend(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem sdf_bend_axis_items[] = {
+      {MOD_SDF_BEND_X, "X", 0, "X", "Bend around X axis"},
+      {MOD_SDF_BEND_Y, "Y", 0, "Y", "Bend around Y axis"},
+      {MOD_SDF_BEND_Z, "Z", 0, "Z", "Bend around Z axis"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SDFBendModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Bend Modifier", "Bend SDF around an axis");
+  RNA_def_struct_sdna(srna, "SDFBendModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_SIMPLEDEFORM);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "strength");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Strength", "Bend strength (curvature)");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "axis", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "axis");
+  RNA_def_property_enum_items(prop, sdf_bend_axis_items);
+  RNA_def_property_ui_text(prop, "Axis", "Bend axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "origin", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "origin");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Origin", "Bend center offset");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_elongate(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFElongateModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Elongate Modifier", "Stretch SDF along axes");
+  RNA_def_struct_sdna(srna, "SDFElongateModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_LENGTH);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "elongation", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "elongation");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(prop, "Elongation", "Stretch amount per axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_hollow(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFHollowModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Hollow Modifier", "Make SDF hollow");
+  RNA_def_struct_sdna(srna, "SDFHollowModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_SOLIDIFY);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "thickness", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "thickness");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Thickness", "Wall thickness");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_round(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFRoundModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Round Modifier", "Additional SDF rounding");
+  RNA_def_struct_sdna(srna, "SDFRoundModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_SMOOTH);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "radius");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Radius", "Rounding radius");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_onion(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFOnionModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Onion Modifier", "Concentric SDF shells");
+  RNA_def_struct_sdna(srna, "SDFOnionModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_SOLIDIFY);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "thickness", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "thickness");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Thickness", "Shell thickness");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_bevel(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SDFBevelModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Bevel Modifier", "Bevel/round SDF edges");
+  RNA_def_struct_sdna(srna, "SDFBevelModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_BEVEL);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "radius");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Radius", "Bevel radius");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
+static void rna_def_modifier_sdf_array(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem sdf_array_type_items[] = {
+      {MOD_SDF_ARRAY_LINEAR, "LINEAR", 0, "Linear", "Linear array"},
+      {MOD_SDF_ARRAY_RADIAL, "RADIAL", 0, "Radial", "Radial array"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem sdf_blend_type_items[] = {
+      {MOD_SDF_BLEND_LINEAR, "LINEAR", 0, "Linear", "Sharp boolean"},
+      {MOD_SDF_BLEND_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth blend"},
+      {MOD_SDF_BLEND_CHAMFER, "CHAMFER", 0, "Chamfer", "Chamfer blend"},
+      {MOD_SDF_BLEND_ROUND, "ROUND", 0, "Round", "Round blend"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SDFArrayModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Array Modifier", "Duplicate SDF geometry");
+  RNA_def_struct_sdna(srna, "SDFArrayModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_ARRAY);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "array_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "array_type");
+  RNA_def_property_enum_items(prop, sdf_array_type_items);
+  RNA_def_property_ui_text(prop, "Type", "Array pattern type");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "count", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "count");
+  RNA_def_property_range(prop, 1, 1000);
+  RNA_def_property_ui_text(prop, "Count", "Number of copies");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_relative_offset", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_relative_offset", 1);
+  RNA_def_property_ui_text(
+      prop, "Relative Offset", "Add an offset relative to the object's SDF size");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "relative_offset", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "relative_offset");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(
+      prop, "Relative Offset", "Factor for each axis (1.0 = one object width)");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_constant_offset", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_constant_offset", 1);
+  RNA_def_property_ui_text(prop, "Constant Offset", "Add a constant offset in meters");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "constant_offset", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "constant_offset");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(prop, "Constant Offset", "Offset in meters per axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "array_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "array_radius");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Radius", "Radial array radius");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "rotation_offset", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation_offset");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(prop, "Rotation Offset", "Per-copy rotation offset");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "blend_type");
+  RNA_def_property_enum_items(prop, sdf_blend_type_items);
+  RNA_def_property_ui_text(prop, "Blend Type", "How to blend array copies");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "blend", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "blend");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Blend Radius", "Array blend radius");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
 void RNA_def_modifier(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -11412,6 +11794,17 @@ void RNA_def_modifier(BlenderRNA *brna)
   rna_def_modifier_grease_pencil_shrinkwrap(brna);
   rna_def_modifier_grease_pencil_build(brna);
   rna_def_modifier_grease_pencil_texture(brna);
+
+  /* SDF modifiers */
+  rna_def_modifier_sdf_mirror(brna);
+  rna_def_modifier_sdf_twist(brna);
+  rna_def_modifier_sdf_bend(brna);
+  rna_def_modifier_sdf_elongate(brna);
+  rna_def_modifier_sdf_hollow(brna);
+  rna_def_modifier_sdf_round(brna);
+  rna_def_modifier_sdf_onion(brna);
+  rna_def_modifier_sdf_bevel(brna);
+  rna_def_modifier_sdf_array(brna);
 }
 
 }  // namespace blender

@@ -130,6 +130,9 @@ enum ModifierTypeFlag {
 
   /** Accepts #GreasePencil data input. */
   eModifierTypeFlag_AcceptsGreasePencil = (1 << 12),
+
+  /** Accepts SDF object input. */
+  eModifierTypeFlag_AcceptsSDF = (1 << 13),
 };
 ENUM_OPERATORS(ModifierTypeFlag)
 

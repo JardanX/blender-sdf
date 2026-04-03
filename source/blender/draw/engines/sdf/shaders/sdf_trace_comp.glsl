@@ -78,7 +78,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       if (!is_shape_near(m)) { continue; }
 
       float da = point_aabb_dist(world_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz);
-      float aabb_skip_thresh = max(sdf_ray_epsilon, objects[m].blend);
+      float aabb_skip_thresh = max(sdf_ray_epsilon, object_aabbs[m].max_group_blend);
       int obj_op = objects[m].csg_operation;
       bool must_eval = grp_has_hit &&
                        (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT);
@@ -211,7 +211,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     if (objects[i].group_id >= 0) { continue; }
 
     float da = point_aabb_dist(world_pos, objects[i].orig_bbox_min.xyz, objects[i].orig_bbox_max.xyz);
-    float ungrouped_skip_thresh = max(0.0f, objects[i].blend);
+    float ungrouped_skip_thresh = max(0.0f, object_aabbs[i].max_group_blend);
     int ungrouped_op = objects[i].csg_operation;
     bool ungrouped_must_eval = scene_dist < 1e9f &&
                                (ungrouped_op == SDF_CSG_OP_INTERSECT ||

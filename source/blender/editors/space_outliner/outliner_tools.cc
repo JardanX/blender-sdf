@@ -994,15 +994,15 @@ static void outliner_object_delete_fn(bContext *C, ReportList *reports, Scene *s
       return;
     }
 
-    if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = id_cast<SDF *>(ob->data);
-      for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod;
-           mod = mod->next)
-      {
-        if (mod->type == SDF_MOD_MIRROR && mod->mirror_ob) {
-          Object *mirror = mod->mirror_ob;
-          mod->mirror_ob = nullptr;
-          BKE_id_delete(bmain, mirror);
+    if (ob->type == OB_SDF) {
+      for (ModifierData &md : ob->modifiers) {
+        if (md.type == eModifierType_SDFMirror) {
+          auto &m = reinterpret_cast<SDFMirrorModifierData &>(md);
+          if (m.mirror_object) {
+            Object *mirror = m.mirror_object;
+            m.mirror_object = nullptr;
+            BKE_id_delete(bmain, mirror);
+          }
         }
       }
     }

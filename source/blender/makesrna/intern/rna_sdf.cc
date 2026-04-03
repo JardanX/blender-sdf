@@ -148,117 +148,7 @@ static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, Pointer
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
-static SDFModifier *rna_SDF_modifier_new(SDF *sdf, int type)
-{
-  SDFModifier *mod = BKE_sdf_modifier_add(sdf, type);
-
-  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
-
-  return mod;
-}
-
-static void rna_SDF_modifier_remove(SDF *sdf, ReportList *reports, PointerRNA *mod_ptr)
-{
-  SDFModifier *mod = (SDFModifier *)mod_ptr->data;
-
-  if (BLI_findindex(&sdf->modifiers, mod) == -1) {
-    BKE_reportf(reports, RPT_ERROR, "Modifier '%s' not in SDF", mod->name);
-    return;
-  }
-
-  BKE_sdf_modifier_remove(sdf, mod);
-  mod_ptr->data = nullptr;
-
-  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
-}
-
-static void rna_SDF_modifier_move(SDF *sdf, ReportList *reports, int from, int to)
-{
-  SDFModifier *mod = (SDFModifier *)BLI_findlink(&sdf->modifiers, from);
-  if (!mod) {
-    BKE_reportf(reports, RPT_ERROR, "Invalid modifier index %d", from);
-    return;
-  }
-
-  int direction = (to > from) ? 1 : -1;
-  int steps = abs(to - from);
-  for (int i = 0; i < steps; i++) {
-    BKE_sdf_modifier_move(sdf, mod, direction);
-  }
-
-  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
-}
-
-static void rna_SDFModifier_offset_get(PointerRNA *ptr, float *values)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  values[0] = mod->params[1];
-  values[1] = mod->params[2];
-  values[2] = mod->params[3];
-}
-
-static void rna_SDFModifier_offset_set(PointerRNA *ptr, const float *values)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  mod->params[1] = values[0];
-  mod->params[2] = values[1];
-  mod->params[3] = values[2];
-}
-
-static void rna_SDFModifier_rotation_offset_get(PointerRNA *ptr, float *values)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  values[0] = mod->params[5];
-  values[1] = mod->params[6];
-  values[2] = mod->params[7];
-}
-
-static void rna_SDFModifier_rotation_offset_set(PointerRNA *ptr, const float *values)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  mod->params[5] = values[0];
-  mod->params[6] = values[1];
-  mod->params[7] = values[2];
-}
-
-static int rna_SDFModifier_csg_operation_get(PointerRNA *ptr)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  return (int)mod->params[5];
-}
-
-static void rna_SDFModifier_csg_operation_set(PointerRNA *ptr, int value)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  mod->params[5] = (float)value;
-}
-
-static int rna_SDFModifier_blend_type_get(PointerRNA *ptr)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  return (int)mod->params[6];
-}
-
-static void rna_SDFModifier_blend_type_set(PointerRNA *ptr, int value)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  mod->params[6] = (float)value;
-}
-
-static int rna_SDFModifier_bend_axis_get(PointerRNA *ptr)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  return (int)mod->params[1];
-}
-
-static void rna_SDFModifier_bend_axis_set(PointerRNA *ptr, int value)
-{
-  SDFModifier *mod = (SDFModifier *)ptr->data;
-  mod->params[1] = (float)value;
-}
+/* MATHOPS: Removed old SDF modifier RNA functions — modifiers now on Object */
 
 static SDFPolygonPoint *rna_SDF_polygon_point_new(SDF *sdf, float x, float y)
 {
@@ -437,223 +327,35 @@ static const EnumPropertyItem rna_enum_sdf_array_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Old SDFModifier RNA struct kept for SDFGroup modifier system */
 static void rna_def_sdf_modifier(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
 
   srna = RNA_def_struct(brna, "SDFModifier", nullptr);
-  RNA_def_struct_ui_text(srna, "SDF Modifier", "Modifier in the SDF modifier stack");
+  RNA_def_struct_ui_text(srna, "SDF Modifier", "Modifier in the SDF modifier stack (legacy/group)");
   RNA_def_struct_sdna(srna, "SDFModifier");
 
-  /* Type */
   prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_modifier_type_items);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Type", "Modifier type");
 
-  /* Name */
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "name");
   RNA_def_property_ui_text(prop, "Name", "Modifier name");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
   RNA_def_struct_name_property(srna, prop);
 
-  /* Enabled */
   prop = RNA_def_property(srna, "show_viewport", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "show_viewport", 1);
   RNA_def_property_ui_text(prop, "Viewport", "Enable modifier in viewport");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
 
-  /* Mirror axes (for Mirror type) */
-  prop = RNA_def_property(srna, "use_mirror_x", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_X);
-  RNA_def_property_ui_text(prop, "X", "Mirror across X axis");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  prop = RNA_def_property(srna, "use_mirror_y", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_Y);
-  RNA_def_property_ui_text(prop, "Y", "Mirror across Y axis");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  prop = RNA_def_property(srna, "use_mirror_z", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SDF_MOD_MIRROR_Z);
-  RNA_def_property_ui_text(prop, "Z", "Mirror across Z axis");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Mirror offset */
-  prop = RNA_def_property(srna, "offset_distance", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
-  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
-  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
-  RNA_def_property_ui_text(prop, "Mirror Offset", "Offset distance for mirror plane");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Mirror object */
-  prop = RNA_def_property(srna, "mirror_object", PROP_POINTER, PROP_NONE);
-  RNA_def_property_pointer_sdna(prop, nullptr, "mirror_ob");
-  RNA_def_property_struct_type(prop, "Object");
-  RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_flag(prop, PROP_ID_SELF_CHECK);
-  RNA_def_property_ui_text(prop, "Mirror Object", "Object to use as mirror origin");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Mirror blend */
-  prop = RNA_def_property(srna, "mirror_blend", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[4]");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
-  RNA_def_property_ui_text(prop, "Blend", "Smooth blend radius for mirroring");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Array type */
-  prop = RNA_def_property(srna, "array_type", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "flag");
-  RNA_def_property_enum_items(prop, rna_enum_sdf_array_type_items);
-  RNA_def_property_ui_text(prop, "Array Type", "Type of array (linear or radial)");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Array count */
-  prop = RNA_def_property(srna, "count", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
-  RNA_def_property_range(prop, 0.0f, 1000.0f);
-  RNA_def_property_ui_range(prop, 0.0f, 50.0f, 100.0f, 0);
-  RNA_def_property_ui_text(prop, "Count", "Number of array duplicates");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Array offset (Linear) */
-  prop = RNA_def_property(srna, "offset", PROP_FLOAT, PROP_XYZ);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_float_funcs(
-      prop, "rna_SDFModifier_offset_get", "rna_SDFModifier_offset_set", nullptr);
-  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
-  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
-  RNA_def_property_ui_text(prop, "Offset", "Linear array offset vector");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Array radius (Radial) */
-  prop = RNA_def_property(srna, "array_radius", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[1]");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 10.0f, 3);
-  RNA_def_property_ui_text(prop, "Radius", "Radius for radial array");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Array blend */
-  prop = RNA_def_property(srna, "array_blend", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[4]");
-  RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
-  RNA_def_property_ui_text(prop, "Blend", "Smooth transition across array cells");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Array rotation offset */
-  prop = RNA_def_property(srna, "rotation_offset", PROP_FLOAT, PROP_EULER);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_float_funcs(prop,
-                               "rna_SDFModifier_rotation_offset_get",
-                               "rna_SDFModifier_rotation_offset_set",
-                               nullptr);
-  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
-  RNA_def_property_ui_range(prop, DEG2RADF(-360.0f), DEG2RADF(360.0f), 10.0f, 3);
-  RNA_def_property_ui_text(
-      prop, "Rotation Offset", "Rotation offset for each array copy (radial array)");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Modifier CSG Operation */
-  prop = RNA_def_property(srna, "csg_operation", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_funcs(
-      prop, "rna_SDFModifier_csg_operation_get", "rna_SDFModifier_csg_operation_set", nullptr);
-  RNA_def_property_enum_items(prop, rna_enum_sdf_csg_items);
-  RNA_def_property_ui_text(prop, "CSG Operation", "Operation for array/mirror branches");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Modifier Blend Type */
-  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_funcs(
-      prop, "rna_SDFModifier_blend_type_get", "rna_SDFModifier_blend_type_set", nullptr);
-  RNA_def_property_enum_items(prop, rna_enum_sdf_blend_type_items);
-  RNA_def_property_ui_text(prop, "Blend Type", "Blending method for array/mirror branches");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Strength (Twist, Bend) */
-  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
-  RNA_def_property_range(prop, -100.0f, 100.0f);
-  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 3);
-  RNA_def_property_ui_text(prop, "Strength", "Deformation strength");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Bend axis */
-  prop = RNA_def_property(srna, "bend_axis", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_sdf_bend_axis_items);
-  RNA_def_property_enum_funcs(
-      prop, "rna_SDFModifier_bend_axis_get", "rna_SDFModifier_bend_axis_set", nullptr);
-  RNA_def_property_ui_text(prop, "Axis", "Axis along which the bend varies");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Thickness (Hollow, Onion) */
-  prop = RNA_def_property(srna, "thickness", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
-  RNA_def_property_range(prop, 0.001f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.001f, 2.0f, 0.01f, 3);
-  RNA_def_property_ui_text(prop, "Thickness", "Wall thickness");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Radius (Round) */
-  prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "params[0]");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 2.0f, 0.01f, 3);
-  RNA_def_property_ui_text(prop, "Radius", "Round radius");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-
-  /* Elongation (Elongate) */
-  prop = RNA_def_property(srna, "elongation", PROP_FLOAT, PROP_XYZ);
+  prop = RNA_def_property(srna, "params", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "params");
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
-  RNA_def_property_ui_text(prop, "Elongation", "Stretch amount per axis");
-  RNA_def_property_update(prop, 0, "rna_SDF_modifier_update");
-}
-
-static void rna_def_sdf_modifiers(BlenderRNA *brna, PropertyRNA *cprop)
-{
-  StructRNA *srna;
-  FunctionRNA *func;
-  PropertyRNA *parm;
-
-  RNA_def_property_srna(cprop, "SDFModifiers");
-  srna = RNA_def_struct(brna, "SDFModifiers", nullptr);
-  RNA_def_struct_sdna(srna, "SDF");
-  RNA_def_struct_ui_text(srna, "SDF Modifiers", "Collection of SDF modifiers");
-
-  /* Add */
-  func = RNA_def_function(srna, "new", "rna_SDF_modifier_new");
-  RNA_def_function_ui_description(func, "Add a new SDF modifier");
-  parm = RNA_def_enum(
-      func, "type", rna_enum_sdf_modifier_type_items, SDF_MOD_MIRROR, "Type", "Modifier type");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_pointer(func, "modifier", "SDFModifier", "", "New modifier");
-  RNA_def_function_return(func, parm);
-
-  /* Remove */
-  func = RNA_def_function(srna, "remove", "rna_SDF_modifier_remove");
-  RNA_def_function_flag(func, FUNC_USE_REPORTS);
-  RNA_def_function_ui_description(func, "Remove an SDF modifier");
-  parm = RNA_def_pointer(func, "modifier", "SDFModifier", "", "Modifier to remove");
-  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
-  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
-
-  /* Move */
-  func = RNA_def_function(srna, "move", "rna_SDF_modifier_move");
-  RNA_def_function_flag(func, FUNC_USE_REPORTS);
-  RNA_def_function_ui_description(func, "Move a modifier in the stack");
-  parm = RNA_def_int(func, "from_index", -1, 0, INT_MAX, "From Index", "", 0, 10000);
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_int(func, "to_index", -1, 0, INT_MAX, "To Index", "", 0, 10000);
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_property_array(prop, 8);
+  RNA_def_property_ui_text(prop, "Parameters", "Per-type modifier parameters");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
 }
 
 static void rna_def_sdf_polygon_point(BlenderRNA *brna)
@@ -982,12 +684,7 @@ static void rna_def_sdf(BlenderRNA *brna)
                                     nullptr,
                                     "rna_IDMaterials_assign_int");
 
-  /* Modifiers */
-  prop = RNA_def_property(srna, "modifiers", PROP_COLLECTION, PROP_NONE);
-  RNA_def_property_collection_sdna(prop, nullptr, "modifiers", nullptr);
-  RNA_def_property_struct_type(prop, "SDFModifier");
-  RNA_def_property_ui_text(prop, "Modifiers", "SDF modifier stack");
-  rna_def_sdf_modifiers(brna, prop);
+  /* MATHOPS: Removed old modifiers collection — modifiers now on Object */
 
   /* SDF Group */
   prop = RNA_def_property(srna, "sdf_group", PROP_POINTER, PROP_NONE);

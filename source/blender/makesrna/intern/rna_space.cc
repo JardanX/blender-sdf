@@ -4905,6 +4905,7 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
       {3, "STEP_COUNT", 0, "Step Count", "Number of march steps per pixel"},
       {4, "STEP_COUNT_TILE", 0, "Step Count per Tile", "Maximum number of march steps in 8x8 tile"},
       {5, "CONE_HEATMAP", 0, "Cone Heatmap", "Steps saved by cone trace pre-pass (green=many, red=none)"},
+      {6, "BBOX_GRID", 0, "BBox Grid", "Show SDF evaluation grid used for selection bounding box"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -4912,7 +4913,7 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "sdf_bvh_debug_view");
   RNA_def_property_enum_items(prop, sdf_bvh_debug_view_items);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  RNA_def_property_ui_text(prop, "BVH Debug View", "Visualize BVH performance and structure");
+  RNA_def_property_ui_text(prop, "Debug View", "Visualize debug information");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
   prop = RNA_def_property(srna, "sdf_fd_normals", PROP_BOOLEAN, PROP_NONE);
@@ -5133,6 +5134,13 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
       prop, nullptr, "overlay.flag", V3D_OVERLAY_HIDE_SDF_NGON);
   RNA_def_property_ui_text(
       prop, "SDF Ngon", "Show ngon polygon point overlays for SDF objects");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_outline_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.sdf_outline_opacity");
+  RNA_def_property_ui_text(
+      prop, "SDF Line Opacity", "Opacity of always-on SDF object edge outlines");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "show_performance", PROP_BOOLEAN, PROP_NONE);

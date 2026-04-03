@@ -115,7 +115,8 @@ void main()
         scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
                                 obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
                                 obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        float t = csgColorFactor(prev, d, scene_dist, obj.csg_operation, obj.blend_type, obj.blend);
+        float t = csgColorFactor(prev, d, obj.csg_operation, obj.blend_type, obj.blend,
+                                 obj.shell_distance, obj.shell_op);
         scene_color = mix(scene_color, obj.color.rgb, t);
       }
     }
@@ -134,7 +135,8 @@ void main()
         grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
                               obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
                               obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
-        float t = csgColorFactor(prev, d, grp_dist, obj.csg_operation, obj.blend_type, obj.blend);
+        float t = csgColorFactor(prev, d, obj.csg_operation, obj.blend_type, obj.blend,
+                                 obj.shell_distance, obj.shell_op);
         grp_color = mix(grp_color, obj.color.rgb, t);
       }
     }

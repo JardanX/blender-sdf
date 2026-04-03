@@ -165,9 +165,11 @@ void main()
   if (!is_persp) {
     float ortho_height = 2.0f / vm.winmat[1][1];
     ortho_tile_world = (ortho_height / float(screen_size.y)) * 8.0f;
-    ortho_cone_r = ortho_tile_world * sdf_cone_aperture;
+    ortho_cone_r = min(ortho_tile_world * sdf_cone_aperture,
+                       length(scene_aabb_max - scene_aabb_min) * 0.5f);
   }
   float cone_epsilon = sdf_ray_epsilon * 32.0f;
+  float max_cone_r = length(scene_aabb_max - scene_aabb_min) * 0.5f;
   int base_offset = tileIdx * kMaxTileObjects;
 
   float t = t_enter;
@@ -185,11 +187,8 @@ void main()
       continue;
     }
 
-    if (aabb_skip < d) {
-      d = max(aabb_skip, cone_epsilon);
-    }
-
-    float cone_r = is_persp ? t * tan_half_tile * sdf_cone_aperture : ortho_cone_r;
+    float cone_r = is_persp ? min(t * tan_half_tile * sdf_cone_aperture, max_cone_r)
+                            : ortho_cone_r;
     if (d < cone_r) {
       float margin = is_persp ? cone_r_safe * 3.0f : ortho_tile_world * 3.0f;
       float t_skip = max(t_safe + max(d_safe - margin, 0.0f), t_enter);
@@ -198,10 +197,17 @@ void main()
       return;
     }
 
+    /* Clamp step size by nearest skipped AABB (prevent overstepping),
+     * but only AFTER the cone test uses the true SDF distance. */
+    float step_d = d;
+    if (aabb_skip < d) {
+      step_d = max(aabb_skip, cone_epsilon);
+    }
+
     t_safe = t;
-    d_safe = d;
+    d_safe = step_d;
     cone_r_safe = cone_r;
-    t += d;
+    t += step_d;
     if (t > t_exit) { break; }
   }
 

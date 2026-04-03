@@ -101,6 +101,15 @@ extern ModifierTypeInfo modifierType_GreasePencilOutline;
 extern ModifierTypeInfo modifierType_GreasePencilShrinkwrap;
 extern ModifierTypeInfo modifierType_GreasePencilBuild;
 extern ModifierTypeInfo modifierType_GreasePencilTexture;
+extern ModifierTypeInfo modifierType_SDFMirror;
+extern ModifierTypeInfo modifierType_SDFTwist;
+extern ModifierTypeInfo modifierType_SDFBend;
+extern ModifierTypeInfo modifierType_SDFElongate;
+extern ModifierTypeInfo modifierType_SDFHollow;
+extern ModifierTypeInfo modifierType_SDFRound;
+extern ModifierTypeInfo modifierType_SDFOnion;
+extern ModifierTypeInfo modifierType_SDFBevel;
+extern ModifierTypeInfo modifierType_SDFArray;
 
 /* MOD_util.cc */
 

@@ -117,7 +117,7 @@ typedef struct SDFModifier {
   /* Per-type params layout:
    * Mirror:   [0]=offset, [4]=blend
    * Twist:    [0]=strength
-   * Bend:     [0]=strength, [1]=axis
+   * Bend:     [0]=strength, [1]=axis, [2..4]=origin xyz
    * Elongate: [0..2]=per-axis stretch
    * Hollow:   [0]=thickness
    * Round:    [0]=radius

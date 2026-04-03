@@ -312,7 +312,8 @@ static bool buttons_context_path_modifier(ButsContextPath *path)
              OB_GREASE_PENCIL,
              OB_CURVES,
              OB_POINTCLOUD,
-             OB_VOLUME))
+             OB_VOLUME,
+             OB_SDF))
     {
       ModifierData *md = BKE_object_active_modifier(ob);
       if (md != nullptr) {

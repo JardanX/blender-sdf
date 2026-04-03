@@ -5,6 +5,40 @@
 
 ---
 
+## Native SDF Modifier System
+
+Moved SDF modifiers from custom system (on SDF data block) to Blender's native modifier system (on Object). SDF objects now have a standard Modifier Properties tab (wrench icon). Each SDF modifier is a native `eModifierType` with `eModifierTypeFlag_AcceptsSDF` — SDF modifiers only appear on SDF objects, mesh modifiers only on meshes.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `modifiers/intern/MOD_sdf_mirror.cc` | SDF Mirror modifier (axes, offset, blend, mirror object) |
+| `modifiers/intern/MOD_sdf_twist.cc` | SDF Twist modifier (strength) |
+| `modifiers/intern/MOD_sdf_bend.cc` | SDF Bend modifier (strength, axis) |
+| `modifiers/intern/MOD_sdf_elongate.cc` | SDF Elongate modifier (per-axis stretch) |
+| `modifiers/intern/MOD_sdf_hollow.cc` | SDF Hollow modifier (wall thickness) |
+| `modifiers/intern/MOD_sdf_round.cc` | SDF Round modifier (rounding radius) |
+| `modifiers/intern/MOD_sdf_onion.cc` | SDF Onion modifier (shell thickness) |
+| `modifiers/intern/MOD_sdf_bevel.cc` | SDF Bevel modifier (bevel radius) |
+| `modifiers/intern/MOD_sdf_array.cc` | SDF Array modifier (linear/radial, relative+constant offset, blend) |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_modifier_types.h` | Added `eModifierType_SDF*` enum entries (87–95), DNA structs for all 9 SDF modifiers, flag/enum definitions |
+| `blenkernel/BKE_modifier.hh` | Added `eModifierTypeFlag_AcceptsSDF = (1 << 13)` |
+| `blenkernel/intern/object.cc` | Added `OB_SDF` to `BKE_object_supports_modifiers()` and `BKE_object_support_modifier_type_check()` |
+| `modifiers/MOD_modifiertypes.hh` | Extern declarations for 9 SDF modifier type infos |
+| `modifiers/intern/MOD_util.cc` | `INIT_TYPE()` registrations for all 9 SDF modifiers |
+| `modifiers/CMakeLists.txt` | Added 9 `MOD_sdf_*.cc` source files |
+| `makesrna/intern/rna_modifier.cc` | RNA enum items, property definitions, `rna_def_modifier_sdf_*()` for all 9 types |
+| `scripts/startup/bl_ui/properties_data_modifier.py` | Added SDF Deform/Generate menus, SDF object type check |
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Removed old custom SDF modifier UI (operators, panel, menu) |
+
+---
+
 ## Multi-Pass SDF Ray Marching Pipeline
 
 Extracted the monolithic trace shader into a 3-pass pipeline: tile cull → cone march → per-pixel trace. The tile cull builds per-tile primitive lists into SSBOs. The cone march does coarse SDF sphere tracing per tile to find approximate surface distance. The per-pixel trace loads tile-culled prim lists from SSBOs and uses cone march results to skip empty space.
@@ -2488,3 +2522,27 @@ The overlay system (selection, outlines) already used analytical sphere tracing 
 | `draw/engines/sdf/shaders/sdf_select_march_frag.glsl` | Kept — overlay selection already used analytical sphere tracing |
 | `draw/engines/sdf/shaders/sdf_outline_march_*.glsl` | Kept — overlay outline already used analytical sphere tracing |
 | `draw/engines/overlay/overlay_sdf.hh` | Kept — overlay code works with null atlas |
+
+---
+
+## SDF Edge Outlines (Always-On)
+
+Added always-on black edge outlines for all SDF objects with configurable opacity in Viewport Overlays.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_edge_detect_frag.glsl` | Edge detection fragment shader — samples SDF G-buffer depth/object-ID, detects boundaries via 4-connected neighbor comparison, outputs black with configurable alpha |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Added `float sdf_outline_opacity` to `View3DOverlay` struct |
+| `makesrna/intern/rna_space.cc` | Added `sdf_outline_opacity` RNA property (PROP_FLOAT, PROP_FACTOR, 0–1 range) |
+| `scripts/startup/bl_ui/space_view3d.py` | Added `VIEW3D_PT_overlay_sdf` panel with "Line Opacity" slider in Viewport Overlays |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_edge_detect` shader create info (samplers, push constants for uv_scale + line_opacity, float4 color output) |
+| `draw/engines/overlay/overlay_sdf.hh` | Added `edge_detect_sh_` shader, `sdf_outline_opacity_` state, `draw_edges()` method (fullscreen pass with alpha blending) |
+| `draw/engines/overlay/overlay_instance.cc` | Call `regular.sdfs.draw_edges()` in overlay line prepass |
+| `blenloader/intern/versioning_500.cc` | Fixed `static_cast` → `reinterpret_cast` for `ob.data` → `SDF*` (pre-existing issue surfaced by recompilation) |

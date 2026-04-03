@@ -104,6 +104,9 @@ class OBJECT_MT_modifier_add(ModifierAddMenu, Menu):
             layout.menu("OBJECT_MT_modifier_add_physics")
         if ob_type in {'GREASEPENCIL'}:
             layout.menu("OBJECT_MT_modifier_add_color")
+        if ob_type == 'SDF':
+            layout.menu("OBJECT_MT_modifier_add_sdf_deform")
+            layout.menu("OBJECT_MT_modifier_add_sdf_generate")
 
         if geometry_nodes_supported:
             layout.menu_contents("OBJECT_MT_modifier_add_root_catalogs")
@@ -290,6 +293,32 @@ class OBJECT_MT_modifier_add_color(ModifierAddMenu, Menu):
         layout.template_modifier_asset_menu_items(catalog_path=self.bl_label)
 
 
+class OBJECT_MT_modifier_add_sdf_deform(ModifierAddMenu, Menu):
+    bl_label = "Deform"
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
+
+    def draw(self, context):
+        layout = self.layout
+        self.operator_modifier_add(layout, 'SDF_TWIST')
+        self.operator_modifier_add(layout, 'SDF_BEND')
+        self.operator_modifier_add(layout, 'SDF_ELONGATE')
+
+
+class OBJECT_MT_modifier_add_sdf_generate(ModifierAddMenu, Menu):
+    bl_label = "Generate"
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
+
+    def draw(self, context):
+        layout = self.layout
+        self.operator_modifier_add(layout, 'SDF_MIRROR')
+        self.operator_modifier_add(layout, 'SDF_ARRAY')
+        layout.separator()
+        self.operator_modifier_add(layout, 'SDF_HOLLOW')
+        self.operator_modifier_add(layout, 'SDF_ROUND')
+        self.operator_modifier_add(layout, 'SDF_ONION')
+        self.operator_modifier_add(layout, 'SDF_BEVEL')
+
+
 class AddModifierMenu(Operator):
     bl_idname = "object.add_modifier_menu"
     bl_label = "Add Modifier"
@@ -313,6 +342,8 @@ classes = (
     OBJECT_MT_modifier_add_normals,
     OBJECT_MT_modifier_add_physics,
     OBJECT_MT_modifier_add_color,
+    OBJECT_MT_modifier_add_sdf_deform,
+    OBJECT_MT_modifier_add_sdf_generate,
     AddModifierMenu,
 )
 

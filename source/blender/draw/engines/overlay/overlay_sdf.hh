@@ -14,6 +14,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 
@@ -81,6 +82,7 @@ class Sdfs : Overlay {
   const SelectionType selection_type_;
   bool show_bbox_ = true;
   bool show_ngon_ = true;
+  bool show_bbox_grid_ = false;
 
   /* Per-SDF object data collected during object_sync. */
   struct SdfEntry {
@@ -91,6 +93,7 @@ class Sdfs : Overlay {
     float3 bb_min;
     float3 bb_max;
     const SDF *sdf_data;
+    const Object *object;
   };
   Vector<SdfEntry> entries_;
   int max_sdf_index_ = 0;
@@ -141,6 +144,7 @@ class Sdfs : Overlay {
                  !(state.v3d->overlay.flag & V3D_OVERLAY_HIDE_SDF_BBOX);
     show_ngon_ = state.v3d && !state.hide_overlays &&
                  !(state.v3d->overlay.flag & V3D_OVERLAY_HIDE_SDF_NGON);
+    show_bbox_grid_ = state.v3d && (state.v3d->shading.sdf_bvh_debug_view == 6);
   }
 
   void object_sync(Manager & /*manager*/,
@@ -163,8 +167,8 @@ class Sdfs : Overlay {
     const bool is_select = (ob_ref.object->base_flag & BASE_SELECTED) != 0;
     const bool is_active = (ob_ref.object == state.object_active);
 
-    uint outline_color_id = 0;
-    if (is_active) {
+    uint outline_color_id = 2u;
+    if (is_select && is_active) {
       outline_color_id = 3u;
     }
     else if (is_select) {
@@ -172,7 +176,7 @@ class Sdfs : Overlay {
     }
 
     uint resource_id = uint(entries_.size()) + 1u;
-    uint packed_id = is_select ? ((outline_color_id << 14u) | (resource_id & 0x3FFFu)) : 0u;
+    uint packed_id = (outline_color_id << 14u) | (resource_id & 0x3FFFu);
 
     const select::ID sel_id = res.select_id(ob_ref);
 
@@ -203,7 +207,7 @@ class Sdfs : Overlay {
       poly_min.z = -sdf_data->size[2];
       poly_max.z = sdf_data->size[2];
     }
-    entries_.append({idx, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data});
+    entries_.append({idx, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data, ob_ref.object});
   }
 
   void end_sync(Resources &res, const State & /*state*/) final
@@ -221,7 +225,6 @@ class Sdfs : Overlay {
         printf("SDF: outline shader FAILED to compile!\n");
       }
     }
-
     select_output_buf_ = &res.select_output_buf;
     select_buf_size_ = math::max(int(res.select_id_map.size()), 4);
     select_buf_size_ = (select_buf_size_ + 3) & ~3;
@@ -278,7 +281,7 @@ class Sdfs : Overlay {
 
   void draw_outline(Framebuffer &framebuffer, View & /*view*/, gpu::Texture *scene_depth)
   {
-    if (!enabled_ || !has_selected_) {
+    if (!enabled_ || entries_.is_empty()) {
       return;
     }
     if (!outline_sh_ || !outline_ids_ssbo_) {
@@ -334,15 +337,16 @@ class Sdfs : Overlay {
 
   void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
   {
-    if (!enabled_ || !has_selected_ || !show_bbox_) {
+    if (!enabled_ || (!show_bbox_ && !show_bbox_grid_)) {
       return;
     }
 
-    /* Count selected and find the single selected entry. */
+    /* Find the single selected SDF entry for bbox drawing. */
     const SdfEntry *sel = nullptr;
     int sel_count = 0;
     for (const SdfEntry &e : entries_) {
-      if (e.outline_packed_id != 0u) {
+      uint color_id = e.outline_packed_id >> 14u;
+      if (color_id == 1u || color_id == 3u) {
         sel = &e;
         sel_count++;
       }
@@ -355,25 +359,25 @@ class Sdfs : Overlay {
     float4x4 rot;
     float3 obj_pos;
 
-    if (sel->bb_min.x < sel->bb_max.x) {
-      /* Polygon: use stored point bounds, transform by object matrix. */
-      lo = sel->bb_min;
-      hi = sel->bb_max;
-      /* Extract rotation-only from object matrix (strip scale). */
-      float3 sx = math::normalize(float3(sel->object_to_world[0]));
-      float3 sy = math::normalize(float3(sel->object_to_world[1]));
-      float3 sz = math::normalize(float3(sel->object_to_world[2]));
-      rot = float4x4(float4(sx, 0), float4(sy, 0), float4(sz, 0), float4(0, 0, 0, 1));
-      obj_pos = float3(sel->object_to_world[3]);
-      /* Scale the bounds by object scale. */
-      float3 scl(math::length(float3(sel->object_to_world[0])),
-                 math::length(float3(sel->object_to_world[1])),
-                 math::length(float3(sel->object_to_world[2])));
-      lo *= scl;
-      hi *= scl;
-    }
-    else if (!sdf::sdf_object_bbox_get(sel->sdf_index, lo, hi, rot, obj_pos)) {
-      return;
+    /* Always try CPU SDF eval for tight bbox + debug points. */
+    if (!sdf::sdf_object_bbox_get(sel->sdf_index, lo, hi, rot, obj_pos)) {
+      if (sel->bb_min.x < sel->bb_max.x) {
+        lo = sel->bb_min;
+        hi = sel->bb_max;
+        float3 sx = math::normalize(float3(sel->object_to_world[0]));
+        float3 sy = math::normalize(float3(sel->object_to_world[1]));
+        float3 sz = math::normalize(float3(sel->object_to_world[2]));
+        rot = float4x4(float4(sx, 0), float4(sy, 0), float4(sz, 0), float4(0, 0, 0, 1));
+        obj_pos = float3(sel->object_to_world[3]);
+        float3 scl(math::length(float3(sel->object_to_world[0])),
+                   math::length(float3(sel->object_to_world[1])),
+                   math::length(float3(sel->object_to_world[2])));
+        lo *= scl;
+        hi *= scl;
+      }
+      else {
+        return;
+      }
     }
 
     GPU_framebuffer_bind(framebuffer);
@@ -390,44 +394,67 @@ class Sdfs : Overlay {
     Vector<CopyXform> copies;
     copies.append({rot, obj_pos});
 
-    if (sel->sdf_data) {
+    if (sel->object) {
       float4x4 inv_rot = math::transpose(rot);
-      for (const SDFModifier *mod = static_cast<const SDFModifier *>(
-               sel->sdf_data->modifiers.first);
-           mod; mod = mod->next)
-      {
-        if (!mod->show_viewport) {
+      for (const ModifierData &md : sel->object->modifiers) {
+        if (!(md.mode & eModifierMode_Realtime)) {
           continue;
         }
-        if (mod->type == SDF_MOD_MIRROR) {
-          float offset = mod->params[0];
+        if (md.type == eModifierType_SDFMirror) {
+          const auto &m = reinterpret_cast<const SDFMirrorModifierData &>(md);
+          float offset = m.offset_distance;
           float3 world_org(0);
-          if (mod->mirror_ob) {
-            world_org = float3(mod->mirror_ob->object_to_world()[3]) - obj_pos;
+          if (m.mirror_object) {
+            world_org = float3(m.mirror_object->object_to_world()[3]) - obj_pos;
           }
           float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
 
           auto do_mirror = [&](int axis_idx) {
-            float disp = 2.0f * local_org[axis_idx] + offset;
-            float3 local_disp(0);
-            local_disp[axis_idx] = disp;
-            float3 world_disp = float3(rot * float4(local_disp, 0.0f));
+            float3 mirror_pos = m.mirror_object ?
+                                    float3(m.mirror_object->object_to_world()[3]) :
+                                    float3(0.0f);
+            float3 N(0);
+            if (m.mirror_object) {
+              N = math::normalize(
+                  float3(m.mirror_object->object_to_world()[axis_idx]));
+            }
+            else {
+              N[axis_idx] = 1.0f;
+            }
             int cur = int(copies.size());
             for (int ci = 0; ci < cur; ci++) {
-              copies.append({copies[ci].r, copies[ci].p + world_disp});
+              float3 p = copies[ci].p;
+              float d = math::dot(mirror_pos - p, N);
+              float3 reflected = p + 2.0f * d * N;
+              float4x4 mirror_r = copies[ci].r;
+              for (int c = 0; c < 3; c++) {
+                float3 col = float3(mirror_r[c]);
+                col -= 2.0f * math::dot(col, N) * N;
+                mirror_r[c] = float4(col, 0.0f);
+              }
+              copies[ci].p = p + offset * N;
+              copies.append({mirror_r, reflected - offset * N});
             }
           };
-          if (mod->flag & SDF_MOD_MIRROR_X) { do_mirror(0); }
-          if (mod->flag & SDF_MOD_MIRROR_Y) { do_mirror(1); }
-          if (mod->flag & SDF_MOD_MIRROR_Z) { do_mirror(2); }
+          if (m.flag & MOD_SDF_MIRROR_AXIS_X) { do_mirror(0); }
+          if (m.flag & MOD_SDF_MIRROR_AXIS_Y) { do_mirror(1); }
+          if (m.flag & MOD_SDF_MIRROR_AXIS_Z) { do_mirror(2); }
         }
-        else if (mod->type == SDF_MOD_ARRAY) {
-          int count = int(mod->params[0]);
+        else if (md.type == eModifierType_SDFArray) {
+          const auto &m = reinterpret_cast<const SDFArrayModifierData &>(md);
+          int count = m.count;
           if (count < 2) {
             continue;
           }
-          if (mod->flag == SDF_MOD_ARRAY_LINEAR) {
-            float3 off(mod->params[1], mod->params[2], mod->params[3]);
+          if (m.array_type == MOD_SDF_ARRAY_LINEAR) {
+            float3 off(0.0f);
+            if (m.use_relative_offset && sel->sdf_data) {
+              float3 sz(sel->sdf_data->size[0], sel->sdf_data->size[1], sel->sdf_data->size[2]);
+              off += float3(m.relative_offset[0], m.relative_offset[1], m.relative_offset[2]) * sz * 2.0f;
+            }
+            if (m.use_constant_offset) {
+              off += float3(m.constant_offset[0], m.constant_offset[1], m.constant_offset[2]);
+            }
             float3 world_off = float3(rot * float4(off, 0.0f));
             int cur = int(copies.size());
             for (int ci = 0; ci < cur; ci++) {
@@ -436,11 +463,10 @@ class Sdfs : Overlay {
               }
             }
           }
-          else if (mod->flag == SDF_MOD_ARRAY_RADIAL) {
-            float radius = mod->params[1];
+          else if (m.array_type == MOD_SDF_ARRAY_RADIAL) {
+            float radius = m.array_radius;
             int cur = int(copies.size());
             for (int ci = 0; ci < cur; ci++) {
-              /* Base copy is at local (radius, 0, 0). Shift base position. */
               float3 base_local_off(radius, 0, 0);
               float3 base_world_off = float3(copies[ci].r * float4(base_local_off, 0.0f));
               copies[ci].p += base_world_off;
@@ -448,11 +474,9 @@ class Sdfs : Overlay {
               for (int ai = 1; ai < count; ai++) {
                 float angle = 2.0f * float(M_PI) * float(ai) / float(count);
                 float ca = cosf(angle), sa = sinf(angle);
-                /* Copy center at (radius*cos(θ), radius*sin(θ), 0) in local space. */
                 float3 local_pos(radius * ca, radius * sa, 0);
                 float3 world_pos = float3(copies[ci].r * float4(local_pos, 0.0f))
                                    + (copies[ci].p - base_world_off);
-                /* Rotation around local Z by θ. */
                 float4x4 arr_rot = float4x4(
                     float4(ca, sa, 0, 0),
                     float4(-sa, ca, 0, 0),
@@ -499,6 +523,30 @@ class Sdfs : Overlay {
     immEnd();
 
     immUnbindProgram();
+
+    if (show_bbox_grid_) {
+      const float3 *dbg_pts;
+      int dbg_count;
+      float4x4 dbg_rot;
+      float3 dbg_pos;
+      sdf::sdf_bbox_debug_points_get(&dbg_pts, &dbg_count, &dbg_rot, &dbg_pos);
+      if (dbg_count > 0) {
+        GPU_point_size(4.0f);
+        uint dbg_attr = GPU_vertformat_attr_add_legacy(
+            immVertexFormat(), "pos", GPU_COMP_F32, 3, GPU_FETCH_FLOAT);
+        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+        immUniformColor4f(0.0f, 1.0f, 1.0f, 0.9f);
+        immBegin(GPU_PRIM_POINTS, dbg_count);
+        for (int di = 0; di < dbg_count; di++) {
+          float4 rp = dbg_rot * float4(dbg_pts[di], 1.0f);
+          float3 wp = float3(rp.x, rp.y, rp.z) + dbg_pos;
+          immVertex3fv(dbg_attr, wp);
+        }
+        immEnd();
+        immUnbindProgram();
+      }
+    }
+
     GPU_blend(GPU_BLEND_NONE);
   }
 

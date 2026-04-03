@@ -654,54 +654,225 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
                                  int mod_start, int mod_count,
                                  float4x4 inv_mat)
 {
-  /* Walk in reverse (same order as applyDomainModifiers). */
-  for (int i = mod_start + mod_count - 1; i >= mod_start; i--) {
+  /* Pass 1: walk forward (high-to-low, same as applyDomainModifiers)
+   * to record the position at each modifier's input. */
+  float3 positions[8];
+  int n = min(mod_count, 8);
+  {
+    float3 p = orig_p;
+    for (int i = mod_start + mod_count - 1; i >= mod_start; i--) {
+      int slot = i - mod_start;
+      if (slot < 8) { positions[slot] = p; }
+      SDFModifierGPU smod = sdf_modifiers[i];
+      int mtype = smod.header.x;
+      int mflags = smod.header.y;
+      if (mtype == SDF_MOD_MIRROR) {
+        float offset = smod.params.x;
+        float3 origin = smod.params.yzw;
+        float blend = smod.params2.x;
+        int blend_type = smod.header.z;
+        float k = (blend_type > 0) ? blend : 0.0f;
+        if ((mflags & SDF_MOD_MIRROR_X) != 0) {
+          float3 raw_N = float3(inv_mat[0]);
+          float nl = length(raw_N);
+          float3 N = (nl > 1e-6f) ? raw_N / nl : float3(1, 0, 0);
+          float d = dot(p - origin, N);
+          p -= (d - sabs(d, k)) * N;
+          p -= offset * abs(N);
+        }
+        if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
+          float3 raw_N = float3(inv_mat[1]);
+          float nl = length(raw_N);
+          float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 1, 0);
+          float d = dot(p - origin, N);
+          p -= (d - sabs(d, k)) * N;
+          p -= offset * abs(N);
+        }
+        if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
+          float3 raw_N = float3(inv_mat[2]);
+          float nl = length(raw_N);
+          float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 0, 1);
+          float d = dot(p - origin, N);
+          p -= (d - sabs(d, k)) * N;
+          p -= offset * abs(N);
+        }
+      }
+      else if (mtype == SDF_MOD_TWIST) {
+        float tk = smod.params.x;
+        int axis = int(smod.params.y);
+        float drive;
+        if (axis == 1) { drive = p.y; }
+        else if (axis == 2) { drive = p.x; }
+        else { drive = p.z; }
+        float angle = tk * drive;
+        float c = cos(angle), s = sin(angle);
+        if (axis == 1) { p = float3(c*p.x - s*p.z, p.y, s*p.x + c*p.z); }
+        else if (axis == 2) { p = float3(p.x, c*p.y - s*p.z, s*p.y + c*p.z); }
+        else { p = float3(c*p.x - s*p.y, s*p.x + c*p.y, p.z); }
+      }
+      else if (mtype == SDF_MOD_ARRAY) {
+        float cnt = smod.params.x;
+        float arr_blend = smod.params2.x;
+        int arr_bt = smod.header.z;
+        float abk = (arr_bt > 0 && arr_blend > 0.001f) ? arr_blend : 0.0f;
+        if (mflags == SDF_MOD_ARRAY_LINEAR) {
+          float3 aoff = smod.params.yzw;
+          float sp = length(aoff);
+          if (sp > 0.0001f && cnt > 0.5f) {
+            float3 adir = aoff / sp;
+            float nt = dot(p, adir) / sp;
+            float aid = round(nt);
+            aid = clamp(aid, 0.0f, max(0.0f, cnt - 1.0f));
+            float lt = nt - aid;
+            if (abk > 0.001f) {
+              float kh = abk / (sp * 2.0f);
+              float alt = abs(lt);
+              float db = 0.5f - alt;
+              float sd = sabs(db, kh);
+              lt = sign(lt + 1e-8f) * (0.5f - sd);
+            }
+            p = p - adir * (aid + lt) * sp;
+          }
+        }
+        else if (mflags == SDF_MOD_ARRAY_RADIAL) {
+          float arad = smod.params.y;
+          if (cnt > 0.5f) {
+            float aa = (2.0f * SDF_PI) / cnt;
+            float na = atan(p.y, p.x) / aa;
+            float aid = round(na);
+            float la = na - aid;
+            if (abk > 0.001f) {
+              float kh = abk / (aa * 2.0f);
+              float ala = abs(la);
+              float db = 0.5f - ala;
+              float sd = sabs(db, kh);
+              la = sign(la + 1e-8f) * (0.5f - sd);
+            }
+            float fa = la * aa;
+            float r = length(p.xy);
+            p.x = r * cos(fa) - arad;
+            p.y = r * sin(fa);
+          }
+        }
+      }
+      else if (mtype == SDF_MOD_BEND) {
+        float bk = smod.params.x;
+        int axis = int(smod.params.y);
+        float3 origin = float3(smod.params.z, smod.params.w, smod.params2.x);
+        p -= origin;
+        if (abs(bk) > 0.0001f) {
+          float drive, curve;
+          if (axis == 1) {
+            drive = p.y; curve = p.z;
+            float a = bk * drive; float c = cos(a); float s = sin(a);
+            p.y = c * drive - s * curve;
+            p.z = s * drive + c * curve;
+          }
+          else if (axis == 2) {
+            drive = p.z; curve = p.x;
+            float a = bk * drive; float c = cos(a); float s = sin(a);
+            p.z = c * drive - s * curve;
+            p.x = s * drive + c * curve;
+          }
+          else {
+            drive = p.x; curve = p.y;
+            float a = bk * drive; float c = cos(a); float s = sin(a);
+            p.x = c * drive - s * curve;
+            p.y = s * drive + c * curve;
+          }
+        }
+        p += origin;
+      }
+      else if (mtype == SDF_MOD_ELONGATE) {
+        float3 h = smod.params.xyz;
+        p = p - clamp(p, -h, h);
+      }
+    }
+  }
+
+  /* Pass 2: walk low-to-high applying J^T at each step.
+   * Chain rule: ∇_p0 = J_high^T * J_low^T * ∇_out → apply J_low^T first. */
+  for (int i = mod_start; i < mod_start + mod_count; i++) {
+    int slot = i - mod_start;
+    float3 pp = (slot < 8) ? positions[slot] : orig_p;
     SDFModifierGPU smod = sdf_modifiers[i];
     int mtype = smod.header.x;
     int mflags = smod.header.y;
 
     if (mtype == SDF_MOD_MIRROR) {
-      float offset = smod.params.x;
       float3 origin = smod.params.yzw;
-      /* Reflect gradient through each mirror that was triggered.
-       * A mirror was triggered when dot(p - origin, N) < 0. */
+      float blend = smod.params2.x;
+      int blend_type = smod.header.z;
+      float k = (blend_type > 0) ? blend : 0.0f;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-        float3 N = float3(inv_mat[0]);
-        if (dot(orig_p - origin, N) < 0.0f) {
-          grad -= 2.0f * dot(grad, N) * N;
-        }
-        orig_p -= offset * N;
+        float3 raw_N = float3(inv_mat[0]);
+        float nl = length(raw_N);
+        float3 N = (nl > 1e-6f) ? raw_N / nl : float3(1, 0, 0);
+        float d = dot(pp - origin, N);
+        float h = (k > 0.0001f) ? clamp(0.5f + 0.5f * d / k, 0.0f, 1.0f) : (d < 0.0f ? 0.0f : 1.0f);
+        grad = grad - 2.0f * (1.0f - h) * dot(grad, N) * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-        float3 N = float3(inv_mat[1]);
-        if (dot(orig_p - origin, N) < 0.0f) {
-          grad -= 2.0f * dot(grad, N) * N;
-        }
-        orig_p -= offset * N;
+        float3 raw_N = float3(inv_mat[1]);
+        float nl = length(raw_N);
+        float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 1, 0);
+        float d = dot(pp - origin, N);
+        float h = (k > 0.0001f) ? clamp(0.5f + 0.5f * d / k, 0.0f, 1.0f) : (d < 0.0f ? 0.0f : 1.0f);
+        grad = grad - 2.0f * (1.0f - h) * dot(grad, N) * N;
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-        float3 N = float3(inv_mat[2]);
-        if (dot(orig_p - origin, N) < 0.0f) {
-          grad -= 2.0f * dot(grad, N) * N;
-        }
-        orig_p -= offset * N;
+        float3 raw_N = float3(inv_mat[2]);
+        float nl = length(raw_N);
+        float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 0, 1);
+        float d = dot(pp - origin, N);
+        float h = (k > 0.0001f) ? clamp(0.5f + 0.5f * d / k, 0.0f, 1.0f) : (d < 0.0f ? 0.0f : 1.0f);
+        grad = grad - 2.0f * (1.0f - h) * dot(grad, N) * N;
       }
     }
     else if (mtype == SDF_MOD_ARRAY) {
-      if (mflags == SDF_MOD_ARRAY_RADIAL) {
-        /* Radial array: applyDomainModifiers rotated p by -cell_angle.
-         * Undo by rotating gradient by +cell_angle around Z. */
-        float cnt = smod.params.x;
+      float cnt = smod.params.x;
+      float arr_blend = smod.params2.x;
+      int arr_bt = smod.header.z;
+      float bk = (arr_bt > 0 && arr_blend > 0.001f) ? arr_blend : 0.0f;
+      if (mflags == SDF_MOD_ARRAY_LINEAR) {
+        /* sabs-boundary Jacobian: J = I - (1 - sabs'(d_bnd, k)) * dir ⊗ dir
+         * sabs' ∈ [0,1] → (1 - sabs') ∈ [0,1] → well-behaved. */
+        float3 aoff = smod.params.yzw;
+        float sp = length(aoff);
+        if (sp > 0.0001f && cnt > 0.5f && bk > 0.001f) {
+          float3 dir = aoff / sp;
+          float nt = dot(pp, dir) / sp;
+          float aid = round(nt);
+          float lt = nt - aid;
+          float kh = bk / (sp * 2.0f);
+          float abs_lt = abs(lt);
+          float d_bnd = 0.5f - abs_lt;
+          float h_sabs = (kh > 0.0001f) ? clamp(0.5f + 0.5f * d_bnd / kh, 0.0f, 1.0f) : 1.0f;
+          float sabs_deriv = 2.0f * h_sabs - 1.0f;
+          float fold_deriv = sabs_deriv;
+          float g_dir = dot(grad, dir);
+          grad = grad - (1.0f - fold_deriv) * g_dir * dir;
+        }
+      }
+      else if (mflags == SDF_MOD_ARRAY_RADIAL) {
         if (cnt > 0.5f) {
-          float a = (2.0f * SDF_PI) / cnt;
-          float blend = smod.params2.x;
-          float cell_angle = sround(atan(orig_p.y, orig_p.x) / a, clamp(blend, 0.0f, 1.0f)) * a;
+          float aa = (2.0f * SDF_PI) / cnt;
+          float na = atan(pp.y, pp.x) / aa;
+          float aid = round(na);
+          float la = na - aid;
+          if (bk > 0.001f) {
+            float kh = bk / (aa * 2.0f);
+            float abs_la = abs(la);
+            float d_bnd = 0.5f - abs_la;
+            float h_sabs = (kh > 0.0001f) ? clamp(0.5f + 0.5f * d_bnd / kh, 0.0f, 1.0f) : 1.0f;
+            float sabs_deriv = 2.0f * h_sabs - 1.0f;
+            la = sign(la + 1e-8f) * (0.5f - sabs(d_bnd, kh));
+          }
+          float cell_angle = (aid + la) * aa;
           float ca = cos(cell_angle), sa = sin(cell_angle);
           float gx = grad.x, gy = grad.y;
           grad.x = ca * gx - sa * gy;
           grad.y = sa * gx + ca * gy;
-
-          /* Also undo per-cell rotations */
           float3 rot = smod.params2.yzw;
           if (abs(rot.z) > 0.0001f) {
             float cz = cos(-rot.z), sz = sin(-rot.z);
@@ -723,31 +894,61 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
           }
         }
       }
-      /* Linear array: just translation, gradient unchanged. */
     }
     else if (mtype == SDF_MOD_TWIST) {
-      /* Counter-rotate gradient by -k*p.z around Z. */
-      float k = smod.params.x;
-      float angle = -k * orig_p.z;
-      float c = cos(angle), s = sin(angle);
-      grad = float3(c * grad.x - s * grad.y, s * grad.x + c * grad.y, grad.z);
+      float tk = smod.params.x;
+      int axis = int(smod.params.y);
+      float drive;
+      if (axis == 1) { drive = pp.y; }
+      else if (axis == 2) { drive = pp.x; }
+      else { drive = pp.z; }
+      float fc = cos(tk * drive), fs = sin(tk * drive);
+      float pa, pb;
+      if (axis == 1) { pa = fc*pp.x - fs*pp.z; pb = fs*pp.x + fc*pp.z; }
+      else if (axis == 2) { pa = fc*pp.y - fs*pp.z; pb = fs*pp.y + fc*pp.z; }
+      else { pa = fc*pp.x - fs*pp.y; pb = fs*pp.x + fc*pp.y; }
+      float ga, gb;
+      if (axis == 1) { ga = grad.x; gb = grad.z; }
+      else if (axis == 2) { ga = grad.y; gb = grad.z; }
+      else { ga = grad.x; gb = grad.y; }
+      if (axis == 1) {
+        grad.x = fc * ga + fs * gb;
+        grad.z = -fs * ga + fc * gb;
+      } else if (axis == 2) {
+        grad.y = fc * ga + fs * gb;
+        grad.z = -fs * ga + fc * gb;
+      } else {
+        grad.x = fc * ga + fs * gb;
+        grad.y = -fs * ga + fc * gb;
+      }
+      float drive_correction = tk * (-pb * ga + pa * gb);
+      if (axis == 1) { grad.y += drive_correction; }
+      else if (axis == 2) { grad.x += drive_correction; }
+      else { grad.z += drive_correction; }
     }
     else if (mtype == SDF_MOD_BEND) {
-      /* Approximate: counter-bend. For small bends this is acceptable. */
-      float k = smod.params.x;
+      float bk = smod.params.x;
       int axis = int(smod.params.y);
-      if (abs(k) > 0.0001f) {
-        float R = 1.0f / k;
-        float sg = sign(R);
-        if (axis == 0) {
-          float2 rel = float2(orig_p.x, orig_p.y + R);
-          float angle = -atan(rel.x * sg, rel.y * sg);
-          float ca = cos(angle), sa = sin(angle);
+      float3 origin = float3(smod.params.z, smod.params.w, smod.params2.x);
+      float3 bp = pp - origin;
+      if (abs(bk) > 0.0001f) {
+        if (axis == 1) {
+          float a = -bk * bp.y;
+          float ca = cos(a), sa = sin(a);
+          grad = float3(grad.x, ca * grad.y - sa * grad.z, sa * grad.y + ca * grad.z);
+        }
+        else if (axis == 2) {
+          float a = -bk * bp.z;
+          float ca = cos(a), sa = sin(a);
+          grad = float3(ca * grad.x + sa * grad.z, grad.y, -sa * grad.x + ca * grad.z);
+        }
+        else {
+          float a = -bk * bp.x;
+          float ca = cos(a), sa = sin(a);
           grad = float3(ca * grad.x - sa * grad.y, sa * grad.x + ca * grad.y, grad.z);
         }
       }
     }
-    /* Elongate, array offsets, etc: gradient unchanged (translations). */
   }
   return grad;
 }

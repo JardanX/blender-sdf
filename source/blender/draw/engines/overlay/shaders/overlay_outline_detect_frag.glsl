@@ -239,6 +239,9 @@ void main()
   else if (color_id == 1u) {
     frag_color = theme.colors.object_select;
   }
+  else if (color_id == 2u) {
+    frag_color = float4(0.0f, 0.0f, 0.0f, sdf_line_opacity);
+  }
   else if (color_id == 3u) {
     frag_color = theme.colors.active_object;
   }
