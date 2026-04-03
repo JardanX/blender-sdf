@@ -2225,6 +2225,7 @@ void DRW_module_exit()
   GPU_TEXTURE_FREE_SAFE(g_select_buffer.texture_depth);
   GPU_FRAMEBUFFER_FREE_SAFE(g_select_buffer.framebuffer_depth_only);
 
+  draw::sdf::sdf_shaders_free();
   DRW_shaders_free();
 }
 
