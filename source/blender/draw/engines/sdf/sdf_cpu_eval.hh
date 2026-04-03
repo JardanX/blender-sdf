@@ -156,7 +156,6 @@ inline DomainResult applyDomainMods(float3 p,
       };
       auto do_mirror = [&](int ax) {
         float3 N(inv_mat[ax][0], inv_mat[ax][1], inv_mat[ax][2]);
-        if (math::dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = std::max(math::dot(N, N), 1e-12f);
         float d = math::dot(p - origin, N) / nl2;
         float ad = sabs(d, bk);
