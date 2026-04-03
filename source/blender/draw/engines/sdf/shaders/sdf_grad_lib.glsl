@@ -673,28 +673,28 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
         int blend_type = smod.header.z;
         float k = (blend_type > 0) ? blend : 0.0f;
         if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-          float3 raw_N = float3(inv_mat[0]);
-          float nl = length(raw_N);
-          float3 N = (nl > 1e-6f) ? raw_N / nl : float3(1, 0, 0);
-          float d = dot(p - origin, N);
+          float3 N = float3(inv_mat[0]);
+          if (dot(-origin, N) < -0.0001f) { N = -N; }
+          float nl2 = max(dot(N, N), 1e-12f);
+          float d = dot(p - origin, N) / nl2;
           p -= (d - sabs(d, k)) * N;
-          p -= offset * abs(N);
+          p -= offset * N;
         }
         if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-          float3 raw_N = float3(inv_mat[1]);
-          float nl = length(raw_N);
-          float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 1, 0);
-          float d = dot(p - origin, N);
+          float3 N = float3(inv_mat[1]);
+          if (dot(-origin, N) < -0.0001f) { N = -N; }
+          float nl2 = max(dot(N, N), 1e-12f);
+          float d = dot(p - origin, N) / nl2;
           p -= (d - sabs(d, k)) * N;
-          p -= offset * abs(N);
+          p -= offset * N;
         }
         if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-          float3 raw_N = float3(inv_mat[2]);
-          float nl = length(raw_N);
-          float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 0, 1);
-          float d = dot(p - origin, N);
+          float3 N = float3(inv_mat[2]);
+          if (dot(-origin, N) < -0.0001f) { N = -N; }
+          float nl2 = max(dot(N, N), 1e-12f);
+          float d = dot(p - origin, N) / nl2;
           p -= (d - sabs(d, k)) * N;
-          p -= offset * abs(N);
+          p -= offset * N;
         }
       }
       else if (mtype == SDF_MOD_TWIST) {
@@ -805,28 +805,28 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
       int blend_type = smod.header.z;
       float k = (blend_type > 0) ? blend : 0.0f;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-        float3 raw_N = float3(inv_mat[0]);
-        float nl = length(raw_N);
-        float3 N = (nl > 1e-6f) ? raw_N / nl : float3(1, 0, 0);
-        float d = dot(pp - origin, N);
+        float3 N = float3(inv_mat[0]);
+        if (dot(-origin, N) < -0.0001f) { N = -N; }
+        float nl2 = max(dot(N, N), 1e-12f);
+        float d = dot(pp - origin, N) / nl2;
         float h = (k > 0.0001f) ? clamp(0.5f + 0.5f * d / k, 0.0f, 1.0f) : (d < 0.0f ? 0.0f : 1.0f);
-        grad = grad - 2.0f * (1.0f - h) * dot(grad, N) * N;
+        grad -= 2.0f * (1.0f - h) * dot(grad, N) * N / nl2;
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-        float3 raw_N = float3(inv_mat[1]);
-        float nl = length(raw_N);
-        float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 1, 0);
-        float d = dot(pp - origin, N);
+        float3 N = float3(inv_mat[1]);
+        if (dot(-origin, N) < -0.0001f) { N = -N; }
+        float nl2 = max(dot(N, N), 1e-12f);
+        float d = dot(pp - origin, N) / nl2;
         float h = (k > 0.0001f) ? clamp(0.5f + 0.5f * d / k, 0.0f, 1.0f) : (d < 0.0f ? 0.0f : 1.0f);
-        grad = grad - 2.0f * (1.0f - h) * dot(grad, N) * N;
+        grad -= 2.0f * (1.0f - h) * dot(grad, N) * N / nl2;
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-        float3 raw_N = float3(inv_mat[2]);
-        float nl = length(raw_N);
-        float3 N = (nl > 1e-6f) ? raw_N / nl : float3(0, 0, 1);
-        float d = dot(pp - origin, N);
+        float3 N = float3(inv_mat[2]);
+        if (dot(-origin, N) < -0.0001f) { N = -N; }
+        float nl2 = max(dot(N, N), 1e-12f);
+        float d = dot(pp - origin, N) / nl2;
         float h = (k > 0.0001f) ? clamp(0.5f + 0.5f * d / k, 0.0f, 1.0f) : (d < 0.0f ? 0.0f : 1.0f);
-        grad = grad - 2.0f * (1.0f - h) * dot(grad, N) * N;
+        grad -= 2.0f * (1.0f - h) * dot(grad, N) * N / nl2;
       }
     }
     else if (mtype == SDF_MOD_ARRAY) {

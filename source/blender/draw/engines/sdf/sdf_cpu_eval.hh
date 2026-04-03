@@ -135,7 +135,8 @@ inline DomainResult applyDomainMods(float3 p,
                                     const SDFModifierGPU *mods,
                                     int mod_start,
                                     int mod_count,
-                                    const float4x4 &inv_mat)
+                                    const float4x4 &inv_mat,
+                                    bool skip_mirror = false)
 {
   float scale = 1.0f;
   for (int i = mod_start + mod_count - 1; i >= mod_start; i--) {
@@ -143,22 +144,28 @@ inline DomainResult applyDomainMods(float3 p,
     int mtype = m.header.x;
     int mflags = m.header.y;
 
-    if (mtype == SDF_MOD_MIRROR) {
+    if (mtype == SDF_MOD_MIRROR && !skip_mirror) {
       float offset = m.params.x;
       float3 origin(m.params.y, m.params.z, m.params.w);
       float blend = m.params2.x;
       float bk = (m.header.z > 0 && blend > 0.001f) ? blend : 0.0f;
-      auto do_axis = [&](int ax) {
+      auto sabs = [](float x, float k) -> float {
+        if (k <= 0.0001f) { return fabsf(x); }
+        float h = std::clamp(0.5f + 0.5f * x / k, 0.0f, 1.0f);
+        return x * (2.0f * h - 1.0f) + k * h * (1.0f - h);
+      };
+      auto do_mirror = [&](int ax) {
         float3 N(inv_mat[ax][0], inv_mat[ax][1], inv_mat[ax][2]);
+        if (math::dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = std::max(math::dot(N, N), 1e-12f);
         float d = math::dot(p - origin, N) / nl2;
-        float ad = (bk > 0.0001f) ? sqrtf(d * d + bk * bk) : fabsf(d);
+        float ad = sabs(d, bk);
         p -= (d - ad) * N;
         p -= offset * N;
       };
-      if (mflags & SDF_MOD_MIRROR_X) { do_axis(0); }
-      if (mflags & SDF_MOD_MIRROR_Y) { do_axis(1); }
-      if (mflags & SDF_MOD_MIRROR_Z) { do_axis(2); }
+      if (mflags & SDF_MOD_MIRROR_X) { do_mirror(0); }
+      if (mflags & SDF_MOD_MIRROR_Y) { do_mirror(1); }
+      if (mflags & SDF_MOD_MIRROR_Z) { do_mirror(2); }
     }
     else if (mtype == SDF_MOD_TWIST) {
       float k = m.params.x;
@@ -231,10 +238,11 @@ inline float applyDistMods(float dist, const SDFModifierGPU *mods, int mod_start
 
 inline float evalObjectSDF(const SDFObjectGPU &obj,
                            const SDFModifierGPU *mods,
-                           float3 local_pos)
+                           float3 local_pos,
+                           bool skip_mirror = false)
 {
   DomainResult dm = applyDomainMods(
-      local_pos, mods, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
+      local_pos, mods, obj.modifier_start, obj.modifier_count, obj.inverse_matrix, skip_mirror);
   float d = evalPrimitive(obj, dm.p);
   return applyDistMods(d, mods, obj.modifier_start, obj.modifier_count);
 }

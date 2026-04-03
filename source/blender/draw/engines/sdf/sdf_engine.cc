@@ -790,13 +790,18 @@ class Instance : public DrawEngine {
       switch (md->type) {
         case eModifierType_SDFMirror: {
           const auto &m = *reinterpret_cast<const SDFMirrorModifierData *>(md);
-          gpu_mod.header = int4(SDF_MOD_MIRROR, m.flag, m.blend_type, 0);
-          float3 world_origin(0.0f);
+          float3 obj_pos = float3(mat[3]);
+          float3 mirror_pos(0.0f);
           if (m.mirror_object != nullptr) {
-            const float4x4 &mirror_mat = m.mirror_object->object_to_world();
-            world_origin = float3(mirror_mat[3]) - float3(mat[3]);
+            mirror_pos = float3(m.mirror_object->object_to_world()[3]);
           }
+          float3 world_origin = mirror_pos - obj_pos;
           float3 local_origin = float3(inv_rot * float4(world_origin, 0.0f));
+          /* Side: fold toward the object center (stable across rotation). */
+          int sides = ((obj_pos.x >= mirror_pos.x) ? 1 : 0) |
+                      ((obj_pos.y >= mirror_pos.y) ? 2 : 0) |
+                      ((obj_pos.z >= mirror_pos.z) ? 4 : 0);
+          gpu_mod.header = int4(SDF_MOD_MIRROR, m.flag, m.blend_type, sides);
           gpu_mod.params = float4(m.offset_distance, local_origin.x, local_origin.y, local_origin.z);
           gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
           valid = true;
@@ -944,7 +949,27 @@ class Instance : public DrawEngine {
       int mflags = mod.header.y;
       switch (mtype) {
         case SDF_MOD_MIRROR: {
-          local_extent *= 2.0f;
+          float offset = fabsf(mod.params.x);
+          float3 local_org = float3(mod.params.y, mod.params.z, mod.params.w);
+          float4x4 inv_rot = gpu_obj.inverse_matrix;
+          if (mflags & SDF_MOD_MIRROR_X) {
+            float3 N = float3(inv_rot[0][0], inv_rot[0][1], inv_rot[0][2]);
+            float ea = math::dot(local_extent, math::abs(N));
+            float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, ea);
+            local_extent += math::abs(N) * disp;
+          }
+          if (mflags & SDF_MOD_MIRROR_Y) {
+            float3 N = float3(inv_rot[1][0], inv_rot[1][1], inv_rot[1][2]);
+            float ea = math::dot(local_extent, math::abs(N));
+            float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, ea);
+            local_extent += math::abs(N) * disp;
+          }
+          if (mflags & SDF_MOD_MIRROR_Z) {
+            float3 N = float3(inv_rot[2][0], inv_rot[2][1], inv_rot[2][2]);
+            float ea = math::dot(local_extent, math::abs(N));
+            float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, ea);
+            local_extent += math::abs(N) * disp;
+          }
           break;
         }
         case SDF_MOD_ELONGATE:
@@ -2918,7 +2943,8 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
         case SDF_TYPE_NGON: ext = float3(sz.x, sz.x, sz.z); break;
         default: ext = sz; break;
       }
-      /* Search region: expand extent by modifiers analytically. */
+      /* Search region: expand by non-mirror modifiers only.
+       * Mirror bbox copies are drawn by the overlay's copy system. */
       float3 search_ext = ext;
       for (int mi = obj.modifier_start; mi < obj.modifier_start + obj.modifier_count; mi++) {
         if (mi < 0 || mi >= s_modifier_count) { break; }
@@ -2953,7 +2979,7 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
         for (int iy = 0; iy <= RES; iy++) {
           for (int ix = 0; ix <= RES; ix++) {
             float3 lp = search_min + float3(float(ix), float(iy), float(iz)) * cell;
-            float d = sdf_cpu::evalObjectSDF(obj, s_modifiers_cpu, lp);
+            float d = sdf_cpu::evalObjectSDF(obj, s_modifiers_cpu, lp, true);
             if (d >= 0.0f && d < threshold) {
               bb_min = math::min(bb_min, lp);
               bb_max = math::max(bb_max, lp);

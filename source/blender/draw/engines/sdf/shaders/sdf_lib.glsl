@@ -927,6 +927,7 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       float bk = (blend_type > 0 && blend > 0.001f) ? blend : 0.0f;
       if ((mflags & SDF_MOD_MIRROR_X) != 0) {
         float3 N = float3(inv_mat[0]);
+        if (dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
         p -= (d - sabs(d, bk)) * N;
@@ -934,6 +935,7 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       }
       if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
         float3 N = float3(inv_mat[1]);
+        if (dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
         p -= (d - sabs(d, bk)) * N;
@@ -941,6 +943,7 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       }
       if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
         float3 N = float3(inv_mat[2]);
+        if (dot(-origin, N) < -0.0001f) { N = -N; }
         float nl2 = max(dot(N, N), 1e-12f);
         float d = dot(p - origin, N) / nl2;
         p -= (d - sabs(d, bk)) * N;
@@ -960,9 +963,7 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       if (axis == 1) { p = float3(c * p.x - s * p.z, p.y, s * p.x + c * p.z); }
       else if (axis == 2) { p = float3(p.x, c * p.y - s * p.z, s * p.y + c * p.z); }
       else { p = float3(c * p.x - s * p.y, s * p.x + c * p.y, p.z); }
-      /* Gentle Lipschitz correction: cap at 2x slowdown.
-       * SOR failure detection handles any remaining overshoot. */
-      scale *= 1.0f / min(1.0f + abs(k) * r, 2.0f);
+      scale *= 1.0f / (1.0f + abs(k) * r);
     }
     else if (mtype == SDF_MOD_BEND) {
       float k = smod.params.x;
