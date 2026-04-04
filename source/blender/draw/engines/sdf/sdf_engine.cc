@@ -877,7 +877,10 @@ class Instance : public DrawEngine {
           gpu_mod.header = int4(SDF_MOD_ARRAY, m.array_type, m.blend_type, 0);
           if (m.array_type == MOD_SDF_ARRAY_RADIAL) {
             gpu_mod.params = float4(float(m.count), m.array_radius, 0.0f, 0.0f);
-            gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
+            gpu_mod.params2 = float4(m.blend,
+                                     m.rotation_offset[0],
+                                     m.rotation_offset[1],
+                                     m.rotation_offset[2]);
           }
           else {
             float3 sz = float3(sdf_data->size);
@@ -1045,11 +1048,10 @@ class Instance : public DrawEngine {
               float radius = mod.params.y;
               local_extent.x += radius;
               local_extent.y += radius;
-              float3 rot_off(mod.params2.y, mod.params2.z, mod.params2.w);
-              if (math::length(rot_off) > 0.0001f) {
-                float r = math::length(local_extent);
-                local_extent = float3(r);
-              }
+              /* Always use spherical AABB — the fold + implicit Y bias
+               * can place geometry outside the box AABB at corners. */
+              float r = math::length(local_extent);
+              local_extent = float3(r);
             }
           }
           break;
