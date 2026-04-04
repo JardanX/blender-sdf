@@ -36,9 +36,13 @@ namespace blender {
 
 static void rna_SDFGroup_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
-  DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
-
   SDFGroup *group = (SDFGroup *)ptr->owner_id;
+
+  if (group->csg_operation == SDF_CSG_SHELL && group->shell_mode == SDF_SHELL_AVOID) {
+    group->shell_op = SDF_SHELL_OP_UNION;
+  }
+
+  DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
   for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
        member = member->next)
   {
@@ -200,8 +204,7 @@ static const EnumPropertyItem rna_enum_sdf_group_blend_type_items[] = {
 
 static const EnumPropertyItem rna_enum_sdf_group_shell_mode_items[] = {
     {SDF_SHELL_NORMAL, "NORMAL", 0, "Normal", "Standard shell operation"},
-    {SDF_SHELL_PUSH, "PUSH", 0, "Shell Push", "Shell combined with push"},
-    {SDF_SHELL_AVOID, "AVOID", 0, "Shell Avoid", "Shell combined with avoid"},
+    {SDF_SHELL_AVOID, "AVOID", 0, "Avoid", "Shell avoids the base surface"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -363,6 +366,31 @@ static void rna_def_sdf_group(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
   RNA_def_property_ui_text(prop, "Smoothness 2", "Smooth the chamfer/round edge on shape 2");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  prop = RNA_def_property(srna, "chamfer_k4", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "chamfer_k4");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "End Smoothness 1", "Smooth the end edge on shape 1");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  prop = RNA_def_property(srna, "chamfer_k5", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "chamfer_k5");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "End Smoothness 2", "Smooth the end edge on shape 2");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  prop = RNA_def_property(srna, "flip_blend", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flip_blend", 1);
+  RNA_def_property_ui_text(prop, "Flip Blend", "Flip the blend direction for round operations");
+  RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
+
+  prop = RNA_def_property(srna, "flip_blend_end", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flip_blend_end", 1);
+  RNA_def_property_ui_text(
+      prop, "Flip End", "Flip the end blend direction for round shell operations");
   RNA_def_property_update(prop, 0, "rna_SDFGroup_update");
 
   /* Shell Distance */

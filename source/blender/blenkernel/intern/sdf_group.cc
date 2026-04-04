@@ -34,6 +34,9 @@ static void sdf_group_init_data(ID *id)
   SDFGroup *group = id_cast<SDFGroup *>(id);
   INIT_DEFAULT_STRUCT_AFTER(group, id);
 
+  group->chamfer_k4 = 0.01f;
+  group->chamfer_k5 = 0.01f;
+
   group->runtime = new bke::SDFGroupRuntime();
 }
 
@@ -91,6 +94,9 @@ static void sdf_group_blend_read_data(BlendDataReader *reader, ID *id)
 
   BLO_read_struct_list(reader, SDFGroupMember, &group->members);
   BLO_read_struct_list(reader, SDFModifier, &group->modifiers);
+
+  if (group->chamfer_k4 == 0.0f) { group->chamfer_k4 = 0.01f; }
+  if (group->chamfer_k5 == 0.0f) { group->chamfer_k5 = 0.01f; }
 
   group->runtime = new bke::SDFGroupRuntime();
 }

@@ -26,6 +26,10 @@
     .shell_blend_bottom = 0.1f, \
     .chamfer_k2 = 0.01f, \
     .chamfer_k3 = 0.01f, \
+    .chamfer_k4 = 0.01f, \
+    .chamfer_k5 = 0.01f, \
+    .flip_blend = 0, \
+    .flip_blend_end = 0, \
     .color = {1.0f, 1.0f, 1.0f, 1.0f}, \
     .totmember = 0, \
     .group_order = 0, \

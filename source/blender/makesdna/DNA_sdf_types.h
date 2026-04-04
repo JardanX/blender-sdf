@@ -158,6 +158,10 @@ typedef struct SDF {
   float shell_blend_bottom = 0.1f;
   float chamfer_k2 = 0.01f;
   float chamfer_k3 = 0.01f;
+  float chamfer_k4 = 0.01f;
+  float chamfer_k5 = 0.01f;
+  int flip_blend = 0;
+  int flip_blend_end = 0;
 
   float box_corners[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float box_edge_top = 0.0f;

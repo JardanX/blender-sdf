@@ -746,37 +746,69 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
 
             layout.separator()
 
-            if sdf.csg_operation == 'SHELL':
-                layout.label(text="Shell Mode")
-                layout.prop(sdf, "shell_mode", text="")
-                layout.label(text="Shell Op")
-                layout.prop(sdf, "shell_op", text="")
-
             layout.label(text="Blend Type")
             grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
             grid.scale_y = 1.4
             for item in sdf.bl_rna.properties["blend_type"].enum_items:
                 grid.prop_enum(sdf, "blend_type", item.identifier, text="")
 
-            if sdf.blend_type != 'LINEAR':
-                if sdf.csg_operation == 'SHELL':
-                    layout.label(text="Blend Top")
-                    layout.prop(sdf, "shell_blend_top", text="")
-                    layout.label(text="Blend Bottom")
-                    layout.prop(sdf, "shell_blend_bottom", text="")
+            is_shell = (sdf.csg_operation == 'SHELL')
+            bt = sdf.blend_type
+
+            if is_shell:
+                row = layout.row(align=True)
+                row.prop(sdf, "shell_distance", text="Distance")
+                sub = row.row(align=True)
+                sub.scale_x = 0.9
+                sub.enabled = (sdf.shell_mode != 'AVOID')
+                sub.prop_enum(sdf, "shell_op", 'UNION', text="", icon='ADD')
+                sub.prop_enum(sdf, "shell_op", 'SUBTRACTION', text="", icon='REMOVE')
+                row = layout.row(align=True)
+                row.prop(sdf, "shell_mode", expand=True)
+
+            if bt != 'LINEAR':
+                col = layout.column(align=True)
+                col.separator()
+
+                if is_shell:
+                    inward = (sdf.shell_op == 'SUBTRACTION')
+                    start_flip_on = (not inward) or (bt == 'ROUND')
+                    end_flip_on = inward or (bt == 'ROUND')
+
+                    row = col.row(align=True)
+                    row.prop(sdf, "shell_blend_top", text="Start")
+                    sub = row.row()
+                    sub.enabled = start_flip_on
+                    sub.prop(sdf, "flip_blend", text="", icon='UV_SYNC_SELECT', toggle=True)
+
+                    row = col.row(align=True)
+                    row.prop(sdf, "shell_blend_bottom", text="End")
+                    sub = row.row()
+                    sub.enabled = end_flip_on
+                    sub.prop(sdf, "flip_blend_end", text="", icon='UV_SYNC_SELECT', toggle=True)
+
+                    if sdf.shell_mode == 'AVOID':
+                        col.prop(sdf, "blend", text="Avoid Blend")
                 else:
-                    layout.label(text="Blend")
-                    layout.prop(sdf, "blend", text="")
+                    col.prop(sdf, "blend", text="Blend Strength")
 
-                if sdf.blend_type in ('CHAMFER', 'ROUND'):
-                    layout.label(text="Edge Smoothness")
-                    row = layout.row(align=True)
-                    row.prop(sdf, "chamfer_k2", text="K2")
-                    row.prop(sdf, "chamfer_k3", text="K3")
-
-            if sdf.csg_operation == 'SHELL':
-                layout.label(text="Distance")
-                layout.prop(sdf, "shell_distance", text="")
+                if bt in ('CHAMFER', 'ROUND'):
+                    col.separator()
+                    if is_shell:
+                        col.label(text="Smooth Start")
+                        row = col.row(align=True)
+                        row.prop(sdf, "chamfer_k2", text="K2")
+                        row.prop(sdf, "chamfer_k3", text="K3")
+                        col.label(text="Smooth End")
+                        row = col.row(align=True)
+                        row.prop(sdf, "chamfer_k4", text="K4")
+                        row.prop(sdf, "chamfer_k5", text="K5")
+                    else:
+                        lbl = "Smooth Chamfer" if bt == 'CHAMFER' else "Smooth Round"
+                        col.label(text=lbl)
+                        row = col.row(align=True)
+                        row.prop(sdf, "chamfer_k2", text="K2")
+                        row.prop(sdf, "chamfer_k3", text="K3")
 
         layout.separator()
 

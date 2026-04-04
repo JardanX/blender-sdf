@@ -165,6 +165,7 @@ void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot);
 void OBJECT_OT_move_to_sdf_group(wmOperatorType *ot);
 void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot);
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot);
+void OBJECT_OT_sdf_shell_distance_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_group_cycle(wmOperatorType *ot);
 /**
  * Called by other space types too.

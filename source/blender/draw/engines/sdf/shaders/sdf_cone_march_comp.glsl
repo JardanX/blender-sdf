@@ -70,7 +70,7 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
       else {
         scene_dist = combineCSG(
             scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
     }
     else {
@@ -80,7 +80,7 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
       else {
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
     }
   }
@@ -147,8 +147,6 @@ void main()
     t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
     if (t_enter > t_exit || t_exit < 0.0f) {
-      /* Don't zero tile_prim_counts — tile center ray can miss scene AABB
-       * at oblique angles while per-pixel rays still hit geometry. */
       tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
       tile_far_hint[tileIdx] = 0.0f;
       return;
@@ -158,20 +156,14 @@ void main()
   }
 
   float tan_half_tile = float(8) / float(screen_size.y);
-  /* Ortho: tile world-space half-size is constant, not distance-dependent.
-   * Use a larger radius than perspective to trigger earlier — this pushes the
-   * skip position further from the surface, giving the trace enough steps to
-   * converge consistently across tile boundaries. */
   float ortho_cone_r = 0.0f;
   float ortho_tile_world = 0.0f;
   if (!is_persp) {
     float ortho_height = 2.0f / vm.winmat[1][1];
     ortho_tile_world = (ortho_height / float(screen_size.y)) * 8.0f;
-    ortho_cone_r = min(ortho_tile_world * sdf_cone_aperture,
-                       length(scene_aabb_max - scene_aabb_min) * 0.5f);
+    ortho_cone_r = ortho_tile_world * sdf_cone_aperture;
   }
   float cone_epsilon = sdf_ray_epsilon * 32.0f;
-  float max_cone_r = length(scene_aabb_max - scene_aabb_min) * 0.5f;
   int base_offset = tileIdx * kMaxTileObjects;
 
   float t = t_enter;
@@ -189,8 +181,12 @@ void main()
       continue;
     }
 
-    float cone_r = is_persp ? min(t * tan_half_tile * sdf_cone_aperture, max_cone_r)
-                            : ortho_cone_r;
+    /* Clamp by nearest skipped AABB before cone test */
+    if (aabb_skip < d) {
+      d = max(aabb_skip, cone_epsilon);
+    }
+
+    float cone_r = is_persp ? t * tan_half_tile * sdf_cone_aperture : ortho_cone_r;
     if (d < cone_r) {
       float margin = is_persp ? cone_r_safe * 3.0f : ortho_tile_world * 3.0f;
       float t_skip = max(t_safe + max(d_safe - margin, 0.0f), t_enter);
@@ -199,23 +195,16 @@ void main()
       return;
     }
 
-    /* Clamp step size by nearest skipped AABB (prevent overstepping),
-     * but only AFTER the cone test uses the true SDF distance. */
-    float step_d = d;
-    if (aabb_skip < d) {
-      step_d = max(aabb_skip, cone_epsilon);
-    }
-
     t_safe = t;
-    d_safe = step_d;
+    d_safe = d;
     cone_r_safe = cone_r;
-    t += step_d;
+    t += d;
     if (t > t_exit) { break; }
   }
 
-  /* Traversed full range without finding surface — keep tile alive,
-   * per-pixel rays may still intersect from different positions. */
+  /* Traversed full range without finding surface — tile is empty */
   if (t >= t_exit && t_safe > t_enter) {
+    tile_prim_counts[tileIdx] = 0;
     tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
     tile_far_hint[tileIdx] = 0.0f;
     return;
@@ -229,7 +218,7 @@ void main()
     tile_far_hint[tileIdx] = t_exit;
   }
   else {
-    /* No progress — center ray missed all AABBs, but keep tile alive */
+    tile_prim_counts[tileIdx] = 0;
     tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
     tile_far_hint[tileIdx] = 0.0f;
   }

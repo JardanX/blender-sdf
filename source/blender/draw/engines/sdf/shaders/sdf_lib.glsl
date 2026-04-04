@@ -856,6 +856,36 @@ float opSmoothRoundIntersection(float d1, float d2, float r, float k2, float k3)
   return max(term1, term2);
 }
 
+/* Inverted round: convex fillet via subtraction + min */
+float opRoundUnionInverted(float a, float b, float r)
+{
+  float diff = -opUnionIRound(a, -b, r);
+  return min(diff, b);
+}
+
+float opSmoothRoundUnionInverted(float a, float b, float r, float k2, float k3)
+{
+  float diff = opSmoothRoundSubtraction(b, a, r, k2, k3);
+  return min(diff, b);
+}
+
+float opIntersectionRound(float a, float b, float r)
+{
+  float2 u = max(float2(r + a, r + b), float2(0.0f));
+  return min(-r, max(a, b)) + length(u);
+}
+
+float opSmoothRoundIntersectionInverted(float d1, float d2, float r, float k2, float k3)
+{
+  float a = d1;
+  float b = -d2;
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corner = r - length(s);
+  float term1 = opSmoothIntersection(a, corner, k2);
+  float term2 = opSmoothIntersection(-b, corner, k3);
+  return max(term1, term2);
+}
+
 /* ---- SDF modifier evaluation ---- */
 
 /** Modifier type IDs (must match eSDFModifierType in DNA_sdf_types.h). */
@@ -1183,15 +1213,17 @@ float sdEllipsoid(float3 p, float3 r)
 
 /**
  * Combine two SDF distances using the specified CSG operation and blend type.
- * \param k2: chamfer/round edge smoothness for shape 1 (0 = sharp).
- * \param k3: chamfer/round edge smoothness for shape 2 (0 = sharp).
  */
 float combineCSG(float d1, float d2, int op, int bt, float k,
                  float shell_dist, int shell_mode, int shell_op,
                  float shell_k_top, float shell_k_bot,
-                 float k2, float k3)
+                 float k2, float k3, float k4, float k5,
+                 int flip_blend, int flip_blend_end)
 {
   bool has_smooth = (k2 > 0.0f || k3 > 0.0f);
+  bool has_smooth_end = (k4 > 0.0f || k5 > 0.0f);
+  bool fb = (flip_blend != 0);
+  bool fbe = (flip_blend_end != 0);
 
   if (op == SDF_CSG_OP_UNION) {
     if (k > 0.0f && bt > 0) {
@@ -1282,86 +1314,151 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
     return min(d1, carved);
   }
   else if (op == SDF_CSG_OP_SHELL) {
-    /* Subtraction flips direction: positive dist carves inward instead of outward. */
     float sd = (shell_op == SDF_SHELL_OP_SUBTRACTION) ? -shell_dist : shell_dist;
     float h = abs(sd);
 
-    if (shell_mode == SDF_SHELL_MODE_PUSH) {
-      /* Standalone shell field around d2, then push into d1. */
-      float d_shell = abs(d2) - h;
-      float subtracted;
-      if (k > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) {
-          subtracted = opSmoothSubtraction(d_shell, d1, k);
-        }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-          subtracted = opChamferSubtraction(d_shell, d1, k);
-        }
-        else {
-          subtracted = opRoundSubtraction(d_shell, d1, k);
-        }
-      }
-      else {
-        subtracted = max(d1, -d_shell);
-      }
-      return min(subtracted, d_shell);
-    }
-
-    /* Normal shell and Avoid: compute the two-stage shell result. */
-    float lk_top = min(shell_k_top, h);
-    float lk_bot = min(shell_k_bot, h);
     float d_shell;
     if (sd < 0.0f) {
-      /* Inward (or subtraction): subtract shape, cap at limit */
+      /* Inward: start = subtraction (bottom edge), end = union (top edge) */
       float d_sub;
-      if (shell_k_bot > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_sub = opSmoothSubtraction(d2, d1, shell_k_bot); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_sub = opChamferSubtraction(d2, d1, shell_k_bot); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { d_sub = opRoundSubtraction(d2, d1, shell_k_bot); }
+      if (shell_k_top > 0.0f && bt > 0) {
+        if (fb) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) { d_sub = opSmoothSubtraction(d2, d1, shell_k_top); }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            if (has_smooth) { d_sub = opSmoothChamferSubtraction(d2, d1, shell_k_top, k2, k3); }
+            else { d_sub = opChamferSubtraction(d2, d1, shell_k_top); }
+          }
+          else {
+            if (has_smooth) { d_sub = opSmoothRoundSubtraction(d2, d1, shell_k_top, k2, k3); }
+            else { d_sub = opRoundSubtraction(d2, d1, shell_k_top); }
+          }
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          d_sub = opSmoothSubtraction(d2, d1, shell_k_top);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth) { d_sub = opSmoothChamferSubtraction(d2, d1, shell_k_top, k2, k3); }
+          else { d_sub = opChamferSubtraction(d2, d1, shell_k_top); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          d_sub = opIntersectionRound(d1, -d2, shell_k_top);
+        }
         else { d_sub = max(d1, -d2); }
       }
       else { d_sub = max(d1, -d2); }
+
       float lim = d1 + h;
-      if (lk_top > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_shell = opSmoothUnion(d_sub, lim, lk_top); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_shell = opChamferUnion(d_sub, lim, lk_top); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { d_shell = opRoundUnion(d_sub, lim, lk_top); }
+      if (shell_k_bot > 0.0f && bt > 0) {
+        if (fbe) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) {
+            float esub = opSmoothSubtraction(lim, d_sub, shell_k_bot);
+            d_shell = min(esub, lim);
+          }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            float esub;
+            if (has_smooth_end) { esub = opSmoothChamferSubtraction(lim, d_sub, shell_k_bot, k4, k5); }
+            else { esub = opChamferSubtraction(lim, d_sub, shell_k_bot); }
+            d_shell = min(esub, lim);
+          }
+          else {
+            if (has_smooth_end) { d_shell = opSmoothRoundUnionInverted(d_sub, lim, shell_k_bot, k4, k5); }
+            else { d_shell = opRoundUnionInverted(d_sub, lim, shell_k_bot); }
+          }
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          d_shell = opSmoothUnion(d_sub, lim, shell_k_bot);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth_end) { d_shell = opSmoothChamferUnion(d_sub, lim, shell_k_bot, k4, k5); }
+          else { d_shell = opChamferUnion(d_sub, lim, shell_k_bot); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          if (has_smooth_end) { d_shell = opSmoothRoundUnion(d_sub, lim, shell_k_bot, k4, k5); }
+          else { d_shell = opRoundUnion(d_sub, lim, shell_k_bot); }
+        }
         else { d_shell = min(d_sub, lim); }
       }
       else { d_shell = min(d_sub, lim); }
     }
     else {
-      /* Outward: union = top edge, intersection = bottom edge */
+      /* Outward: start = union (top edge), end = intersection (bottom edge) */
       float d_union;
       if (shell_k_top > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_union = opSmoothUnion(d1, d2, shell_k_top); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_union = opChamferUnion(d1, d2, shell_k_top); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { d_union = opRoundUnion(d1, d2, shell_k_top); }
+        if (fb) {
+          /* Flip start = push-like: subtract then min */
+          float sub;
+          if (bt == SDF_BLEND_TYPE_SMOOTH) { sub = opSmoothSubtraction(d2, d1, shell_k_top); }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            if (has_smooth) { sub = opSmoothChamferSubtraction(d2, d1, shell_k_top, k2, k3); }
+            else { sub = opChamferSubtraction(d2, d1, shell_k_top); }
+          }
+          else {
+            if (has_smooth) { sub = opSmoothRoundSubtraction(d2, d1, shell_k_top, k2, k3); }
+            else { sub = opRoundSubtraction(d2, d1, shell_k_top); }
+          }
+          d_union = min(sub, d2);
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          d_union = opSmoothUnion(d1, d2, shell_k_top);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth) { d_union = opSmoothChamferUnion(d1, d2, shell_k_top, k2, k3); }
+          else { d_union = opChamferUnion(d1, d2, shell_k_top); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          if (has_smooth) { d_union = opSmoothRoundUnion(d1, d2, shell_k_top, k2, k3); }
+          else { d_union = opRoundUnion(d1, d2, shell_k_top); }
+        }
         else { d_union = min(d1, d2); }
       }
       else { d_union = min(d1, d2); }
+
       float lim = d1 - h;
-      if (lk_bot > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_shell = opSmoothIntersection(d_union, lim, lk_bot); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_shell = opChamferIntersection(d_union, lim, lk_bot); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { d_shell = opRoundIntersection(d_union, lim, lk_bot); }
+      if (shell_k_bot > 0.0f && bt > 0) {
+        if (fbe) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) {
+            float esub = opSmoothSubtraction(lim, d_union, shell_k_bot);
+            d_shell = max(esub, lim);
+          }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            float esub;
+            if (has_smooth_end) { esub = opSmoothChamferSubtraction(lim, d_union, shell_k_bot, k4, k5); }
+            else { esub = opChamferSubtraction(lim, d_union, shell_k_bot); }
+            d_shell = max(esub, lim);
+          }
+          else {
+            if (has_smooth_end) { d_shell = opSmoothRoundIntersectionInverted(d_union, lim, shell_k_bot, k4, k5); }
+            else { d_shell = opRoundIntersection(d_union, lim, shell_k_bot); }
+          }
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) {
+          d_shell = opSmoothIntersection(d_union, lim, shell_k_bot);
+        }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth_end) { d_shell = opSmoothChamferIntersection(d_union, lim, shell_k_bot, k4, k5); }
+          else { d_shell = opChamferIntersection(d_union, lim, shell_k_bot); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          d_shell = opSmoothIntersection(d_union, lim, shell_k_bot);
+        }
         else { d_shell = max(d_union, lim); }
       }
       else { d_shell = max(d_union, lim); }
     }
 
     if (shell_mode == SDF_SHELL_MODE_AVOID) {
-      /* Full shell computed, now carve it by d1. */
       float carved;
       if (k > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) {
           carved = opSmoothSubtraction(d1, d_shell, k);
         }
         else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-          carved = opChamferSubtraction(d1, d_shell, k);
+          if (has_smooth) { carved = opSmoothChamferSubtraction(d1, d_shell, k, k2, k3); }
+          else { carved = opChamferSubtraction(d1, d_shell, k); }
         }
         else {
-          carved = opRoundSubtraction(d1, d_shell, k);
+          if (has_smooth) { carved = opSmoothRoundSubtraction(d1, d_shell, k, k2, k3); }
+          else { carved = opRoundSubtraction(d1, d_shell, k); }
         }
       }
       else {
@@ -1372,7 +1469,7 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
 
     return d_shell;
   }
-  return d1; /* Fallback for unknown ops. */
+  return d1;
 }
 
 float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
@@ -1586,7 +1683,8 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
         scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
         grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
-        grp.chamfer_k2, grp.chamfer_k3);
+        grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5,
+        grp.flip_blend, grp.flip_blend_end);
     float t = csgColorFactor(prev, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
                              grp.shell_distance, grp.shell_op);
     out_color = mix(out_color, grp_color, t);
@@ -1604,7 +1702,8 @@ void flushGroupDist(int gid, float grp_dist, inout float scene_dist)
         scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
         grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
-        grp.chamfer_k2, grp.chamfer_k3);
+        grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5,
+        grp.flip_blend, grp.flip_blend_end);
   }
 }
 

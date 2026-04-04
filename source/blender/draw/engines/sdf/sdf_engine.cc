@@ -396,6 +396,10 @@ class Instance : public DrawEngine {
     gpu_obj.shell_blend_bottom = sdf_data->shell_blend_bottom;
     gpu_obj.chamfer_k2 = sdf_data->chamfer_k2;
     gpu_obj.chamfer_k3 = sdf_data->chamfer_k3;
+    gpu_obj.chamfer_k4 = sdf_data->chamfer_k4;
+    gpu_obj.chamfer_k5 = sdf_data->chamfer_k5;
+    gpu_obj.flip_blend = sdf_data->flip_blend;
+    gpu_obj.flip_blend_end = sdf_data->flip_blend_end;
 
     /* Early AABB + frustum cull (before expensive polygon/modifier work) */
     {
@@ -1143,6 +1147,10 @@ class Instance : public DrawEngine {
         gpu_grp.shell_blend_bottom = group->shell_blend_bottom;
         gpu_grp.chamfer_k2 = group->chamfer_k2;
         gpu_grp.chamfer_k3 = group->chamfer_k3;
+        gpu_grp.chamfer_k4 = group->chamfer_k4;
+        gpu_grp.chamfer_k5 = group->chamfer_k5;
+        gpu_grp.flip_blend = group->flip_blend;
+        gpu_grp.flip_blend_end = group->flip_blend_end;
         gpu_grp.first_object = obj_offset;
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(
@@ -1234,9 +1242,19 @@ class Instance : public DrawEngine {
         float max_blend = grp_blend;
         int start = groups_gpu_[gi].first_object;
         int cnt = groups_gpu_[gi].object_count;
+        bool has_shell = false;
+        float grp_diag = 0.0f;
         for (int m = start; m < start + cnt; m++) {
           float b = (objects_[m].blend_type == 0) ? 0.0f : objects_[m].blend;
           max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
+          if (objects_[m].csg_operation == SDF_CSG_SHELL) {
+            has_shell = true;
+          }
+          float3 ext = float3(objects_[m].bbox_max) - float3(objects_[m].bbox_min);
+          grp_diag = std::max(grp_diag, math::length(ext));
+        }
+        if (has_shell) {
+          max_blend = std::max(max_blend, grp_diag);
         }
         for (int m = start; m < start + cnt; m++) {
           objects_[m].max_group_blend = max_blend;
