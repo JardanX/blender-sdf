@@ -37,7 +37,7 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &layout = *panel->layout;
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
   layout.use_property_split_set(true);
-  layout.prop(ptr, "radius", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "offset", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   modifier_error_message_draw(layout, ptr);
 }
 
@@ -56,7 +56,7 @@ static void blend_read(BlendDataReader * /*reader*/, ModifierData * /*md*/) {}
 
 ModifierTypeInfo modifierType_SDFRound = {
     /*idname*/ "SDFRound",
-    /*name*/ N_("SDF Round"),
+    /*name*/ N_("SDF Expand/Shrink"),
     /*struct_name*/ "SDFRoundModifierData",
     /*struct_size*/ sizeof(SDFRoundModifierData),
     /*srna*/ &RNA_SDFRoundModifier,

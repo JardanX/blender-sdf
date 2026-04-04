@@ -20,10 +20,10 @@ shared int s_numCandidates;
 float4 evalLocalGrad(float3 lp, SDFObjectGPU obj, float scale)
 {
   float4 dg = evalPrimitiveGrad(lp, obj, sdf_ray_epsilon);
-  dg.x *= scale;
   if (obj.modifier_count > 0) {
     dg = applyDistanceModifiersGrad(dg, obj.modifier_start, obj.modifier_count);
   }
+  dg.x *= scale;
   return dg;
 }
 

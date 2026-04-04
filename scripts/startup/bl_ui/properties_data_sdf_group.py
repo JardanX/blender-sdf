@@ -131,7 +131,7 @@ class SDFGROUP_OT_modifier_add(Operator):
             ('BEND', "Bend", "Bend around an axis", 'MOD_SIMPLEDEFORM', 2),
             ('ELONGATE', "Elongate", "Stretch along axes", 'MOD_LENGTH', 3),
             ('HOLLOW', "Hollow", "Make hollow with wall thickness", 'MOD_SOLIDIFY', 4),
-            ('ROUND', "Round", "Additional rounding", 'MOD_SMOOTH', 5),
+            ('ROUND', "Expand/Shrink", "Expand or shrink the SDF surface", 'MOD_SMOOTH', 5),
             ('ONION', "Onion", "Concentric shells", 'MOD_SOLIDIFY', 6),
             ('BEVEL', "Bevel", "Bevel/round edges", 'MOD_BEVEL', 7),
             ('ARRAY', "Array", "Duplicate geometry", 'MOD_ARRAY', 8),
@@ -214,7 +214,7 @@ class SDFGROUP_MT_modifier_add(Menu):
         layout.operator("sdf_group.modifier_add", text="Elongate", icon='MOD_LENGTH').type = 'ELONGATE'
         layout.separator()
         layout.operator("sdf_group.modifier_add", text="Hollow", icon='MOD_SOLIDIFY').type = 'HOLLOW'
-        layout.operator("sdf_group.modifier_add", text="Round", icon='MOD_SMOOTH').type = 'ROUND'
+        layout.operator("sdf_group.modifier_add", text="Expand/Shrink", icon='MOD_SMOOTH').type = 'ROUND'
         layout.operator("sdf_group.modifier_add", text="Onion", icon='MOD_SOLIDIFY').type = 'ONION'
         layout.separator()
         layout.operator("sdf_group.modifier_add", text="Bevel", icon='MOD_BEVEL').type = 'BEVEL'
@@ -287,7 +287,7 @@ class DATA_PT_sdf_group_modifiers(SDFGroupButtonsPanel, Panel):
             elif mod.type == 'HOLLOW':
                 col.prop(mod, "thickness")
             elif mod.type == 'ROUND':
-                col.prop(mod, "radius")
+                col.prop(mod, "offset")
             elif mod.type == 'ONION':
                 col.prop(mod, "thickness")
             elif mod.type == 'BEVEL':

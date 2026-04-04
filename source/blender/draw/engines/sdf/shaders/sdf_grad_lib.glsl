@@ -718,18 +718,21 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
           float sp = length(aoff);
           if (sp > 0.0001f && cnt > 0.5f) {
             float3 adir = aoff / sp;
-            float nt = dot(p, adir) / sp;
-            float aid = round(nt);
-            aid = clamp(aid, 0.0f, max(0.0f, cnt - 1.0f));
+            float t_orig = dot(p, adir);
+            float nt = t_orig / sp;
+            float aid = clamp(round(nt), 0.0f, cnt - 1.0f);
             float lt = nt - aid;
-            if (abk > 0.001f) {
-              float kh = abk / (sp * 2.0f);
-              float alt = abs(lt);
-              float db = 0.5f - alt;
-              float sd = sabs(db, kh);
-              lt = sign(lt + 1e-8f) * (0.5f - sd);
+            if (cnt > 1.5f && fract(aid * 0.5f) > 0.25f) {
+              lt = -lt;
             }
-            p = p - adir * (aid + lt) * sp;
+            if (cnt > 1.5f) {
+              float dr = (0.5f - lt) * sp;
+              float pr = dr - sabs(dr, abk);
+              float dl = (0.5f + lt) * sp;
+              float pl = dl - sabs(dl, abk);
+              lt += (pr - pl) / sp;
+            }
+            p += adir * (lt * sp - t_orig);
           }
         }
         else if (mflags == SDF_MOD_ARRAY_RADIAL) {
@@ -739,12 +742,20 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
             float na = atan(p.y, p.x) / aa;
             float aid = round(na);
             float la = na - aid;
-            if (abk > 0.001f) {
-              float kh = abk / (aa * 2.0f);
-              float ala = abs(la);
-              float db = 0.5f - ala;
-              float sd = sabs(db, kh);
-              la = sign(la + 1e-8f) * (0.5f - sd);
+            float arc = aa * max(arad, 0.0001f);
+            float angle_p1 = atan(p.y, p.x);
+            if (cnt > 1.5f) {
+              bool mir = fract(abs(aid) * 0.5f) > 0.25f;
+              bool odd = fract(cnt * 0.5f) > 0.25f;
+              bool at_def = odd && (abs(angle_p1) > SDF_PI - aa * 0.5f);
+              if (at_def) { la = abs(la); }
+              else if (mir) { la = -la; }
+              float abk_eff = abk;
+              float d_r = (0.5f - la) * arc;
+              float pr = d_r - sabs(d_r, abk_eff);
+              float d_l = (0.5f + la) * arc;
+              float pl = d_l - sabs(d_l, abk_eff);
+              la += (pr - pl) / arc;
             }
             float fa = la * aa;
             float r = length(p.xy);
@@ -831,63 +842,100 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
       int arr_bt = smod.header.z;
       float bk = (arr_bt > 0 && arr_blend > 0.001f) ? arr_blend : 0.0f;
       if (mflags == SDF_MOD_ARRAY_LINEAR) {
-        /* sabs-boundary Jacobian: J = I - (1 - sabs'(d_bnd, k)) * dir ⊗ dir
-         * sabs' ∈ [0,1] → (1 - sabs') ∈ [0,1] → well-behaved. */
         float3 aoff = smod.params.yzw;
         float sp = length(aoff);
-        if (sp > 0.0001f && cnt > 0.5f && bk > 0.001f) {
+        if (sp > 0.0001f && cnt > 0.5f && cnt > 1.5f) {
           float3 dir = aoff / sp;
           float nt = dot(pp, dir) / sp;
-          float aid = round(nt);
+          float aid = clamp(round(nt), 0.0f, cnt - 1.0f);
           float lt = nt - aid;
-          float kh = bk / (sp * 2.0f);
-          float abs_lt = abs(lt);
-          float d_bnd = 0.5f - abs_lt;
-          float h_sabs = (kh > 0.0001f) ? clamp(0.5f + 0.5f * d_bnd / kh, 0.0f, 1.0f) : 1.0f;
-          float sabs_deriv = 2.0f * h_sabs - 1.0f;
-          float fold_deriv = sabs_deriv;
+
+          float flip = 1.0f;
+          if (fract(aid * 0.5f) > 0.25f) { lt = -lt; flip = -1.0f; }
+
+          float d_r = (0.5f - lt) * sp;
+          float d_l = (0.5f + lt) * sp;
+          float h_r = (bk > 0.001f) ? clamp(0.5f + 0.5f * d_r / bk, 0.0f, 1.0f) : ((d_r >= 0.0f) ? 1.0f : 0.0f);
+          float h_l = (bk > 0.001f) ? clamp(0.5f + 0.5f * d_l / bk, 0.0f, 1.0f) : ((d_l >= 0.0f) ? 1.0f : 0.0f);
+          float deriv = flip * ((2.0f * h_r - 1.0f) + (2.0f * h_l - 1.0f) - 1.0f);
+
           float g_dir = dot(grad, dir);
-          grad = grad - (1.0f - fold_deriv) * g_dir * dir;
+          grad += dir * (deriv - 1.0f) * g_dir;
         }
       }
       else if (mflags == SDF_MOD_ARRAY_RADIAL) {
+        float arad = smod.params.y;
         if (cnt > 0.5f) {
           float aa = (2.0f * SDF_PI) / cnt;
-          float na = atan(pp.y, pp.x) / aa;
+          float angle = atan(pp.y, pp.x);
+          float na = angle / aa;
           float aid = round(na);
           float la = na - aid;
-          if (bk > 0.001f) {
-            float kh = bk / (aa * 2.0f);
-            float abs_la = abs(la);
-            float d_bnd = 0.5f - abs_la;
-            float h_sabs = (kh > 0.0001f) ? clamp(0.5f + 0.5f * d_bnd / kh, 0.0f, 1.0f) : 1.0f;
-            float sabs_deriv = 2.0f * h_sabs - 1.0f;
-            la = sign(la + 1e-8f) * (0.5f - sabs(d_bnd, kh));
-          }
-          float cell_angle = (aid + la) * aa;
-          float ca = cos(cell_angle), sa = sin(cell_angle);
-          float gx = grad.x, gy = grad.y;
-          grad.x = ca * gx - sa * gy;
-          grad.y = sa * gx + ca * gy;
+
+          /* 1. Inverse rotation offset */
           float3 rot = smod.params2.yzw;
           if (abs(rot.z) > 0.0001f) {
             float cz = cos(-rot.z), sz = sin(-rot.z);
-            gx = grad.x; gy = grad.y;
+            float gx = grad.x, gy = grad.y;
             grad.x = cz * gx - sz * gy;
             grad.y = sz * gx + cz * gy;
           }
           if (abs(rot.y) > 0.0001f) {
             float cy = cos(-rot.y), sy = sin(-rot.y);
-            gx = grad.x; float gz = grad.z;
+            float gx = grad.x; float gz = grad.z;
             grad.x = cy * gx + sy * gz;
             grad.z = -sy * gx + cy * gz;
           }
           if (abs(rot.x) > 0.0001f) {
             float cx = cos(-rot.x), sx = sin(-rot.x);
-            gy = grad.y; float gz = grad.z;
+            float gy = grad.y; float gz = grad.z;
             grad.y = cx * gy - sx * gz;
             grad.z = sx * gy + cx * gz;
           }
+
+          /* Recompute fold_a and δ from forward pass.
+           * J = R(fold_a) · diag(1, δ) · R(-angle)
+           * J^T = R(angle) · diag(1, δ) · R(-fold_a) */
+          float arc = aa * max(arad, 0.0001f);
+          float fold_local = la;
+          float delta = 1.0f;
+          if (cnt > 1.5f) {
+            bool mir = fract(abs(aid) * 0.5f) > 0.25f;
+            bool odd = fract(cnt * 0.5f) > 0.25f;
+            bool at_def = odd && (abs(angle) > SDF_PI - aa * 0.5f);
+            float msign = at_def ? ((la >= 0.0f) ? 1.0f : -1.0f) : (mir ? -1.0f : 1.0f);
+
+            fold_local = la * msign;
+
+            float eff_bk = bk;
+            float d_r = (0.5f - fold_local) * arc;
+            float d_l = (0.5f + fold_local) * arc;
+            float h_r = clamp(0.5f + 0.5f * d_r / eff_bk, 0.0f, 1.0f);
+            float h_l = clamp(0.5f + 0.5f * d_l / eff_bk, 0.0f, 1.0f);
+            float bnd_deriv = (2.0f * h_r - 1.0f) + (2.0f * h_l - 1.0f) - 1.0f;
+
+            float pull_r = d_r - sabs(d_r, eff_bk);
+            float pull_l = d_l - sabs(d_l, eff_bk);
+            fold_local += (pull_r - pull_l) / arc;
+
+            delta = msign * bnd_deriv;
+          }
+          float fold_a = fold_local * aa;
+
+          /* 2. R(-fold_a): rotate into radial/tangential frame */
+          float cf = cos(fold_a), sf = sin(fold_a);
+          float gx = grad.x, gy = grad.y;
+          grad.x =  cf * gx + sf * gy;
+          grad.y = -sf * gx + cf * gy;
+
+          /* 3. Scale tangential component by fold derivative */
+          grad.y *= delta;
+
+          /* 4. R(+angle): rotate back to input frame */
+          float ca = cos(angle), sa = sin(angle);
+          gx = grad.x; gy = grad.y;
+          grad.x = ca * gx - sa * gy;
+          grad.y = sa * gx + ca * gy;
         }
       }
     }

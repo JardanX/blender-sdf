@@ -120,7 +120,7 @@ typedef struct SDFModifier {
    * Bend:     [0]=strength, [1]=axis, [2..4]=origin xyz
    * Elongate: [0..2]=per-axis stretch
    * Hollow:   [0]=thickness
-   * Round:    [0]=radius
+   * Expand/Shrink: [0]=offset
    * Onion:    [0]=thickness
    * Array:    [0]=count, [1..3]=offset/radius, [4]=blend, [5..7]=rotation offset */
   float params[8];

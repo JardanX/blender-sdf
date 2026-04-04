@@ -174,7 +174,7 @@ static const char *sdf_modifier_type_name(int type)
     case SDF_MOD_HOLLOW:
       return "Hollow";
     case SDF_MOD_ROUND:
-      return "Round";
+      return "Expand/Shrink";
     case SDF_MOD_ONION:
       return "Onion";
     case SDF_MOD_BEVEL:

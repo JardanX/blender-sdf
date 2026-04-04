@@ -3654,7 +3654,7 @@ struct SDFHollowModifierData {
 
 struct SDFRoundModifierData {
   ModifierData modifier;
-  float radius = 0.0f;
+  float offset = 0.0f;
   char _pad[4] = {};
 };
 
