@@ -74,7 +74,6 @@ float4 evalObjectGrad(float3 world_pos, int i)
   /* Transform to local space */
   float3 p = (inv * float4(world_pos - off, 1.0f)).xyz;
   float3 orig_p = p;
-
   float4 dg;
   float domain_scale = 1.0f;
   if (obj.modifier_count > 0) {
@@ -218,75 +217,9 @@ void main()
     }
   }
 
-  float3 n;
-
-  /* DEBUG: 6-tap central differences on the full scene SDF (brute force reference). */
-  if (debug_fd_normals != 0) {
-    float eps = sdf_ray_epsilon * 5.0f;
-    float3 offsets[6] = float3[6](
-        float3(eps, 0.0f, 0.0f), float3(-eps, 0.0f, 0.0f),
-        float3(0.0f, eps, 0.0f), float3(0.0f, -eps, 0.0f),
-        float3(0.0f, 0.0f, eps), float3(0.0f, 0.0f, -eps));
-    float d[6];
-    for (int t = 0; t < 6; t++) {
-      float3 sp = p + offsets[t];
-      float sd_acc = 1e10f;
-      int cg = -2;
-      float gd = 1e10f;
-      bool gh = false;
-      for (int u2 = 0; u2 < nc; u2++) {
-        int j = s_candidates[u2];
-        SDFObjectAABB ab = object_aabbs[j];
-        int gj = ab.group_id;
-        if (gj != cg && gh) {
-          if (sd_acc >= 1e9f) { sd_acc = gd; }
-          else {
-            SDFGroupGPU gg = groups[cg];
-            sd_acc = combineCSG(sd_acc, gd, gg.csg_operation, gg.blend_type, gg.blend,
-                                gg.shell_distance, gg.shell_mode, gg.shell_op,
-                                gg.shell_blend_top, gg.shell_blend_bottom,
-                                gg.chamfer_k2, gg.chamfer_k3);
-          }
-          gh = false; gd = 1e10f;
-        }
-        float da2 = point_aabb_dist(sp, ab.bbox_min.xyz, ab.bbox_max.xyz);
-        if (da2 > max(margin, ab.max_group_blend + margin)) { cg = gj; continue; }
-        SDFObjectGPU ob = objects[j];
-        float3 lp2 = (ob.inverse_matrix * float4(sp - ob.position.xyz, 1.0f)).xyz;
-        float dd = evalPrimitive(lp2, ob);
-        cg = gj;
-        int co = ob.csg_operation, cb = ob.blend_type;
-        float cl = ob.blend, cs = ob.shell_distance;
-        int cm = ob.shell_mode, cx = ob.shell_op;
-        float ct = ob.shell_blend_top, cv = ob.shell_blend_bottom, c2 = ob.chamfer_k2, c3 = ob.chamfer_k3;
-        if (gj < 0) {
-          if (sd_acc >= 1e9f) { if (co == 0) { sd_acc = dd; } }
-          else { sd_acc = combineCSG(sd_acc, dd, co, cb, cl, cs, cm, cx, ct, cv, c2, c3); }
-        }
-        else {
-          if (!gh) { if (co != SDF_CSG_OP_SUBTRACT && co != SDF_CSG_OP_SHELL && co != SDF_CSG_OP_INTERSECT) { gd = dd; gh = true; } }
-          else { gd = combineCSG(gd, dd, co, cb, cl, cs, cm, cx, ct, cv, c2, c3); }
-        }
-      }
-      if (gh) {
-        if (sd_acc >= 1e9f) { sd_acc = gd; }
-        else {
-          SDFGroupGPU gg = groups[cg];
-          sd_acc = combineCSG(sd_acc, gd, gg.csg_operation, gg.blend_type, gg.blend,
-                              gg.shell_distance, gg.shell_mode, gg.shell_op,
-                              gg.shell_blend_top, gg.shell_blend_bottom,
-                              gg.chamfer_k2, gg.chamfer_k3);
-        }
-      }
-      d[t] = sd_acc;
-    }
-    n = normalize(float3(d[0] - d[1], d[2] - d[3], d[4] - d[5]));
-  }
-  else {
-    n = scene_dg.yzw;
-    float nl = length(n);
-    n = nl > 1e-8f ? n / nl : float3(0.0f, 0.0f, 1.0f);
-  }
+  float3 n = scene_dg.yzw;
+  float nl = length(n);
+  n = nl > 1e-8f ? n / nl : float3(0.0f, 0.0f, 1.0f);
 
   if (any(isnan(n))) {
     n = float3(0.0f, 0.0f, 1.0f);
