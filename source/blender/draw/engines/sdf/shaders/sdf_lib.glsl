@@ -160,12 +160,10 @@ float sdAdvancedBox(float3 p,
   float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
   float2 sz = size.xy * tapFactor;
 
-  /* Lipschitz correction: the per-slice taper creates a gradient magnitude of
-   * sqrt(1 + slope^2) on the side walls. Dividing uniformly by this value
-   * ensures the SDF is globally Lipschitz-1, which is required for safe
-   * over-relaxation sphere tracing. This slightly underestimates distance
-   * at the caps, costing a few extra steps, but avoids crack artifacts. */
-  float slope = max(size.x, size.y) * (tapTop + tapBot) / (2.0f * max(taperZ, 0.001f));
+  /* Lipschitz correction: at box corners both X and Y taper slopes contribute
+   * to the Z gradient, giving magnitude sqrt(1 + slope_x^2 + slope_y^2).
+   * Use length(size.xy) to capture the worst-case corner gradient. */
+  float slope = length(size.xy) * (tapTop + tapBot) / (2.0f * max(taperZ, 0.001f));
   float lipschitz = sqrt(1.0f + slope * slope);
 
   float maxR = min(sz.x, sz.y);
@@ -865,7 +863,7 @@ float opSmoothRoundIntersection(float d1, float d2, float r, float k2, float k3)
 #define SDF_MOD_TWIST 1
 #define SDF_MOD_BEND 2
 #define SDF_MOD_ELONGATE 3
-#define SDF_MOD_HOLLOW 4
+#define SDF_MOD_SOLIDIFY 4
 #define SDF_MOD_ROUND 5
 #define SDF_MOD_ONION 6
 #define SDF_MOD_BEVEL 7
@@ -1495,20 +1493,59 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
  * Apply distance modifiers to SDF distance (after primitive evaluation).
  * Applied in forward stack order.
  */
-float applyDistanceModifiers(float dist, int mod_start, int mod_count)
+float applyDistanceModifiers(float dist, float3 p, SDFObjectGPU obj, int mod_start, int mod_count)
 {
   for (int i = mod_start; i < mod_start + mod_count; i++) {
     SDFModifierGPU smod = sdf_modifiers[i];
     int mtype = smod.header.x;
 
-    if (mtype == SDF_MOD_HOLLOW) {
-      dist = abs(dist) - smod.params.x;
+    if (mtype == SDF_MOD_SOLIDIFY) {
+      float thickness = smod.params.x;
+      float bevel = smod.params.z;
+      int mode = smod.header.y;
+
+      if (mode == 0) {
+        /* Closed */
+        float d_inner = -(dist + thickness);
+        if (bevel > 0.0) {
+          dist = opSmoothIntersection(dist, d_inner, bevel);
+        }
+        else {
+          dist = max(dist, d_inner);
+        }
+      }
+      else {
+        /* Open: axis-scaled inner to punch through caps */
+        int axis = smod.header.z;
+        float inner_scale = smod.params.y;
+        float3 p_inner = p;
+        p_inner[axis] *= inner_scale;
+        float d_inner = -(evalPrimitiveOnly(obj, p_inner) + thickness);
+        if (bevel > 0.0) {
+          dist = opSmoothIntersection(dist, d_inner, bevel);
+        }
+        else {
+          dist = max(dist, d_inner);
+        }
+      }
     }
     else if (mtype == SDF_MOD_ROUND) {
       dist -= smod.params.x;
     }
     else if (mtype == SDF_MOD_ONION) {
-      dist = abs(dist) - smod.params.x;
+      int layers = max(smod.header.y, 1);
+      float cut_half = max(smod.params.x, 0.001) * 0.5;
+      float min_ext = smod.params.y;
+      float original_d = dist;
+      if (layers > 1) {
+        float spacing = min_ext / float(layers);
+        float depth = max(-dist, 0.0);
+        float max_cut = float(layers - 1) * spacing;
+        float nearest = clamp(floor(depth / spacing + 0.5) * spacing, spacing, max_cut);
+        float cut_dist = abs(depth - nearest);
+        float onion_d = cut_half - cut_dist;
+        dist = max(original_d, onion_d);
+      }
     }
   }
   return dist;
@@ -1524,7 +1561,7 @@ float evalObjectSDF(SDFObjectGPU obj, float3 p)
   float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
   p = dm.xyz;
   float d = evalPrimitiveOnly(obj, p);
-  d = applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
+  d = applyDistanceModifiers(d, p, obj, obj.modifier_start, obj.modifier_count);
   return d * dm.w;
 }
 

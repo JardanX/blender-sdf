@@ -37,7 +37,8 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &layout = *panel->layout;
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
   layout.use_property_split_set(true);
-  layout.prop(ptr, "thickness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "layers", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "gap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   modifier_error_message_draw(layout, ptr);
 }
 

@@ -360,8 +360,8 @@ static const char *sdf_group_modifier_type_name(int type)
       return "Bend";
     case SDF_MOD_ELONGATE:
       return "Elongate";
-    case SDF_MOD_HOLLOW:
-      return "Hollow";
+    case SDF_MOD_SOLIDIFY:
+      return "Solidify";
     case SDF_MOD_ROUND:
       return "Expand/Shrink";
     case SDF_MOD_ONION:
@@ -398,7 +398,7 @@ SDFModifier *BKE_sdf_group_modifier_add(SDFGroup *group, int type)
       mod->params[1] = 0.0f;
       mod->params[2] = 0.0f;
       break;
-    case SDF_MOD_HOLLOW:
+    case SDF_MOD_SOLIDIFY:
       mod->params[0] = 0.1f;
       break;
     case SDF_MOD_ROUND:

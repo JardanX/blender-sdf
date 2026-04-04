@@ -293,7 +293,7 @@ void modifier_type_init(ModifierTypeInfo *types[])
   INIT_TYPE(SDFTwist);
   INIT_TYPE(SDFBend);
   INIT_TYPE(SDFElongate);
-  INIT_TYPE(SDFHollow);
+  INIT_TYPE(SDFSolidify);
   INIT_TYPE(SDFRound);
   INIT_TYPE(SDFOnion);
   INIT_TYPE(SDFBevel);

@@ -105,7 +105,7 @@ extern ModifierTypeInfo modifierType_SDFMirror;
 extern ModifierTypeInfo modifierType_SDFTwist;
 extern ModifierTypeInfo modifierType_SDFBend;
 extern ModifierTypeInfo modifierType_SDFElongate;
-extern ModifierTypeInfo modifierType_SDFHollow;
+extern ModifierTypeInfo modifierType_SDFSolidify;
 extern ModifierTypeInfo modifierType_SDFRound;
 extern ModifierTypeInfo modifierType_SDFOnion;
 extern ModifierTypeInfo modifierType_SDFBevel;

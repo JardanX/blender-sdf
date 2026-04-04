@@ -313,7 +313,7 @@ class OBJECT_MT_modifier_add_sdf_generate(ModifierAddMenu, Menu):
         self.operator_modifier_add(layout, 'SDF_MIRROR')
         self.operator_modifier_add(layout, 'SDF_ARRAY')
         layout.separator()
-        self.operator_modifier_add(layout, 'SDF_HOLLOW')
+        self.operator_modifier_add(layout, 'SDF_SOLIDIFY')
         self.operator_modifier_add(layout, 'SDF_ROUND')
         self.operator_modifier_add(layout, 'SDF_ONION')
         self.operator_modifier_add(layout, 'SDF_BEVEL')

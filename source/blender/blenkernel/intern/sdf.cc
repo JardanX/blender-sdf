@@ -171,8 +171,8 @@ static const char *sdf_modifier_type_name(int type)
       return "Bend";
     case SDF_MOD_ELONGATE:
       return "Elongate";
-    case SDF_MOD_HOLLOW:
-      return "Hollow";
+    case SDF_MOD_SOLIDIFY:
+      return "Solidify";
     case SDF_MOD_ROUND:
       return "Expand/Shrink";
     case SDF_MOD_ONION:

@@ -129,7 +129,7 @@ enum ModifierType {
   eModifierType_SDFTwist = 88,
   eModifierType_SDFBend = 89,
   eModifierType_SDFElongate = 90,
-  eModifierType_SDFHollow = 91,
+  eModifierType_SDFSolidify = 91,
   eModifierType_SDFRound = 92,
   eModifierType_SDFOnion = 93,
   eModifierType_SDFBevel = 94,
@@ -3646,10 +3646,17 @@ struct SDFElongateModifierData {
   char _pad[4] = {};
 };
 
-struct SDFHollowModifierData {
+enum eSDFSolidifyMode {
+  SDF_SOLIDIFY_CLOSED = 0,
+  SDF_SOLIDIFY_OPEN = 1,
+};
+
+struct SDFSolidifyModifierData {
   ModifierData modifier;
   float thickness = 0.1f;
-  char _pad[4] = {};
+  float bevel = 0.0f;
+  int mode = 0;
+  int axis = 2;
 };
 
 struct SDFRoundModifierData {
@@ -3660,8 +3667,8 @@ struct SDFRoundModifierData {
 
 struct SDFOnionModifierData {
   ModifierData modifier;
-  float thickness = 0.1f;
-  char _pad[4] = {};
+  float gap = 0.1f;
+  int layers = 2;
 };
 
 struct SDFBevelModifierData {

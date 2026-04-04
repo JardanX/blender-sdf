@@ -20,7 +20,7 @@ using blender::int4;
 #define SDF_MOD_TWIST 1
 #define SDF_MOD_BEND 2
 #define SDF_MOD_ELONGATE 3
-#define SDF_MOD_HOLLOW 4
+#define SDF_MOD_SOLIDIFY 4
 #define SDF_MOD_ROUND 5
 #define SDF_MOD_ONION 6
 #define SDF_MOD_MIRROR_X 1
@@ -222,12 +222,65 @@ inline DomainResult applyDomainMods(float3 p,
 
 /* Distance modifiers */
 
-inline float applyDistMods(float dist, const SDFModifierGPU *mods, int mod_start, int mod_count)
+inline float applyDistMods(float dist,
+                           float3 p,
+                           const SDFObjectGPU &obj,
+                           const SDFModifierGPU *mods,
+                           int mod_start,
+                           int mod_count,
+                           bool skip_shell = false)
 {
   for (int i = mod_start; i < mod_start + mod_count; i++) {
     int mtype = mods[i].header.x;
-    if (mtype == SDF_MOD_HOLLOW || mtype == SDF_MOD_ONION) {
-      dist = fabsf(dist) - mods[i].params.x;
+    if ((mtype == SDF_MOD_SOLIDIFY || mtype == SDF_MOD_ONION) && skip_shell) {
+      continue;
+    }
+    if (mtype == SDF_MOD_SOLIDIFY) {
+      int mode = mods[i].header.y;
+      float thickness = mods[i].params.x;
+      float bevel = mods[i].params.z;
+
+      if (mode == 0) {
+        float d_inner = -(dist + thickness);
+        if (bevel > 0.0001f) {
+          float h = math::clamp(0.5f - 0.5f * (d_inner - dist) / bevel, 0.0f, 1.0f);
+          dist = math::interpolate(d_inner, dist, h) + bevel * h * (1.0f - h);
+        }
+        else {
+          dist = fmaxf(dist, d_inner);
+        }
+      }
+      else {
+        int axis = mods[i].header.z;
+        float inner_scale = mods[i].params.y;
+        float3 p_inner = p;
+        p_inner[axis] *= inner_scale;
+        float d_eval = evalPrimitive(obj, p_inner);
+        float d_inner = -(d_eval + thickness);
+        if (bevel > 0.0001f) {
+          float h = math::clamp(0.5f - 0.5f * (d_inner - dist) / bevel, 0.0f, 1.0f);
+          dist = math::interpolate(d_inner, dist, h) + bevel * h * (1.0f - h);
+        }
+        else {
+          dist = fmaxf(dist, d_inner);
+        }
+      }
+    }
+    else if (mtype == SDF_MOD_ONION) {
+      int layers = mods[i].header.y > 0 ? mods[i].header.y : 1;
+      float cut_half = fmaxf(mods[i].params.x, 0.001f) * 0.5f;
+      float min_ext = mods[i].params.y;
+      float original_d = dist;
+      if (layers > 1) {
+        float spacing = min_ext / float(layers);
+        float depth = fmaxf(-dist, 0.0f);
+        float max_cut = float(layers - 1) * spacing;
+        float nearest = math::clamp(
+            floorf(depth / spacing + 0.5f) * spacing, spacing, max_cut);
+        float cut_dist = fabsf(depth - nearest);
+        float onion_d = cut_half - cut_dist;
+        dist = fmaxf(original_d, onion_d);
+      }
     }
     else if (mtype == SDF_MOD_ROUND) {
       dist -= mods[i].params.x;
@@ -241,12 +294,13 @@ inline float applyDistMods(float dist, const SDFModifierGPU *mods, int mod_start
 inline float evalObjectSDF(const SDFObjectGPU &obj,
                            const SDFModifierGPU *mods,
                            float3 local_pos,
-                           bool skip_mirror = false)
+                           bool skip_mirror = false,
+                           bool skip_shell = false)
 {
   DomainResult dm = applyDomainMods(
       local_pos, mods, obj.modifier_start, obj.modifier_count, obj.inverse_matrix, skip_mirror);
   float d = evalPrimitive(obj, dm.p);
-  return applyDistMods(d, mods, obj.modifier_start, obj.modifier_count);
+  return applyDistMods(d, dm.p, obj, mods, obj.modifier_start, obj.modifier_count, skip_shell);
 }
 
 }  // namespace blender::sdf_cpu
