@@ -33,6 +33,12 @@ void main()
     normal = float3(0.0f, 0.0f, 1.0f);
   }
 
+  /* Flip normal for backfaces (camera inside SDF) */
+  float3 V = drw_world_incident_vector(hit_pos);
+  if (dot(normal, V) < 0.0f) {
+    normal = -normal;
+  }
+
   /* Shading */
   ViewMatrices vm = drw_view();
   float3 obj_color = hit_color;

@@ -44,6 +44,9 @@ static void sdf_init_data(ID *id)
   SDF *sdf = id_cast<SDF *>(id);
   INIT_DEFAULT_STRUCT_AFTER(sdf, id);
 
+  sdf->chamfer_k4 = 0.01f;
+  sdf->chamfer_k5 = 0.01f;
+
   sdf->runtime = new bke::SDFRuntime();
 }
 
@@ -117,6 +120,9 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_pointer_array(reader, sdf->totcol, (void **)&sdf->mat);
   BLO_read_struct_list(reader, SDFModifier, &sdf->modifiers);
   BLO_read_struct_list(reader, SDFPolygonPoint, &sdf->polygon_points);
+
+  if (sdf->chamfer_k4 == 0.0f) { sdf->chamfer_k4 = 0.01f; }
+  if (sdf->chamfer_k5 == 0.0f) { sdf->chamfer_k5 = 0.01f; }
 
   sdf->runtime = new bke::SDFRuntime();
 }

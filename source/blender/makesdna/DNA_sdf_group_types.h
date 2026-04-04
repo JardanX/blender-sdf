@@ -56,6 +56,10 @@ typedef struct SDFGroup {
   float shell_blend_bottom = 0.1f;
   float chamfer_k2 = 0.01f;
   float chamfer_k3 = 0.01f;
+  float chamfer_k4 = 0.01f;
+  float chamfer_k5 = 0.01f;
+  int flip_blend = 0;
+  int flip_blend_end = 0;
 
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 

@@ -147,7 +147,7 @@ void main()
                                   grp.csg_operation, grp.blend_type, grp.blend,
                                   grp.shell_distance, grp.shell_mode, grp.shell_op,
                                   grp.shell_blend_top, grp.shell_blend_bottom,
-                                  grp.chamfer_k2, grp.chamfer_k3);
+                                  grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
       }
       grp_has_hit = false;
       grp_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
@@ -173,6 +173,10 @@ void main()
     float csb = objects[i].shell_blend_bottom;
     float ck2 = objects[i].chamfer_k2;
     float ck3 = objects[i].chamfer_k3;
+    float ck4 = objects[i].chamfer_k4;
+    float ck5 = objects[i].chamfer_k5;
+    int cfb = objects[i].flip_blend;
+    int cfbe = objects[i].flip_blend_end;
 
     if (gid < 0) {
       if (scene_dg.x >= 1e9f) {
@@ -183,7 +187,7 @@ void main()
         scene_dg = (dg.x < scene_dg.x) ? dg : scene_dg;
       }
       else {
-        scene_dg = combineCSGGrad(scene_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        scene_dg = combineCSGGrad(scene_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3, ck4, ck5, cfb, cfbe);
       }
     }
     else {
@@ -198,7 +202,7 @@ void main()
         grp_dg = (dg.x < grp_dg.x) ? dg : grp_dg;
       }
       else {
-        grp_dg = combineCSGGrad(grp_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3);
+        grp_dg = combineCSGGrad(grp_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3, ck4, ck5, cfb, cfbe);
       }
     }
   }
@@ -213,7 +217,7 @@ void main()
                                 grp.csg_operation, grp.blend_type, grp.blend,
                                 grp.shell_distance, grp.shell_mode, grp.shell_op,
                                 grp.shell_blend_top, grp.shell_blend_bottom,
-                                grp.chamfer_k2, grp.chamfer_k3);
+                                grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
     }
   }
 

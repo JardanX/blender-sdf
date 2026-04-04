@@ -49,36 +49,68 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
 
         layout.separator()
 
-        if grp.csg_operation == 'SHELL':
-            layout.label(text="Shell Mode")
-            layout.prop(grp, "shell_mode", text="")
-            layout.label(text="Shell Op")
-            layout.prop(grp, "shell_op", text="")
-
         layout.label(text="Blend Type")
         row = layout.row(align=True)
         row.scale_y = 1.4
         row.prop(grp, "blend_type", expand=True, icon_only=True)
 
-        if grp.blend_type != 'LINEAR':
-            if grp.csg_operation == 'SHELL':
-                layout.label(text="Blend Top")
-                layout.prop(grp, "shell_blend_top", text="")
-                layout.label(text="Blend Bottom")
-                layout.prop(grp, "shell_blend_bottom", text="")
+        is_shell = (grp.csg_operation == 'SHELL')
+        bt = grp.blend_type
+
+        if is_shell:
+            row = layout.row(align=True)
+            row.prop(grp, "shell_distance", text="Distance")
+            sub = row.row(align=True)
+            sub.scale_x = 0.9
+            sub.enabled = (grp.shell_mode != 'AVOID')
+            sub.prop_enum(grp, "shell_op", 'UNION', text="", icon='ADD')
+            sub.prop_enum(grp, "shell_op", 'SUBTRACTION', text="", icon='REMOVE')
+            row = layout.row(align=True)
+            row.prop(grp, "shell_mode", expand=True)
+
+        if bt != 'LINEAR':
+            col = layout.column(align=True)
+            col.separator()
+
+            if is_shell:
+                inward = (grp.shell_op == 'SUBTRACTION')
+                start_flip_on = (not inward) or (bt == 'ROUND')
+                end_flip_on = inward or (bt == 'ROUND')
+
+                row = col.row(align=True)
+                row.prop(grp, "shell_blend_top", text="Start")
+                sub = row.row()
+                sub.enabled = start_flip_on
+                sub.prop(grp, "flip_blend", text="", icon='UV_SYNC_SELECT', toggle=True)
+
+                row = col.row(align=True)
+                row.prop(grp, "shell_blend_bottom", text="End")
+                sub = row.row()
+                sub.enabled = end_flip_on
+                sub.prop(grp, "flip_blend_end", text="", icon='UV_SYNC_SELECT', toggle=True)
+
+                if grp.shell_mode == 'AVOID':
+                    col.prop(grp, "blend", text="Avoid Blend")
             else:
-                layout.label(text="Blend")
-                layout.prop(grp, "blend", text="")
+                col.prop(grp, "blend", text="Blend Strength")
 
-            if grp.blend_type in ('CHAMFER', 'ROUND'):
-                layout.label(text="Edge Smoothness")
-                row = layout.row(align=True)
-                row.prop(grp, "chamfer_k2", text="K2")
-                row.prop(grp, "chamfer_k3", text="K3")
-
-        if grp.csg_operation == 'SHELL':
-            layout.label(text="Distance")
-            layout.prop(grp, "shell_distance", text="")
+            if bt in ('CHAMFER', 'ROUND'):
+                col.separator()
+                if is_shell:
+                    col.label(text="Smooth Start")
+                    row = col.row(align=True)
+                    row.prop(grp, "chamfer_k2", text="K2")
+                    row.prop(grp, "chamfer_k3", text="K3")
+                    col.label(text="Smooth End")
+                    row = col.row(align=True)
+                    row.prop(grp, "chamfer_k4", text="K4")
+                    row.prop(grp, "chamfer_k5", text="K5")
+                else:
+                    lbl = "Smooth Chamfer" if bt == 'CHAMFER' else "Smooth Round"
+                    col.label(text=lbl)
+                    row = col.row(align=True)
+                    row.prop(grp, "chamfer_k2", text="K2")
+                    row.prop(grp, "chamfer_k3", text="K3")
 
 
 class DATA_PT_sdf_group_members(SDFGroupButtonsPanel, Panel):

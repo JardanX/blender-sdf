@@ -225,8 +225,8 @@ float4 opSubtractionGrad(float4 a, float4 b) { return (-b.x > a.x) ? negGrad(b) 
 /* Chamfer union with gradient. */
 float4 opChamferUnionGrad(float4 a, float4 b, float r)
 {
-  float chamfer = (a.x - r + b.x) * 0.5f;
-  float3 cg = (a.yzw + b.yzw) * 0.5f;
+  float chamfer = (a.x - r + b.x) * 0.70710678f;
+  float3 cg = (a.yzw + b.yzw) * 0.70710678f;
   float4 cp = float4(chamfer, cg);
   return opUnionGrad(opUnionGrad(a, b), cp);
 }
@@ -234,8 +234,8 @@ float4 opChamferUnionGrad(float4 a, float4 b, float r)
 /* Chamfer intersection with gradient. */
 float4 opChamferIntersectionGrad(float4 a, float4 b, float r)
 {
-  float chamfer = (a.x + r + b.x) * 0.5f;
-  float3 cg = (a.yzw + b.yzw) * 0.5f;
+  float chamfer = (a.x + r + b.x) * 0.70710678f;
+  float3 cg = (a.yzw + b.yzw) * 0.70710678f;
   float4 cp = float4(chamfer, cg);
   return opIntersectionGrad(opIntersectionGrad(a, b), cp);
 }
@@ -264,13 +264,13 @@ float4 opRoundUnionGrad(float4 dg1, float4 dg2, float r)
   q -= 2.0f * N * proj;
   q.y -= r;
   q.y = min(0.0f, q.y);
-  float ad = sign(q.x) * length(q);
+  float lq = length(q);
+  float ad = sign(q.x) * lq;
   float3 gad;
-  if (abs(q.x) < 1e-8f && abs(q.y) < 1e-8f) {
+  if (lq < 1e-6f) {
     gad = ga;
   }
   else {
-    float lq = max(length(q), 1e-8f);
     float dqdx, dqdy;
     if (proj < 0.0f) {
       dqdx = 0.5f;
@@ -281,8 +281,9 @@ float4 opRoundUnionGrad(float4 dg1, float4 dg2, float r)
       dqdy = 0.0f;
     }
     float qy_clamped = (q.y < 0.0f) ? 1.0f : 0.0f;
-    gad = (sign(q.x) / lq) * (q.x * (dqdx * ga + dqdy * gb) +
-                               q.y * qy_clamped * (dqdy * ga + dqdx * gb));
+    float s = (abs(q.x) > 1e-8f) ? sign(q.x) : 0.0f;
+    gad = (s / max(lq, 1e-8f)) * (q.x * (dqdx * ga + dqdy * gb) +
+                                   q.y * qy_clamped * (dqdy * ga + dqdx * gb));
   }
 
   return (ad < corn) ? float4(ad, gad) : float4(corn, gc);
@@ -304,8 +305,8 @@ float4 opRoundIntersectionGrad(float4 dg1, float4 dg2, float r)
 /* Smooth chamfer with gradient. */
 float4 opSmoothChamferUnionGrad(float4 dg1, float4 dg2, float k, float k2, float k3)
 {
-  float cp = (dg1.x + dg2.x - k) * 0.5f;
-  float3 gc = (dg1.yzw + dg2.yzw) * 0.5f;
+  float cp = (dg1.x + dg2.x - k) * 0.70710678f;
+  float3 gc = (dg1.yzw + dg2.yzw) * 0.70710678f;
   float4 dgcp = float4(cp, gc);
   float4 t1 = opSmoothUnionGrad(dg1, dgcp, k2);
   float4 t2 = opSmoothUnionGrad(dg2, dgcp, k3);
@@ -316,8 +317,8 @@ float4 opSmoothChamferSubtractionGrad(float4 dg1, float4 dg2, float k, float k2,
 {
   float4 A = float4(-dg1.x, -dg1.yzw);
   float4 B = dg2;
-  float cp = (A.x + B.x + k) * 0.5f;
-  float3 gc = (A.yzw + B.yzw) * 0.5f;
+  float cp = (A.x + B.x + k) * 0.70710678f;
+  float3 gc = (A.yzw + B.yzw) * 0.70710678f;
   float4 dgcp = float4(cp, gc);
   float4 t1 = opSmoothIntersectionGrad(A, dgcp, k2);
   float4 t2 = opSmoothIntersectionGrad(B, dgcp, k3);
@@ -326,8 +327,8 @@ float4 opSmoothChamferSubtractionGrad(float4 dg1, float4 dg2, float k, float k2,
 
 float4 opSmoothChamferIntersectionGrad(float4 dg1, float4 dg2, float k, float k2, float k3)
 {
-  float cp = (dg1.x + dg2.x + k) * 0.5f;
-  float3 gc = (dg1.yzw + dg2.yzw) * 0.5f;
+  float cp = (dg1.x + dg2.x + k) * 0.70710678f;
+  float3 gc = (dg1.yzw + dg2.yzw) * 0.70710678f;
   float4 dgcp = float4(cp, gc);
   float4 t1 = opSmoothIntersectionGrad(dg1, dgcp, k2);
   float4 t2 = opSmoothIntersectionGrad(dg2, dgcp, k3);
@@ -373,14 +374,58 @@ float4 opSmoothRoundIntersectionGrad(float4 dg1, float4 dg2, float r, float k2, 
   return opIntersectionGrad(t1, t2);
 }
 
+/* Inverted round gradient variants */
+float4 opRoundUnionInvertedGrad(float4 dg1, float4 dg2, float r)
+{
+  float4 diff = opRoundSubtractionGrad(dg2, dg1, r);
+  return opUnionGrad(diff, dg2);
+}
+
+float4 opSmoothRoundUnionInvertedGrad(float4 dg1, float4 dg2, float r, float k2, float k3)
+{
+  float4 diff = opSmoothRoundSubtractionGrad(dg2, dg1, r, k2, k3);
+  return opUnionGrad(diff, dg2);
+}
+
+float4 opIntersectionRoundGrad(float4 dg1, float4 dg2, float r)
+{
+  float2 u = max(float2(r + dg1.x, r + dg2.x), float2(0.0f));
+  float lu = max(length(u), 1e-8f);
+  float3 gu = (u.x * dg1.yzw + u.y * dg2.yzw) / lu;
+  float base = min(-r, max(dg1.x, dg2.x));
+  float3 gbase = (dg1.x > dg2.x) ? dg1.yzw : dg2.yzw;
+  if (-r < max(dg1.x, dg2.x)) {
+    return float4(base + lu, gbase + gu);
+  }
+  return float4(base + lu, gu);
+}
+
+float4 opSmoothRoundIntersectionInvertedGrad(float4 dg1, float4 dg2, float r, float k2, float k3)
+{
+  float4 A = dg1;
+  float4 B = float4(-dg2.x, -dg2.yzw);
+  float2 s = float2(min(A.x, 0.0f), max(B.x, 0.0f));
+  float ls = max(length(s), 1e-8f);
+  float corn = r - ls;
+  float3 gc = -(s.x * A.yzw + s.y * B.yzw) / ls;
+  float4 dgcorn = float4(corn, gc);
+  float4 t1 = opSmoothIntersectionGrad(A, dgcorn, k2);
+  float4 t2 = opSmoothIntersectionGrad(float4(-B.x, -B.yzw), dgcorn, k3);
+  return opIntersectionGrad(t1, t2);
+}
+
 /* ---- Master CSG gradient combiner ---- */
 
 float4 combineCSGGrad(float4 dg1, float4 dg2, int op, int bt, float k,
                       float shell_dist, int shell_mode, int shell_op,
                       float shell_k_top, float shell_k_bot,
-                      float k2, float k3)
+                      float k2, float k3, float k4, float k5,
+                      int flip_blend, int flip_blend_end)
 {
   bool has_smooth = (k2 > 0.0f || k3 > 0.0f);
+  bool has_smooth_end = (k4 > 0.0f || k5 > 0.0f);
+  bool fb = (flip_blend != 0);
+  bool fbe = (flip_blend_end != 0);
 
   if (op == SDF_CSG_OP_UNION) {
     if (k > 0.0f && bt > 0) {
@@ -475,42 +520,60 @@ float4 combineCSGGrad(float4 dg1, float4 dg2, int op, int bt, float k,
     float sd = (shell_op == SDF_SHELL_OP_SUBTRACTION) ? -shell_dist : shell_dist;
     float h = abs(sd);
 
-    if (shell_mode == SDF_SHELL_MODE_PUSH) {
-      /* abs() gradient: use safe sign to avoid flip instability at d2≈0 */
-      float s_abs = abs(dg2.x);
-      float safe_s = dg2.x / max(abs(dg2.x), 0.001f);
-      float3 s_grad = safe_s * dg2.yzw;
-      float4 dg_shell = float4(s_abs - h, s_grad);
-      float4 sub;
-      if (k > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { sub = opSmoothSubtractionGrad(dg_shell, dg1, k); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { sub = opChamferSubtractionGrad(dg_shell, dg1, k); }
-        else { sub = opRoundSubtractionGrad(dg_shell, dg1, k); }
-      }
-      else {
-        sub = opSubtractionGrad(dg1, dg_shell);
-      }
-      return opUnionGrad(sub, dg_shell);
-    }
-
-    float lk_top = min(shell_k_top, h);
-    float lk_bot = min(shell_k_bot, h);
     float4 dg_shell;
 
     if (sd < 0.0f) {
       float4 d_sub;
-      if (shell_k_bot > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_sub = opSmoothSubtractionGrad(dg2, dg1, shell_k_bot); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_sub = opChamferSubtractionGrad(dg2, dg1, shell_k_bot); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { d_sub = opRoundSubtractionGrad(dg2, dg1, shell_k_bot); }
+      if (shell_k_top > 0.0f && bt > 0) {
+        if (fb) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) { d_sub = opSmoothSubtractionGrad(dg2, dg1, shell_k_top); }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            if (has_smooth) { d_sub = opSmoothChamferSubtractionGrad(dg2, dg1, shell_k_top, k2, k3); }
+            else { d_sub = opChamferSubtractionGrad(dg2, dg1, shell_k_top); }
+          }
+          else {
+            if (has_smooth) { d_sub = opSmoothRoundSubtractionGrad(dg2, dg1, shell_k_top, k2, k3); }
+            else { d_sub = opRoundSubtractionGrad(dg2, dg1, shell_k_top); }
+          }
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) { d_sub = opSmoothSubtractionGrad(dg2, dg1, shell_k_top); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth) { d_sub = opSmoothChamferSubtractionGrad(dg2, dg1, shell_k_top, k2, k3); }
+          else { d_sub = opChamferSubtractionGrad(dg2, dg1, shell_k_top); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          d_sub = opIntersectionRoundGrad(dg1, float4(-dg2.x, -dg2.yzw), shell_k_top);
+        }
         else { d_sub = opSubtractionGrad(dg1, dg2); }
       }
       else { d_sub = opSubtractionGrad(dg1, dg2); }
       float4 dg_lim = float4(dg1.x + h, dg1.yzw);
-      if (lk_top > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { dg_shell = opSmoothUnionGrad(d_sub, dg_lim, lk_top); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { dg_shell = opChamferUnionGrad(d_sub, dg_lim, lk_top); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { dg_shell = opRoundUnionGrad(d_sub, dg_lim, lk_top); }
+      if (shell_k_bot > 0.0f && bt > 0) {
+        if (fbe) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) {
+            float4 esub = opSmoothSubtractionGrad(dg_lim, d_sub, shell_k_bot);
+            dg_shell = opUnionGrad(esub, dg_lim);
+          }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            float4 esub;
+            if (has_smooth_end) { esub = opSmoothChamferSubtractionGrad(dg_lim, d_sub, shell_k_bot, k4, k5); }
+            else { esub = opChamferSubtractionGrad(dg_lim, d_sub, shell_k_bot); }
+            dg_shell = opUnionGrad(esub, dg_lim);
+          }
+          else {
+            if (has_smooth_end) { dg_shell = opSmoothRoundUnionInvertedGrad(d_sub, dg_lim, shell_k_bot, k4, k5); }
+            else { dg_shell = opRoundUnionInvertedGrad(d_sub, dg_lim, shell_k_bot); }
+          }
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) { dg_shell = opSmoothUnionGrad(d_sub, dg_lim, shell_k_bot); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth_end) { dg_shell = opSmoothChamferUnionGrad(d_sub, dg_lim, shell_k_bot, k4, k5); }
+          else { dg_shell = opChamferUnionGrad(d_sub, dg_lim, shell_k_bot); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          if (has_smooth_end) { dg_shell = opSmoothRoundUnionGrad(d_sub, dg_lim, shell_k_bot, k4, k5); }
+          else { dg_shell = opRoundUnionGrad(d_sub, dg_lim, shell_k_bot); }
+        }
         else { dg_shell = opUnionGrad(d_sub, dg_lim); }
       }
       else { dg_shell = opUnionGrad(d_sub, dg_lim); }
@@ -518,17 +581,57 @@ float4 combineCSGGrad(float4 dg1, float4 dg2, int op, int bt, float k,
     else {
       float4 d_union;
       if (shell_k_top > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { d_union = opSmoothUnionGrad(dg1, dg2, shell_k_top); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { d_union = opChamferUnionGrad(dg1, dg2, shell_k_top); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { d_union = opRoundUnionGrad(dg1, dg2, shell_k_top); }
+        if (fb) {
+          float4 sub;
+          if (bt == SDF_BLEND_TYPE_SMOOTH) { sub = opSmoothSubtractionGrad(dg2, dg1, shell_k_top); }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            if (has_smooth) { sub = opSmoothChamferSubtractionGrad(dg2, dg1, shell_k_top, k2, k3); }
+            else { sub = opChamferSubtractionGrad(dg2, dg1, shell_k_top); }
+          }
+          else {
+            if (has_smooth) { sub = opSmoothRoundSubtractionGrad(dg2, dg1, shell_k_top, k2, k3); }
+            else { sub = opRoundSubtractionGrad(dg2, dg1, shell_k_top); }
+          }
+          d_union = opUnionGrad(sub, dg2);
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) { d_union = opSmoothUnionGrad(dg1, dg2, shell_k_top); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth) { d_union = opSmoothChamferUnionGrad(dg1, dg2, shell_k_top, k2, k3); }
+          else { d_union = opChamferUnionGrad(dg1, dg2, shell_k_top); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          if (has_smooth) { d_union = opSmoothRoundUnionGrad(dg1, dg2, shell_k_top, k2, k3); }
+          else { d_union = opRoundUnionGrad(dg1, dg2, shell_k_top); }
+        }
         else { d_union = opUnionGrad(dg1, dg2); }
       }
       else { d_union = opUnionGrad(dg1, dg2); }
       float4 dg_lim = float4(dg1.x - h, dg1.yzw);
-      if (lk_bot > 0.0f && bt > 0) {
-        if (bt == SDF_BLEND_TYPE_SMOOTH) { dg_shell = opSmoothIntersectionGrad(d_union, dg_lim, lk_bot); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { dg_shell = opChamferIntersectionGrad(d_union, dg_lim, lk_bot); }
-        else if (bt == SDF_BLEND_TYPE_ROUND) { dg_shell = opRoundIntersectionGrad(d_union, dg_lim, lk_bot); }
+      if (shell_k_bot > 0.0f && bt > 0) {
+        if (fbe) {
+          if (bt == SDF_BLEND_TYPE_SMOOTH) {
+            float4 esub = opSmoothSubtractionGrad(dg_lim, d_union, shell_k_bot);
+            dg_shell = opIntersectionGrad(esub, dg_lim);
+          }
+          else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+            float4 esub;
+            if (has_smooth_end) { esub = opSmoothChamferSubtractionGrad(dg_lim, d_union, shell_k_bot, k4, k5); }
+            else { esub = opChamferSubtractionGrad(dg_lim, d_union, shell_k_bot); }
+            dg_shell = opIntersectionGrad(esub, dg_lim);
+          }
+          else {
+            if (has_smooth_end) { dg_shell = opSmoothRoundIntersectionInvertedGrad(d_union, dg_lim, shell_k_bot, k4, k5); }
+            else { dg_shell = opRoundIntersectionGrad(d_union, dg_lim, shell_k_bot); }
+          }
+        }
+        else if (bt == SDF_BLEND_TYPE_SMOOTH) { dg_shell = opSmoothIntersectionGrad(d_union, dg_lim, shell_k_bot); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth_end) { dg_shell = opSmoothChamferIntersectionGrad(d_union, dg_lim, shell_k_bot, k4, k5); }
+          else { dg_shell = opChamferIntersectionGrad(d_union, dg_lim, shell_k_bot); }
+        }
+        else if (bt == SDF_BLEND_TYPE_ROUND) {
+          dg_shell = opSmoothIntersectionGrad(d_union, dg_lim, shell_k_bot);
+        }
         else { dg_shell = opIntersectionGrad(d_union, dg_lim); }
       }
       else { dg_shell = opIntersectionGrad(d_union, dg_lim); }
@@ -538,8 +641,14 @@ float4 combineCSGGrad(float4 dg1, float4 dg2, int op, int bt, float k,
       float4 carved;
       if (k > 0.0f && bt > 0) {
         if (bt == SDF_BLEND_TYPE_SMOOTH) { carved = opSmoothSubtractionGrad(dg1, dg_shell, k); }
-        else if (bt == SDF_BLEND_TYPE_CHAMFER) { carved = opChamferSubtractionGrad(dg1, dg_shell, k); }
-        else { carved = opRoundSubtractionGrad(dg1, dg_shell, k); }
+        else if (bt == SDF_BLEND_TYPE_CHAMFER) {
+          if (has_smooth) { carved = opSmoothChamferSubtractionGrad(dg1, dg_shell, k, k2, k3); }
+          else { carved = opChamferSubtractionGrad(dg1, dg_shell, k); }
+        }
+        else {
+          if (has_smooth) { carved = opSmoothRoundSubtractionGrad(dg1, dg_shell, k, k2, k3); }
+          else { carved = opRoundSubtractionGrad(dg1, dg_shell, k); }
+        }
       }
       else {
         float4 neg1 = float4(-dg1.x, -dg1.yzw);

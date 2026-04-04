@@ -47,10 +47,18 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "BKE_screen.hh"
+
 #include "ED_object.hh"
 #include "ED_outliner.hh"
 #include "ED_screen.hh"
 #include "ED_select_utils.hh"
+#include "ED_space_api.hh"
+#include "ED_view3d.hh"
+
+#include "GPU_immediate.hh"
+#include "GPU_matrix.hh"
+#include "GPU_state.hh"
 
 #include "UI_interface.hh"
 
@@ -694,16 +702,83 @@ void OBJECT_OT_sdf_group_cycle(wmOperatorType *ot)
   RNA_def_int(ot->srna, "direction", 1, -1, 1, "Direction", "Cycle direction (-1=previous, 1=next)", -1, 1);
 }
 
-/* SDF Blend Adjust (Modal) */
+/* SDF Blend / Distance Adjust (Modal) */
 
-struct SDFBlendAdjustData {
+struct SDFValueAdjustData {
   float init_mval_x;
-  float init_blend;
-  float current_blend;
+  float init_mval_y;
+  float init_value;
+  float current_value;
   bool slow_mode;
   float slow_mval_x;
-  float slow_blend;
+  float slow_value;
+  void *draw_handle;
+  ARegion *region;
+  float mval_x;
+  float mval_y;
+  Object *ob;
+  float line_r, line_g, line_b;
+  const char *label;
+  /* Direction detection for shell blend */
+  bool locked;
+  bool is_horizontal;
+  float init_other;
 };
+
+static void sdf_value_adjust_draw(const bContext * /*C*/, ARegion *region, void *userdata)
+{
+  SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(userdata);
+  if (!data->ob || !data->locked) {
+    return;
+  }
+
+  float obj_screen[2];
+  float3 obj_world = float3(data->ob->object_to_world()[3]);
+  if (ED_view3d_project_float_global(region, obj_world, obj_screen, V3D_PROJ_TEST_NOP) !=
+      V3D_PROJ_RET_OK)
+  {
+    return;
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_smooth(true);
+  GPU_line_width(2.0f);
+
+  uint pos = GPU_vertformat_attr_add_legacy(
+      immVertexFormat(), "pos", GPU_COMP_F32, 2, GPU_FETCH_FLOAT);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  immUniformColor4f(data->line_r, data->line_g, data->line_b, 0.85f);
+  immBegin(GPU_PRIM_LINES, 2);
+  immVertex2f(pos, obj_screen[0], obj_screen[1]);
+  immVertex2f(pos, data->mval_x, data->mval_y);
+  immEnd();
+
+  GPU_point_size(7.0f);
+  immBegin(GPU_PRIM_POINTS, 1);
+  immVertex2f(pos, data->mval_x, data->mval_y);
+  immEnd();
+
+  GPU_point_size(5.0f);
+  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+  immBegin(GPU_PRIM_POINTS, 1);
+  immVertex2f(pos, obj_screen[0], obj_screen[1]);
+  immEnd();
+
+  immUnbindProgram();
+  GPU_line_smooth(false);
+  GPU_blend(GPU_BLEND_NONE);
+}
+
+static void sdf_draw_cleanup(ARegion *region, void *draw_handle, bContext *C)
+{
+  ED_region_draw_cb_exit(region->runtime->type, draw_handle);
+  ED_area_status_text(CTX_wm_area(C), nullptr);
+  ED_workspace_status_text(C, nullptr);
+  ED_region_tag_redraw(region);
+}
+
+/* Polls */
 
 static bool sdf_blend_adjust_poll(bContext *C)
 {
@@ -711,28 +786,43 @@ static bool sdf_blend_adjust_poll(bContext *C)
   return ob && ob->type == OB_SDF && ob->data && CTX_wm_region_view3d(C);
 }
 
-static void sdf_blend_adjust_update_header(bContext *C, SDFBlendAdjustData *data)
+static bool sdf_shell_distance_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_SDF || !ob->data || !CTX_wm_region_view3d(C)) {
+    return false;
+  }
+  SDF *sdf = id_cast<SDF *>(ob->data);
+  return sdf->csg_operation == SDF_CSG_SHELL;
+}
+
+static void sdf_value_update_header(bContext *C, SDFValueAdjustData *data)
 {
   WorkspaceStatus status(C);
   status.item(IFACE_("Confirm"), ICON_EVENT_RETURN, ICON_MOUSE_LMB);
   status.item(IFACE_("Cancel"), ICON_EVENT_ESC, ICON_MOUSE_RMB);
-  status.item(IFACE_("Adjust Blend"), ICON_MOUSE_MOVE);
   status.item_bool(IFACE_("Precision"), data->slow_mode, ICON_EVENT_SHIFT);
+  status.item(IFACE_("Adjust"), ICON_MOUSE_MOVE);
 
   char msg[128];
-  SNPRINTF(msg, "Blend: %.3f", data->current_blend);
+  SNPRINTF(msg, "%s: %.3f", data->label, data->current_value);
   ED_area_status_text(CTX_wm_area(C), msg);
 }
 
-static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, const wmEvent *event)
+/* Shared single-value modal (locked direction, X-axis controls value) */
+
+static wmOperatorStatus sdf_value_modal_common(bContext *C,
+                                                 wmOperator *op,
+                                                 const wmEvent *event,
+                                                 void (*write_fn)(SDF *, float),
+                                                 void (*restore_fn)(SDF *, float))
 {
-  SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
+  SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
   if (!ob || ob->type != OB_SDF || !ob->data) {
+    sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     op->customdata = nullptr;
-    ED_area_status_text(CTX_wm_area(C), nullptr);
-    ED_workspace_status_text(C, nullptr);
     return OPERATOR_CANCELLED;
   }
   SDF *sdf = id_cast<SDF *>(ob->data);
@@ -740,11 +830,10 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
   if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
       (event->type == RIGHTMOUSE && event->val == KM_PRESS))
   {
-    sdf->blend = data->init_blend;
+    restore_fn(sdf, data->init_value);
     DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-    ED_area_status_text(CTX_wm_area(C), nullptr);
-    ED_workspace_status_text(C, nullptr);
+    sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     return OPERATOR_CANCELLED;
   }
@@ -753,11 +842,10 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
       (event->type == EVT_RETKEY && event->val == KM_PRESS) ||
       (event->type == EVT_PADENTER && event->val == KM_PRESS))
   {
-    sdf->blend = data->current_blend;
+    write_fn(sdf, data->current_value);
     DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-    ED_area_status_text(CTX_wm_area(C), nullptr);
-    ED_workspace_status_text(C, nullptr);
+    sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     return OPERATOR_FINISHED;
   }
@@ -768,74 +856,243 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
   if (event->type == EVT_LEFTSHIFTKEY && event->val == KM_PRESS) {
     data->slow_mode = true;
     data->slow_mval_x = mx;
-    data->slow_blend = data->current_blend;
+    data->slow_value = data->current_value;
   }
   if (event->type == EVT_LEFTSHIFTKEY && event->val == KM_RELEASE) {
     data->slow_mode = false;
   }
-
   if (data->slow_mode) {
-    float d = (mx - data->slow_mval_x) * sensitivity * 0.1f;
-    data->current_blend = max_ff(data->slow_blend + d, 0.0f);
+    float dx = (mx - data->slow_mval_x) * sensitivity * 0.1f;
+    data->current_value = max_ff(data->slow_value + dx, 0.0f);
   }
   else {
-    float d = (mx - data->init_mval_x) * sensitivity;
-    data->current_blend = max_ff(data->init_blend + d, 0.0f);
+    float dx = (mx - data->init_mval_x) * sensitivity;
+    data->current_value = max_ff(data->init_value + dx, 0.0f);
   }
+  data->mval_x = mx;
+  data->mval_y = float(event->mval[1]);
 
-  sdf->blend = data->current_blend;
+  write_fn(sdf, data->current_value);
   DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  ED_region_tag_redraw(data->region);
 
-  sdf_blend_adjust_update_header(C, data);
+  sdf_value_update_header(C, data);
   return OPERATOR_RUNNING_MODAL;
 }
 
-static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C,
-                                                 wmOperator *op,
-                                                 const wmEvent *event)
+static SDFValueAdjustData *sdf_value_init(bContext *C,
+                                            const wmEvent *event,
+                                            Object *ob,
+                                            float init_value,
+                                            float r, float g, float b,
+                                            const char *label)
+{
+  ARegion *region = CTX_wm_region(C);
+  SDFValueAdjustData *data = MEM_new<SDFValueAdjustData>(__func__);
+  data->init_mval_x = float(event->mval[0]);
+  data->init_mval_y = float(event->mval[1]);
+  data->mval_x = float(event->mval[0]);
+  data->mval_y = float(event->mval[1]);
+  data->init_value = init_value;
+  data->current_value = init_value;
+  data->slow_mode = false;
+  data->locked = true;
+  data->is_horizontal = true;
+  data->init_other = 0.0f;
+  data->ob = ob;
+  data->region = region;
+  data->line_r = r;
+  data->line_g = g;
+  data->line_b = b;
+  data->label = label;
+  data->draw_handle = ED_region_draw_cb_activate(
+      region->runtime->type, sdf_value_adjust_draw, data, REGION_DRAW_POST_PIXEL);
+  return data;
+}
+
+/* B key: blend (non-shell) or direction-detect top/bottom (shell) */
+
+static void sdf_write_blend(SDF *sdf, float v) { sdf->blend = v; }
+static void sdf_write_shell_top(SDF *sdf, float v) { sdf->shell_blend_top = v; }
+static void sdf_write_shell_bottom(SDF *sdf, float v) { sdf->shell_blend_bottom = v; }
+
+static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_SDF || !ob->data) {
+    sdf_draw_cleanup(data->region, data->draw_handle, C);
+    MEM_delete(data);
+    op->customdata = nullptr;
+    return OPERATOR_CANCELLED;
+  }
+  SDF *sdf = id_cast<SDF *>(ob->data);
+  bool is_shell = (sdf->csg_operation == SDF_CSG_SHELL);
+
+  if (!is_shell) {
+    return sdf_value_modal_common(C, op, event, sdf_write_blend, sdf_write_blend);
+  }
+
+  /* Shell: direction detection */
+  if (!data->locked) {
+    float dx = fabsf(float(event->mval[0]) - data->init_mval_x);
+    float dy = fabsf(float(event->mval[1]) - data->init_mval_y);
+    constexpr float threshold = 8.0f;
+
+    if (dx >= threshold || dy >= threshold) {
+      data->locked = true;
+      if (dx >= dy) {
+        data->is_horizontal = true;
+        data->init_value = sdf->shell_blend_top;
+        data->current_value = sdf->shell_blend_top;
+        data->init_other = sdf->shell_blend_bottom;
+        data->label = "Shell Top";
+        data->line_r = 1.0f; data->line_g = 0.3f; data->line_b = 0.3f;
+      }
+      else {
+        data->is_horizontal = false;
+        data->init_value = sdf->shell_blend_bottom;
+        data->current_value = sdf->shell_blend_bottom;
+        data->init_other = sdf->shell_blend_top;
+        data->label = "Shell Bottom";
+        data->line_r = 0.3f; data->line_g = 0.6f; data->line_b = 1.0f;
+      }
+      data->init_mval_x = float(event->mval[0]);
+      data->init_mval_y = float(event->mval[1]);
+    }
+
+    data->mval_x = float(event->mval[0]);
+    data->mval_y = float(event->mval[1]);
+    ED_region_tag_redraw(data->region);
+
+    if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
+        (event->type == RIGHTMOUSE && event->val == KM_PRESS))
+    {
+      sdf_draw_cleanup(data->region, data->draw_handle, C);
+      MEM_delete(data);
+      return OPERATOR_CANCELLED;
+    }
+
+    sdf_value_update_header(C, data);
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  /* Locked: use shared logic */
+  if (data->is_horizontal) {
+    return sdf_value_modal_common(C, op, event, sdf_write_shell_top, sdf_write_shell_top);
+  }
+  return sdf_value_modal_common(C, op, event, sdf_write_shell_bottom, sdf_write_shell_bottom);
+}
+
+static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   Object *ob = CTX_data_active_object(C);
   SDF *sdf = id_cast<SDF *>(ob->data);
+  bool is_shell = (sdf->csg_operation == SDF_CSG_SHELL);
 
-  SDFBlendAdjustData *data = MEM_new<SDFBlendAdjustData>(__func__);
-  data->init_mval_x = float(event->mval[0]);
-  data->init_blend = sdf->blend;
-  data->current_blend = sdf->blend;
-  data->slow_mode = false;
+  SDFValueAdjustData *data;
+  if (is_shell) {
+    data = sdf_value_init(C, event, ob, 0.0f, 1.0f, 1.0f, 1.0f, "Move to select");
+    data->locked = false;
+  }
+  else {
+    data = sdf_value_init(C, event, ob, sdf->blend, 1.0f, 0.65f, 0.0f, "Blend");
+  }
+
   op->customdata = data;
-
   WM_event_add_modal_handler(C, op);
-  sdf_blend_adjust_update_header(C, data);
-
+  sdf_value_update_header(C, data);
   return OPERATOR_RUNNING_MODAL;
 }
 
 static void sdf_blend_adjust_cancel(bContext *C, wmOperator *op)
 {
-  SDFBlendAdjustData *data = static_cast<SDFBlendAdjustData *>(op->customdata);
+  SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
   if (ob && ob->type == OB_SDF && ob->data) {
     SDF *sdf = id_cast<SDF *>(ob->data);
-    sdf->blend = data->init_blend;
-    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+    if (data->locked) {
+      if (sdf->csg_operation == SDF_CSG_SHELL) {
+        if (data->is_horizontal) {
+          sdf->shell_blend_top = data->init_value;
+        }
+        else {
+          sdf->shell_blend_bottom = data->init_value;
+        }
+      }
+      else {
+        sdf->blend = data->init_value;
+      }
+      DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+    }
   }
-  ED_area_status_text(CTX_wm_area(C), nullptr);
-  ED_workspace_status_text(C, nullptr);
+  sdf_draw_cleanup(data->region, data->draw_handle, C);
   MEM_delete(data);
 }
 
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot)
 {
   ot->name = "Adjust SDF Blend";
-  ot->description = "Interactively adjust blend amount by moving the mouse";
+  ot->description = "Interactively adjust blend (shell: move right=top, up=bottom)";
   ot->idname = "OBJECT_OT_sdf_blend_adjust";
 
   ot->invoke = sdf_blend_adjust_invoke;
   ot->modal = sdf_blend_adjust_modal;
   ot->cancel = sdf_blend_adjust_cancel;
   ot->poll = sdf_blend_adjust_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_BLOCKING;
+}
+
+/* D key: shell_distance (only for shell objects) */
+
+static void sdf_write_distance(SDF *sdf, float v) { sdf->shell_distance = v; }
+
+static wmOperatorStatus sdf_shell_distance_modal(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  return sdf_value_modal_common(C, op, event, sdf_write_distance, sdf_write_distance);
+}
+
+static wmOperatorStatus sdf_shell_distance_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  Object *ob = CTX_data_active_object(C);
+  SDF *sdf = id_cast<SDF *>(ob->data);
+
+  SDFValueAdjustData *data = sdf_value_init(
+      C, event, ob, sdf->shell_distance, 0.3f, 1.0f, 0.3f, "Distance");
+  op->customdata = data;
+
+  WM_event_add_modal_handler(C, op);
+  sdf_value_update_header(C, data);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void sdf_shell_distance_cancel(bContext *C, wmOperator *op)
+{
+  SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
+  Object *ob = CTX_data_active_object(C);
+  if (ob && ob->type == OB_SDF && ob->data) {
+    SDF *sdf = id_cast<SDF *>(ob->data);
+    sdf->shell_distance = data->init_value;
+    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  }
+  sdf_draw_cleanup(data->region, data->draw_handle, C);
+  MEM_delete(data);
+}
+
+void OBJECT_OT_sdf_shell_distance_adjust(wmOperatorType *ot)
+{
+  ot->name = "Adjust Shell Distance";
+  ot->description = "Interactively adjust shell distance by moving the mouse";
+  ot->idname = "OBJECT_OT_sdf_shell_distance_adjust";
+
+  ot->invoke = sdf_shell_distance_invoke;
+  ot->modal = sdf_shell_distance_modal;
+  ot->cancel = sdf_shell_distance_cancel;
+  ot->poll = sdf_shell_distance_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_BLOCKING;
 }

@@ -110,7 +110,7 @@ void main()
       else {
         scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
                                 obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
-                                obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+                                obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
     }
     else {
@@ -124,7 +124,7 @@ void main()
       else {
         grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
                               obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
-                              obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+                              obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
     }
   }

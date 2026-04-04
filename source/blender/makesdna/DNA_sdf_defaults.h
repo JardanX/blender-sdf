@@ -30,6 +30,10 @@
     .shell_blend_bottom = 0.1f, \
     .chamfer_k2 = 0.01f, \
     .chamfer_k3 = 0.01f, \
+    .chamfer_k4 = 0.01f, \
+    .chamfer_k5 = 0.01f, \
+    .flip_blend = 0, \
+    .flip_blend_end = 0, \
     .box_corners = {0.0f, 0.0f, 0.0f, 0.0f}, \
     .box_edge_top = 0.0f, \
     .box_edge_bottom = 0.0f, \

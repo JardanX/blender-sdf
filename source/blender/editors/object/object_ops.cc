@@ -111,6 +111,7 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_move_to_sdf_group);
   WM_operatortype_append(OBJECT_OT_sdf_to_mesh);
   WM_operatortype_append(OBJECT_OT_sdf_blend_adjust);
+  WM_operatortype_append(OBJECT_OT_sdf_shell_distance_adjust);
   WM_operatortype_append(OBJECT_OT_sdf_group_cycle);
   WM_operatortype_append(OBJECT_OT_add);
   WM_operatortype_append(OBJECT_OT_lattice_add_to_selected);

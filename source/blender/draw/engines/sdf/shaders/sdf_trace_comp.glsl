@@ -111,7 +111,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         float prev = grp_dist;
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
           if (-d > prev) { grp_winner_id = float(obj.original_index); }
         }
@@ -168,7 +168,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
           scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
           grp.shell_distance, grp.shell_mode, grp.shell_op,
           grp.shell_blend_top, grp.shell_blend_bottom,
-          grp.chamfer_k2, grp.chamfer_k3);
+          grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
       if (grp.csg_operation == SDF_CSG_OP_SUBTRACT) {
         if (-grp_dist > prev) { out_obj_id = grp_winner_id; }
       }
@@ -245,7 +245,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       float prev = scene_dist;
       scene_dist = combineCSG(
           scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-          obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+          obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
         if (-d > prev) { out_obj_id = float(obj.original_index); }
       }
@@ -360,7 +360,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         float prev = scene_dist;
         scene_dist = combineCSG(
             scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
           if (-d > prev) { out_obj_id = float(obj.original_index); }
         }
@@ -405,7 +405,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
         float prev = grp_dist;
         grp_dist = combineCSG(
             grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3);
+            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
           if (-d > prev) { grp_winner_id = float(obj.original_index); }
         }
@@ -671,26 +671,19 @@ void main()
   float d_prev = 1e10f;
 
 #ifdef USE_TILE_CULLING
-  /* Cone skip: jump to cone position and evaluate SDF there.
-   * Handles both surface approach AND empty-space skipping (booleans). */
-  if (cone_skip_target > 0.0f) {
+  if (cone_skip_target > t_enter) {
     float3 skip_pos = ray_origin + ray_dir * cone_skip_target;
     float skip_aabb;
     float skip_id;
     float skip_d = evalSceneTile(skip_pos, skip_aabb, skip_id);
-    if (skip_d > sdf_ray_epsilon * 2.0f) {
+    if (skip_d > 0.0f) {
       t = cone_skip_target;
       if (skip_d < 1e9f) {
         d_prev = skip_d;
         t_prev = cone_skip_target - skip_d;
       }
     }
-    else if (cone_skip_target > t_enter + sdf_ray_epsilon * 8.0f) {
-      /* Near/on surface at skip point — back off slightly but still skip bulk of empty space */
-      t = cone_skip_target - sdf_ray_epsilon * 8.0f;
-    }
   }
-
 #endif
 
   for (int step = 0; step < sdf_max_steps; step++) {
