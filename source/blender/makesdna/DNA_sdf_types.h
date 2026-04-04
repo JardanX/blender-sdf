@@ -81,7 +81,7 @@ typedef enum eSDFModifierType {
   SDF_MOD_TWIST = 1,
   SDF_MOD_BEND = 2,
   SDF_MOD_ELONGATE = 3,
-  SDF_MOD_HOLLOW = 4,
+  SDF_MOD_SOLIDIFY = 4,
   SDF_MOD_ROUND = 5,
   SDF_MOD_ONION = 6,
   SDF_MOD_BEVEL = 7,
@@ -119,7 +119,7 @@ typedef struct SDFModifier {
    * Twist:    [0]=strength
    * Bend:     [0]=strength, [1]=axis, [2..4]=origin xyz
    * Elongate: [0..2]=per-axis stretch
-   * Hollow:   [0]=thickness
+   * Solidify: [0]=thickness
    * Expand/Shrink: [0]=offset
    * Onion:    [0]=thickness
    * Array:    [0]=count, [1..3]=offset/radius, [4]=blend, [5..7]=rotation offset */

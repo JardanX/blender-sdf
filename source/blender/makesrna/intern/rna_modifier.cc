@@ -458,11 +458,11 @@ const EnumPropertyItem rna_enum_object_modifier_type_items[] = {
      ICON_MOD_LENGTH,
      "Elongate",
      "Stretch SDF along axes"},
-    {eModifierType_SDFHollow,
-     "SDF_HOLLOW",
+    {eModifierType_SDFSolidify,
+     "SDF_SOLIDIFY",
      ICON_MOD_SOLIDIFY,
-     "Hollow",
-     "Make SDF hollow with wall thickness"},
+     "Solidify",
+     "Add internal shell thickness to SDF"},
     {eModifierType_SDFRound,
      "SDF_ROUND",
      ICON_MOD_SMOOTH,
@@ -11417,14 +11417,27 @@ static void rna_def_modifier_sdf_elongate(BlenderRNA *brna)
   RNA_define_lib_overridable(false);
 }
 
-static void rna_def_modifier_sdf_hollow(BlenderRNA *brna)
+static void rna_def_modifier_sdf_solidify(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
 
-  srna = RNA_def_struct(brna, "SDFHollowModifier", "Modifier");
-  RNA_def_struct_ui_text(srna, "SDF Hollow Modifier", "Make SDF hollow");
-  RNA_def_struct_sdna(srna, "SDFHollowModifierData");
+  static const EnumPropertyItem sdf_solidify_mode_items[] = {
+      {SDF_SOLIDIFY_CLOSED, "CLOSED", 0, "Closed", "Sealed shell with internal cavity"},
+      {SDF_SOLIDIFY_OPEN, "OPEN", 0, "Open", "Shell with caps removed along axis"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem sdf_solidify_axis_items[] = {
+      {0, "X", 0, "X", "Cut caps along X axis"},
+      {1, "Y", 0, "Y", "Cut caps along Y axis"},
+      {2, "Z", 0, "Z", "Cut caps along Z axis"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SDFSolidifyModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Solidify Modifier", "Add internal shell thickness");
+  RNA_def_struct_sdna(srna, "SDFSolidifyModifierData");
   RNA_def_struct_ui_icon(srna, ICON_MOD_SOLIDIFY);
 
   RNA_define_lib_overridable(true);
@@ -11432,7 +11445,25 @@ static void rna_def_modifier_sdf_hollow(BlenderRNA *brna)
   prop = RNA_def_property(srna, "thickness", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "thickness");
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_text(prop, "Thickness", "Wall thickness");
+  RNA_def_property_ui_text(prop, "Thickness", "Shell thickness (inward)");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "bevel", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "bevel");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Bevel", "Bevel radius for inside edges");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mode");
+  RNA_def_property_enum_items(prop, sdf_solidify_mode_items);
+  RNA_def_property_ui_text(prop, "Mode", "Open or closed shell");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "axis", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "axis");
+  RNA_def_property_enum_items(prop, sdf_solidify_axis_items);
+  RNA_def_property_ui_text(prop, "Axis", "Cap removal axis (Open mode)");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   RNA_define_lib_overridable(false);
@@ -11471,10 +11502,16 @@ static void rna_def_modifier_sdf_onion(BlenderRNA *brna)
 
   RNA_define_lib_overridable(true);
 
-  prop = RNA_def_property(srna, "thickness", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "thickness");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_text(prop, "Thickness", "Shell thickness");
+  prop = RNA_def_property(srna, "layers", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "layers");
+  RNA_def_property_range(prop, 1, 32);
+  RNA_def_property_ui_text(prop, "Layers", "Number of equal subdivisions");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "gap", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "gap");
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Gap", "Width of cut between layers");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   RNA_define_lib_overridable(false);
@@ -11800,7 +11837,7 @@ void RNA_def_modifier(BlenderRNA *brna)
   rna_def_modifier_sdf_twist(brna);
   rna_def_modifier_sdf_bend(brna);
   rna_def_modifier_sdf_elongate(brna);
-  rna_def_modifier_sdf_hollow(brna);
+  rna_def_modifier_sdf_solidify(brna);
   rna_def_modifier_sdf_round(brna);
   rna_def_modifier_sdf_onion(brna);
   rna_def_modifier_sdf_bevel(brna);

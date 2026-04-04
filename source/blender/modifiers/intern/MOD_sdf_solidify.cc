@@ -23,7 +23,7 @@ namespace blender {
 
 static void init_data(ModifierData *md)
 {
-  auto *smd = reinterpret_cast<SDFHollowModifierData *>(md);
+  auto *smd = reinterpret_cast<SDFSolidifyModifierData *>(md);
   INIT_DEFAULT_STRUCT_AFTER(smd, modifier);
 }
 
@@ -37,29 +37,32 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &layout = *panel->layout;
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
   layout.use_property_split_set(true);
+  layout.prop(ptr, "mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   layout.prop(ptr, "thickness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "bevel", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(ptr, "axis", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   modifier_error_message_draw(layout, ptr);
 }
 
 static void panel_register(ARegionType *region_type)
 {
-  modifier_panel_register(region_type, eModifierType_SDFHollow, panel_draw);
+  modifier_panel_register(region_type, eModifierType_SDFSolidify, panel_draw);
 }
 
 static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const ModifierData *md)
 {
-  const auto *smd = reinterpret_cast<const SDFHollowModifierData *>(md);
+  const auto *smd = reinterpret_cast<const SDFSolidifyModifierData *>(md);
   writer->write_struct(smd);
 }
 
 static void blend_read(BlendDataReader * /*reader*/, ModifierData * /*md*/) {}
 
-ModifierTypeInfo modifierType_SDFHollow = {
-    /*idname*/ "SDFHollow",
-    /*name*/ N_("SDF Hollow"),
-    /*struct_name*/ "SDFHollowModifierData",
-    /*struct_size*/ sizeof(SDFHollowModifierData),
-    /*srna*/ &RNA_SDFHollowModifier,
+ModifierTypeInfo modifierType_SDFSolidify = {
+    /*idname*/ "SDFSolidify",
+    /*name*/ N_("SDF Solidify"),
+    /*struct_name*/ "SDFSolidifyModifierData",
+    /*struct_size*/ sizeof(SDFSolidifyModifierData),
+    /*srna*/ &RNA_SDFSolidifyModifier,
     /*type*/ ModifierTypeType::NonGeometrical,
     /*flags*/ eModifierTypeFlag_AcceptsSDF,
     /*icon*/ ICON_MOD_SOLIDIFY,

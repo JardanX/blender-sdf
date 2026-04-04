@@ -309,10 +309,6 @@ class Instance : public DrawEngine {
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
   {
-    Object *ob_dbg = ob_ref.object;
-    if (ob_dbg->type == OB_SDF) {
-      printf("DBG object_sync: OB_SDF received, depth_mode=%d\n", depth_mode_ ? 1 : 0);
-    }
     if (depth_mode_) {
       return;
     }
@@ -381,11 +377,6 @@ class Instance : public DrawEngine {
                               0.0f);
 
     float bevel = 0.0f;
-    for (const SDFModifier *bmod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); bmod; bmod = bmod->next) {
-      if (bmod->show_viewport && bmod->type == SDF_MOD_BEVEL) {
-        bevel += bmod->params[0];
-      }
-    }
     for (const ModifierData *bmd = static_cast<const ModifierData *>(ob->modifiers.first); bmd; bmd = bmd->next) {
       if ((bmd->mode & eModifierMode_Realtime) && bmd->type == eModifierType_SDFBevel) {
         bevel += reinterpret_cast<const SDFBevelModifierData *>(bmd)->radius;
@@ -493,9 +484,8 @@ class Instance : public DrawEngine {
           case SDF_MOD_ELONGATE:
             local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
             break;
-          case SDF_MOD_HOLLOW:
+          case SDF_MOD_SOLIDIFY:
           case SDF_MOD_ONION:
-            local_extent += float3(mod.params.x);
             break;
           case SDF_MOD_ROUND:
           case SDF_MOD_BEVEL:
@@ -584,34 +574,7 @@ class Instance : public DrawEngine {
       scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
       scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
-      /* Frustum test — cull objects whose padded AABB is entirely outside */
-      {
-        float group_pad = 0.0f;
-        if (sdf_data->sdf_group != nullptr) {
-          const SDFGroup *grp = sdf_data->sdf_group;
-          float gb = (grp->csg_operation == SDF_CSG_SHELL)
-                         ? std::max(grp->shell_blend_top, grp->shell_blend_bottom)
-                         : grp->blend;
-          group_pad = gb + fabsf(grp->shell_distance);
-        }
-        float3 pad_min = world_min - float3(group_pad);
-        float3 pad_max = world_max + float3(group_pad);
-        bool outside = false;
-        for (int p = 0; p < 6; p++) {
-          float3 n(frustum_planes_[p]);
-          float d = frustum_planes_[p].w;
-          float3 pos_vertex(n.x > 0 ? pad_max.x : pad_min.x,
-                            n.y > 0 ? pad_max.y : pad_min.y,
-                            n.z > 0 ? pad_max.z : pad_min.z);
-          if (math::dot(n, pos_vertex) + d < 0.0f) {
-            outside = true;
-            break;
-          }
-        }
-        if (outside) {
-          return;
-        }
-      }
+      /* Frustum cull deferred to end_sync where modifier-expanded AABBs are available */
     }
 
     gpu_obj.group_id = -1;
@@ -777,36 +740,9 @@ class Instance : public DrawEngine {
       gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
     }
 
-    /* Pack modifiers — read from old internal list AND native modifier stack */
+    /* Pack modifiers from native modifier stack (old internal SDFModifier list is deprecated) */
     gpu_obj.modifier_start = int(modifiers_.size());
     gpu_obj.modifier_count = 0;
-
-    /* Old internal SDFModifier list (legacy / SDFGroup) */
-    for (const SDFModifier *mod = static_cast<const SDFModifier *>(sdf_data->modifiers.first); mod; mod = mod->next) {
-      if (!mod->show_viewport) {
-        continue;
-      }
-      SDFModifierGPU gpu_mod = {};
-      gpu_mod.header = int4(mod->type, mod->flag, 0, 0);
-      if (mod->type == SDF_MOD_MIRROR) {
-        float3 world_origin;
-        if (mod->mirror_ob != nullptr) {
-          const float4x4 &mirror_mat = mod->mirror_ob->object_to_world();
-          world_origin = float3(mirror_mat[3]) - float3(mat[3]);
-        }
-        else {
-          world_origin = float3(mod->params[1], mod->params[2], mod->params[3]);
-        }
-        float3 local_origin = float3(inv_rot * float4(world_origin, 0.0f));
-        gpu_mod.params = float4(mod->params[0], local_origin.x, local_origin.y, local_origin.z);
-      }
-      else {
-        gpu_mod.params = float4(mod->params[0], mod->params[1], mod->params[2], mod->params[3]);
-      }
-      gpu_mod.params2 = float4(mod->params[4], mod->params[5], mod->params[6], mod->params[7]);
-      modifiers_.append(gpu_mod);
-      gpu_obj.modifier_count++;
-    }
 
     /* Native Blender modifier stack */
     for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first); md; md = md->next) {
@@ -857,10 +793,16 @@ class Instance : public DrawEngine {
           valid = true;
           break;
         }
-        case eModifierType_SDFHollow: {
-          const auto &m = *reinterpret_cast<const SDFHollowModifierData *>(md);
-          gpu_mod.header = int4(SDF_MOD_HOLLOW, 0, 0, 0);
-          gpu_mod.params = float4(m.thickness, 0.0f, 0.0f, 0.0f);
+        case eModifierType_SDFSolidify: {
+          const auto &m = *reinterpret_cast<const SDFSolidifyModifierData *>(md);
+          float inner_scale = 1.0f;
+          if (m.mode == SDF_SOLIDIFY_OPEN) {
+            int ax = math::clamp(m.axis, 0, 2);
+            float sz = math::max(sdf_data->size[ax] * scale[ax], 0.001f);
+            inner_scale = math::max(1.0f - 2.0f * m.thickness / sz, 0.1f);
+          }
+          gpu_mod.header = int4(SDF_MOD_SOLIDIFY, m.mode, m.axis, 0);
+          gpu_mod.params = float4(m.thickness, inner_scale, m.bevel, 0.0f);
           valid = true;
           break;
         }
@@ -873,8 +815,11 @@ class Instance : public DrawEngine {
         }
         case eModifierType_SDFOnion: {
           const auto &m = *reinterpret_cast<const SDFOnionModifierData *>(md);
-          gpu_mod.header = int4(SDF_MOD_ONION, 0, 0, 0);
-          gpu_mod.params = float4(m.thickness, 0.0f, 0.0f, 0.0f);
+          int layers = math::max(m.layers, 1);
+          float3 sz = float3(gpu_obj.sdf_size);
+          float min_ext = math::min(sz.x, math::min(sz.y, sz.z));
+          gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
+          gpu_mod.params = float4(m.gap, min_ext, 0.0f, 0.0f);
           valid = true;
           break;
         }
@@ -1006,7 +951,7 @@ class Instance : public DrawEngine {
         case SDF_MOD_ELONGATE:
           local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
           break;
-        case SDF_MOD_HOLLOW:
+        case SDF_MOD_SOLIDIFY:
         case SDF_MOD_ONION:
           local_extent += float3(mod.params.x);
           break;
@@ -1121,7 +1066,6 @@ class Instance : public DrawEngine {
       float3 pad_min = world_min - float3(group_pad);
       float3 pad_max = world_max + float3(group_pad);
       bool outside = false;
-      int cull_plane = -1;
       for (int p = 0; p < 6; p++) {
         float3 n(frustum_planes_[p]);
         float d = frustum_planes_[p].w;
@@ -1130,20 +1074,13 @@ class Instance : public DrawEngine {
                           n.z > 0 ? pad_max.z : pad_min.z);
         if (math::dot(n, pos_vertex) + d < 0.0f) {
           outside = true;
-          cull_plane = p;
           break;
         }
       }
       if (outside) {
-        printf("DBG CULLED: aabb=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] pad=%.2f plane=%d\n",
-               world_min.x, world_min.y, world_min.z,
-               world_max.x, world_max.y, world_max.z, group_pad, cull_plane);
         return;
       }
     }
-    printf("DBG KEPT: aabb=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
-           world_min.x, world_min.y, world_min.z,
-           world_max.x, world_max.y, world_max.z);
 
     float sphere_radius = math::length(local_extent);
     float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
@@ -1672,9 +1609,17 @@ class Instance : public DrawEngine {
 
   void draw(Manager & /*manager*/) final
   {
-    printf("DBG draw(): objects=%d\n", int(objects_.size()));
     if (objects_.is_empty()) {
-      printf("DBG draw(): EARLY EXIT — objects empty!\n");
+      /* Clear stale output so previous frame's SDF doesn't persist */
+      if (comp_color_tx_) {
+        float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        GPU_texture_clear(comp_color_tx_, GPU_DATA_FLOAT, clear);
+      }
+      if (comp_depth_tx_) {
+        float clear[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        GPU_texture_clear(comp_depth_tx_, GPU_DATA_FLOAT, clear);
+      }
+      compute_valid_ = false;
       return;
     }
 
@@ -1894,7 +1839,7 @@ class Instance : public DrawEngine {
 
     use_bvh_ = 1;
     /* Values 1-5 are GPU debug views, 6+ are overlay-only. */
-    debug_bvh_views_ = 3; /* DEBUG: step count heatmap */
+    debug_bvh_views_ = (s.sdf_bvh_debug_view <= 5) ? s.sdf_bvh_debug_view : 0;
     debug_fd_normals_ = s.sdf_fd_normals ? 1 : 0;
     use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 512;
@@ -2476,13 +2421,6 @@ class Instance : public DrawEngine {
   void draw_trace()
   {
     ensure_compute_targets();
-    static int frame_ctr = 0;
-    if (frame_ctr++ % 60 == 0) {
-      printf("SDF TRACE: %d objs, scene=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
-             int(objects_.size()),
-             scene_min_.x, scene_min_.y, scene_min_.z,
-             scene_max_.x, scene_max_.y, scene_max_.z);
-    }
 
     gpu::Shader *sh = (use_bvh_ != 0 && trace_tile_sh_) ? trace_tile_sh_ : trace_comp_sh_;
     if (!sh) {
@@ -2992,8 +2930,8 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
           float diag = math::length(search_ext);
           search_ext = float3(diag);
         }
-        else if (mt == SDF_MOD_HOLLOW || mt == SDF_MOD_ONION) {
-          search_ext += float3(mod.params.x);
+        else if (mt == SDF_MOD_SOLIDIFY || mt == SDF_MOD_ONION) {
+          /* Never expand — these only carve inward. */
         }
         else if (mt == SDF_MOD_ROUND || mt == SDF_MOD_BEVEL) {
           search_ext = math::max(search_ext + float3(mod.params.x), float3(0.0f));
@@ -3016,7 +2954,7 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
         for (int iy = 0; iy <= RES; iy++) {
           for (int ix = 0; ix <= RES; ix++) {
             float3 lp = search_min + float3(float(ix), float(iy), float(iz)) * cell;
-            float d = sdf_cpu::evalObjectSDF(obj, s_modifiers_cpu, lp, true);
+            float d = sdf_cpu::evalObjectSDF(obj, s_modifiers_cpu, lp, true, true);
             if (d >= 0.0f && d < threshold) {
               bb_min = math::min(bb_min, lp);
               bb_max = math::max(bb_max, lp);

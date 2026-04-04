@@ -65,7 +65,7 @@ set(SRC
   intern/MOD_sdf_twist.cc
   intern/MOD_sdf_bend.cc
   intern/MOD_sdf_elongate.cc
-  intern/MOD_sdf_hollow.cc
+  intern/MOD_sdf_solidify.cc
   intern/MOD_sdf_round.cc
   intern/MOD_sdf_onion.cc
   intern/MOD_sdf_bevel.cc

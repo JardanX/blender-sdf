@@ -628,15 +628,77 @@ float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
 
 /* ---- Distance modifier gradient ---- */
 
-float4 applyDistanceModifiersGrad(float4 dg, int mod_start, int mod_count)
+float4 applyDistanceModifiersGrad(float4 dg, float3 p, SDFObjectGPU obj,
+                                  int mod_start, int mod_count)
 {
   for (int i = mod_start; i < mod_start + mod_count; i++) {
     SDFModifierGPU smod = sdf_modifiers[i];
     int mtype = smod.header.x;
 
-    if (mtype == SDF_MOD_HOLLOW || mtype == SDF_MOD_ONION) {
-      float safe_s = dg.x / max(abs(dg.x), 0.001f);
-      dg = float4(abs(dg.x) - smod.params.x, safe_s * dg.yzw);
+    if (mtype == SDF_MOD_SOLIDIFY) {
+      float thickness = smod.params.x;
+      float bevel = smod.params.z;
+      int mode = smod.header.y;
+      float d = dg.x;
+
+      if (mode == 0) {
+        /* Closed */
+        float d_inner = -(d + thickness);
+        if (bevel > 0.0) {
+          float h = clamp(0.5 - 0.5 * (d_inner - d) / bevel, 0.0, 1.0);
+          float val = mix(d_inner, d, h) + bevel * h * (1.0 - h);
+          float3 grad = mix(-dg.yzw, dg.yzw, h);
+          dg = float4(val, grad);
+        }
+        else {
+          if (d < -thickness * 0.5) {
+            dg = float4(-(d + thickness), -dg.yzw);
+          }
+        }
+      }
+      else {
+        /* Open: axis-scaled inner */
+        int axis = smod.header.z;
+        float inner_scale = smod.params.y;
+        float3 p_inner = p;
+        p_inner[axis] *= inner_scale;
+        float4 pg = evalPrimitiveGrad(p_inner, obj, 0.001);
+        float d_inner_prim = pg.x;
+        float inner_void = -(d_inner_prim + thickness);
+        if (bevel > 0.0) {
+          float h = clamp(0.5 - 0.5 * (inner_void - d) / bevel, 0.0, 1.0);
+          float val = mix(inner_void, d, h) + bevel * h * (1.0 - h);
+          float3 g_inner = pg.yzw;
+          g_inner[axis] *= inner_scale;
+          float3 grad = mix(-g_inner, dg.yzw, h);
+          dg = float4(val, grad);
+        }
+        else {
+          if (inner_void > d) {
+            float3 grad = pg.yzw;
+            grad[axis] *= inner_scale;
+            dg = float4(inner_void, -grad);
+          }
+        }
+      }
+    }
+    else if (mtype == SDF_MOD_ONION) {
+      int layers = max(smod.header.y, 1);
+      float cut_half = max(smod.params.x, 0.001) * 0.5;
+      float min_ext = smod.params.y;
+      float original_d = dg.x;
+      if (layers > 1) {
+        float spacing = min_ext / float(layers);
+        float depth = max(-original_d, 0.0);
+        float max_cut = float(layers - 1) * spacing;
+        float nearest = clamp(floor(depth / spacing + 0.5) * spacing, spacing, max_cut);
+        float cut_dist = abs(depth - nearest);
+        float onion_d = cut_half - cut_dist;
+        if (onion_d > original_d) {
+          float s = (depth >= nearest) ? 1.0 : -1.0;
+          dg = float4(onion_d, s * dg.yzw);
+        }
+      }
     }
     else if (mtype == SDF_MOD_ROUND) {
       dg.x -= smod.params.x;

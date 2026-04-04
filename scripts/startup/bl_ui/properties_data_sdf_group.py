@@ -130,7 +130,7 @@ class SDFGROUP_OT_modifier_add(Operator):
             ('TWIST', "Twist", "Twist around Z axis", 'MOD_SIMPLEDEFORM', 1),
             ('BEND', "Bend", "Bend around an axis", 'MOD_SIMPLEDEFORM', 2),
             ('ELONGATE', "Elongate", "Stretch along axes", 'MOD_LENGTH', 3),
-            ('HOLLOW', "Hollow", "Make hollow with wall thickness", 'MOD_SOLIDIFY', 4),
+            ('SOLIDIFY', "Solidify", "Add internal shell thickness", 'MOD_SOLIDIFY', 4),
             ('ROUND', "Expand/Shrink", "Expand or shrink the SDF surface", 'MOD_SMOOTH', 5),
             ('ONION', "Onion", "Concentric shells", 'MOD_SOLIDIFY', 6),
             ('BEVEL', "Bevel", "Bevel/round edges", 'MOD_BEVEL', 7),
@@ -213,7 +213,7 @@ class SDFGROUP_MT_modifier_add(Menu):
         layout.operator("sdf_group.modifier_add", text="Bend", icon='MOD_SIMPLEDEFORM').type = 'BEND'
         layout.operator("sdf_group.modifier_add", text="Elongate", icon='MOD_LENGTH').type = 'ELONGATE'
         layout.separator()
-        layout.operator("sdf_group.modifier_add", text="Hollow", icon='MOD_SOLIDIFY').type = 'HOLLOW'
+        layout.operator("sdf_group.modifier_add", text="Solidify", icon='MOD_SOLIDIFY').type = 'SOLIDIFY'
         layout.operator("sdf_group.modifier_add", text="Expand/Shrink", icon='MOD_SMOOTH').type = 'ROUND'
         layout.operator("sdf_group.modifier_add", text="Onion", icon='MOD_SOLIDIFY').type = 'ONION'
         layout.separator()
@@ -284,12 +284,17 @@ class DATA_PT_sdf_group_modifiers(SDFGroupButtonsPanel, Panel):
                 col.prop(mod, "bend_axis", text="Axis")
             elif mod.type == 'ELONGATE':
                 col.prop(mod, "elongation")
-            elif mod.type == 'HOLLOW':
+            elif mod.type == 'SOLIDIFY':
                 col.prop(mod, "thickness")
+                col.prop(mod, "mode")
+                if mod.mode == 'OPEN':
+                    col.prop(mod, "axis")
             elif mod.type == 'ROUND':
                 col.prop(mod, "offset")
             elif mod.type == 'ONION':
                 col.prop(mod, "thickness")
+                col.prop(mod, "layers")
+                col.prop(mod, "gap")
             elif mod.type == 'BEVEL':
                 col.prop(mod, "radius")
             elif mod.type == 'ARRAY':
