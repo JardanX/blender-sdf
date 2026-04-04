@@ -1018,26 +1018,18 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
           float id = clamp(round(norm_t), 0.0f, count - 1.0f);
           float local = norm_t - id;
 
-          /* Stacked mirrors: odd copies mirrored so both sides of every
-           * boundary converge to the same position — seamless with twist.
-           * Same sabs fold as the mirror modifier at each cell boundary. */
           if (count > 1.5f && fract(id * 0.5f) > 0.25f) {
             local = -local;
           }
 
           if (count > 1.5f) {
-            /* Right boundary: mirror fold identical to mirror modifier.
-             * d = signed distance from boundary (positive = inside cell). */
             float d_r = (0.5f - local) * spacing;
             float pull_r = d_r - sabs(d_r, bk);
-            /* Left boundary */
             float d_l = (0.5f + local) * spacing;
             float pull_l = d_l - sabs(d_l, bk);
-            /* Right pull shifts left (toward center), left pull shifts right */
             local += (pull_r - pull_l) / spacing;
           }
 
-          /* Reconstruct: replace along-dir component with cell-0-local position */
           p += dir * (local * spacing - t);
         }
       }
@@ -1050,24 +1042,38 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
           float id = round(norm_a);
           float local = norm_a - id;
 
-          if (count > 1.5f && fract(abs(id) * 0.5f) > 0.25f) {
-            local = -local;
-          }
-
           if (count > 1.5f) {
+            /* Stacked mirror: flip odd cells so boundaries converge.
+             * For odd count, skip mirror on defect cells at ±π. */
+            bool mir = fract(abs(id) * 0.5f) > 0.25f;
+            bool odd = fract(count * 0.5f) > 0.25f;
+            bool at_defect = odd && (abs(angle) > SDF_PI - sector * 0.5f);
+            if (at_defect) {
+              local = abs(local);
+            }
+            else if (mir) {
+              local = -local;
+            }
+
             float arc = sector * max(radius, 0.0001f);
+            /* Minimum blend prevents hard junctions where box corners
+             * align with fold boundaries (causes ray marching noise). */
             float d_r = (0.5f - local) * arc;
             float pull_r = d_r - sabs(d_r, bk);
             float d_l = (0.5f + local) * arc;
             float pull_l = d_l - sabs(d_l, bk);
             local += (pull_r - pull_l) / arc;
+            if (bk > 0.001f) { scale *= 0.5f; }
           }
           float fold_a = local * sector;
           float r = length(p.xy);
           p.x = r * cos(fold_a) - radius;
           p.y = r * sin(fold_a);
 
+          /* Per-copy rotation offset (around copy center).
+           * Add constant Y bias to prevent fold ridge / box edge degeneracy. */
           float3 rot = smod.params2.yzw;
+          rot.y += 0.001f;
           if (abs(rot.x) > 0.0001f) {
             float cx = cos(rot.x), sx = sin(rot.x);
             p = float3(p.x, cx * p.y - sx * p.z, sx * p.y + cx * p.z);
@@ -1517,8 +1523,9 @@ float evalObjectSDF(SDFObjectGPU obj, float3 p)
   /* All modifiers (mirror, array, twist, etc.) use domain folding — single eval path. */
   float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
   p = dm.xyz;
-  float d = evalPrimitiveOnly(obj, p) * dm.w;
-  return applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
+  float d = evalPrimitiveOnly(obj, p);
+  d = applyDistanceModifiers(d, obj.modifier_start, obj.modifier_count);
+  return d * dm.w;
 }
 
 /* ---- Cross-shader helpers ---- */

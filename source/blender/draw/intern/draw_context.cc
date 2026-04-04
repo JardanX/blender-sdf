@@ -59,7 +59,7 @@
 #include "DNA_world_types.h"
 
 /* MATHOPS: Removed — Grease Pencil editor */
-// #include "ED_gpencil_legacy.hh"
+#include "ED_gpencil_legacy.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_view3d.hh"
@@ -1246,6 +1246,9 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
   RegionView3D *rv3d = draw_ctx.rv3d;
   ARegion *region = draw_ctx.region;
   View3D *v3d = draw_ctx.v3d;
+  Depsgraph *depsgraph = draw_ctx.depsgraph;
+
+  const bool do_annotations = draw_show_annotation();
 
   /* State has been reset at the end `draw_ctx.engines_draw_scene()`. */
 
@@ -1258,7 +1261,11 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
     GPU_matrix_projection_set(rv3d->winmat);
     GPU_matrix_set(rv3d->viewmat);
 
-    /* MATHOPS: Removed — annotations (grease pencil legacy) */
+    if (do_annotations) {
+      GPU_depth_test(GPU_DEPTH_NONE);
+      ED_annotation_draw_view3d(DEG_get_input_scene(depsgraph), depsgraph, v3d, region, true);
+      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    }
 
     GPU_depth_test(GPU_DEPTH_NONE);
     /* Apply state for callbacks. */
@@ -1300,7 +1307,10 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
     GPU_depth_test(GPU_DEPTH_NONE);
     DRW_draw_region_info(draw_ctx.evil_C, region);
 
-    /* MATHOPS: Removed — annotations (grease pencil legacy) */
+    if (((v3d->flag2 & V3D_HIDE_OVERLAYS) == 0) && (do_annotations)) {
+      GPU_depth_test(GPU_DEPTH_NONE);
+      ED_annotation_draw_view3d(DEG_get_input_scene(depsgraph), depsgraph, v3d, region, false);
+    }
 
     if ((v3d->gizmo_flag & V3D_GIZMO_HIDE) == 0) {
       /* Draw 2D after region info so we can draw on top of the camera passepartout overlay.
@@ -1312,7 +1322,11 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
   }
   else {
-    /* MATHOPS: Removed — annotations (grease pencil legacy) */
+    if (v3d && ((v3d->flag2 & V3D_SHOW_ANNOTATION) != 0)) {
+      GPU_depth_test(GPU_DEPTH_NONE);
+      ED_annotation_draw_view3d(DEG_get_input_scene(depsgraph), depsgraph, v3d, region, true);
+      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    }
 
 #ifdef WITH_XR_OPENXR
     if ((v3d->flag & V3D_XR_SESSION_SURFACE) != 0) {
@@ -1375,6 +1389,7 @@ static void drw_callbacks_pre_scene_2D(DRWContext &draw_ctx)
 static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
 {
   const bool do_draw_gizmos = (draw_ctx.space_data->spacetype != SPACE_IMAGE);
+  const bool do_annotations = draw_show_annotation();
 
   /* State has been reset at the end `draw_ctx.engines_draw_scene()`. */
 
@@ -1389,7 +1404,9 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
 
     wmOrtho2(v2d.cur.xmin, v2d.cur.xmax, v2d.cur.ymin, v2d.cur.ymax);
 
-    /* MATHOPS: Removed — annotations (grease pencil legacy) */
+    if (do_annotations) {
+      ED_annotation_draw_view2d(draw_ctx.evil_C, true);
+    }
 
     GPU_depth_test(GPU_DEPTH_NONE);
 
@@ -1401,6 +1418,10 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
     draw::command::StateSet::set();
 
     GPU_depth_test(GPU_DEPTH_NONE);
+
+    if (do_annotations) {
+      ED_annotation_draw_view2d(draw_ctx.evil_C, false);
+    }
   }
 
   ED_region_pixelspace(draw_ctx.region);

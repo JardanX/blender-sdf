@@ -147,8 +147,10 @@ void main()
     t_exit = min(min(t_hi.x, t_hi.y), t_hi.z);
 
     if (t_enter > t_exit || t_exit < 0.0f) {
-      tile_prim_counts[tileIdx] = 0;
+      /* Don't zero tile_prim_counts — tile center ray can miss scene AABB
+       * at oblique angles while per-pixel rays still hit geometry. */
       tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+      tile_far_hint[tileIdx] = 0.0f;
       return;
     }
     t_enter = max(t_enter, 0.0f);
@@ -211,9 +213,9 @@ void main()
     if (t > t_exit) { break; }
   }
 
-  /* Traversed full range without finding surface — tile is empty */
+  /* Traversed full range without finding surface — keep tile alive,
+   * per-pixel rays may still intersect from different positions. */
   if (t >= t_exit && t_safe > t_enter) {
-    tile_prim_counts[tileIdx] = 0;
     tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
     tile_far_hint[tileIdx] = 0.0f;
     return;
@@ -227,8 +229,7 @@ void main()
     tile_far_hint[tileIdx] = t_exit;
   }
   else {
-    /* No progress — center ray missed all AABBs, tile is empty */
-    tile_prim_counts[tileIdx] = 0;
+    /* No progress — center ray missed all AABBs, but keep tile alive */
     tile_hit_pos[tileIdx] = float4(0.0f, 0.0f, 0.0f, -1.0f);
     tile_far_hint[tileIdx] = 0.0f;
   }

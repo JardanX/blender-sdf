@@ -37,7 +37,7 @@ extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {SDF_MOD_BEND, "BEND", ICON_MOD_SIMPLEDEFORM, "Bend", "Bend around an axis"},
     {SDF_MOD_ELONGATE, "ELONGATE", ICON_MOD_LENGTH, "Elongate", "Stretch along axes"},
     {SDF_MOD_HOLLOW, "HOLLOW", ICON_MOD_SOLIDIFY, "Hollow", "Make hollow with wall thickness"},
-    {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Round", "Additional rounding"},
+    {SDF_MOD_ROUND, "ROUND", ICON_MOD_SMOOTH, "Expand/Shrink", "Expand or shrink the SDF surface"},
     {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
     {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
     {SDF_MOD_ARRAY, "ARRAY", ICON_MOD_ARRAY, "Array", "Duplicate geometry"},

@@ -466,8 +466,8 @@ const EnumPropertyItem rna_enum_object_modifier_type_items[] = {
     {eModifierType_SDFRound,
      "SDF_ROUND",
      ICON_MOD_SMOOTH,
-     "Round",
-     "Additional SDF rounding"},
+     "Expand/Shrink",
+     "Expand or shrink the SDF surface"},
     {eModifierType_SDFOnion,
      "SDF_ONION",
      ICON_MOD_SOLIDIFY,
@@ -11444,16 +11444,16 @@ static void rna_def_modifier_sdf_round(BlenderRNA *brna)
   PropertyRNA *prop;
 
   srna = RNA_def_struct(brna, "SDFRoundModifier", "Modifier");
-  RNA_def_struct_ui_text(srna, "SDF Round Modifier", "Additional SDF rounding");
+  RNA_def_struct_ui_text(srna, "SDF Expand/Shrink Modifier", "Expand or shrink the SDF surface");
   RNA_def_struct_sdna(srna, "SDFRoundModifierData");
   RNA_def_struct_ui_icon(srna, ICON_MOD_SMOOTH);
 
   RNA_define_lib_overridable(true);
 
-  prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "radius");
-  RNA_def_property_range(prop, 0.0f, FLT_MAX);
-  RNA_def_property_ui_text(prop, "Radius", "Rounding radius");
+  prop = RNA_def_property(srna, "offset", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "offset");
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Offset", "Positive expands, negative shrinks");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   RNA_define_lib_overridable(false);

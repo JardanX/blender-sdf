@@ -61,6 +61,7 @@
 #include "sdf_engine.h"
 #include "sdf_meshing.hh"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -126,11 +127,19 @@ static void sdf_shaders_ensure()
   if (s_shaders_compiled) {
     return;
   }
+  auto t0 = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < SH_COUNT; i++) {
     if (s_shader_cache[i] == nullptr) {
+      auto ts = std::chrono::high_resolution_clock::now();
       s_shader_cache[i] = GPU_shader_create_from_info_name(s_shader_info_names[i]);
+      auto te = std::chrono::high_resolution_clock::now();
+      printf("SDF shader[%d] '%s' => %.0f ms\n", i, s_shader_info_names[i],
+             std::chrono::duration<double, std::milli>(te - ts).count());
     }
   }
+  auto t1 = std::chrono::high_resolution_clock::now();
+  printf("SDF total shader compile: %.0f ms\n",
+         std::chrono::duration<double, std::milli>(t1 - t0).count());
   s_shaders_compiled = true;
 }
 
@@ -300,6 +309,10 @@ class Instance : public DrawEngine {
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
   {
+    Object *ob_dbg = ob_ref.object;
+    if (ob_dbg->type == OB_SDF) {
+      printf("DBG object_sync: OB_SDF received, depth_mode=%d\n", depth_mode_ ? 1 : 0);
+    }
     if (depth_mode_) {
       return;
     }
@@ -486,7 +499,7 @@ class Instance : public DrawEngine {
             break;
           case SDF_MOD_ROUND:
           case SDF_MOD_BEVEL:
-            local_extent += float3(mod.params.x);
+            local_extent = math::max(local_extent + float3(mod.params.x), float3(0.0f));
             break;
           case SDF_MOD_TWIST: {
             float xy = math::sqrt(local_extent.x * local_extent.x +
@@ -854,7 +867,7 @@ class Instance : public DrawEngine {
         case eModifierType_SDFRound: {
           const auto &m = *reinterpret_cast<const SDFRoundModifierData *>(md);
           gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
-          gpu_mod.params = float4(m.radius, 0.0f, 0.0f, 0.0f);
+          gpu_mod.params = float4(m.offset, 0.0f, 0.0f, 0.0f);
           valid = true;
           break;
         }
@@ -999,7 +1012,7 @@ class Instance : public DrawEngine {
           break;
         case SDF_MOD_ROUND:
         case SDF_MOD_BEVEL:
-          local_extent += float3(mod.params.x);
+          local_extent = math::max(local_extent + float3(mod.params.x), float3(0.0f));
           break;
         case SDF_MOD_TWIST: {
           float xy = math::sqrt(local_extent.x * local_extent.x +
@@ -1048,8 +1061,7 @@ class Instance : public DrawEngine {
               float radius = mod.params.y;
               local_extent.x += radius;
               local_extent.y += radius;
-              /* Always use spherical AABB — the fold + implicit Y bias
-               * can place geometry outside the box AABB at corners. */
+              /* Spherical AABB when rotation offset or Y bias is active */
               float r = math::length(local_extent);
               local_extent = float3(r);
             }
@@ -1109,6 +1121,7 @@ class Instance : public DrawEngine {
       float3 pad_min = world_min - float3(group_pad);
       float3 pad_max = world_max + float3(group_pad);
       bool outside = false;
+      int cull_plane = -1;
       for (int p = 0; p < 6; p++) {
         float3 n(frustum_planes_[p]);
         float d = frustum_planes_[p].w;
@@ -1117,13 +1130,20 @@ class Instance : public DrawEngine {
                           n.z > 0 ? pad_max.z : pad_min.z);
         if (math::dot(n, pos_vertex) + d < 0.0f) {
           outside = true;
+          cull_plane = p;
           break;
         }
       }
       if (outside) {
+        printf("DBG CULLED: aabb=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] pad=%.2f plane=%d\n",
+               world_min.x, world_min.y, world_min.z,
+               world_max.x, world_max.y, world_max.z, group_pad, cull_plane);
         return;
       }
     }
+    printf("DBG KEPT: aabb=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+           world_min.x, world_min.y, world_min.z,
+           world_max.x, world_max.y, world_max.z);
 
     float sphere_radius = math::length(local_extent);
     float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
@@ -1652,7 +1672,9 @@ class Instance : public DrawEngine {
 
   void draw(Manager & /*manager*/) final
   {
+    printf("DBG draw(): objects=%d\n", int(objects_.size()));
     if (objects_.is_empty()) {
+      printf("DBG draw(): EARLY EXIT — objects empty!\n");
       return;
     }
 
@@ -1872,7 +1894,7 @@ class Instance : public DrawEngine {
 
     use_bvh_ = 1;
     /* Values 1-5 are GPU debug views, 6+ are overlay-only. */
-    debug_bvh_views_ = (s.sdf_bvh_debug_view <= 5) ? s.sdf_bvh_debug_view : 0;
+    debug_bvh_views_ = 3; /* DEBUG: step count heatmap */
     debug_fd_normals_ = s.sdf_fd_normals ? 1 : 0;
     use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 512;
@@ -2454,6 +2476,13 @@ class Instance : public DrawEngine {
   void draw_trace()
   {
     ensure_compute_targets();
+    static int frame_ctr = 0;
+    if (frame_ctr++ % 60 == 0) {
+      printf("SDF TRACE: %d objs, scene=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]\n",
+             int(objects_.size()),
+             scene_min_.x, scene_min_.y, scene_min_.z,
+             scene_max_.x, scene_max_.y, scene_max_.z);
+    }
 
     gpu::Shader *sh = (use_bvh_ != 0 && trace_tile_sh_) ? trace_tile_sh_ : trace_comp_sh_;
     if (!sh) {
@@ -2963,9 +2992,11 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
           float diag = math::length(search_ext);
           search_ext = float3(diag);
         }
-        else if (mt == SDF_MOD_HOLLOW || mt == SDF_MOD_ONION ||
-                 mt == SDF_MOD_ROUND || mt == SDF_MOD_BEVEL) {
+        else if (mt == SDF_MOD_HOLLOW || mt == SDF_MOD_ONION) {
           search_ext += float3(mod.params.x);
+        }
+        else if (mt == SDF_MOD_ROUND || mt == SDF_MOD_BEVEL) {
+          search_ext = math::max(search_ext + float3(mod.params.x), float3(0.0f));
         }
       }
       search_ext *= 1.1f;
