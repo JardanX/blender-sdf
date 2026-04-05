@@ -812,6 +812,23 @@ float4 applyDistanceModifiersGrad(float4 dg, float3 p, SDFObjectGPU obj,
     else if (mtype == SDF_MOD_ROUND) {
       dg.x -= smod.params.x;
     }
+    else if (mtype == SDF_MOD_DISPLACE) {
+      float strength = smod.params.x;
+      float frequency = smod.params.y;
+      float lacunarity = smod.params.z;
+      float roughness = smod.params.w;
+      int noise_type = smod.header.y;
+      int octaves = smod.header.z;
+      float4 ng = sdf_displacement_grad(
+          p * frequency, noise_type, octaves, lacunarity, roughness);
+      dg.x += ng.x * strength;
+      /* Scale perturbation relative to base gradient to prevent flipping */
+      float base_len = max(length(dg.yzw), 0.01f);
+      float3 disp_grad = ng.yzw * (strength * frequency);
+      float disp_len = length(disp_grad);
+      float scale = min(disp_len, base_len * 0.9f) / max(disp_len, 1e-8f);
+      dg.yzw += disp_grad * scale;
+    }
   }
   return dg;
 }
@@ -893,14 +910,21 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
             float nt = t_orig / sp;
             float aid = clamp(round(nt), 0.0f, cnt - 1.0f);
             float lt = nt - aid;
+            bool mir = false;
             if (cnt > 1.5f && fract(aid * 0.5f) > 0.25f) {
               lt = -lt;
+              mir = true;
             }
             if (cnt > 1.5f) {
               float dr = (0.5f - lt) * sp;
               float pr = dr - sabs(dr, abk);
               float dl = (0.5f + lt) * sp;
               float pl = dl - sabs(dl, abk);
+              if (aid < 0.5f) { pl = 0.0f; }
+              if (aid > cnt - 1.5f) {
+                if (mir) { pl = 0.0f; }
+                else { pr = 0.0f; }
+              }
               lt += (pr - pl) / sp;
             }
             p += adir * (lt * sp - t_orig);
@@ -1022,12 +1046,18 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
           float lt = nt - aid;
 
           float flip = 1.0f;
-          if (fract(aid * 0.5f) > 0.25f) { lt = -lt; flip = -1.0f; }
+          bool mir = false;
+          if (fract(aid * 0.5f) > 0.25f) { lt = -lt; flip = -1.0f; mir = true; }
 
           float d_r = (0.5f - lt) * sp;
           float d_l = (0.5f + lt) * sp;
           float h_r = (bk > 0.001f) ? clamp(0.5f + 0.5f * d_r / bk, 0.0f, 1.0f) : ((d_r >= 0.0f) ? 1.0f : 0.0f);
           float h_l = (bk > 0.001f) ? clamp(0.5f + 0.5f * d_l / bk, 0.0f, 1.0f) : ((d_l >= 0.0f) ? 1.0f : 0.0f);
+          if (aid < 0.5f) { h_l = 1.0f; }
+          if (aid > cnt - 1.5f) {
+            if (mir) { h_l = 1.0f; }
+            else { h_r = 1.0f; }
+          }
           float deriv = flip * ((2.0f * h_r - 1.0f) + (2.0f * h_l - 1.0f) - 1.0f);
 
           float g_dir = dot(grad, dir);
@@ -1148,19 +1178,34 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
       float3 bp = pp - origin;
       if (abs(bk) > 0.0001f) {
         if (axis == 1) {
-          float a = -bk * bp.y;
+          float a = bk * bp.y;
           float ca = cos(a), sa = sin(a);
-          grad = float3(grad.x, ca * grad.y - sa * grad.z, sa * grad.y + ca * grad.z);
+          float bd = ca * bp.y - sa * bp.z;
+          float bc = sa * bp.y + ca * bp.z;
+          float dc = bk * (-bc * grad.y + bd * grad.z);
+          float gy = grad.y, gz = grad.z;
+          grad.y = ca * gy + sa * gz + dc;
+          grad.z = -sa * gy + ca * gz;
         }
         else if (axis == 2) {
-          float a = -bk * bp.z;
+          float a = bk * bp.z;
           float ca = cos(a), sa = sin(a);
-          grad = float3(ca * grad.x + sa * grad.z, grad.y, -sa * grad.x + ca * grad.z);
+          float bd = ca * bp.z - sa * bp.x;
+          float bc = sa * bp.z + ca * bp.x;
+          float dc = bk * (-bc * grad.z + bd * grad.x);
+          float gx = grad.x, gz = grad.z;
+          grad.z = ca * gz + sa * gx + dc;
+          grad.x = -sa * gz + ca * gx;
         }
         else {
-          float a = -bk * bp.x;
+          float a = bk * bp.x;
           float ca = cos(a), sa = sin(a);
-          grad = float3(ca * grad.x - sa * grad.y, sa * grad.x + ca * grad.y, grad.z);
+          float bd = ca * bp.x - sa * bp.y;
+          float bc = sa * bp.x + ca * bp.y;
+          float dc = bk * (-bc * grad.x + bd * grad.y);
+          float gx = grad.x, gy = grad.y;
+          grad.x = ca * gx + sa * gy + dc;
+          grad.y = -sa * gx + ca * gy;
         }
       }
     }

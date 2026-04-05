@@ -317,6 +317,7 @@ class OBJECT_MT_modifier_add_sdf_generate(ModifierAddMenu, Menu):
         self.operator_modifier_add(layout, 'SDF_ROUND')
         self.operator_modifier_add(layout, 'SDF_ONION')
         self.operator_modifier_add(layout, 'SDF_BEVEL')
+        self.operator_modifier_add(layout, 'SDF_DISPLACE')
 
 
 class AddModifierMenu(Operator):

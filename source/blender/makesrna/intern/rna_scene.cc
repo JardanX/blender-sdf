@@ -1838,6 +1838,7 @@ static const EnumPropertyItem *rna_RenderSettings_engine_itemf(bContext * /*C*/,
   for (type = static_cast<RenderEngineType *>(R_engines.first); type; type = type->next, a++) {
     /* MATHOPS: Hide Workbench/Proximity and Hydra Storm — Cycles is the sole engine. */
     if (STREQ(type->idname, RE_engine_id_BLENDER_WORKBENCH) ||
+        STREQ(type->idname, "BLENDER_PROXIMITY") ||
         STREQ(type->idname, "HYDRA_STORM"))
     {
       continue;

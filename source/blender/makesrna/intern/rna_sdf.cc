@@ -41,6 +41,7 @@ extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
     {SDF_MOD_ONION, "ONION", ICON_MOD_SOLIDIFY, "Onion", "Create concentric shells"},
     {SDF_MOD_BEVEL, "BEVEL", ICON_MOD_BEVEL, "Bevel", "Bevel/round edges"},
     {SDF_MOD_ARRAY, "ARRAY", ICON_MOD_ARRAY, "Array", "Duplicate geometry"},
+    {SDF_MOD_DISPLACE, "DISPLACE", ICON_MOD_DISPLACE, "Displacement", "Displace surface with pattern"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

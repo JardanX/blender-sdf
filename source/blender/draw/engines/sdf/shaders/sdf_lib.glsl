@@ -898,6 +898,7 @@ float opSmoothRoundIntersectionInverted(float d1, float d2, float r, float k2, f
 #define SDF_MOD_ONION 6
 #define SDF_MOD_BEVEL 7
 #define SDF_MOD_ARRAY 8
+#define SDF_MOD_DISPLACE 9
 
 /** Mirror axis flags. */
 #define SDF_MOD_MIRROR_X 1
@@ -907,6 +908,12 @@ float opSmoothRoundIntersectionInverted(float d1, float d2, float r, float k2, f
 /** Array types. */
 #define SDF_MOD_ARRAY_LINEAR 0
 #define SDF_MOD_ARRAY_RADIAL 1
+
+/** Displacement noise types. */
+#define SDF_MOD_DISPLACE_NOISE 0
+#define SDF_MOD_DISPLACE_VORONOI 1
+#define SDF_MOD_DISPLACE_TRIANGLE 2
+#define SDF_MOD_DISPLACE_POINTS 3
 
 /**
  * Smooth absolute value for soft mirroring.
@@ -932,6 +939,204 @@ float sround(float x, float k)
   float f = fract(x + 0.5f - k * 0.5f);
   float step_val = smoothstep(0.0f, k, f);
   return i + step_val;
+}
+
+/* ---- Noise functions for displacement ---- */
+
+/* Fract-based 3D hash — fast, no sin(), good distribution */
+float3 sdf_hash33(float3 p)
+{
+  p = fract(p * float3(0.1031f, 0.1030f, 0.0973f));
+  p += dot(p, p.yxz + 33.33f);
+  return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+float sdf_hash31(float3 p)
+{
+  p = fract(p * 0.1031f);
+  p += dot(p, p.zyx + 31.32f);
+  return fract((p.x + p.y) * p.z);
+}
+
+/* Value noise — quintic interpolation */
+float sdf_value_noise(float3 p)
+{
+  float3 i = floor(p);
+  float3 f = fract(p);
+  float3 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+
+  float a = sdf_hash31(i);
+  float b = sdf_hash31(i + float3(1, 0, 0));
+  float c = sdf_hash31(i + float3(0, 1, 0));
+  float d = sdf_hash31(i + float3(1, 1, 0));
+  float e = sdf_hash31(i + float3(0, 0, 1));
+  float ff = sdf_hash31(i + float3(1, 0, 1));
+  float g = sdf_hash31(i + float3(0, 1, 1));
+  float h = sdf_hash31(i + float3(1, 1, 1));
+
+  return mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y),
+             mix(mix(e, ff, u.x), mix(g, h, u.x), u.y), u.z) * 2.0f - 1.0f;
+}
+
+float sdf_fbm_noise(float3 p, int octaves, float lacunarity, float roughness)
+{
+  float sum = 0.0f;
+  float amp = 1.0f;
+  float max_amp = 0.0f;
+  for (int i = 0; i < octaves; i++) {
+    sum += sdf_value_noise(p) * amp;
+    max_amp += amp;
+    p *= lacunarity;
+    amp *= roughness;
+  }
+  return sum / max_amp;
+}
+
+/* 3D voronoi with analytical gradient — single pass */
+float4 sdf_voronoi_grad(float3 p)
+{
+  float3 i = floor(p);
+  float3 f = fract(p);
+  float min_d2 = 100.0f;
+  float3 nearest_r = float3(0);
+  for (int z = -1; z <= 1; z++) {
+    for (int y = -1; y <= 1; y++) {
+      for (int x = -1; x <= 1; x++) {
+        float3 b = float3(float(x), float(y), float(z));
+        float3 r = b - f + sdf_hash33(i + b);
+        float d2 = dot(r, r);
+        if (d2 < min_d2) {
+          min_d2 = d2;
+          nearest_r = r;
+        }
+      }
+    }
+  }
+  float d = sqrt(min_d2);
+  float3 grad = nearest_r / max(d, 1e-8f);
+  return float4(d, grad);
+}
+
+float sdf_voronoi(float3 p) { return sdf_voronoi_grad(p).x; }
+
+float sdf_fbm_voronoi(float3 p, int octaves, float lacunarity, float roughness)
+{
+  float sum = 0.0f;
+  float amp = 1.0f;
+  float max_amp = 0.0f;
+  for (int i = 0; i < octaves; i++) {
+    sum += (1.0f - sdf_voronoi(p)) * amp;
+    max_amp += amp;
+    p *= lacunarity;
+    amp *= roughness;
+  }
+  return sum / max_amp;
+}
+
+/* Analytical voronoi FBM gradient — avoids finite differences */
+float4 sdf_fbm_voronoi_grad(float3 p, int octaves, float lacunarity, float roughness)
+{
+  float sum = 0.0f;
+  float3 gsum = float3(0);
+  float amp = 1.0f;
+  float freq = 1.0f;
+  float max_amp = 0.0f;
+  for (int i = 0; i < octaves; i++) {
+    float4 vg = sdf_voronoi_grad(p * freq);
+    sum += (1.0f - vg.x) * amp;
+    gsum += vg.yzw * amp * freq;
+    max_amp += amp;
+    freq *= lacunarity;
+    amp *= roughness;
+  }
+  float inv_ma = 1.0f / max_amp;
+  return float4(sum * inv_ma, gsum * inv_ma);
+}
+
+/* Diamond knurl grid — MathOPS sdDiamondGrid */
+float sdf_diamond_2d(float2 p)
+{
+  float2 cell = fract(p) - 0.5f;
+  return 1.0f - (abs(cell.x) + abs(cell.y)) * 2.0f;
+}
+
+float sdf_triangle_grid(float3 p)
+{
+  float n1 = sdf_diamond_2d(p.xy);
+  float n2 = sdf_diamond_2d(p.yz);
+  float n3 = sdf_diamond_2d(p.zx);
+  float n = max(n1, max(n2, n3));
+  float c = clamp(n, 0.0f, 1.0f);
+  return c * c;
+}
+
+/* Points — 3D spherical dots in a cubic grid */
+float sdf_points(float3 p)
+{
+  float3 f = fract(p) - 0.5f;
+  float d = length(f);
+  return smoothstep(0.45f, 0.0f, d);
+}
+
+float sdf_fbm_triangle(float3 p, int octaves, float lacunarity, float roughness)
+{
+  float sum = 0.0f;
+  float amp = 1.0f;
+  float max_amp = 0.0f;
+  for (int i = 0; i < octaves; i++) {
+    sum += sdf_triangle_grid(p) * amp;
+    max_amp += amp;
+    p *= lacunarity;
+    amp *= roughness;
+  }
+  return sum / max_amp;
+}
+
+/* Full quality displacement (used by gradient/normal pass) */
+float sdf_displacement(float3 p, int noise_type, int octaves, float lacunarity, float roughness)
+{
+  if (noise_type == SDF_MOD_DISPLACE_VORONOI) {
+    return sdf_fbm_voronoi(p, octaves, lacunarity, roughness);
+  }
+  if (noise_type == SDF_MOD_DISPLACE_TRIANGLE) {
+    return sdf_fbm_triangle(p, octaves, lacunarity, roughness);
+  }
+  if (noise_type == SDF_MOD_DISPLACE_POINTS) {
+    return sdf_points(p);
+  }
+  return sdf_fbm_noise(p, octaves, lacunarity, roughness);
+}
+
+/* Cheaper displacement for ray march — same noise type, fewer octaves */
+float sdf_displacement_fast(float3 p, int noise_type, int octaves, float lacunarity, float roughness)
+{
+  int fast_oct = max(min(octaves, 2), 1);
+  if (noise_type == SDF_MOD_DISPLACE_VORONOI) {
+    return sdf_fbm_voronoi(p, 1, lacunarity, roughness);
+  }
+  if (noise_type == SDF_MOD_DISPLACE_TRIANGLE) {
+    return sdf_fbm_triangle(p, fast_oct, lacunarity, roughness);
+  }
+  if (noise_type == SDF_MOD_DISPLACE_POINTS) {
+    return sdf_points(p);
+  }
+  return sdf_fbm_noise(p, fast_oct, lacunarity, roughness);
+}
+
+/* Gradient: analytical for voronoi, finite-difference for others */
+float4 sdf_displacement_grad(float3 p, int noise_type, int octaves,
+                             float lacunarity, float roughness)
+{
+  if (noise_type == SDF_MOD_DISPLACE_VORONOI) {
+    return sdf_fbm_voronoi_grad(p, octaves, lacunarity, roughness);
+  }
+  const float e = 0.002f;
+  float val = sdf_displacement(p, noise_type, octaves, lacunarity, roughness);
+  float inv_e = 1.0f / e;
+  float gx = (sdf_displacement(p + float3(e, 0, 0), noise_type, octaves, lacunarity, roughness) - val) * inv_e;
+  float gy = (sdf_displacement(p + float3(0, e, 0), noise_type, octaves, lacunarity, roughness) - val) * inv_e;
+  float gz = (sdf_displacement(p + float3(0, 0, e), noise_type, octaves, lacunarity, roughness) - val) * inv_e;
+  return float4(val, gx, gy, gz);
 }
 
 /**
@@ -1046,8 +1251,10 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
           float id = clamp(round(norm_t), 0.0f, count - 1.0f);
           float local = norm_t - id;
 
+          bool mirrored = false;
           if (count > 1.5f && fract(id * 0.5f) > 0.25f) {
             local = -local;
+            mirrored = true;
           }
 
           if (count > 1.5f) {
@@ -1055,6 +1262,11 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
             float pull_r = d_r - sabs(d_r, bk);
             float d_l = (0.5f + local) * spacing;
             float pull_l = d_l - sabs(d_l, bk);
+            if (id < 0.5f) { pull_l = 0.0f; }
+            if (id > count - 1.5f) {
+              if (mirrored) { pull_l = 0.0f; }
+              else { pull_r = 0.0f; }
+            }
             local += (pull_r - pull_l) / spacing;
           }
 
@@ -1628,6 +1840,22 @@ float applyDistanceModifiers(float dist, float3 p, SDFObjectGPU obj, int mod_sta
     }
     else if (mtype == SDF_MOD_ROUND) {
       dist -= smod.params.x;
+    }
+    else if (mtype == SDF_MOD_DISPLACE) {
+      float strength = smod.params.x;
+      float frequency = smod.params.y;
+      float lacunarity = smod.params.z;
+      float roughness = smod.params.w;
+      int noise_type = smod.header.y;
+      int octaves = smod.header.z;
+      float n = sdf_displacement_fast(p * frequency, noise_type, octaves, lacunarity, roughness);
+      /* Per-type Lipschitz bound */
+      float lip = 1.0f;
+      if (noise_type == SDF_MOD_DISPLACE_POINTS) { lip = 3.5f; }
+      else if (noise_type == SDF_MOD_DISPLACE_TRIANGLE) { lip = 3.0f; }
+      else if (noise_type == SDF_MOD_DISPLACE_VORONOI) { lip = 1.5f; }
+      dist += n * strength;
+      dist /= (1.0f + abs(strength) * frequency * lip);
     }
     else if (mtype == SDF_MOD_ONION) {
       int layers = max(smod.header.y, 1);

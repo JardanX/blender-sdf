@@ -483,6 +483,11 @@ const EnumPropertyItem rna_enum_object_modifier_type_items[] = {
      ICON_MOD_ARRAY,
      "Array",
      "Duplicate SDF geometry"},
+    {eModifierType_SDFDisplace,
+     "SDF_DISPLACE",
+     ICON_MOD_DISPLACE,
+     "Displacement",
+     "Displace SDF surface with noise"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -11627,6 +11632,69 @@ static void rna_def_modifier_sdf_array(BlenderRNA *brna)
   RNA_define_lib_overridable(false);
 }
 
+static void rna_def_modifier_sdf_displace(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem sdf_displace_noise_type_items[] = {
+      {MOD_SDF_DISPLACE_NOISE, "NOISE", 0, "Noise", "Granular plastic-like noise"},
+      {MOD_SDF_DISPLACE_VORONOI, "VORONOI", 0, "Voronoi", "Tileable cellular noise"},
+      {MOD_SDF_DISPLACE_TRIANGLE, "DIAMOND", 0, "Diamond", "Diamond knurl grid pattern"},
+      {MOD_SDF_DISPLACE_POINTS, "POINTS", 0, "Points", "Spherical dots in a regular grid"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SDFDisplaceModifier", "Modifier");
+  RNA_def_struct_ui_text(srna, "SDF Displacement Modifier", "Displace SDF surface with noise");
+  RNA_def_struct_sdna(srna, "SDFDisplaceModifierData");
+  RNA_def_struct_ui_icon(srna, ICON_MOD_DISPLACE);
+
+  RNA_define_lib_overridable(true);
+
+  prop = RNA_def_property(srna, "noise_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "noise_type");
+  RNA_def_property_enum_items(prop, sdf_displace_noise_type_items);
+  RNA_def_property_ui_text(prop, "Noise Type", "Type of displacement noise");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "strength");
+  RNA_def_property_range(prop, -5.0f, 5.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Strength", "Displacement amount");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "frequency", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "frequency");
+  RNA_def_property_range(prop, 0.1f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 50.0f, 0.5f, 2);
+  RNA_def_property_ui_text(prop, "Frequency", "Scale of the noise pattern");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "octaves", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "octaves");
+  RNA_def_property_range(prop, 1, 8);
+  RNA_def_property_ui_text(prop, "Octaves", "Number of noise layers (detail)");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "lacunarity", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "lacunarity");
+  RNA_def_property_range(prop, 1.0f, 10.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 4.0f, 0.1f, 2);
+  RNA_def_property_ui_text(prop, "Lacunarity", "Frequency multiplier per octave");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "roughness", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "roughness");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.05f, 3);
+  RNA_def_property_ui_text(prop, "Roughness", "Amplitude multiplier per octave");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  RNA_define_lib_overridable(false);
+}
+
 void RNA_def_modifier(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -11842,6 +11910,7 @@ void RNA_def_modifier(BlenderRNA *brna)
   rna_def_modifier_sdf_onion(brna);
   rna_def_modifier_sdf_bevel(brna);
   rna_def_modifier_sdf_array(brna);
+  rna_def_modifier_sdf_displace(brna);
 }
 
 }  // namespace blender

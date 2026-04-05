@@ -298,6 +298,7 @@ void modifier_type_init(ModifierTypeInfo *types[])
   INIT_TYPE(SDFOnion);
   INIT_TYPE(SDFBevel);
   INIT_TYPE(SDFArray);
+  INIT_TYPE(SDFDisplace);
 #undef INIT_TYPE
 }
 

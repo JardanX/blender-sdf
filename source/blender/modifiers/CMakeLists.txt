@@ -70,6 +70,7 @@ set(SRC
   intern/MOD_sdf_onion.cc
   intern/MOD_sdf_bevel.cc
   intern/MOD_sdf_array.cc
+  intern/MOD_sdf_displace.cc
   intern/MOD_hook.cc
   intern/MOD_laplaciandeform.cc
   intern/MOD_laplaciansmooth.cc
