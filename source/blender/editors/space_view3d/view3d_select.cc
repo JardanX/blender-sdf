@@ -17,6 +17,7 @@
 #include "DNA_meshdata_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
@@ -564,6 +565,118 @@ static void do_lasso_tag_pose(const ViewContext *vc, const Span<int2> mcoords)
                          V3D_PROJ_TEST_CLIP_DEFAULT | V3D_PROJ_TEST_CLIP_CONTENT_DEFAULT);
 }
 
+/* SDF bounding box helpers */
+
+static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
+{
+  const float *sz = sdf->size;
+  float ext[3] = {sz[0], sz[1], sz[2]};
+  switch (sdf->sdf_type) {
+    case SDF_TYPE_CONE:
+      ext[0] = ext[1] = sz[0];
+      ext[2] = sz[1];
+      break;
+    case SDF_TYPE_CAPSULE:
+      ext[0] = ext[1] = sz[0];
+      ext[2] = sz[1] + sz[0];
+      break;
+    case SDF_TYPE_TORUS:
+      ext[0] = ext[1] = sz[0] + sz[1];
+      ext[2] = sz[1];
+      break;
+    case SDF_TYPE_NGON:
+      ext[0] = ext[1] = sz[0];
+      ext[2] = sz[2];
+      break;
+    case SDF_TYPE_POLYGON: {
+      float mn[2] = {1e30f, 1e30f};
+      float mx[2] = {-1e30f, -1e30f};
+      for (const SDFPolygonPoint *pt =
+               static_cast<const SDFPolygonPoint *>(sdf->polygon_points.first);
+           pt; pt = pt->next)
+      {
+        mn[0] = min_ff(mn[0], pt->co[0]);
+        mn[1] = min_ff(mn[1], pt->co[1]);
+        mx[0] = max_ff(mx[0], pt->co[0]);
+        mx[1] = max_ff(mx[1], pt->co[1]);
+      }
+      r_min[0] = mn[0]; r_min[1] = mn[1]; r_min[2] = -sz[2];
+      r_max[0] = mx[0]; r_max[1] = mx[1]; r_max[2] = sz[2];
+      return;
+    }
+    default:
+      break;
+  }
+  r_min[0] = -ext[0]; r_min[1] = -ext[1]; r_min[2] = -ext[2];
+  r_max[0] = ext[0];  r_max[1] = ext[1];  r_max[2] = ext[2];
+}
+
+/**
+ * Project 8 corners of SDF bounding box to screen, returning screen-space AABB.
+ * Also fills `r_corners` (up to 8 valid projected points) and `r_count`.
+ * Returns false if no corner projects successfully.
+ */
+static bool sdf_bb_project_to_screen(const ARegion *region,
+                                     const Object *ob,
+                                     float r_screen_corners[][2],
+                                     int *r_count,
+                                     rcti *r_screen_rect)
+{
+  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+  if (!sdf) {
+    return false;
+  }
+
+  float bb_min[3], bb_max[3];
+  sdf_local_extents(sdf, bb_min, bb_max);
+
+  /* Expand by bevel. */
+  float bevel = sdf->bevel;
+  for (int i = 0; i < 3; i++) {
+    bb_min[i] -= bevel;
+    bb_max[i] += bevel;
+  }
+
+  const float4x4 &obmat = ob->object_to_world();
+  int count = 0;
+  float smin[2] = {FLT_MAX, FLT_MAX};
+  float smax[2] = {-FLT_MAX, -FLT_MAX};
+
+  for (int c = 0; c < 8; c++) {
+    float3 local = {
+        (c & 1) ? bb_max[0] : bb_min[0],
+        (c & 2) ? bb_max[1] : bb_min[1],
+        (c & 4) ? bb_max[2] : bb_min[2],
+    };
+    float3 world = math::transform_point(obmat, local);
+
+    float sc[2];
+    if (ED_view3d_project_float_global(region, world, sc, V3D_PROJ_TEST_CLIP_DEFAULT) ==
+        V3D_PROJ_RET_OK)
+    {
+      copy_v2_v2(r_screen_corners[count], sc);
+      count++;
+      smin[0] = min_ff(smin[0], sc[0]);
+      smin[1] = min_ff(smin[1], sc[1]);
+      smax[0] = max_ff(smax[0], sc[0]);
+      smax[1] = max_ff(smax[1], sc[1]);
+    }
+  }
+
+  *r_count = count;
+  if (count == 0) {
+    return false;
+  }
+
+  if (r_screen_rect) {
+    r_screen_rect->xmin = int(smin[0]);
+    r_screen_rect->ymin = int(smin[1]);
+    r_screen_rect->xmax = int(smax[0]) + 1;
+    r_screen_rect->ymax = int(smax[1]) + 1;
+  }
+  return true;
+}
+
 static bool do_lasso_select_objects(const ViewContext *vc,
                                     const Span<int2> mcoords,
                                     const eSelectOp sel_op)
@@ -576,16 +689,35 @@ static bool do_lasso_select_objects(const ViewContext *vc,
   }
   BKE_view_layer_synced_ensure(vc->scene, vc->view_layer);
   for (Base &base : *BKE_view_layer_object_bases_get(vc->view_layer)) {
-    if (BASE_SELECTABLE(v3d, &base)) { /* Use this to avoid unnecessary lasso look-ups. */
-      float region_co[2];
+    if (BASE_SELECTABLE(v3d, &base)) {
       const bool is_select = base.flag & BASE_SELECTED;
-      const bool is_inside = (ED_view3d_project_base(vc->region, &base, region_co) ==
-                              V3D_PROJ_RET_OK) &&
-                             BLI_lasso_is_point_inside(mcoords,
-                                                       int(region_co[0]),
-                                                       int(region_co[1]),
-                                                       /* Dummy value. */
-                                                       INT_MAX);
+      bool is_inside = false;
+
+      if (base.object->type == OB_SDF) {
+        /* SDF: test any projected BB corner inside lasso. */
+        float corners[8][2];
+        int count;
+        if (sdf_bb_project_to_screen(vc->region, base.object, corners, &count, nullptr)) {
+          for (int i = 0; i < count; i++) {
+            if (BLI_lasso_is_point_inside(
+                    mcoords, int(corners[i][0]), int(corners[i][1]), INT_MAX))
+            {
+              is_inside = true;
+              break;
+            }
+          }
+        }
+      }
+      else {
+        float region_co[2];
+        is_inside = (ED_view3d_project_base(vc->region, &base, region_co) ==
+                     V3D_PROJ_RET_OK) &&
+                    BLI_lasso_is_point_inside(mcoords,
+                                              int(region_co[0]),
+                                              int(region_co[1]),
+                                              INT_MAX);
+      }
+
       const int sel_op_result = ED_select_op_action_deselected(sel_op, is_select, is_inside);
       if (sel_op_result != -1) {
         ed::object::base_select(&base,
@@ -4393,7 +4525,21 @@ static bool do_object_box_select(bContext *C,
     }
   }
 
-  for (Base *base = static_cast<Base *>(object_bases->first); base && hits; base = base->next) {
+  /* SDF objects: math fallback (no GPU geometry in select engine). */
+  for (Base &base : *object_bases) {
+    if (base.object->type == OB_SDF && BASE_SELECTABLE(v3d, &base)) {
+      rcti sr;
+      float corners[8][2];
+      int count;
+      if (sdf_bb_project_to_screen(vc->region, base.object, corners, &count, &sr)) {
+        if (BLI_rcti_isect(rect, &sr, nullptr)) {
+          bases_inside.add(&base);
+        }
+      }
+    }
+  }
+
+  for (Base *base = static_cast<Base *>(object_bases->first); base; base = base->next) {
     if (BASE_SELECTABLE(v3d, base)) {
       const bool is_select = base->flag & BASE_SELECTED;
       const bool is_inside = bases_inside.contains(base);
@@ -5528,16 +5674,36 @@ static bool object_circle_select(const ViewContext *vc,
   BKE_view_layer_synced_ensure(scene, view_layer);
   for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
     if (BASE_SELECTABLE(v3d, &base) && ((base.flag & BASE_SELECTED) != select_flag)) {
-      float screen_co[2];
-      if (ED_view3d_project_float_global(vc->region,
-                                         base.object->object_to_world().location(),
-                                         screen_co,
-                                         V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
-      {
-        if (len_squared_v2v2(mval_fl, screen_co) <= radius_squared) {
-          ed::object::base_select(&base, select ? ed::object::BA_SELECT : ed::object::BA_DESELECT);
-          changed = true;
+      bool hit = false;
+
+      if (base.object->type == OB_SDF) {
+        /* SDF: test circle against projected BB (AABB-circle intersection). */
+        float corners[8][2];
+        int count;
+        rcti sr;
+        if (sdf_bb_project_to_screen(vc->region, base.object, corners, &count, &sr)) {
+          /* Closest point on AABB to circle center. */
+          float cx = math::clamp(mval_fl[0], float(sr.xmin), float(sr.xmax));
+          float cy = math::clamp(mval_fl[1], float(sr.ymin), float(sr.ymax));
+          float dx = mval_fl[0] - cx;
+          float dy = mval_fl[1] - cy;
+          hit = (dx * dx + dy * dy) <= radius_squared;
         }
+      }
+      else {
+        float screen_co[2];
+        if (ED_view3d_project_float_global(vc->region,
+                                           base.object->object_to_world().location(),
+                                           screen_co,
+                                           V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
+        {
+          hit = len_squared_v2v2(mval_fl, screen_co) <= radius_squared;
+        }
+      }
+
+      if (hit) {
+        ed::object::base_select(&base, select ? ed::object::BA_SELECT : ed::object::BA_DESELECT);
+        changed = true;
       }
     }
   }
