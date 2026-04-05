@@ -1275,18 +1275,18 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
       }
       else if (mflags == SDF_MOD_ARRAY_RADIAL) {
         float radius = smod.params.y;
-        if (count > 0.5f) {
+        if (count > 1.5f) {
           float sector = (2.0f * SDF_PI) / count;
           float angle = atan(p.y, p.x);
           float norm_a = angle / sector;
           float id = round(norm_a);
           float local = norm_a - id;
 
-          if (count > 1.5f) {
-            /* Stacked mirror: flip odd cells so boundaries converge.
-             * For odd count, skip mirror on defect cells at ±π. */
+          {
             bool mir = fract(abs(id) * 0.5f) > 0.25f;
             bool odd = fract(count * 0.5f) > 0.25f;
+            /* For odd count, the cell touching ±π has no mirror partner.
+             * Use abs() for the entire cell to avoid an intra-cell seam. */
             bool at_defect = odd && (abs(angle) > SDF_PI - sector * 0.5f);
             if (at_defect) {
               local = abs(local);
@@ -1296,8 +1296,6 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
             }
 
             float arc = sector * max(radius, 0.0001f);
-            /* Minimum blend prevents hard junctions where box corners
-             * align with fold boundaries (causes ray marching noise). */
             float d_r = (0.5f - local) * arc;
             float pull_r = d_r - sabs(d_r, bk);
             float d_l = (0.5f + local) * arc;
@@ -1310,8 +1308,6 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
           p.x = r * cos(fold_a) - radius;
           p.y = r * sin(fold_a);
 
-          /* Per-copy rotation offset (around copy center).
-           * Add constant Y bias to prevent fold ridge / box edge degeneracy. */
           float3 rot = smod.params2.yzw;
           rot.y += 0.001f;
           if (abs(rot.x) > 0.0001f) {

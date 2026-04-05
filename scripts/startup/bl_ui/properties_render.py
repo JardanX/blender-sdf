@@ -89,43 +89,46 @@ _SDF_PRESETS = {
     'LOW': {
         'sdf_resolution_scale': 50.0,
         'sdf_adaptive_resolution': True,
-        'sdf_max_steps': 128,
+        'sdf_frustum_cull': True,
+        'sdf_max_steps': 100,
         'sdf_ray_epsilon': 0.001,
-        'sdf_over_relaxation': 1.3,
+        'sdf_over_relaxation': 1.5,
         'sdf_use_cone_trace': True,
         'sdf_cone_aperture': 0.5,
         'sdf_cone_steps': 32,
     },
     'MEDIUM': {
         'sdf_resolution_scale': 100.0,
-        'sdf_adaptive_resolution': True,
-        'sdf_max_steps': 256,
-        'sdf_ray_epsilon': 0.0001,
-        'sdf_over_relaxation': 1.3,
+        'sdf_adaptive_resolution': False,
+        'sdf_frustum_cull': True,
+        'sdf_max_steps': 100,
+        'sdf_ray_epsilon': 0.001,
+        'sdf_over_relaxation': 1.5,
         'sdf_use_cone_trace': True,
         'sdf_cone_aperture': 0.5,
-        'sdf_cone_steps': 64,
+        'sdf_cone_steps': 32,
     },
     'HIGH': {
         'sdf_resolution_scale': 100.0,
         'sdf_adaptive_resolution': False,
+        'sdf_frustum_cull': True,
         'sdf_max_steps': 512,
         'sdf_ray_epsilon': 0.0001,
-        'sdf_over_relaxation': 1.3,
+        'sdf_over_relaxation': 1.5,
         'sdf_use_cone_trace': True,
         'sdf_cone_aperture': 0.5,
-        'sdf_cone_steps': 64,
+        'sdf_cone_steps': 32,
     },
 }
 
 
 _SDF_UNVERSIONED_DEFAULTS = {
     'sdf_resolution_scale': (0.0, 100.0),
-    'sdf_max_steps': (0, 512),
-    'sdf_ray_epsilon': (0.0, 0.0001),
-    'sdf_over_relaxation': (0.0, 1.3),
+    'sdf_max_steps': (0, 100),
+    'sdf_ray_epsilon': (0.0, 0.001),
+    'sdf_over_relaxation': (0.0, 1.5),
     'sdf_cone_aperture': (0.0, 0.5),
-    'sdf_cone_steps': (0, 64),
+    'sdf_cone_steps': (0, 32),
 }
 
 
@@ -155,9 +158,9 @@ class SDF_OT_raymarcher_preset(Operator):
 
     preset: EnumProperty(
         items=[
-            ('LOW', "Low", "Fast viewport: 50% resolution, adaptive, 128 steps"),
-            ('MEDIUM', "Medium", "Balanced: full resolution, adaptive, 256 steps"),
-            ('HIGH', "High", "Maximum quality: full resolution, no adaptive, 512 steps"),
+            ('LOW', "Low", "Fast viewport: 50% resolution, adaptive, 100 steps"),
+            ('MEDIUM', "Medium", "Balanced: full resolution, 100 steps, 0.001 epsilon"),
+            ('HIGH', "High", "Maximum quality: full resolution, 512 steps, 0.0001 epsilon"),
         ],
     )
 
@@ -575,6 +578,31 @@ classes = (
     RENDER_PT_color_management_working_space,
     RENDER_PT_color_management_advanced,
 )
+
+def _sdf_apply_medium_defaults():
+    """Apply Medium preset to viewports that don't match any preset."""
+    for wm in bpy.data.window_managers:
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for space in area.spaces:
+                        if space.type == 'VIEW_3D':
+                            shading = space.shading
+                            if not shading.sdf_frustum_cull:
+                                shading.sdf_frustum_cull = True
+                            if not any(_matches_preset(shading, k) for k in _SDF_PRESETS):
+                                for attr, val in _SDF_PRESETS['MEDIUM'].items():
+                                    setattr(shading, attr, val)
+
+
+@bpy.app.handlers.persistent
+def _sdf_load_post_handler(_):
+    _sdf_apply_medium_defaults()
+
+
+bpy.app.handlers.load_post.append(_sdf_load_post_handler)
+bpy.app.timers.register(_sdf_apply_medium_defaults, first_interval=0.1)
+
 
 if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class

@@ -440,14 +440,13 @@ class Instance : public DrawEngine {
           break;
         }
         case SDF_TYPE_POLYGON: {
-          float ps = math::min(scale.x, scale.y);
-          float max_xy = 0.0f;
+          float max_x = 0.0f, max_y = 0.0f;
           for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
-            max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
-            max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
+            max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
+            max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
           }
           local_extent = float3(
-              max_xy + bevel + aabb_pad, max_xy + bevel + aabb_pad, sz.z + bevel + aabb_pad);
+              max_x + bevel + aabb_pad, max_y + bevel + aabb_pad, sz.z + bevel + aabb_pad);
           break;
         }
         default:
@@ -620,13 +619,13 @@ class Instance : public DrawEngine {
       gpu_obj.polygon_point_start = int(polygon_points_.size());
       gpu_obj.polygon_point_count = 0;
 
-      /* Collect original points (uniform XY scale preserves aspect ratio) */
-      float poly_scale = math::min(scale.x, scale.y);
+      /* Per-axis XY scale so S+X / S+Y stretch the polygon */
+      float corner_scale = math::min(scale.x, scale.y);
       Vector<float2> pts;
       Vector<float> crn;
       for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
-        pts.append(float2(pt->co[0] * poly_scale, pt->co[1] * poly_scale));
-        crn.append(pt->corner * poly_scale);
+        pts.append(float2(pt->co[0] * scale.x, pt->co[1] * scale.y));
+        crn.append(pt->corner * corner_scale);
       }
       int pc = int(pts.size());
 
@@ -930,14 +929,13 @@ class Instance : public DrawEngine {
         break;
       }
       case SDF_TYPE_POLYGON: {
-        float ps = math::min(scale.x, scale.y);
-        float max_xy = 0.0f;
+        float max_x = 0.0f, max_y = 0.0f;
         for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
-          max_xy = math::max(max_xy, fabsf(pt->co[0]) * ps);
-          max_xy = math::max(max_xy, fabsf(pt->co[1]) * ps);
+          max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
+          max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
         }
         local_extent = float3(
-            max_xy + bevel + pad, max_xy + bevel + pad, sz.z + bevel + pad);
+            max_x + bevel + pad, max_y + bevel + pad, sz.z + bevel + pad);
         break;
       }
       default:
@@ -2975,6 +2973,29 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
         case SDF_TYPE_CAPSULE: ext = float3(sz.x, sz.x, sz.y + sz.x); break;
         case SDF_TYPE_TORUS: ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y); break;
         case SDF_TYPE_NGON: ext = float3(sz.x, sz.x, sz.z); break;
+        case SDF_TYPE_POLYGON: {
+          /* CPU eval doesn't support polygon — use polygon point bounds directly. */
+          float3 mn(1e30f), mx(-1e30f);
+          if (obj.polygon_point_count > 0) {
+            for (int pi = 0; pi < obj.polygon_point_count; pi++) {
+              int idx = obj.polygon_point_start + pi;
+              if (idx >= 0 && idx < s_polygon_pts_count) {
+                float2 vi(s_polygon_pts_cpu[idx].vi_edge.x, s_polygon_pts_cpu[idx].vi_edge.y);
+                mn.x = std::min(mn.x, vi.x);
+                mn.y = std::min(mn.y, vi.y);
+                mx.x = std::max(mx.x, vi.x);
+                mx.y = std::max(mx.y, vi.y);
+              }
+            }
+          }
+          mn.z = -sz.z;
+          mx.z = sz.z;
+          out_min = mn;
+          out_max = mx;
+          out_rot = rot;
+          out_pos = pos;
+          return true;
+        }
         default: ext = sz; break;
       }
       /* Search region: expand by non-mirror modifiers only.

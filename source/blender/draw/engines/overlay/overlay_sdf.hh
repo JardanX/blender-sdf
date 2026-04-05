@@ -465,24 +465,39 @@ class Sdfs : Overlay {
           }
           else if (m.array_type == MOD_SDF_ARRAY_RADIAL) {
             float radius = m.array_radius;
+            float rx = m.rotation_offset[0], ry = m.rotation_offset[1],
+                  rz = m.rotation_offset[2];
+            /* Shader applies Rx, Ry, Rz to eval point (EulerXYZ order).
+             * Object appears rotated by inverse. Use Blender's EulerXYZ
+             * to build the forward matrix, then invert. */
+            float4x4 fwd = math::from_rotation<float4x4>(
+                math::EulerXYZ(rx, ry, rz));
+            float4x4 rot_std = math::invert(fwd);
+            float4x4 fwd_mir = math::from_rotation<float4x4>(
+                math::EulerXYZ(-rx, ry, -rz));
+            float4x4 rot_mir = math::invert(fwd_mir);
             int cur = int(copies.size());
             for (int ci = 0; ci < cur; ci++) {
-              float3 base_local_off(radius, 0, 0);
-              float3 base_world_off = float3(copies[ci].r * float4(base_local_off, 0.0f));
-              copies[ci].p += base_world_off;
+              float4x4 orig_rot = copies[ci].r;
+              float3 orig_pos = copies[ci].p;
+              float3 base_off = float3(orig_rot * float4(radius, 0, 0, 0));
+              copies[ci].p = orig_pos + base_off;
+              copies[ci].r = orig_rot * rot_std;
 
               for (int ai = 1; ai < count; ai++) {
+                bool mirrored = (ai % 2 == 1);
                 float angle = 2.0f * float(M_PI) * float(ai) / float(count);
                 float ca = cosf(angle), sa = sinf(angle);
                 float3 local_pos(radius * ca, radius * sa, 0);
-                float3 world_pos = float3(copies[ci].r * float4(local_pos, 0.0f))
-                                   + (copies[ci].p - base_world_off);
+                float3 world_pos = float3(orig_rot * float4(local_pos, 0.0f))
+                                   + orig_pos;
                 float4x4 arr_rot = float4x4(
                     float4(ca, sa, 0, 0),
                     float4(-sa, ca, 0, 0),
                     float4(0, 0, 1, 0),
                     float4(0, 0, 0, 1));
-                copies.append({copies[ci].r * arr_rot, world_pos});
+                copies.append({orig_rot * arr_rot * (mirrored ? rot_mir : rot_std),
+                               world_pos});
               }
             }
           }

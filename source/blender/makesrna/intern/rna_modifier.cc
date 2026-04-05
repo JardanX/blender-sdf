@@ -11611,7 +11611,7 @@ static void rna_def_modifier_sdf_array(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Radius", "Radial array radius");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
-  prop = RNA_def_property(srna, "rotation_offset", PROP_FLOAT, PROP_XYZ);
+  prop = RNA_def_property(srna, "rotation_offset", PROP_FLOAT, PROP_EULER);
   RNA_def_property_float_sdna(prop, nullptr, "rotation_offset");
   RNA_def_property_array(prop, 3);
   RNA_def_property_ui_text(prop, "Rotation Offset", "Per-copy rotation offset");
