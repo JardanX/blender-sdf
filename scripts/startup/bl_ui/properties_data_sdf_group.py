@@ -43,16 +43,18 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
         grp = context.sdf_group
 
         layout.label(text="CSG Operation")
-        row = layout.row(align=True)
-        row.scale_y = 1.4
-        row.prop(grp, "csg_operation", expand=True, icon_only=True)
+        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+        grid.scale_y = 1.4
+        for item in grp.bl_rna.properties["csg_operation"].enum_items:
+            grid.prop_enum(grp, "csg_operation", item.identifier, text="")
 
         layout.separator()
 
         layout.label(text="Blend Type")
-        row = layout.row(align=True)
-        row.scale_y = 1.4
-        row.prop(grp, "blend_type", expand=True, icon_only=True)
+        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+        grid.scale_y = 1.4
+        for item in grp.bl_rna.properties["blend_type"].enum_items:
+            grid.prop_enum(grp, "blend_type", item.identifier, text="")
 
         is_shell = (grp.csg_operation == 'SHELL')
         bt = grp.blend_type
@@ -111,40 +113,6 @@ class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):
                     row = col.row(align=True)
                     row.prop(grp, "chamfer_k2", text="K2")
                     row.prop(grp, "chamfer_k3", text="K3")
-
-
-class DATA_PT_sdf_group_members(SDFGroupButtonsPanel, Panel):
-    bl_label = "Members"
-
-    def draw(self, context):
-        layout = self.layout
-        grp = context.sdf_group
-
-        if not grp.members:
-            layout.label(text="No members")
-            return
-
-        for idx, member in enumerate(grp.members):
-            row = layout.row(align=True)
-            row.label(text=f"{idx + 1}.")
-            if member.object:
-                row.label(text=member.object.name, icon='OUTLINER_OB_SDF')
-            else:
-                row.label(text="(empty)", icon='ERROR')
-
-            sub = row.row(align=True)
-            sub.scale_x = 0.8
-            op = sub.operator("object.sdf_group_reorder", text="", icon='TRIA_UP')
-            op.member_index = idx
-            op.direction = -1
-            op.group_name = grp.name
-            op = sub.operator("object.sdf_group_reorder", text="", icon='TRIA_DOWN')
-            op.member_index = idx
-            op.direction = 1
-            op.group_name = grp.name
-            op = sub.operator("object.sdf_group_remove_member", text="", icon='X')
-            op.member_index = idx
-            op.group_name = grp.name
 
 
 # Group Modifier Operators
@@ -302,9 +270,10 @@ class DATA_PT_sdf_group_modifiers(SDFGroupButtonsPanel, Panel):
 
                 box_csg = box.box()
                 box_csg.label(text="Mirror Blending:")
-                row = box_csg.row(align=True)
-                row.scale_y = 1.2
-                row.prop(mod, "blend_type", expand=True, icon_only=True)
+                grid = box_csg.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+                grid.scale_y = 1.2
+                for item in mod.bl_rna.properties["blend_type"].enum_items:
+                    grid.prop_enum(mod, "blend_type", item.identifier, text="")
                 sub = box_csg.row()
                 sub.enabled = (mod.blend_type != 'LINEAR')
                 sub.prop(mod, "mirror_blend", text="Radius")
@@ -333,16 +302,17 @@ class DATA_PT_sdf_group_modifiers(SDFGroupButtonsPanel, Panel):
                 col.prop(mod, "array_type")
                 col.prop(mod, "count")
                 if mod.array_type == 'LINEAR':
-                    col.prop(mod, "offset")
+                    col.prop(mod, "linear_offset")
                 elif mod.array_type == 'RADIAL':
                     col.prop(mod, "array_radius")
                     col.prop(mod, "rotation_offset")
 
                 box_csg = box.box()
                 box_csg.label(text="Array Blending:")
-                row = box_csg.row(align=True)
-                row.scale_y = 1.2
-                row.prop(mod, "blend_type", expand=True, icon_only=True)
+                grid = box_csg.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+                grid.scale_y = 1.2
+                for item in mod.bl_rna.properties["blend_type"].enum_items:
+                    grid.prop_enum(mod, "blend_type", item.identifier, text="")
                 sub = box_csg.row()
                 sub.enabled = (mod.blend_type != 'LINEAR')
                 sub.prop(mod, "array_blend", text="Radius")
@@ -367,7 +337,6 @@ classes = (
     SDFGROUP_MT_modifier_add,
     DATA_PT_context_sdf_group,
     DATA_PT_sdf_group_operation,
-    DATA_PT_sdf_group_members,
     DATA_PT_sdf_group_modifiers,
     DATA_PT_sdf_group_display,
 )

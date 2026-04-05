@@ -4,9 +4,7 @@
 
 #pragma once
 
-#ifndef GPU_SHADER
-#  include "GPU_shader_shared_utils.hh"
-#endif
+#include "GPU_shader_shared_utils.hh"
 
 struct [[host_shared]] SDFObjectGPU {
   float4x4 inverse_matrix;
@@ -45,6 +43,7 @@ struct [[host_shared]] SDFObjectGPU {
   float4 orig_bbox_min;
   float4 orig_bbox_max;
 };
+BLI_STATIC_ASSERT_ALIGN(SDFObjectGPU, 16)
 
 struct [[host_shared]] SDFObjectAABB {
   float4 bbox_min;
@@ -54,6 +53,7 @@ struct [[host_shared]] SDFObjectAABB {
   int _pad0;
   int _pad1;
 };
+BLI_STATIC_ASSERT_ALIGN(SDFObjectAABB, 16)
 
 struct [[host_shared]] SDFGroupGPU {
   int csg_operation;
@@ -72,25 +72,33 @@ struct [[host_shared]] SDFGroupGPU {
   int flip_blend_end;
   int first_object;
   int object_count;
+  int modifier_start;
+  int modifier_count;
+  int _pad0;
+  int _pad1;
   float4 color;
 };
+BLI_STATIC_ASSERT_ALIGN(SDFGroupGPU, 16)
 
 struct [[host_shared]] SDFModifierGPU {
   int4 header;
   float4 params;
   float4 params2;
 };
+BLI_STATIC_ASSERT_ALIGN(SDFModifierGPU, 16)
 
 struct [[host_shared]] SDFPolygonPointGPU {
   float4 vi_edge;
   float4 arc_data;
   float4 arc_bounds;
 };
+BLI_STATIC_ASSERT_ALIGN(SDFPolygonPointGPU, 16)
 
 struct [[host_shared]] BVHNodeGPU {
   float4 min_and_left;
   float4 max_and_right;
 };
+BLI_STATIC_ASSERT_ALIGN(BVHNodeGPU, 16)
 
 struct [[host_shared]] SdfAabbNodeGPU {
   float4 bounds_min;
@@ -100,8 +108,18 @@ struct [[host_shared]] SdfAabbNodeGPU {
   int child_b;
   int shape_index;
 };
+BLI_STATIC_ASSERT_ALIGN(SdfAabbNodeGPU, 16)
 
 struct [[host_shared]] DCVertexGPU {
   float4 position;
   float4 normal;
 };
+BLI_STATIC_ASSERT_ALIGN(DCVertexGPU, 16)
+
+struct [[host_shared]] SDFShadingDataGPU {
+  float4 studio_light[4];
+  float4 studio_color[4];
+  float4 studio_spec[4];
+  float4 studio_ambient;
+};
+BLI_STATIC_ASSERT_ALIGN(SDFShadingDataGPU, 16)

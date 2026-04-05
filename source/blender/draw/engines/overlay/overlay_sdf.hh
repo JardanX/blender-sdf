@@ -293,7 +293,6 @@ class Sdfs : Overlay {
     if (!depth_tx || !gbuf_tx) {
       return;
     }
-
     if (!fullscreen_batch_) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
     }

@@ -119,36 +119,33 @@ static constexpr const char *s_shader_info_names[SH_COUNT] = {
     "sdf_fxaa",
 };
 
-static gpu::Shader *s_shader_cache[SH_COUNT] = {};
-static bool s_shaders_compiled = false;
+static gpu::StaticShader s_shaders[SH_COUNT];
+static bool s_shaders_initialized = false;
 
 static void sdf_shaders_ensure()
 {
-  if (s_shaders_compiled) {
-    return;
-  }
-  auto t0 = std::chrono::high_resolution_clock::now();
-  for (int i = 0; i < SH_COUNT; i++) {
-    if (s_shader_cache[i] == nullptr) {
-      auto ts = std::chrono::high_resolution_clock::now();
-      s_shader_cache[i] = GPU_shader_create_from_info_name(s_shader_info_names[i]);
-      auto te = std::chrono::high_resolution_clock::now();
-      printf("SDF shader[%d] '%s' => %.0f ms\n", i, s_shader_info_names[i],
-             std::chrono::duration<double, std::milli>(te - ts).count());
+  if (!s_shaders_initialized) {
+    for (int i = 0; i < SH_COUNT; i++) {
+      s_shaders[i] = gpu::StaticShader(s_shader_info_names[i]);
     }
+    s_shaders_initialized = true;
   }
-  auto t1 = std::chrono::high_resolution_clock::now();
-  printf("SDF total shader compile: %.0f ms\n",
-         std::chrono::duration<double, std::milli>(t1 - t0).count());
-  s_shaders_compiled = true;
+  for (int i = 0; i < SH_COUNT; i++) {
+    s_shaders[i].ensure_compile_async();
+  }
+}
+
+static gpu::Shader *sdf_shader_get(int index)
+{
+  return s_shaders[index].get();
 }
 
 void sdf_shaders_free()
 {
   for (int i = 0; i < SH_COUNT; i++) {
-    GPU_SHADER_FREE_SAFE(s_shader_cache[i]);
+    s_shaders[i] = {};
   }
-  s_shaders_compiled = false;
+  s_shaders_initialized = false;
 }
 
 class Instance : public DrawEngine {
@@ -167,17 +164,16 @@ class Instance : public DrawEngine {
   bool needs_upload_ = true;
   bool depth_mode_ = false;
 
-  /* Aliases into static shader cache */
-  gpu::Shader *&trace_comp_sh_ = s_shader_cache[SH_TRACE_COMP];
-  gpu::Shader *&trace_tile_sh_ = s_shader_cache[SH_TRACE_TILE_COMP];
-  gpu::Shader *&aabb_project_sh_ = s_shader_cache[SH_AABB_PROJECT_COMP];
-  gpu::Shader *&tile_cull_sh_ = s_shader_cache[SH_TILE_CULL_COMP];
-  gpu::Shader *&cone_march_sh_ = s_shader_cache[SH_CONE_MARCH_COMP];
-  gpu::Shader *&color_resolve_sh_ = s_shader_cache[SH_COLOR_RESOLVE_COMP];
-  gpu::Shader *&normal_comp_sh_ = s_shader_cache[SH_NORMAL_COMP];
-  gpu::Shader *&shade_comp_sh_ = s_shader_cache[SH_SHADE_COMP];
-  gpu::Shader *&blit_sh_ = s_shader_cache[SH_BLIT];
-  gpu::Shader *&fxaa_sh_ = s_shader_cache[SH_FXAA];
+  gpu::Shader *trace_comp_sh() { return sdf_shader_get(SH_TRACE_COMP); }
+  gpu::Shader *trace_tile_sh() { return sdf_shader_get(SH_TRACE_TILE_COMP); }
+  gpu::Shader *aabb_project_sh() { return sdf_shader_get(SH_AABB_PROJECT_COMP); }
+  gpu::Shader *tile_cull_sh() { return sdf_shader_get(SH_TILE_CULL_COMP); }
+  gpu::Shader *cone_march_sh() { return sdf_shader_get(SH_CONE_MARCH_COMP); }
+  gpu::Shader *color_resolve_sh() { return sdf_shader_get(SH_COLOR_RESOLVE_COMP); }
+  gpu::Shader *normal_comp_sh() { return sdf_shader_get(SH_NORMAL_COMP); }
+  gpu::Shader *shade_comp_sh() { return sdf_shader_get(SH_SHADE_COMP); }
+  gpu::Shader *blit_sh() { return sdf_shader_get(SH_BLIT); }
+  gpu::Shader *fxaa_sh() { return sdf_shader_get(SH_FXAA); }
 
   gpu::Texture *comp_color_tx_ = nullptr;
   gpu::Texture *comp_depth_tx_ = nullptr;
@@ -265,6 +261,7 @@ class Instance : public DrawEngine {
   float4 studio_light_col_[4] = {};
   float4 studio_light_spec_[4] = {};
   float3 studio_ambient_ = float3(0.0f);
+  gpu::UniformBuf *shading_ubo_ = nullptr;
 
  public:
   Instance() {}
@@ -862,7 +859,7 @@ class Instance : public DrawEngine {
                                      m.rotation_offset[2]);
           }
           else {
-            float3 sz = float3(sdf_data->size);
+            float3 sz = float3(gpu_obj.sdf_size);
             float3 offset(0.0f);
             if (m.use_relative_offset) {
               offset += float3(m.relative_offset[0], m.relative_offset[1], m.relative_offset[2]) *
@@ -1196,6 +1193,92 @@ class Instance : public DrawEngine {
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(
             group->color[0], group->color[1], group->color[2], group->color[3]);
+
+        /* Pack group modifiers */
+        gpu_grp.modifier_start = int(modifiers_.size());
+        gpu_grp.modifier_count = 0;
+        for (const SDFModifier *gmod = static_cast<const SDFModifier *>(group->modifiers.first);
+             gmod; gmod = gmod->next)
+        {
+          if (!gmod->show_viewport) {
+            continue;
+          }
+          SDFModifierGPU gpu_mod = {};
+          bool valid = false;
+          int mtype = gmod->type;
+
+          if (mtype == SDF_MOD_MIRROR) {
+            float3 mirror_pos(0.0f);
+            if (gmod->mirror_ob) {
+              mirror_pos = float3(gmod->mirror_ob->object_to_world()[3]);
+            }
+            int sides = 7;
+            int blend_type = int(gmod->params[5]);
+            gpu_mod.header = int4(SDF_MOD_MIRROR, gmod->flag, blend_type, sides);
+            gpu_mod.params = float4(gmod->params[0], mirror_pos.x, mirror_pos.y, mirror_pos.z);
+            gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_TWIST) {
+            gpu_mod.header = int4(SDF_MOD_TWIST, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], float(2), 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_BEND) {
+            int axis = int(gmod->params[1]);
+            gpu_mod.header = int4(SDF_MOD_BEND, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], float(axis), gmod->params[2], gmod->params[3]);
+            gpu_mod.params2 = float4(gmod->params[4], 0.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ELONGATE) {
+            gpu_mod.header = int4(SDF_MOD_ELONGATE, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_SOLIDIFY) {
+            int mode = int(gmod->params[1]);
+            int axis = int(gmod->params[2]);
+            gpu_mod.header = int4(SDF_MOD_SOLIDIFY, mode, axis, 0);
+            gpu_mod.params = float4(gmod->params[0], 0.8f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ROUND) {
+            gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ONION) {
+            int layers = std::max(int(gmod->params[1]), 1);
+            gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
+            gpu_mod.params = float4(gmod->params[2], 1.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_BEVEL) {
+            gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ARRAY) {
+            int array_type = gmod->flag;
+            int blend_type = int(gmod->params[5]);
+            gpu_mod.header = int4(SDF_MOD_ARRAY, array_type, blend_type, 0);
+            if (array_type == SDF_MOD_ARRAY_RADIAL) {
+              gpu_mod.params = float4(gmod->params[0], gmod->params[1], 0.0f, 0.0f);
+              gpu_mod.params2 = float4(gmod->params[4], gmod->params[5], gmod->params[6], gmod->params[7]);
+            }
+            else {
+              gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], gmod->params[3]);
+              gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
+            }
+            valid = true;
+          }
+          if (valid) {
+            modifiers_.append(gpu_mod);
+            gpu_grp.modifier_count++;
+          }
+        }
+
         float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
                                   ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
                                   : gpu_grp.blend;
@@ -1683,7 +1766,7 @@ class Instance : public DrawEngine {
     }
 
     ensure_shaders();
-    if (trace_comp_sh_ == nullptr) {
+    if (trace_comp_sh() == nullptr) {
       return;
     }
 
@@ -2352,12 +2435,12 @@ class Instance : public DrawEngine {
 
   void draw_aabb_project()
   {
-    if (!aabb_project_sh_ || objects_.is_empty()) {
+    if (!aabb_project_sh() || objects_.is_empty()) {
       return;
     }
     int obj_count = int(objects_.size());
     ensure_screen_aabbs_ssbo(obj_count);
-    gpu::Shader *sh = aabb_project_sh_;
+    gpu::Shader *sh = aabb_project_sh();
     GPU_shader_bind(sh);
     if (object_ssbo_) {
       GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
@@ -2377,7 +2460,7 @@ class Instance : public DrawEngine {
 
   void draw_tile_cull()
   {
-    if (!tile_cull_sh_ || use_bvh_ == 0) {
+    if (!tile_cull_sh() || use_bvh_ == 0) {
       return;
     }
     ensure_compute_targets();
@@ -2386,7 +2469,7 @@ class Instance : public DrawEngine {
     int total_tiles = tiles_x * tiles_y;
     ensure_tile_ssbos(total_tiles);
 
-    gpu::Shader *sh = tile_cull_sh_;
+    gpu::Shader *sh = tile_cull_sh();
     GPU_shader_bind(sh);
     if (object_ssbo_) {
       GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
@@ -2411,14 +2494,14 @@ class Instance : public DrawEngine {
 
   void draw_cone_march()
   {
-    if (use_cone_trace_ == 0 || !cone_march_sh_) {
+    if (use_cone_trace_ == 0 || !cone_march_sh()) {
       return;
     }
 
     int tiles_x = (render_size_.x + 7) / 8;
     int tiles_y = (render_size_.y + 7) / 8;
 
-    gpu::Shader *sh = cone_march_sh_;
+    gpu::Shader *sh = cone_march_sh();
     GPU_shader_bind(sh);
 
     if (object_ssbo_) {
@@ -2481,7 +2564,7 @@ class Instance : public DrawEngine {
   {
     ensure_compute_targets();
 
-    gpu::Shader *sh = (use_bvh_ != 0 && trace_tile_sh_) ? trace_tile_sh_ : trace_comp_sh_;
+    gpu::Shader *sh = (use_bvh_ != 0 && trace_tile_sh()) ? trace_tile_sh() : trace_comp_sh();
     if (!sh) {
       return;
     }
@@ -2555,7 +2638,7 @@ class Instance : public DrawEngine {
     if (debug_bvh_views_ != 0) {
       return;
     }
-    gpu::Shader *sh = color_resolve_sh_;
+    gpu::Shader *sh = color_resolve_sh();
     if (!sh) {
       return;
     }
@@ -2594,7 +2677,7 @@ class Instance : public DrawEngine {
     if (debug_bvh_views_ != 0) {
       return;
     }
-    gpu::Shader *sh = normal_comp_sh_;
+    gpu::Shader *sh = normal_comp_sh();
     if (!sh) {
       return;
     }
@@ -2637,7 +2720,7 @@ class Instance : public DrawEngine {
       return;
     }
 
-    gpu::Shader *sh = shade_comp_sh_;
+    gpu::Shader *sh = shade_comp_sh();
     if (!sh) {
       return;
     }
@@ -2661,19 +2744,20 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
-    GPU_shader_uniform_4fv(sh, "studio_light0", studio_light_dir_[0]);
-    GPU_shader_uniform_4fv(sh, "studio_light1", studio_light_dir_[1]);
-    GPU_shader_uniform_4fv(sh, "studio_light2", studio_light_dir_[2]);
-    GPU_shader_uniform_4fv(sh, "studio_light3", studio_light_dir_[3]);
-    GPU_shader_uniform_4fv(sh, "studio_color0", studio_light_col_[0]);
-    GPU_shader_uniform_4fv(sh, "studio_color1", studio_light_col_[1]);
-    GPU_shader_uniform_4fv(sh, "studio_color2", studio_light_col_[2]);
-    GPU_shader_uniform_4fv(sh, "studio_color3", studio_light_col_[3]);
-    GPU_shader_uniform_4fv(sh, "studio_spec0", studio_light_spec_[0]);
-    GPU_shader_uniform_4fv(sh, "studio_spec1", studio_light_spec_[1]);
-    GPU_shader_uniform_4fv(sh, "studio_spec2", studio_light_spec_[2]);
-    GPU_shader_uniform_4fv(sh, "studio_spec3", studio_light_spec_[3]);
-    GPU_shader_uniform_3fv(sh, "studio_ambient", studio_ambient_);
+    SDFShadingDataGPU shading_data;
+    for (int i = 0; i < 4; i++) {
+      shading_data.studio_light[i] = studio_light_dir_[i];
+      shading_data.studio_color[i] = studio_light_col_[i];
+      shading_data.studio_spec[i] = studio_light_spec_[i];
+    }
+    shading_data.studio_ambient = float4(studio_ambient_, 0.0f);
+
+    if (shading_ubo_ == nullptr) {
+      shading_ubo_ = GPU_uniformbuf_create_ex(
+          sizeof(SDFShadingDataGPU), nullptr, "sdf_shading_data");
+    }
+    GPU_uniformbuf_update(shading_ubo_, &shading_data);
+    GPU_uniformbuf_bind(shading_ubo_, 1);
 
     View &view = View::default_get();
     GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
@@ -2715,30 +2799,30 @@ class Instance : public DrawEngine {
     GPU_face_culling(GPU_CULL_NONE);
     GPU_stencil_test(GPU_STENCIL_NONE);
 
-    GPU_shader_bind(blit_sh_);
-    GPU_shader_uniform_1i(blit_sh_, "debug_bvh_views", debug_bvh_views_);
+    GPU_shader_bind(blit_sh());
+    GPU_shader_uniform_1i(blit_sh(), "debug_bvh_views", debug_bvh_views_);
 
     float bg[3] = {0.0f, 0.0f, 0.0f};
     if (draw_ctx_->scene && draw_ctx_->v3d) {
       ED_view3d_background_color_get(draw_ctx_->scene, draw_ctx_->v3d, bg);
     }
-    GPU_shader_uniform_3fv(blit_sh_, "bg_color", bg);
+    GPU_shader_uniform_3fv(blit_sh(), "bg_color", bg);
 
     float uv_sc[2] = {float(render_size_.x) / float(texture_size_.x),
                        float(render_size_.y) / float(texture_size_.y)};
-    GPU_shader_uniform_2fv(blit_sh_, "uv_scale", uv_sc);
+    GPU_shader_uniform_2fv(blit_sh(), "uv_scale", uv_sc);
 
-    int color_slot = GPU_shader_get_sampler_binding(blit_sh_, "color_tx");
+    int color_slot = GPU_shader_get_sampler_binding(blit_sh(), "color_tx");
     GPU_texture_filter_mode(comp_color_tx_, false);
     GPU_texture_bind(comp_color_tx_, color_slot);
-    int depth_slot = GPU_shader_get_sampler_binding(blit_sh_, "depth_tx");
+    int depth_slot = GPU_shader_get_sampler_binding(blit_sh(), "depth_tx");
     GPU_texture_filter_mode(comp_depth_tx_, false);
     GPU_texture_bind(comp_depth_tx_, depth_slot);
 
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
     }
-    GPU_batch_set_shader(fullscreen_batch_, blit_sh_);
+    GPU_batch_set_shader(fullscreen_batch_, blit_sh());
     GPU_batch_draw(fullscreen_batch_);
 
     GPU_texture_unbind(comp_color_tx_);
@@ -2778,7 +2862,7 @@ class Instance : public DrawEngine {
 
   void draw_fxaa()
   {
-    if (!fxaa_enabled_ || fxaa_sh_ == nullptr) {
+    if (!fxaa_enabled_ || fxaa_sh() == nullptr) {
       return;
     }
 
@@ -2795,19 +2879,19 @@ class Instance : public DrawEngine {
     GPU_face_culling(GPU_CULL_NONE);
     GPU_stencil_test(GPU_STENCIL_NONE);
 
-    GPU_shader_bind(fxaa_sh_);
+    GPU_shader_bind(fxaa_sh());
 
-    int color_slot = GPU_shader_get_sampler_binding(fxaa_sh_, "color_tx");
+    int color_slot = GPU_shader_get_sampler_binding(fxaa_sh(), "color_tx");
     GPU_texture_filter_mode(march_color_tx_, true);
     GPU_texture_bind(march_color_tx_, color_slot);
 
     float2 rcp = float2(1.0f / float(viewport_size_.x), 1.0f / float(viewport_size_.y));
-    GPU_shader_uniform_2fv(fxaa_sh_, "rcpFrame", rcp);
+    GPU_shader_uniform_2fv(fxaa_sh(), "rcpFrame", rcp);
 
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
     }
-    GPU_batch_set_shader(fullscreen_batch_, fxaa_sh_);
+    GPU_batch_set_shader(fullscreen_batch_, fxaa_sh());
     GPU_batch_draw(fullscreen_batch_);
 
     GPU_texture_unbind(march_color_tx_);
@@ -2892,6 +2976,9 @@ class Instance : public DrawEngine {
     }
     if (tile_prim_lists_ssbo_) {
       GPU_storagebuf_free(tile_prim_lists_ssbo_);
+    }
+    if (shading_ubo_) {
+      GPU_uniformbuf_free(shading_ubo_);
     }
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);
@@ -3146,11 +3233,14 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   gpu::Shader *color_sh = GPU_shader_create_from_info_name("sdf_dc_vertex_color_comp");
   if (!grid_sh || !dc_sh || !tri_sh || !color_sh) return "Shader compile failed";
 
-  /* Global output buffers. Readback = verts + tris transferred from GPU→CPU.
-   * 4M verts (128 MB) + 8M tris (128 MB) = 256 MB. PCIe transfer ~20ms.
-   * The GPU sync (waiting for compute to finish) dominates readback time. */
-  const int global_max_verts = 4 * 1024 * 1024;
-  const int global_max_tris = 8 * 1024 * 1024;
+  /* Scale output buffers with resolution: surface verts grow ~O(res^2).
+   * Base 4M/8M sized for res=32; scale quadratically, cap at 32M/64M. */
+  const int base_verts = 4 * 1024 * 1024;
+  const int base_tris = 8 * 1024 * 1024;
+  const float res_scale = float(grid_res) / 32.0f;
+  const float area_scale = math::max(res_scale * res_scale, 1.0f);
+  const int global_max_verts = math::min(int(base_verts * area_scale), 32 * 1024 * 1024);
+  const int global_max_tris = math::min(int(base_tris * area_scale), 64 * 1024 * 1024);
 
   gpu::StorageBuf *vert_ssbo = GPU_storagebuf_create_ex(
       global_max_verts * sizeof(DCVertexGPU), nullptr, GPU_USAGE_DYNAMIC, "dc_vertices");
@@ -3294,6 +3384,11 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   GPU_storagebuf_read(counter_ssbo, counters.data());
   int vert_count = math::min(counters[0], global_max_verts);
   int tri_count = math::min(counters[1], global_max_tris);
+
+  if (counters[0] > global_max_verts || counters[1] > global_max_tris) {
+    printf("SDF DC: buffer overflow — %d/%d verts, %d/%d tris (res=%d). Mesh truncated.\n",
+           counters[0], global_max_verts, counters[1], global_max_tris, grid_res);
+  }
 
   if (vert_count == 0) {
     cleanup();

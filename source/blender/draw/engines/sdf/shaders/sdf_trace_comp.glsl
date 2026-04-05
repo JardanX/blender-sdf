@@ -74,10 +74,19 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     bool grp_has_hit = false;
     float grp_winner_id = -1.0f;
 
+    /* Group-level domain modifiers transform world_pos */
+    float3 grp_pos = world_pos;
+    float grp_scale = 1.0f;
+    if (grp.modifier_count > 0) {
+      float4 dm = applyDomainModifiers(world_pos, grp.modifier_start, grp.modifier_count, float4x4(1.0));
+      grp_pos = dm.xyz;
+      grp_scale = dm.w;
+    }
+
     for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
       if (!is_shape_near(m)) { continue; }
 
-      float da = point_aabb_dist(world_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz);
+      float da = point_aabb_dist(grp_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz);
       float aabb_skip_thresh = max(sdf_ray_epsilon, object_aabbs[m].max_group_blend);
       int obj_op = objects[m].csg_operation;
       bool must_eval = grp_has_hit &&
@@ -93,7 +102,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         d = da;
       }
       else {
-        float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+        float3 lp = (obj.inverse_matrix * float4(grp_pos - obj.position.xyz, 1.0f)).xyz;
         d = evalPrimitive(lp, obj);
         g_numEvaluated++;
       }
@@ -146,6 +155,12 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
           grp_color = mix(grp_color, obj.color.rgb, t);
         }
       }
+    }
+
+    /* Group-level distance modifiers */
+    if (grp_has_hit && grp.modifier_count > 0) {
+      grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, grp.modifier_start, grp.modifier_count);
+      grp_dist *= grp_scale;
     }
 
     if (!grp_has_hit) {

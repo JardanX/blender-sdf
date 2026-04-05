@@ -74,15 +74,30 @@ void main()
   float grp_dist = 1e10f;
   float3 grp_color = float3(0.5f);
   bool grp_has_hit = false;
+  float3 grp_pos = world_pos;
+  float grp_scale = 1.0f;
 
   for (int i = 0; i < object_count; i++) {
     if ((obj_bits[i >> 5] & (1u << (i & 31))) == 0u) {
       int gid_obj = objects[i].group_id;
       if (gid_obj != cur_group && grp_has_hit) {
+        if (cur_group >= 0 && groups[cur_group].modifier_count > 0) {
+          grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, groups[cur_group].modifier_start, groups[cur_group].modifier_count);
+          grp_dist *= grp_scale;
+        }
         flushGroup(cur_group, grp_dist, grp_color, scene_dist, scene_color);
         grp_has_hit = false;
         grp_dist = 1e10f;
-        grp_color = float3(0.5f);
+        grp_color = (gid_obj >= 0) ? groups[gid_obj].color.rgb : float3(0.5f);
+      }
+      if (gid_obj != cur_group && gid_obj >= 0 && groups[gid_obj].modifier_count > 0) {
+        float4 dm = applyDomainModifiers(world_pos, groups[gid_obj].modifier_start, groups[gid_obj].modifier_count, float4x4(1.0));
+        grp_pos = dm.xyz;
+        grp_scale = dm.w;
+      }
+      else if (gid_obj != cur_group) {
+        grp_pos = world_pos;
+        grp_scale = 1.0f;
       }
       cur_group = gid_obj;
       continue;
@@ -92,13 +107,28 @@ void main()
     int gid_obj = obj.group_id;
 
     if (gid_obj != cur_group && grp_has_hit) {
+      if (cur_group >= 0 && groups[cur_group].modifier_count > 0) {
+        grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, groups[cur_group].modifier_start, groups[cur_group].modifier_count);
+        grp_dist *= grp_scale;
+      }
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, scene_color);
       grp_has_hit = false;
       grp_dist = 1e10f;
-      grp_color = float3(0.5f);
+      grp_color = (gid_obj >= 0) ? groups[gid_obj].color.rgb : float3(0.5f);
     }
 
-    float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+    if (gid_obj != cur_group && gid_obj >= 0 && groups[gid_obj].modifier_count > 0) {
+      float4 dm = applyDomainModifiers(world_pos, groups[gid_obj].modifier_start, groups[gid_obj].modifier_count, float4x4(1.0));
+      grp_pos = dm.xyz;
+      grp_scale = dm.w;
+    }
+    else if (gid_obj != cur_group) {
+      grp_pos = world_pos;
+      grp_scale = 1.0f;
+    }
+
+    float3 eval_pos = (gid_obj >= 0) ? grp_pos : world_pos;
+    float3 lp = (obj.inverse_matrix * float4(eval_pos - obj.position.xyz, 1.0f)).xyz;
     float d = evalPrimitive(lp, obj);
     cur_group = gid_obj;
 
@@ -143,6 +173,10 @@ void main()
   }
 
   if (grp_has_hit) {
+    if (cur_group >= 0 && groups[cur_group].modifier_count > 0) {
+      grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, groups[cur_group].modifier_start, groups[cur_group].modifier_count);
+      grp_dist *= grp_scale;
+    }
     flushGroup(cur_group, grp_dist, grp_color, scene_dist, scene_color);
   }
 

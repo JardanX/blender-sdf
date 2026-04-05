@@ -1872,6 +1872,39 @@ float applyDistanceModifiers(float dist, float3 p, SDFObjectGPU obj, int mod_sta
   return dist;
 }
 
+/* Group-level distance modifiers (no per-object evalPrimitiveOnly). */
+float applyGroupDistanceModifiers(float dist, float3 p, int mod_start, int mod_count)
+{
+  for (int i = mod_start; i < mod_start + mod_count; i++) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+
+    if (mtype == SDF_MOD_SOLIDIFY) {
+      float thickness = smod.params.x;
+      float d_inner = -(dist + thickness);
+      dist = max(dist, d_inner);
+    }
+    else if (mtype == SDF_MOD_ROUND) {
+      dist -= smod.params.x;
+    }
+    else if (mtype == SDF_MOD_ONION) {
+      int layers = max(smod.header.y, 1);
+      float cut_half = max(smod.params.x, 0.001) * 0.5;
+      float min_ext = smod.params.y;
+      if (layers > 1) {
+        float spacing = min_ext / float(layers);
+        float depth = max(-dist, 0.0);
+        float max_cut = float(layers - 1) * spacing;
+        float nearest = clamp(floor(depth / spacing + 0.5) * spacing, spacing, max_cut);
+        float cut_dist = abs(depth - nearest);
+        float onion_d = cut_half - cut_dist;
+        dist = max(dist, onion_d);
+      }
+    }
+  }
+  return dist;
+}
+
 /**
  * Evaluate the full SDF for an object with robust branching for CSG modifiers.
  * Uses exact CSG distance evaluation for up to ONE Array/Mirror for artifact-free smooth blending.

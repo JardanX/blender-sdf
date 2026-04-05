@@ -52,27 +52,23 @@ void main()
     float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
     float3 I = drw_view_incident_vector(view_pos);
 
-    float4 dirs[4] = float4[4](studio_light0, studio_light1, studio_light2, studio_light3);
-    float4 cols[4] = float4[4](studio_color0, studio_color1, studio_color2, studio_color3);
-    float4 specs[4] = float4[4](studio_spec0, studio_spec1, studio_spec2, studio_spec3);
-
-    float3 diffuse_light = studio_ambient;
-    float3 specular_light = studio_ambient;
+    float3 diffuse_light = shading_data.studio_ambient.xyz;
+    float3 specular_light = shading_data.studio_ambient.xyz;
     float roughness = 0.5f;
 
     for (int i = 0; i < 4; i++) {
-      float NL = dot(dirs[i].xyz, N);
-      float w = cols[i].w;
+      float NL = dot(shading_data.studio_light[i].xyz, N);
+      float w = shading_data.studio_color[i].w;
       float w1 = w + 1.0f;
-      diffuse_light += cols[i].rgb * clamp((NL + w) / (w1 * w1), 0.0f, 1.0f);
+      diffuse_light += shading_data.studio_color[i].rgb * clamp((NL + w) / (w1 * w1), 0.0f, 1.0f);
     }
 
     float3 spec_col = float3(0.0f);
     if (use_specular != 0) {
       float3 R = -reflect(I, N);
       for (int i = 0; i < 4; i++) {
-        float3 L = dirs[i].xyz;
-        float w = cols[i].w;
+        float3 L = shading_data.studio_light[i].xyz;
+        float w = shading_data.studio_color[i].w;
         float3 H = normalize(L + I);
         float spec_angle = clamp(dot(H, N), 0.0f, 1.0f);
         float cNL = clamp(dot(L, N), 0.0f, 1.0f);
@@ -87,7 +83,7 @@ void main()
         float w_s1 = w_s + 1.0f;
         float spec_env = clamp((wrap_NL + w_s) / (w_s1 * w_s1), 0.0f, 1.0f);
 
-        specular_light += specs[i].rgb * mix(spec, spec_env, w * w);
+        specular_light += shading_data.studio_spec[i].rgb * mix(spec, spec_env, w * w);
       }
 
       spec_col = float3(0.05f);
