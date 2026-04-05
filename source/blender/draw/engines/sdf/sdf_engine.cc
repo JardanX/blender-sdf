@@ -2151,6 +2151,20 @@ class Instance : public DrawEngine {
                                                  white);
       }
     }
+
+    /* Always ensure a valid matcap texture exists — the shader declares the
+     * sampler unconditionally, so even flat/studio lighting needs a dummy. */
+    if (matcap_tx_ == nullptr) {
+      float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+      matcap_tx_ = GPU_texture_create_2d_array("sdf_matcap_fallback",
+                                                1,
+                                                1,
+                                                1,
+                                                1,
+                                                gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                GPU_TEXTURE_USAGE_SHADER_READ,
+                                                white);
+    }
   }
 
   void ensure_shaders()
@@ -2698,8 +2712,6 @@ class Instance : public DrawEngine {
                           GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
     }
 
-    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_1i(sh, "debug_fd_normals", debug_fd_normals_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
@@ -2733,10 +2745,8 @@ class Instance : public DrawEngine {
     GPU_texture_image_bind(comp_depth_tx_, GPU_shader_get_sampler_binding(sh, "out_depth_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
-    if (matcap_tx_) {
-      int matcap_slot = GPU_shader_get_sampler_binding(sh, "matcap_tx");
-      GPU_texture_bind(matcap_tx_, matcap_slot);
-    }
+    int matcap_slot = GPU_shader_get_sampler_binding(sh, "matcap_tx");
+    GPU_texture_bind(matcap_tx_, matcap_slot);
 
     GPU_shader_uniform_1i(sh, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(sh, "use_specular", use_specular_);
@@ -2771,9 +2781,7 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(comp_color_tx_);
     GPU_texture_image_unbind(comp_depth_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
-    if (matcap_tx_) {
-      GPU_texture_unbind(matcap_tx_);
-    }
+    GPU_texture_unbind(matcap_tx_);
     GPU_shader_unbind();
   }
 
