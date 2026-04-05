@@ -618,18 +618,18 @@ struct View3DShading {
 
   char sdf_use_bvh = 0;
   char sdf_bvh_debug_view = 0;
-  char sdf_use_cone_trace = 0;
+  char sdf_use_cone_trace = 1;
   char sdf_adaptive_resolution = 0;
-  char sdf_frustum_cull = 0;
+  char sdf_frustum_cull = 1;
   char sdf_fd_normals = 0;
   char _pad_sdf_bvh[2] = {};
 
-  int sdf_max_steps = 0;
-  float sdf_ray_epsilon = 0.0f;
-  float sdf_over_relaxation = 0.0f;
-  float sdf_cone_aperture = 0.0f;
-  int sdf_cone_steps = 0;
-  float sdf_resolution_scale = 0.0f;
+  int sdf_max_steps = 100;
+  float sdf_ray_epsilon = 0.001f;
+  float sdf_over_relaxation = 1.5f;
+  float sdf_cone_aperture = 0.5f;
+  int sdf_cone_steps = 32;
+  float sdf_resolution_scale = 100.0f;
 };
 
 /** 3D Viewport Overlay settings. */

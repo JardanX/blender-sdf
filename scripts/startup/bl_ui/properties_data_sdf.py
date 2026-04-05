@@ -12,17 +12,23 @@ from mathutils import Matrix, Vector
 _CORNER_HANDLE_GAP = 0.15
 _context_point_index = -1
 
-def _no_scale_matrix(ob):
-    loc, rot, _sca = ob.matrix_world.decompose()
-    return Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
-
-
-def _poly_scale(ob):
-    _loc, _rot, sca = ob.matrix_world.decompose()
-    return min(sca.x, sca.y)
-
 
 # Polygon Point Gizmos
+
+def _local_to_world_offset(ob, local_x, local_y):
+    """Transform a local XY point to a world-space offset from the object origin."""
+    world = ob.matrix_world @ Vector((local_x, local_y, 0.0))
+    origin = ob.matrix_world.translation
+    return (world.x - origin.x, world.y - origin.y, world.z - origin.z)
+
+
+def _world_offset_to_local(ob, wx, wy, wz):
+    """Transform a world-space offset (from object origin) back to local XY."""
+    origin = ob.matrix_world.translation
+    world = Vector((wx + origin.x, wy + origin.y, wz + origin.z))
+    local = ob.matrix_world.inverted() @ world
+    return (local.x, local.y)
+
 
 def _make_sdf_point_getter(point_index):
     def getter():
@@ -33,8 +39,7 @@ def _make_sdf_point_getter(point_index):
         if point_index >= len(sdf.polygon_points):
             return (0.0, 0.0, 0.0)
         pt = sdf.polygon_points[point_index]
-        s = _poly_scale(ob)
-        return (pt.co[0] * s, pt.co[1] * s, 0.0)
+        return _local_to_world_offset(ob, pt.co[0], pt.co[1])
     return getter
 
 def _make_sdf_point_setter(point_index):
@@ -46,10 +51,9 @@ def _make_sdf_point_setter(point_index):
         if point_index >= len(sdf.polygon_points):
             return
         pt = sdf.polygon_points[point_index]
-        s = _poly_scale(ob)
-        if s > 1e-6:
-            pt.co[0] = value[0] / s
-            pt.co[1] = value[1] / s
+        lx, ly = _world_offset_to_local(ob, value[0], value[1], value[2])
+        pt.co[0] = lx
+        pt.co[1] = ly
         ob.data.update_tag()
     return setter
 
@@ -86,10 +90,10 @@ def _make_corner_getter(point_index):
         if point_index >= len(sdf.polygon_points):
             return (0.0, 0.0, 0.0)
         pt = sdf.polygon_points[point_index]
-        s = _poly_scale(ob)
         b = _bisector_for_point(sdf, point_index)
-        pos = Vector((pt.co[0] * s, pt.co[1] * s)) + b * (pt.corner * s + _CORNER_HANDLE_GAP)
-        return (pos.x, pos.y, 0.0)
+        lx = pt.co[0] + b.x * (pt.corner + _CORNER_HANDLE_GAP)
+        ly = pt.co[1] + b.y * (pt.corner + _CORNER_HANDLE_GAP)
+        return _local_to_world_offset(ob, lx, ly)
     return getter
 
 
@@ -102,13 +106,12 @@ def _make_corner_setter(point_index):
         if point_index >= len(sdf.polygon_points):
             return
         pt = sdf.polygon_points[point_index]
-        s = _poly_scale(ob)
-        vi_s = Vector((pt.co[0] * s, pt.co[1] * s))
-        new_pos = Vector((value[0], value[1]))
+        lx, ly = _world_offset_to_local(ob, value[0], value[1], value[2])
+        vi = Vector((pt.co[0], pt.co[1]))
+        new_pos = Vector((lx, ly))
         b = _bisector_for_point(sdf, point_index)
-        dist = (new_pos - vi_s).dot(b)
-        if s > 1e-6:
-            pt.corner = max((dist - _CORNER_HANDLE_GAP) / s, 0.0)
+        dist = (new_pos - vi).dot(b)
+        pt.corner = max(dist - _CORNER_HANDLE_GAP, 0.0)
         ob.data.update_tag()
     return setter
 
@@ -128,16 +131,16 @@ class SDF_GT_corner_line(bpy.types.Gizmo):
         if i >= len(sdf.polygon_points):
             return
         pt = sdf.polygon_points[i]
-        s = _poly_scale(ob)
         b = _bisector_for_point(sdf, i)
-        start = (pt.co[0] * s, pt.co[1] * s, 0.0)
-        offset = pt.corner * s + _CORNER_HANDLE_GAP
-        end = (pt.co[0] * s + b.x * offset, pt.co[1] * s + b.y * offset, 0.0)
+        offset = pt.corner + _CORNER_HANDLE_GAP
+
+        s0 = _local_to_world_offset(ob, pt.co[0], pt.co[1])
+        s1 = _local_to_world_offset(ob, pt.co[0] + b.x * offset, pt.co[1] + b.y * offset)
 
         gpu.matrix.push()
         gpu.matrix.multiply_matrix(self.matrix_basis)
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-        batch = batch_for_shader(shader, 'LINES', {"pos": [start, end]})
+        batch = batch_for_shader(shader, 'LINES', {"pos": [s0, s1]})
         shader.bind()
         c = self._color if hasattr(self, '_color') else (0.25, 0.45, 0.7, 0.5)
         shader.uniform_float("color", c)
@@ -195,8 +198,7 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
         if sdf.sdf_type != 'POLYGON':
             return
 
-        mat = _no_scale_matrix(ob)
-        s = _poly_scale(ob)
+        mat = Matrix.Translation(ob.matrix_world.translation)
 
         for i, _pt in enumerate(sdf.polygon_points):
             gz = self.gizmos.new("GIZMO_GT_move_3d")
@@ -238,6 +240,18 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
 
         self._last_count = len(sdf.polygon_points)
 
+    def draw_prepare(self, context):
+        ob = context.object
+        if not ob or ob.type != 'SDF' or not ob.data:
+            return
+        mat = Matrix.Translation(ob.matrix_world.translation)
+        for gz in self.gizmos_list:
+            gz.matrix_basis = mat
+        for cgz in self.corner_gizmos:
+            cgz.matrix_basis = mat
+        for lgz in self.line_gizmos:
+            lgz.matrix_basis = mat
+
     def refresh(self, context):
         ob = context.object
         if not ob or ob.type != 'SDF' or not ob.data:
@@ -260,7 +274,7 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
                 first_interval=0.0)
         self._was_modal = any_modal
 
-        mat = _no_scale_matrix(ob)
+        mat = Matrix.Translation(ob.matrix_world.translation)
         for i in range(count):
             gz = self.gizmos_list[i]
             cgz = self.corner_gizmos[i]
@@ -326,12 +340,17 @@ class SDF_MT_main_pie(Menu):
 
     def draw(self, context):
         pie = self.layout.menu_pie()
-        pie.separator()                                                        # W (skip)
-        pie.separator()                                                        # E (skip)
+        sdf = context.object.data
+        pie.prop_enum(sdf, "csg_operation", value='UNION')       # W
+        pie.prop_enum(sdf, "csg_operation", value='SUBTRACT')    # E
         op = pie.operator("wm.call_menu_pie", text="CSG Operation", icon='MOD_BOOLEAN')  # S
         op.name = "SDF_MT_csg_pie"
         op = pie.operator("wm.call_menu_pie", text="Shape", icon='MESH_UVSPHERE')        # N
         op.name = "SDF_MT_shape_pie"
+        pie.prop_enum(sdf, "csg_operation", value='INTERSECT')   # NW
+        pie.prop_enum(sdf, "csg_operation", value='SHELL')       # NE
+        pie.prop_enum(sdf, "csg_operation", value='PUSH')        # SW
+        pie.prop_enum(sdf, "csg_operation", value='AVOID')       # SE
 
 
 class SDF_MT_blend_pie(Menu):

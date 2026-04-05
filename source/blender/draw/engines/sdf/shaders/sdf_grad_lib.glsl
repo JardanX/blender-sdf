@@ -932,24 +932,23 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
         }
         else if (mflags == SDF_MOD_ARRAY_RADIAL) {
           float arad = smod.params.y;
-          if (cnt > 0.5f) {
+          if (cnt > 1.5f) {
             float aa = (2.0f * SDF_PI) / cnt;
             float na = atan(p.y, p.x) / aa;
             float aid = round(na);
             float la = na - aid;
             float arc = aa * max(arad, 0.0001f);
             float angle_p1 = atan(p.y, p.x);
-            if (cnt > 1.5f) {
+            {
               bool mir = fract(abs(aid) * 0.5f) > 0.25f;
               bool odd = fract(cnt * 0.5f) > 0.25f;
               bool at_def = odd && (abs(angle_p1) > SDF_PI - aa * 0.5f);
               if (at_def) { la = abs(la); }
               else if (mir) { la = -la; }
-              float abk_eff = abk;
               float d_r = (0.5f - la) * arc;
-              float pr = d_r - sabs(d_r, abk_eff);
+              float pr = d_r - sabs(d_r, abk);
               float d_l = (0.5f + la) * arc;
-              float pl = d_l - sabs(d_l, abk_eff);
+              float pl = d_l - sabs(d_l, abk);
               la += (pr - pl) / arc;
             }
             float fa = la * aa;
@@ -1066,14 +1065,13 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
       }
       else if (mflags == SDF_MOD_ARRAY_RADIAL) {
         float arad = smod.params.y;
-        if (cnt > 0.5f) {
+        if (cnt > 1.5f) {
           float aa = (2.0f * SDF_PI) / cnt;
           float angle = atan(pp.y, pp.x);
           float na = angle / aa;
           float aid = round(na);
           float la = na - aid;
 
-          /* 1. Inverse rotation offset */
           float3 rot = smod.params2.yzw;
           if (abs(rot.z) > 0.0001f) {
             float cz = cos(-rot.z), sz = sin(-rot.z);
@@ -1094,9 +1092,6 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
             grad.z = sx * gy + cx * gz;
           }
 
-          /* Recompute fold_a and δ from forward pass.
-           * J = R(fold_a) · diag(1, δ) · R(-angle)
-           * J^T = R(angle) · diag(1, δ) · R(-fold_a) */
           float arc = aa * max(arad, 0.0001f);
           float fold_local = la;
           float delta = 1.0f;
@@ -1108,31 +1103,27 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
 
             fold_local = la * msign;
 
-            float eff_bk = bk;
             float d_r = (0.5f - fold_local) * arc;
             float d_l = (0.5f + fold_local) * arc;
-            float h_r = clamp(0.5f + 0.5f * d_r / eff_bk, 0.0f, 1.0f);
-            float h_l = clamp(0.5f + 0.5f * d_l / eff_bk, 0.0f, 1.0f);
+            float h_r = clamp(0.5f + 0.5f * d_r / bk, 0.0f, 1.0f);
+            float h_l = clamp(0.5f + 0.5f * d_l / bk, 0.0f, 1.0f);
             float bnd_deriv = (2.0f * h_r - 1.0f) + (2.0f * h_l - 1.0f) - 1.0f;
 
-            float pull_r = d_r - sabs(d_r, eff_bk);
-            float pull_l = d_l - sabs(d_l, eff_bk);
+            float pull_r = d_r - sabs(d_r, bk);
+            float pull_l = d_l - sabs(d_l, bk);
             fold_local += (pull_r - pull_l) / arc;
 
             delta = msign * bnd_deriv;
           }
           float fold_a = fold_local * aa;
 
-          /* 2. R(-fold_a): rotate into radial/tangential frame */
           float cf = cos(fold_a), sf = sin(fold_a);
           float gx = grad.x, gy = grad.y;
           grad.x =  cf * gx + sf * gy;
           grad.y = -sf * gx + cf * gy;
 
-          /* 3. Scale tangential component by fold derivative */
           grad.y *= delta;
 
-          /* 4. R(+angle): rotate back to input frame */
           float ca = cos(angle), sa = sin(angle);
           gx = grad.x; gy = grad.y;
           grad.x = ca * gx - sa * gy;
