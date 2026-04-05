@@ -25,6 +25,8 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
   float grp_dist = 1e10f;
   float3 grp_color = float3(0.5f);
   bool grp_has_hit = false;
+  float3 grp_pos = world_pos;
+  float grp_scale = 1.0f;
 
   for (int u = 0; u < tile_count; u++) {
     int i = tile_prim_lists[base_offset + u];
@@ -33,13 +35,29 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
     int gid = aabb.group_id;
 
     if (gid != cur_group && grp_has_hit) {
+      if (cur_group >= 0 && groups[cur_group].modifier_count > 0) {
+        grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, groups[cur_group].modifier_start, groups[cur_group].modifier_count);
+        grp_dist *= grp_scale;
+      }
       flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
       grp_has_hit = false;
       grp_dist = 1e10f;
+      grp_color = (gid >= 0) ? groups[gid].color.rgb : float3(0.5f);
+    }
+
+    if (gid != cur_group && gid >= 0 && groups[gid].modifier_count > 0) {
+      float4 dm = applyDomainModifiers(world_pos, groups[gid].modifier_start, groups[gid].modifier_count, float4x4(1.0));
+      grp_pos = dm.xyz;
+      grp_scale = dm.w;
+    }
+    else if (gid != cur_group) {
+      grp_pos = world_pos;
+      grp_scale = 1.0f;
     }
 
     SDFObjectGPU obj = objects[i];
-    float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
+    float3 eval_pos = (gid >= 0) ? grp_pos : world_pos;
+    float da = point_aabb_dist(eval_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
     float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
 
     int obj_op = obj.csg_operation;
@@ -58,7 +76,7 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
       cur_group = gid;
     }
     else {
-      float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+      float3 lp = (obj.inverse_matrix * float4(eval_pos - obj.position.xyz, 1.0f)).xyz;
       d = evalPrimitive(lp, obj);
       cur_group = gid;
     }
@@ -87,6 +105,10 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
 
   /* Flush final group */
   if (grp_has_hit) {
+    if (cur_group >= 0 && groups[cur_group].modifier_count > 0) {
+      grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, groups[cur_group].modifier_start, groups[cur_group].modifier_count);
+      grp_dist *= grp_scale;
+    }
     flushGroup(cur_group, grp_dist, grp_color, scene_dist, dummy_color);
   }
 

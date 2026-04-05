@@ -4,23 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a **Blender 5.0.1 fork** (base: `v5.0-release`) that adds **SDF (Signed Distance Field)** as a native object type. The fork is part of the **MathOPS** project — a GPU compute-shader SDF renderer that runs as a Blender addon. The fork itself provides the data foundation; rendering is handled externally by the addon.
+This is a **Blender 5.0.1 fork** (base: `v5.0-release`) that adds **SDF (Signed Distance Field)** as a native object type with a built-in GPU draw engine for real-time SDF rendering.
 
-### MathOPS Addon (separate repo)
-
-The rendering counterpart lives at **`D:/Projects/GitHub/MathOPS/MathOPS`** — a Blender addon with:
-- **Proximity engine**: Real-time GPU compute-shader ray marching (`Addon/engine/proximity/`)
-- **Brick Map engine**: Voxel-based SDF baking with C++ native module (`Addon/engine/proximity/brick_map/`)
-- **GLSL shaders**: `Addon/engine/shaders/sdf/` (primitives, utils, scene, compute)
-- **Properties**: `Addon/properties.py` (RNA properties on `bpy.types.Object`)
-- **Selection**: `Addon/operators/sdf_selection.py` (GPU-assisted picking)
-
-The addon reads the SDF data structures defined by this fork's DNA/RNA. When modifying SDF struct fields or RNA properties here, the addon may need corresponding updates.
+**This repo is the Blender C/C++/GLSL source code.** It is NOT the MathOPS addon (that's a separate repo at `D:/Projects/GitHub/MathOPS/MathOPS`). When modifying SDF struct fields or RNA properties here, the addon may need corresponding updates, but all work in this repo is Blender fork work.
 
 Key modifications from upstream Blender:
-- **SDF object type** (`OB_SDF = 31`, `ID_SF = 'SF'`) — 6 new files, 26 modified
+- **SDF object type** (`OB_SDF = 31`, `ID_SF = 'SF'`) — new DNA/BKE/RNA/depsgraph/editor/draw support
+- **SDF draw engine** — full GPU ray-marching renderer at `draw/engines/sdf/` (BVH, cone marching, shading, meshing, FXAA)
 - **Metaball removal** — SDF replaces metaballs; runtime code deleted, DNA kept as tombstones for .blend compat
-- **EEVEE removal** — entire render engine deleted (~297 files); MathOPS uses its own renderer
+- **EEVEE removal** — entire render engine deleted (~297 files)
 - **Feature culling** — grease pencil, sound editor, VSE, movie clip UI removed (libraries kept compiled for deps)
 
 All changes are tracked in `SDF_CHANGES.md` at the repo root — consult it before modifying any SDF-related code.
@@ -106,8 +98,23 @@ UI operators and interaction.
 - `object/object_ops.cc` — Operator registration
 
 ### 6. Draw — `draw/`
-Rendering pipeline. SDF objects currently pass through as no-ops in the draw system (the MathOPS addon handles rendering).
-- `draw_cache.cc` — `case OB_SDF: break;`
+GPU rendering pipeline. The SDF draw engine is a full ray-marching renderer built into Blender.
+- `engines/sdf/sdf_engine.cc` — Main engine: pass setup, dispatch, framebuffer management
+- `engines/sdf/sdf_bvh.cc/.hh` — BVH construction for SDF scene acceleration
+- `engines/sdf/sdf_shader_shared.hh` — Shared C++/GLSL structs (GPU data layout)
+- `engines/sdf/sdf_cpu_eval.hh` — CPU-side SDF evaluation (picking, meshing)
+- `engines/sdf/sdf_meshing.hh` — Dual contouring mesh extraction
+- `engines/sdf/shaders/` — GLSL compute/fragment shaders:
+  - `sdf_lib.glsl` — Core SDF primitive library (all shape evaluators)
+  - `sdf_trace_comp.glsl` — Primary ray marching (sphere tracing)
+  - `sdf_cone_march_comp.glsl` — Cone marching acceleration
+  - `sdf_shade_comp.glsl` — Shading/lighting pass
+  - `sdf_grid_eval_comp.glsl` — Grid evaluation for meshing
+  - `sdf_color_resolve_comp.glsl` — Color/material resolve
+  - `sdf_dc_*.glsl` — Dual contouring pipeline (contour, triangulate, vertex color)
+  - `sdf_blit_frag.glsl` — Final blit to screen
+  - `infos/sdf_shader_infos.hh` — Shader info declarations (UBOs, SSBOs, samplers)
+- `draw_cache.cc` — `case OB_SDF: break;` (batch cache not used; engine renders directly)
 
 ### Registration Checklist (for adding new ID types)
 

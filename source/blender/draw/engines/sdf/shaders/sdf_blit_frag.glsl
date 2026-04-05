@@ -13,6 +13,7 @@ void main()
   float depth = texture(depth_tx, uv).r;
   if (depth == 0.0f && debug_bvh_views == 0) {
     discard;
+    return;
   }
   gl_FragDepth = depth;
 }
