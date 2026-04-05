@@ -134,6 +134,7 @@ enum ModifierType {
   eModifierType_SDFOnion = 93,
   eModifierType_SDFBevel = 94,
   eModifierType_SDFArray = 95,
+  eModifierType_SDFDisplace = 96,
   NUM_MODIFIER_TYPES,
 };
 
@@ -3693,6 +3694,23 @@ struct SDFArrayModifierData {
   /** #SDFBlendType */
   int blend_type = MOD_SDF_BLEND_SMOOTH;
   float rotation_offset[3] = {0.0f, 0.0f, 0.0f};
+};
+
+enum eSDFDisplaceNoiseType {
+  MOD_SDF_DISPLACE_NOISE = 0,
+  MOD_SDF_DISPLACE_VORONOI = 1,
+  MOD_SDF_DISPLACE_TRIANGLE = 2,
+  MOD_SDF_DISPLACE_POINTS = 3,
+};
+
+struct SDFDisplaceModifierData {
+  ModifierData modifier;
+  float strength = 0.05f;
+  float frequency = 10.0f;
+  int noise_type = MOD_SDF_DISPLACE_NOISE;
+  int octaves = 1;
+  float lacunarity = 2.0f;
+  float roughness = 0.5f;
 };
 
 }  // namespace blender

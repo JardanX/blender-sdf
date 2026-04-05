@@ -491,15 +491,33 @@ class Instance : public DrawEngine {
           case SDF_MOD_SOLIDIFY:
           case SDF_MOD_ONION:
             break;
+          case SDF_MOD_DISPLACE:
+            local_extent += float3(math::abs(mod.params.x));
+            break;
           case SDF_MOD_ROUND:
           case SDF_MOD_BEVEL:
             local_extent = math::max(local_extent + float3(mod.params.x), float3(0.0f));
             break;
           case SDF_MOD_TWIST: {
-            float xy = math::sqrt(local_extent.x * local_extent.x +
-                                  local_extent.y * local_extent.y);
-            local_extent.x = xy;
-            local_extent.y = xy;
+            int axis = int(mod.params.y);
+            if (axis == 1) {
+              float xz = math::sqrt(local_extent.x * local_extent.x +
+                                    local_extent.z * local_extent.z);
+              local_extent.x = xz;
+              local_extent.z = xz;
+            }
+            else if (axis == 2) {
+              float yz = math::sqrt(local_extent.y * local_extent.y +
+                                    local_extent.z * local_extent.z);
+              local_extent.y = yz;
+              local_extent.z = yz;
+            }
+            else {
+              float xy = math::sqrt(local_extent.x * local_extent.x +
+                                    local_extent.y * local_extent.y);
+              local_extent.x = xy;
+              local_extent.y = xy;
+            }
             break;
           }
           case SDF_MOD_BEND: {
@@ -860,6 +878,13 @@ class Instance : public DrawEngine {
           valid = true;
           break;
         }
+        case eModifierType_SDFDisplace: {
+          const auto &m = *reinterpret_cast<const SDFDisplaceModifierData *>(md);
+          gpu_mod.header = int4(SDF_MOD_DISPLACE, m.noise_type, m.octaves, 0);
+          gpu_mod.params = float4(m.strength, m.frequency, m.lacunarity, m.roughness);
+          valid = true;
+          break;
+        }
         default:
           break;
       }
@@ -959,15 +984,33 @@ class Instance : public DrawEngine {
         case SDF_MOD_ONION:
           local_extent += float3(mod.params.x);
           break;
+        case SDF_MOD_DISPLACE:
+          local_extent += float3(math::abs(mod.params.x));
+          break;
         case SDF_MOD_ROUND:
         case SDF_MOD_BEVEL:
           local_extent = math::max(local_extent + float3(mod.params.x), float3(0.0f));
           break;
         case SDF_MOD_TWIST: {
-          float xy = math::sqrt(local_extent.x * local_extent.x +
-                                local_extent.y * local_extent.y);
-          local_extent.x = xy;
-          local_extent.y = xy;
+          int axis = int(mod.params.y);
+          if (axis == 1) {
+            float xz = math::sqrt(local_extent.x * local_extent.x +
+                                  local_extent.z * local_extent.z);
+            local_extent.x = xz;
+            local_extent.z = xz;
+          }
+          else if (axis == 2) {
+            float yz = math::sqrt(local_extent.y * local_extent.y +
+                                  local_extent.z * local_extent.z);
+            local_extent.y = yz;
+            local_extent.z = yz;
+          }
+          else {
+            float xy = math::sqrt(local_extent.x * local_extent.x +
+                                  local_extent.y * local_extent.y);
+            local_extent.x = xy;
+            local_extent.y = xy;
+          }
           break;
         }
         case SDF_MOD_BEND: {
@@ -2944,12 +2987,36 @@ bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
         if (mt == SDF_MOD_ELONGATE) {
           search_ext += float3(mod.params.x, mod.params.y, mod.params.z);
         }
-        else if (mt == SDF_MOD_TWIST || mt == SDF_MOD_BEND) {
+        else if (mt == SDF_MOD_TWIST) {
+          int axis = int(mod.params.y);
+          if (axis == 1) {
+            float xz = math::sqrt(search_ext.x * search_ext.x +
+                                  search_ext.z * search_ext.z);
+            search_ext.x = xz;
+            search_ext.z = xz;
+          }
+          else if (axis == 2) {
+            float yz = math::sqrt(search_ext.y * search_ext.y +
+                                  search_ext.z * search_ext.z);
+            search_ext.y = yz;
+            search_ext.z = yz;
+          }
+          else {
+            float xy = math::sqrt(search_ext.x * search_ext.x +
+                                  search_ext.y * search_ext.y);
+            search_ext.x = xy;
+            search_ext.y = xy;
+          }
+        }
+        else if (mt == SDF_MOD_BEND) {
           float diag = math::length(search_ext);
           search_ext = float3(diag);
         }
         else if (mt == SDF_MOD_SOLIDIFY || mt == SDF_MOD_ONION) {
           /* Never expand — these only carve inward. */
+        }
+        else if (mt == SDF_MOD_DISPLACE) {
+          search_ext += float3(fabsf(mod.params.x));
         }
         else if (mt == SDF_MOD_ROUND || mt == SDF_MOD_BEVEL) {
           search_ext = math::max(search_ext + float3(mod.params.x), float3(0.0f));

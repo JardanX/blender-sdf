@@ -110,6 +110,7 @@ extern ModifierTypeInfo modifierType_SDFRound;
 extern ModifierTypeInfo modifierType_SDFOnion;
 extern ModifierTypeInfo modifierType_SDFBevel;
 extern ModifierTypeInfo modifierType_SDFArray;
+extern ModifierTypeInfo modifierType_SDFDisplace;
 
 /* MOD_util.cc */
 

@@ -376,6 +376,8 @@ static const char *sdf_group_modifier_type_name(int type)
       return "Bevel";
     case SDF_MOD_ARRAY:
       return "Array";
+    case SDF_MOD_DISPLACE:
+      return "Displacement";
     default:
       return "Modifier";
   }
@@ -422,6 +424,13 @@ SDFModifier *BKE_sdf_group_modifier_add(SDFGroup *group, int type)
       mod->params[1] = 1.0f;
       mod->params[2] = 0.0f;
       mod->params[3] = 0.0f;
+      break;
+    case SDF_MOD_DISPLACE:
+      mod->params[0] = 0.05f;  /* strength */
+      mod->params[1] = 10.0f;  /* frequency */
+      mod->params[2] = 2.0f;   /* lacunarity */
+      mod->params[3] = 0.5f;   /* roughness */
+      mod->flag = SDF_MOD_DISPLACE_NOISE;
       break;
     default:
       break;

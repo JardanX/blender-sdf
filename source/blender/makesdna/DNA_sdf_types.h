@@ -86,6 +86,7 @@ typedef enum eSDFModifierType {
   SDF_MOD_ONION = 6,
   SDF_MOD_BEVEL = 7,
   SDF_MOD_ARRAY = 8,
+  SDF_MOD_DISPLACE = 9,
 } eSDFModifierType;
 
 /* Mirror axis flags */
@@ -99,6 +100,14 @@ enum {
 enum {
   SDF_MOD_ARRAY_LINEAR = 0,
   SDF_MOD_ARRAY_RADIAL = 1,
+};
+
+/* Displacement noise types */
+enum {
+  SDF_MOD_DISPLACE_NOISE = 0,
+  SDF_MOD_DISPLACE_VORONOI = 1,
+  SDF_MOD_DISPLACE_TRIANGLE = 2,
+  SDF_MOD_DISPLACE_POINTS = 3,
 };
 
 typedef struct SDFPolygonPoint {

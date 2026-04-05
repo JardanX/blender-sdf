@@ -23,6 +23,7 @@ using blender::int4;
 #define SDF_MOD_SOLIDIFY 4
 #define SDF_MOD_ROUND 5
 #define SDF_MOD_ONION 6
+#define SDF_MOD_DISPLACE 9
 #define SDF_MOD_MIRROR_X 1
 #define SDF_MOD_MIRROR_Y 2
 #define SDF_MOD_MIRROR_Z 4
@@ -284,6 +285,9 @@ inline float applyDistMods(float dist,
     }
     else if (mtype == SDF_MOD_ROUND) {
       dist -= mods[i].params.x;
+    }
+    else if (mtype == SDF_MOD_DISPLACE) {
+      dist += mods[i].params.x;
     }
   }
   return dist;
