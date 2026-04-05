@@ -28,8 +28,8 @@ void main()
 
   /* Edge detection: check 4-connected neighbors for object boundary. */
   bool is_edge = false;
-  float2 offsets[4] = float2[4](
-      float2(-1.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, -1.0f), float2(0.0f, 1.0f));
+  float2 offsets[4] = {
+      float2(-1.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, -1.0f), float2(0.0f, 1.0f)};
 
   for (int i = 0; i < 4; i++) {
     float2 nuv = sdf_uv + offsets[i] * texel;
