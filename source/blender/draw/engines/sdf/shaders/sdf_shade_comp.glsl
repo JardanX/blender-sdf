@@ -52,9 +52,9 @@ void main()
     float3 view_pos = (vm.viewmat * float4(hit_pos, 1.0f)).xyz;
     float3 I = drw_view_incident_vector(view_pos);
 
-    float4 dirs[4] = float4[4](studio_light0, studio_light1, studio_light2, studio_light3);
-    float4 cols[4] = float4[4](studio_color0, studio_color1, studio_color2, studio_color3);
-    float4 specs[4] = float4[4](studio_spec0, studio_spec1, studio_spec2, studio_spec3);
+    float4 dirs[4] = {studio_light0, studio_light1, studio_light2, studio_light3};
+    float4 cols[4] = {studio_color0, studio_color1, studio_color2, studio_color3};
+    float4 specs[4] = {studio_spec0, studio_spec1, studio_spec2, studio_spec3};
 
     float3 diffuse_light = studio_ambient;
     float3 specular_light = studio_ambient;
