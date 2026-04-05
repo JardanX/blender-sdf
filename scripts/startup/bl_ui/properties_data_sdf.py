@@ -286,6 +286,23 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
 
 # Pie Menus
 
+class SDF_MT_shape_pie(Menu):
+    bl_idname = "SDF_MT_shape_pie"
+    bl_label = "Shape"
+
+    def draw(self, context):
+        pie = self.layout.menu_pie()
+        sdf = context.object.data
+        pie.prop_enum(sdf, "sdf_type", value='BOX')         # W
+        pie.prop_enum(sdf, "sdf_type", value='SPHERE')      # E
+        pie.prop_enum(sdf, "sdf_type", value='CONE')        # S
+        pie.prop_enum(sdf, "sdf_type", value='CYLINDER')    # N
+        pie.prop_enum(sdf, "sdf_type", value='TORUS')       # NW
+        pie.prop_enum(sdf, "sdf_type", value='CAPSULE')     # NE
+        pie.prop_enum(sdf, "sdf_type", value='NGON')        # SW
+        pie.prop_enum(sdf, "sdf_type", value='POLYGON')     # SE
+
+
 class SDF_MT_csg_pie(Menu):
     bl_idname = "SDF_MT_csg_pie"
     bl_label = "CSG Operation"
@@ -301,8 +318,20 @@ class SDF_MT_csg_pie(Menu):
         pie.prop_enum(sdf, "csg_operation", value='SHELL')       # NE
         pie.prop_enum(sdf, "csg_operation", value='PUSH')        # SW
         pie.prop_enum(sdf, "csg_operation", value='AVOID')       # SE
-        # Layout: 3 left (NW=Intersect, W=Union, SW=Push)
-        #         3 right (NE=Shell, E=Subtract, SE=Avoid)
+
+
+class SDF_MT_main_pie(Menu):
+    bl_idname = "SDF_MT_main_pie"
+    bl_label = "SDF"
+
+    def draw(self, context):
+        pie = self.layout.menu_pie()
+        pie.separator()                                                        # W (skip)
+        pie.separator()                                                        # E (skip)
+        op = pie.operator("wm.call_menu_pie", text="CSG Operation", icon='MOD_BOOLEAN')  # S
+        op.name = "SDF_MT_csg_pie"
+        op = pie.operator("wm.call_menu_pie", text="Shape", icon='MESH_UVSPHERE')        # N
+        op.name = "SDF_MT_shape_pie"
 
 
 class SDF_MT_blend_pie(Menu):
@@ -319,9 +348,9 @@ class SDF_MT_blend_pie(Menu):
 
 
 class SDF_OT_csg_pie_call(Operator):
-    """Open the CSG operation pie menu (Tab)"""
+    """Open the SDF pie menu (Tab) — Shape on top, CSG on bottom"""
     bl_idname = "sdf.csg_pie_call"
-    bl_label = "SDF CSG Pie"
+    bl_label = "SDF Pie"
 
     @classmethod
     def poll(cls, context):
@@ -329,7 +358,7 @@ class SDF_OT_csg_pie_call(Operator):
         return ob is not None and ob.type == 'SDF'
 
     def execute(self, context):
-        bpy.ops.wm.call_menu_pie(name="SDF_MT_csg_pie")
+        bpy.ops.wm.call_menu_pie(name="SDF_MT_main_pie")
         return {'FINISHED'}
 
 
@@ -820,7 +849,9 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
 
 classes = (
     SDF_GT_corner_line,
+    SDF_MT_shape_pie,
     SDF_MT_csg_pie,
+    SDF_MT_main_pie,
     SDF_MT_blend_pie,
     SDF_OT_csg_pie_call,
     SDF_OT_blend_pie_call,
