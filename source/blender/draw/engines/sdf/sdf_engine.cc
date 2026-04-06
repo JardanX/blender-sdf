@@ -49,6 +49,7 @@
 #include "GPU_texture.hh"
 #include "GPU_compute.hh"
 #include "GPU_uniform_buffer.hh"
+#include "GPU_context.hh"
 
 #include "draw_defines.hh"
 #include "draw_manager.hh"
@@ -2913,8 +2914,6 @@ class Instance : public DrawEngine {
  public:
   ~Instance() override
   {
-    /* Shaders live in static cache — do NOT free them here. */
-
     s_object_ssbo = nullptr;
     s_modifier_ssbo = nullptr;
     s_polygon_ssbo = nullptr;
@@ -2927,6 +2926,17 @@ class Instance : public DrawEngine {
     s_render_size = {0, 0};
     s_texture_size = {0, 0};
     s_object_count = 0;
+    s_objects_cpu = nullptr;
+    s_objects_cpu_count = 0;
+    s_polygon_pts_cpu = nullptr;
+    s_polygon_pts_count = 0;
+    s_modifiers_cpu = nullptr;
+    s_modifier_count = 0;
+
+    /* GPU context may already be torn down during shutdown */
+    if (!GPU_context_active_get()) {
+      return;
+    }
 
     if (comp_color_tx_) {
       GPU_texture_free(comp_color_tx_);
