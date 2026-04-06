@@ -56,7 +56,9 @@ float3 sym3_eigenvalues(float3x3 A)
 
   float b0 = A[0][0] - q, b1 = A[1][1] - q, b2 = A[2][2] - q;
   float p = sqrt((b0 * b0 + b1 * b1 + b2 * b2 + 2.0 * p1) / 6.0);
-  float3x3 B = (A - float3x3(q)) / p;
+  float inv_p = 1.0 / p;
+  float3x3 qI = float3x3(float3(q, 0.0, 0.0), float3(0.0, q, 0.0), float3(0.0, 0.0, q));
+  float3x3 B = (A - qI) * inv_p;
   float detB = B[0][0] * (B[1][1] * B[2][2] - B[1][2] * B[2][1]) -
                B[0][1] * (B[1][0] * B[2][2] - B[1][2] * B[2][0]) +
                B[0][2] * (B[1][0] * B[2][1] - B[1][1] * B[2][0]);
@@ -143,7 +145,8 @@ void main()
   if (eig.z < threshold) { lam = max(lam, threshold - eig.z); }
   if (eig.y < threshold) { lam = max(lam, threshold - eig.y); }
 
-  float3x3 A = ata + float3x3(lam);
+  float3x3 lamI = float3x3(float3(lam, 0.0, 0.0), float3(0.0, lam, 0.0), float3(0.0, 0.0, lam));
+  float3x3 A = ata + lamI;
   float3 b = atb - ata * mp;
 
   float det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) -
