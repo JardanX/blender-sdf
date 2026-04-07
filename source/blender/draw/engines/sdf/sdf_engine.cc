@@ -2641,11 +2641,15 @@ class Instance : public DrawEngine {
   {
     if (object_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "objects");
-      GPU_storagebuf_bind(object_ssbo_, slot);
+      if (slot >= 0) {
+        GPU_storagebuf_bind(object_ssbo_, slot);
+      }
     }
     if (modifier_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "sdf_modifiers");
-      GPU_storagebuf_bind(modifier_ssbo_, slot);
+      if (slot >= 0) {
+        GPU_storagebuf_bind(modifier_ssbo_, slot);
+      }
     }
     if (polygon_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "polygon_points");
@@ -2655,7 +2659,9 @@ class Instance : public DrawEngine {
     }
     if (group_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "groups");
-      GPU_storagebuf_bind(group_ssbo_, slot);
+      if (slot >= 0) {
+        GPU_storagebuf_bind(group_ssbo_, slot);
+      }
     }
     if (bvh_nodes_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "aabb_nodes");
@@ -2731,11 +2737,12 @@ class Instance : public DrawEngine {
     gpu::Shader *sh = aabb_project_sh();
     GPU_shader_bind(sh);
     if (object_ssbo_) {
-      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "objects");
+      if (slot >= 0) GPU_storagebuf_bind(object_ssbo_, slot);
     }
     if (screen_aabbs_ssbo_) {
-      GPU_storagebuf_bind(screen_aabbs_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "screen_aabbs"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "screen_aabbs");
+      if (slot >= 0) GPU_storagebuf_bind(screen_aabbs_ssbo_, slot);
     }
     GPU_shader_uniform_1i(sh, "object_count", obj_count);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
@@ -2760,19 +2767,20 @@ class Instance : public DrawEngine {
     gpu::Shader *sh = tile_cull_sh();
     GPU_shader_bind(sh);
     if (object_ssbo_) {
-      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "objects");
+      if (slot >= 0) GPU_storagebuf_bind(object_ssbo_, slot);
     }
     if (screen_aabbs_ssbo_) {
-      GPU_storagebuf_bind(screen_aabbs_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "screen_aabbs"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "screen_aabbs");
+      if (slot >= 0) GPU_storagebuf_bind(screen_aabbs_ssbo_, slot);
     }
     if (tile_prim_counts_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
     }
     if (tile_prim_lists_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
     }
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
@@ -2793,40 +2801,40 @@ class Instance : public DrawEngine {
     GPU_shader_bind(sh);
 
     if (object_ssbo_) {
-      GPU_storagebuf_bind(object_ssbo_, GPU_shader_get_ssbo_binding(sh, "objects"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "objects");
+      if (slot >= 0) GPU_storagebuf_bind(object_ssbo_, slot);
     }
     if (modifier_ssbo_) {
-      GPU_storagebuf_bind(modifier_ssbo_, GPU_shader_get_ssbo_binding(sh, "sdf_modifiers"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "sdf_modifiers");
+      if (slot >= 0) GPU_storagebuf_bind(modifier_ssbo_, slot);
     }
     if (polygon_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "polygon_points");
-      if (slot >= 0) {
-        GPU_storagebuf_bind(polygon_ssbo_, slot);
-      }
+      if (slot >= 0) GPU_storagebuf_bind(polygon_ssbo_, slot);
     }
     if (group_ssbo_) {
-      GPU_storagebuf_bind(group_ssbo_, GPU_shader_get_ssbo_binding(sh, "groups"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "groups");
+      if (slot >= 0) GPU_storagebuf_bind(group_ssbo_, slot);
     }
     if (object_aabb_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(sh, "object_aabbs");
-      if (slot >= 0) {
-        GPU_storagebuf_bind(object_aabb_ssbo_, slot);
-      }
+      if (slot >= 0) GPU_storagebuf_bind(object_aabb_ssbo_, slot);
     }
     if (cone_hit_ssbo_) {
-      GPU_storagebuf_bind(cone_hit_ssbo_, GPU_shader_get_ssbo_binding(sh, "tile_hit_pos"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_hit_pos");
+      if (slot >= 0) GPU_storagebuf_bind(cone_hit_ssbo_, slot);
     }
     if (tile_prim_counts_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
     }
     if (tile_prim_lists_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
     }
     if (tile_far_hint_ssbo_) {
-      GPU_storagebuf_bind(tile_far_hint_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_far_hint"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_far_hint");
+      if (slot >= 0) GPU_storagebuf_bind(tile_far_hint_ssbo_, slot);
     }
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
@@ -2938,12 +2946,12 @@ class Instance : public DrawEngine {
     bind_ssbos(sh);
 
     if (tile_prim_counts_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
     }
     if (tile_prim_lists_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
     }
 
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
@@ -2978,12 +2986,12 @@ class Instance : public DrawEngine {
     bind_ssbos(sh);
 
     if (tile_prim_counts_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_counts_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_counts"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
     }
     if (tile_prim_lists_ssbo_) {
-      GPU_storagebuf_bind(tile_prim_lists_ssbo_,
-                          GPU_shader_get_ssbo_binding(sh, "tile_prim_lists"));
+      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
+      if (slot >= 0) GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
     }
 
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
@@ -3637,11 +3645,11 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
         /* Grid eval */
         GPU_shader_bind(grid_sh);
-        if (s_object_ssbo) GPU_storagebuf_bind(s_object_ssbo, grid_obj_slot);
-        if (s_modifier_ssbo) GPU_storagebuf_bind(s_modifier_ssbo, grid_mod_slot);
-        if (s_group_ssbo) GPU_storagebuf_bind(s_group_ssbo, grid_grp_slot);
+        if (s_object_ssbo && grid_obj_slot >= 0) GPU_storagebuf_bind(s_object_ssbo, grid_obj_slot);
+        if (s_modifier_ssbo && grid_mod_slot >= 0) GPU_storagebuf_bind(s_modifier_ssbo, grid_mod_slot);
+        if (s_group_ssbo && grid_grp_slot >= 0) GPU_storagebuf_bind(s_group_ssbo, grid_grp_slot);
         if (grid_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, grid_poly_slot);
-        GPU_storagebuf_bind(grid_ssbo, grid_val_slot);
+        if (grid_val_slot >= 0) GPU_storagebuf_bind(grid_ssbo, grid_val_slot);
         if (has_bvh && grid_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, grid_bvh_slot);
         GPU_shader_uniform_1i(grid_sh, "object_count", s_object_count);
         GPU_shader_uniform_1i(grid_sh, "group_count", s_group_count);
@@ -3655,10 +3663,10 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
         /* DC contour → writes to GLOBAL vert buffer + local cell map */
         GPU_shader_bind(dc_sh);
-        GPU_storagebuf_bind(grid_ssbo, dc_gv_slot);
-        GPU_storagebuf_bind(vert_ssbo, dc_v_slot);
-        GPU_storagebuf_bind(counter_ssbo, dc_c_slot);
-        GPU_storagebuf_bind(cell_ssbo, dc_cv_slot);
+        if (dc_gv_slot >= 0) GPU_storagebuf_bind(grid_ssbo, dc_gv_slot);
+        if (dc_v_slot >= 0) GPU_storagebuf_bind(vert_ssbo, dc_v_slot);
+        if (dc_c_slot >= 0) GPU_storagebuf_bind(counter_ssbo, dc_c_slot);
+        if (dc_cv_slot >= 0) GPU_storagebuf_bind(cell_ssbo, dc_cv_slot);
         GPU_shader_uniform_1i(dc_sh, "grid_verts", PADDED_GV);
         GPU_shader_uniform_3fv(dc_sh, "grid_origin", chunk_origin);
         GPU_shader_uniform_1f(dc_sh, "cell_size", cell_size);
@@ -3668,10 +3676,10 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
         /* Triangulation → only inner cells, writes to GLOBAL tri buffer */
         GPU_shader_bind(tri_sh);
-        GPU_storagebuf_bind(grid_ssbo, tr_gv_slot);
-        GPU_storagebuf_bind(tri_ssbo, tr_t_slot);
-        GPU_storagebuf_bind(counter_ssbo, tr_c_slot);
-        GPU_storagebuf_bind(cell_ssbo, tr_cv_slot);
+        if (tr_gv_slot >= 0) GPU_storagebuf_bind(grid_ssbo, tr_gv_slot);
+        if (tr_t_slot >= 0) GPU_storagebuf_bind(tri_ssbo, tr_t_slot);
+        if (tr_c_slot >= 0) GPU_storagebuf_bind(counter_ssbo, tr_c_slot);
+        if (tr_cv_slot >= 0) GPU_storagebuf_bind(cell_ssbo, tr_cv_slot);
         GPU_shader_uniform_1i(tri_sh, "grid_verts", PADDED_GV);
         GPU_shader_uniform_1i(tri_sh, "inner_start", PAD);
         GPU_shader_uniform_1i(tri_sh, "inner_end", PAD + CHUNK);
@@ -3714,12 +3722,12 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     int col_out_slot = GPU_shader_get_ssbo_binding(color_sh, "dc_colors");
     int col_bvh_slot = GPU_shader_get_ssbo_binding(color_sh, "aabb_nodes");
 
-    if (s_object_ssbo) GPU_storagebuf_bind(s_object_ssbo, col_obj_slot);
-    if (s_modifier_ssbo) GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
-    if (s_group_ssbo) GPU_storagebuf_bind(s_group_ssbo, col_grp_slot);
+    if (s_object_ssbo && col_obj_slot >= 0) GPU_storagebuf_bind(s_object_ssbo, col_obj_slot);
+    if (s_modifier_ssbo && col_mod_slot >= 0) GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
+    if (s_group_ssbo && col_grp_slot >= 0) GPU_storagebuf_bind(s_group_ssbo, col_grp_slot);
     if (col_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, col_poly_slot);
-    GPU_storagebuf_bind(vert_ssbo, col_pos_slot);
-    GPU_storagebuf_bind(color_ssbo, col_out_slot);
+    if (col_pos_slot >= 0) GPU_storagebuf_bind(vert_ssbo, col_pos_slot);
+    if (col_out_slot >= 0) GPU_storagebuf_bind(color_ssbo, col_out_slot);
     if (has_bvh && col_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, col_bvh_slot);
 
     GPU_shader_uniform_1i(color_sh, "object_count", s_object_count);

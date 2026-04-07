@@ -385,6 +385,7 @@ class Sdfs : Overlay {
     GPU_depth_test(GPU_DEPTH_ALWAYS);
     GPU_depth_mask(false);
     GPU_blend(GPU_BLEND_ALPHA);
+    GPU_line_smooth(true);
     GPU_line_width(1.0f);
 
     /* Collect transforms (rotation + position) for base + modifier copies. */
@@ -559,7 +560,7 @@ class Sdfs : Overlay {
     uint pos_attr = GPU_vertformat_attr_add_legacy(
         immVertexFormat(), "pos", GPU_COMP_F32, 3, GPU_FETCH_FLOAT);
     immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-    immUniformColor4f(1.0f, 0.65f, 0.0f, 0.8f);
+    immUniformColor4f(1.0f, 0.65f, 0.0f, 0.2f);
 
     immBegin(GPU_PRIM_LINES, 24 * int(copies.size()));
     for (const CopyXform &cx : copies) {
@@ -600,6 +601,7 @@ class Sdfs : Overlay {
       }
     }
 
+    GPU_line_smooth(false);
     GPU_blend(GPU_BLEND_NONE);
   }
 
@@ -653,31 +655,17 @@ class Sdfs : Overlay {
     MEM_delete_void(static_cast<void *>(gbuf_data));
     MEM_delete_void(static_cast<void *>(depth_data));
 
-    printf("SDF pick: depth=%.4f obj_id_f=%.1f px=(%d,%d) gbuf=%dx%d entries=%d\n",
-           sdf_depth, obj_id_f, gx, gy, gbuf_w, gbuf_h, int(entries_.size()));
-
     if (sdf_depth <= 0.0f || sdf_depth >= 1.0f) {
-      printf("  -> no hit (depth out of range)\n");
       return;
     }
 
     int obj_id = int(obj_id_f + 0.5f);
     if (obj_id < 0 || obj_id >= int(select_table_.size())) {
-      printf("  -> obj_id %d out of range (table size %d)\n", obj_id, int(select_table_.size()));
       return;
     }
 
     uint sel_id = select_table_[obj_id];
-    printf("  -> obj_id=%d sel_id=%u buf_size=%d\n", obj_id, sel_id, select_buf_size_);
-    for (const SdfEntry &e : entries_) {
-      printf("     entry sdf_idx=%d sel_id=%u packed=0x%x select=%d active=%d\n",
-             e.sdf_index, e.select_id, e.outline_packed_id,
-             int((e.outline_packed_id >> 14u) == 1u || (e.outline_packed_id >> 14u) == 3u),
-             int((e.outline_packed_id >> 14u) == 3u));
-    }
-
     if (sel_id == uint32_t(-1) || sel_id >= uint32_t(select_buf_size_)) {
-      printf("  -> sel_id invalid\n");
       return;
     }
     Vector<uint32_t> buf(select_buf_size_);
@@ -686,7 +674,6 @@ class Sdfs : Overlay {
     memcpy(&depth_bits, &sdf_depth, sizeof(uint32_t));
     buf[sel_id] = depth_bits;
     GPU_storagebuf_update(*select_output_buf_, buf.data());
-    printf("  -> wrote depth 0x%x at sel_id %u\n", depth_bits, sel_id);
   }
 };
 

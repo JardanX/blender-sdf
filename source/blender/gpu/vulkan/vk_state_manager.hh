@@ -39,6 +39,9 @@ class BindSpaceUniformBuffers {
 
   void bind(VKUniformBuffer *resource, int binding)
   {
+    if (binding < 0) {
+      return;
+    }
     if (bound_resources.size() <= binding) {
       bound_resources.resize(binding + 1);
     }
@@ -77,6 +80,9 @@ template<int Offset> class BindSpaceImages {
             TextureWriteFormat format,
             StateManager *state_manager)
   {
+    if (binding < 0) {
+      return;
+    }
     if (binding >= Offset) {
       binding -= Offset;
     }
@@ -131,6 +137,9 @@ class BindSpaceStorageBuffers {
 
   void bind(Type resource_type, void *resource, int binding, VkDeviceSize offset)
   {
+    if (binding < 0) {
+      return;
+    }
     if (bound_resources.size() <= binding) {
       bound_resources.resize(binding + 1);
     }
@@ -178,6 +187,9 @@ class BindSpaceTextures {
 
   void bind(Type resource_type, void *resource, GPUSamplerState sampler, int binding)
   {
+    if (binding < 0) {
+      return;
+    }
     if (bound_resources.size() <= binding) {
       bound_resources.resize(binding + 1, {});
     }
