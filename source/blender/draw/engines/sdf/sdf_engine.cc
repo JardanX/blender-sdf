@@ -154,6 +154,7 @@ class Instance : public DrawEngine {
   Vector<SDFObjectGPU> objects_;
   Vector<SDFGroup *> object_group_ptrs_;
   Vector<Object *> object_ptrs_;
+  Vector<Object *> group_empties_;
 
   float3 scene_min_ = float3(1e30f);
   float3 scene_max_ = float3(-1e30f);
@@ -291,6 +292,7 @@ class Instance : public DrawEngine {
     objects_.clear();
     object_group_ptrs_.clear();
     object_ptrs_.clear();
+    group_empties_.clear();
     modifiers_.clear();
     polygon_points_.clear();
     groups_gpu_.clear();
@@ -324,6 +326,12 @@ class Instance : public DrawEngine {
 
     const SDF *sdf_data = id_cast<const SDF *>(ob->data);
     if (sdf_data == nullptr) {
+      return;
+    }
+
+    /* Group empties are containers, not renderable primitives */
+    if (sdf_data->sdf_type == SDF_TYPE_GROUP) {
+      group_empties_.append(ob);
       return;
     }
 
@@ -1391,10 +1399,12 @@ class Instance : public DrawEngine {
       scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
       max_blend_ = math::max(max_blend_, copy_obj.blend);
-      if (copy_obj.blend > 0.001f &&
-          (copy_obj.blend_type == SDF_BLEND_ROUND || copy_obj.blend_type == SDF_BLEND_CHAMFER))
-      {
-        step_factor_ = min_ff(step_factor_, 0.65f);
+      if (copy_obj.blend > 0.001f && copy_obj.blend_type > 0) {
+        float sf = (copy_obj.blend_type == SDF_BLEND_SMOOTH) ? 0.75f : 0.65f;
+        if (copy_obj.blend > 0.5f) {
+          sf = min_ff(sf, 0.5f);
+        }
+        step_factor_ = min_ff(step_factor_, sf);
       }
       if (copy_obj.csg_operation == SDF_CSG_SHELL) {
         max_shell_distance_ = math::max(max_shell_distance_,
@@ -1545,10 +1555,12 @@ class Instance : public DrawEngine {
         float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
                                   ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
                                   : gpu_grp.blend;
-        if (grp_eff_blend > 0.001f &&
-            (gpu_grp.blend_type == SDF_BLEND_ROUND || gpu_grp.blend_type == SDF_BLEND_CHAMFER))
-        {
-          step_factor_ = min_ff(step_factor_, 0.65f);
+        if (grp_eff_blend > 0.001f && gpu_grp.blend_type > 0) {
+          float sf = (gpu_grp.blend_type == SDF_BLEND_SMOOTH) ? 0.75f : 0.65f;
+          if (grp_eff_blend > 0.5f) {
+            sf = min_ff(sf, 0.5f);
+          }
+          step_factor_ = min_ff(step_factor_, sf);
         }
         groups_gpu_.append(gpu_grp);
         group_index_map.add(group, g_idx);
@@ -1563,6 +1575,146 @@ class Instance : public DrawEngine {
 
         g_idx++;
         obj_offset += group->totmember;
+      }
+
+      /* New parent-child group path: SDF_TYPE_GROUP empties as parents */
+      for (Object *group_ob : group_empties_) {
+        Object *orig_group = DEG_get_original(group_ob);
+        const SDF *grp_sdf = id_cast<const SDF *>(group_ob->data);
+        if (!grp_sdf) {
+          continue;
+        }
+
+        SDFGroupGPU gpu_grp = {};
+        gpu_grp.csg_operation = grp_sdf->csg_operation;
+        gpu_grp.blend_type = grp_sdf->blend_type;
+        gpu_grp.blend = grp_sdf->blend;
+        gpu_grp.shell_distance = grp_sdf->shell_distance;
+        gpu_grp.shell_mode = grp_sdf->shell_mode;
+        gpu_grp.shell_op = grp_sdf->shell_op;
+        gpu_grp.shell_blend_top = grp_sdf->shell_blend_top;
+        gpu_grp.shell_blend_bottom = grp_sdf->shell_blend_bottom;
+        gpu_grp.chamfer_k2 = grp_sdf->chamfer_k2;
+        gpu_grp.chamfer_k3 = grp_sdf->chamfer_k3;
+        gpu_grp.chamfer_k4 = grp_sdf->chamfer_k4;
+        gpu_grp.chamfer_k5 = grp_sdf->chamfer_k5;
+        gpu_grp.flip_blend = grp_sdf->flip_blend;
+        gpu_grp.flip_blend_end = grp_sdf->flip_blend_end;
+        gpu_grp.color = float4(grp_sdf->color[0], grp_sdf->color[1],
+                               grp_sdf->color[2], grp_sdf->color[3]);
+        gpu_grp.first_object = 0;
+        gpu_grp.object_count = 0;
+
+        /* Pack group modifiers from the SDF modifier stack */
+        gpu_grp.modifier_start = int(modifiers_.size());
+        gpu_grp.modifier_count = 0;
+        for (const SDFModifier *gmod = static_cast<const SDFModifier *>(grp_sdf->modifiers.first);
+             gmod; gmod = gmod->next)
+        {
+          if (!gmod->show_viewport) {
+            continue;
+          }
+          SDFModifierGPU gpu_mod = {};
+          bool valid = false;
+          int mtype = gmod->type;
+
+          if (mtype == SDF_MOD_MIRROR) {
+            float3 mirror_pos(0.0f);
+            if (gmod->mirror_ob) {
+              mirror_pos = float3(gmod->mirror_ob->object_to_world()[3]);
+            }
+            int sides = 7;
+            int blend_type = int(gmod->params[5]);
+            gpu_mod.header = int4(SDF_MOD_MIRROR, gmod->flag, blend_type, sides);
+            gpu_mod.params = float4(gmod->params[0], mirror_pos.x, mirror_pos.y, mirror_pos.z);
+            gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_TWIST) {
+            gpu_mod.header = int4(SDF_MOD_TWIST, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], float(2), 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_BEND) {
+            int axis = int(gmod->params[1]);
+            gpu_mod.header = int4(SDF_MOD_BEND, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], float(axis), gmod->params[2], gmod->params[3]);
+            gpu_mod.params2 = float4(gmod->params[4], 0.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ELONGATE) {
+            gpu_mod.header = int4(SDF_MOD_ELONGATE, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_SOLIDIFY) {
+            int mode = int(gmod->params[1]);
+            int axis = int(gmod->params[2]);
+            gpu_mod.header = int4(SDF_MOD_SOLIDIFY, mode, axis, 0);
+            gpu_mod.params = float4(gmod->params[0], 0.8f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ROUND) {
+            gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ONION) {
+            int layers = std::max(int(gmod->params[1]), 1);
+            gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
+            gpu_mod.params = float4(gmod->params[2], 1.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_BEVEL) {
+            gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
+            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
+            valid = true;
+          }
+          else if (mtype == SDF_MOD_ARRAY) {
+            int array_type = gmod->flag;
+            int blend_type = int(gmod->params[5]);
+            gpu_mod.header = int4(SDF_MOD_ARRAY, array_type, blend_type, 0);
+            if (array_type == SDF_MOD_ARRAY_RADIAL) {
+              gpu_mod.params = float4(gmod->params[0], gmod->params[1], 0.0f, 0.0f);
+              gpu_mod.params2 = float4(gmod->params[4], gmod->params[5], gmod->params[6], gmod->params[7]);
+            }
+            else {
+              gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], gmod->params[3]);
+              gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
+            }
+            valid = true;
+          }
+          if (valid) {
+            modifiers_.append(gpu_mod);
+            gpu_grp.modifier_count++;
+          }
+        }
+
+        float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
+                                  ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
+                                  : gpu_grp.blend;
+        if (grp_eff_blend > 0.001f && gpu_grp.blend_type > 0) {
+          float sf = (gpu_grp.blend_type == SDF_BLEND_SMOOTH) ? 0.75f : 0.65f;
+          if (grp_eff_blend > 0.5f) {
+            sf = min_ff(sf, 0.5f);
+          }
+          step_factor_ = min_ff(step_factor_, sf);
+        }
+
+        groups_gpu_.append(gpu_grp);
+
+        /* Map children to this group */
+        int child_order = 0;
+        for (int i = 0; i < int(object_ptrs_.size()); i++) {
+          Object *eval_ob = object_ptrs_[i];
+          Object *orig_ob = DEG_get_original(eval_ob);
+          if (orig_ob->parent == orig_group) {
+            object_membership_map.add_overwrite(orig_ob, {g_idx, child_order});
+            child_order++;
+          }
+        }
+
+        g_idx++;
       }
 
       BLI_assert(int(object_ptrs_.size()) == int(objects_.size()));
@@ -1658,12 +1810,19 @@ class Instance : public DrawEngine {
           objects_[m].max_group_blend = max_blend;
         }
       }
-      /* Ungrouped objects: store own blend in _pad1 */
+      /* Ungrouped objects: use max blend across all ungrouped objects.
+       * Any ungrouped object may participate in another's smooth blend zone. */
+      float max_ungrouped_blend = 0.0f;
       for (int i = 0; i < int(objects_.size()); i++) {
         if (objects_[i].group_id < 0) {
           float b = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
           b += fabsf(objects_[i].shell_distance);
-          objects_[i].max_group_blend = b;
+          max_ungrouped_blend = std::max(max_ungrouped_blend, b);
+        }
+      }
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i].group_id < 0) {
+          objects_[i].max_group_blend = max_ungrouped_blend;
         }
       }
     }
@@ -2677,7 +2836,7 @@ class Instance : public DrawEngine {
     }
   }
 
-  static constexpr int kMaxTileObjects = 128;
+  static constexpr int kMaxTileObjects = 256;
 
   void ensure_screen_aabbs_ssbo(int obj_count)
   {
