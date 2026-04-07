@@ -2560,6 +2560,11 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
 
     BKE_id_multi_tagged_delete(bmain);
     BKE_sdf_reindex_all(bmain);
+
+    /* Tag all remaining SDF data blocks so depsgraph propagates new indices. */
+    for (SDF &sdf : bmain->sdfs) {
+      DEG_id_tag_update(&sdf.id, ID_RECALC_GEOMETRY);
+    }
   }
 
   if (confirm) {

@@ -442,8 +442,13 @@ class Instance : public DrawEngine {
             max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
             max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
           }
-          local_extent = float3(
-              max_x + bevel + aabb_pad, max_y + bevel + aabb_pad, sz.z + bevel + aabb_pad);
+          float line_pad = sdf_data->polygon_is_line ?
+                               sdf_data->polygon_line_thickness * 0.5f *
+                                   math::min(scale.x, scale.y) :
+                               0.0f;
+          local_extent = float3(max_x + line_pad + bevel + aabb_pad,
+                                max_y + line_pad + bevel + aabb_pad,
+                                sz.z + bevel + aabb_pad);
           break;
         }
         default:
@@ -570,6 +575,40 @@ class Instance : public DrawEngine {
         }
       }
 
+      /* Expand early AABB for array instances (scan modifier stack directly) */
+      for (const ModifierData *amd = static_cast<const ModifierData *>(ob->modifiers.first);
+           amd; amd = amd->next)
+      {
+        if (amd->type == eModifierType_SDFArray && (amd->mode & eModifierMode_Realtime)) {
+          const auto &am = *reinterpret_cast<const SDFArrayModifierData *>(amd);
+          if (am.count > 1) {
+            if (am.array_type == MOD_SDF_ARRAY_LINEAR) {
+              float3 arr_off(0.0f);
+              if (am.use_relative_offset) {
+                arr_off += float3(am.relative_offset[0], am.relative_offset[1],
+                                  am.relative_offset[2]) * sz * 2.0f;
+              }
+              if (am.use_constant_offset) {
+                arr_off += float3(am.constant_offset[0], am.constant_offset[1],
+                                  am.constant_offset[2]);
+              }
+              local_extent += math::abs(arr_off) * float(am.count - 1);
+            }
+            else if (am.array_type == MOD_SDF_ARRAY_RADIAL) {
+              local_extent.x += am.array_radius;
+              local_extent.y += am.array_radius;
+              float r_ext = math::length(local_extent);
+              local_extent = float3(r_ext);
+            }
+            if (am.use_object_offset && am.offset_object != nullptr) {
+              float r_ext = math::length(local_extent) * 1.5f;
+              local_extent = float3(r_ext);
+            }
+          }
+          break;
+        }
+      }
+
       float3 world_min = float3(1e30f);
       float3 world_max = float3(-1e30f);
       for (int corner = 0; corner < 8; corner++) {
@@ -591,8 +630,6 @@ class Instance : public DrawEngine {
       float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
       scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
       scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
-
-      /* Frustum cull deferred to end_sync where modifier-expanded AABBs are available */
     }
 
     gpu_obj.group_id = -1;
@@ -625,6 +662,91 @@ class Instance : public DrawEngine {
         crn.append(pt->corner * corner_scale);
       }
       int pc = int(pts.size());
+
+      /* Line mode: expand polyline into thick polygon */
+      if (sdf_data->polygon_is_line && pc >= 2) {
+        float half_t = sdf_data->polygon_line_thickness * 0.5f *
+                       math::min(scale.x, scale.y);
+
+        Vector<float2> left_side(pc);
+        Vector<float2> right_side(pc);
+        Vector<float> left_crn(pc);
+        Vector<float> right_crn(pc);
+
+        for (int i = 0; i < pc; i++) {
+          float2 n_prev(0.0f), n_next(0.0f);
+          if (i > 0) {
+            float2 d = math::normalize(pts[i] - pts[i - 1]);
+            n_prev = float2(-d.y, d.x);
+          }
+          if (i < pc - 1) {
+            float2 d = math::normalize(pts[i + 1] - pts[i]);
+            n_next = float2(-d.y, d.x);
+          }
+
+          if (i == 0) {
+            left_side[i] = pts[i] + n_next * half_t;
+            right_side[i] = pts[i] - n_next * half_t;
+            left_crn[i] = 0.0f;
+            right_crn[i] = 0.0f;
+          }
+          else if (i == pc - 1) {
+            left_side[i] = pts[i] + n_prev * half_t;
+            right_side[i] = pts[i] - n_prev * half_t;
+            left_crn[i] = 0.0f;
+            right_crn[i] = 0.0f;
+          }
+          else {
+            /* Miter at interior vertex */
+            float2 miter = math::normalize(n_prev + n_next);
+            float dot_val = math::dot(miter, n_prev);
+            if (fabsf(dot_val) < 0.1f) {
+              dot_val = (dot_val >= 0.0f) ? 0.1f : -0.1f;
+            }
+            float miter_len = half_t / dot_val;
+            float max_miter = half_t * 3.0f;
+            miter_len = math::clamp(miter_len, -max_miter, max_miter);
+
+            left_side[i] = pts[i] + miter * miter_len;
+            right_side[i] = pts[i] - miter * miter_len;
+
+            /* Determine which side is outer/inner based on turn direction.
+               Left normal = (-d.y, d.x). For a left turn (cross > 0),
+               the outside of the curve is the RIGHT side (pts - normal). */
+            float2 d_prev = math::normalize(pts[i] - pts[i - 1]);
+            float2 d_next = math::normalize(pts[i + 1] - pts[i]);
+            float cross_val = d_prev.x * d_next.y - d_prev.y * d_next.x;
+
+            if (cross_val > 0.0f) {
+              left_crn[i] = math::max(crn[i] - half_t, 0.0f);
+              right_crn[i] = crn[i] + half_t;
+            }
+            else {
+              left_crn[i] = crn[i] + half_t;
+              right_crn[i] = math::max(crn[i] - half_t, 0.0f);
+            }
+          }
+        }
+
+        /* Build expanded polygon: left forward, right backward */
+        Vector<float2> expanded_pts;
+        Vector<float> expanded_crn;
+        expanded_pts.reserve(2 * pc);
+        expanded_crn.reserve(2 * pc);
+
+        for (int i = 0; i < pc; i++) {
+          expanded_pts.append(left_side[i]);
+          expanded_crn.append(left_crn[i]);
+        }
+        for (int i = pc - 1; i >= 0; i--) {
+          expanded_pts.append(right_side[i]);
+          expanded_crn.append(right_crn[i]);
+        }
+
+        pts = std::move(expanded_pts);
+        crn = std::move(expanded_crn);
+        pc = int(pts.size());
+      }
 
       float max_corner = 0.0f;
       for (int i = 0; i < pc; i++) {
@@ -758,13 +880,19 @@ class Instance : public DrawEngine {
       gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
     }
 
-    /* Pack modifiers from native modifier stack (old internal SDFModifier list is deprecated) */
+    /* Pack modifiers (skip array — handled via instancing below) */
     gpu_obj.modifier_start = int(modifiers_.size());
     gpu_obj.modifier_count = 0;
+    const SDFArrayModifierData *array_mod = nullptr;
 
-    /* Native Blender modifier stack */
-    for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first); md; md = md->next) {
+    for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first);
+         md; md = md->next)
+    {
       if (!(md->mode & eModifierMode_Realtime)) {
+        continue;
+      }
+      if (md->type == eModifierType_SDFArray) {
+        array_mod = reinterpret_cast<const SDFArrayModifierData *>(md);
         continue;
       }
       SDFModifierGPU gpu_mod = {};
@@ -779,12 +907,12 @@ class Instance : public DrawEngine {
           }
           float3 world_origin = mirror_pos - obj_pos;
           float3 local_origin = float3(inv_rot * float4(world_origin, 0.0f));
-          /* Side: fold toward the object center (stable across rotation). */
           int sides = ((obj_pos.x >= mirror_pos.x) ? 1 : 0) |
                       ((obj_pos.y >= mirror_pos.y) ? 2 : 0) |
                       ((obj_pos.z >= mirror_pos.z) ? 4 : 0);
           gpu_mod.header = int4(SDF_MOD_MIRROR, m.flag, m.blend_type, sides);
-          gpu_mod.params = float4(m.offset_distance, local_origin.x, local_origin.y, local_origin.z);
+          gpu_mod.params = float4(
+              m.offset_distance, local_origin.x, local_origin.y, local_origin.z);
           gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
           valid = true;
           break;
@@ -816,8 +944,8 @@ class Instance : public DrawEngine {
           float inner_scale = 1.0f;
           if (m.mode == SDF_SOLIDIFY_OPEN) {
             int ax = math::clamp(m.axis, 0, 2);
-            float sz = math::max(sdf_data->size[ax] * scale[ax], 0.001f);
-            inner_scale = math::max(1.0f - 2.0f * m.thickness / sz, 0.1f);
+            float ssz = math::max(sdf_data->size[ax] * scale[ax], 0.001f);
+            inner_scale = math::max(1.0f - 2.0f * m.thickness / ssz, 0.1f);
           }
           gpu_mod.header = int4(SDF_MOD_SOLIDIFY, m.mode, m.axis, 0);
           gpu_mod.params = float4(m.thickness, inner_scale, m.bevel, 0.0f);
@@ -834,8 +962,8 @@ class Instance : public DrawEngine {
         case eModifierType_SDFOnion: {
           const auto &m = *reinterpret_cast<const SDFOnionModifierData *>(md);
           int layers = math::max(m.layers, 1);
-          float3 sz = float3(gpu_obj.sdf_size);
-          float min_ext = math::min(sz.x, math::min(sz.y, sz.z));
+          float3 osz = float3(gpu_obj.sdf_size);
+          float min_ext = math::min(osz.x, math::min(osz.y, osz.z));
           gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
           gpu_mod.params = float4(m.gap, min_ext, 0.0f, 0.0f);
           valid = true;
@@ -845,32 +973,6 @@ class Instance : public DrawEngine {
           const auto &m = *reinterpret_cast<const SDFBevelModifierData *>(md);
           gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
           gpu_mod.params = float4(m.radius, 0.0f, 0.0f, 0.0f);
-          valid = true;
-          break;
-        }
-        case eModifierType_SDFArray: {
-          const auto &m = *reinterpret_cast<const SDFArrayModifierData *>(md);
-          gpu_mod.header = int4(SDF_MOD_ARRAY, m.array_type, m.blend_type, 0);
-          if (m.array_type == MOD_SDF_ARRAY_RADIAL) {
-            gpu_mod.params = float4(float(m.count), m.array_radius, 0.0f, 0.0f);
-            gpu_mod.params2 = float4(m.blend,
-                                     m.rotation_offset[0],
-                                     m.rotation_offset[1],
-                                     m.rotation_offset[2]);
-          }
-          else {
-            float3 sz = float3(gpu_obj.sdf_size);
-            float3 offset(0.0f);
-            if (m.use_relative_offset) {
-              offset += float3(m.relative_offset[0], m.relative_offset[1], m.relative_offset[2]) *
-                        sz * 2.0f;
-            }
-            if (m.use_constant_offset) {
-              offset += float3(m.constant_offset[0], m.constant_offset[1], m.constant_offset[2]);
-            }
-            gpu_mod.params = float4(float(m.count), offset.x, offset.y, offset.z);
-            gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
-          }
           valid = true;
           break;
         }
@@ -890,57 +992,65 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Compute AABB */
+    /* Compute base local extent for AABB (without array) */
     float shell_expand = (sdf_data->csg_operation == SDF_CSG_SHELL) ?
                              fabsf(sdf_data->shell_distance) :
                              0.0f;
     float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
     float pad = blend_pad + shell_expand;
-    float3 local_extent;
-    float3 sz = float3(gpu_obj.sdf_size);
-    switch (sdf_data->sdf_type) {
-      case SDF_TYPE_CAPSULE: {
-        float r = sz.x;
-        float h = math::max(sz.y - bevel, 0.0f);
-        local_extent = float3(r + pad, r + pad, h + r + pad);
-        break;
-      }
-      case SDF_TYPE_CYLINDER: {
-        local_extent = sz + float3(bevel + pad);
-        break;
-      }
-      case SDF_TYPE_CONE: {
-        float r = sz.x;
-        float h = sz.y;
-        local_extent = float3(r + bevel + pad, r + bevel + pad, h + bevel + pad);
-        break;
-      }
-      case SDF_TYPE_TORUS: {
-        float outer = sz.x + sz.y;
-        local_extent = float3(outer + pad, outer + pad, sz.y + pad);
-        break;
-      }
-      case SDF_TYPE_NGON: {
-        float r = sz.x;
-        local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
-        break;
-      }
-      case SDF_TYPE_POLYGON: {
-        float max_x = 0.0f, max_y = 0.0f;
-        for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
-          max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
-          max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
+    float3 base_local_extent;
+    {
+      float3 sz = float3(gpu_obj.sdf_size);
+      switch (sdf_data->sdf_type) {
+        case SDF_TYPE_CAPSULE: {
+          float r = sz.x;
+          float h = math::max(sz.y - bevel, 0.0f);
+          base_local_extent = float3(r + pad, r + pad, h + r + pad);
+          break;
         }
-        local_extent = float3(
-            max_x + bevel + pad, max_y + bevel + pad, sz.z + bevel + pad);
-        break;
+        case SDF_TYPE_CYLINDER:
+          base_local_extent = sz + float3(bevel + pad);
+          break;
+        case SDF_TYPE_CONE: {
+          float r = sz.x;
+          float h = sz.y;
+          base_local_extent = float3(r + bevel + pad, r + bevel + pad, h + bevel + pad);
+          break;
+        }
+        case SDF_TYPE_TORUS: {
+          float outer = sz.x + sz.y;
+          base_local_extent = float3(outer + pad, outer + pad, sz.y + pad);
+          break;
+        }
+        case SDF_TYPE_NGON: {
+          float r = sz.x;
+          base_local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
+          break;
+        }
+        case SDF_TYPE_POLYGON: {
+          float max_x = 0.0f, max_y = 0.0f;
+          for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(
+                   sdf_data->polygon_points.first);
+               pt; pt = pt->next)
+          {
+            max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
+            max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
+          }
+          float lp = sdf_data->polygon_is_line ?
+                         sdf_data->polygon_line_thickness * 0.5f *
+                             math::min(scale.x, scale.y) :
+                         0.0f;
+          base_local_extent = float3(
+              max_x + lp + bevel + pad, max_y + lp + bevel + pad, sz.z + bevel + pad);
+          break;
+        }
+        default:
+          base_local_extent = sz + float3(bevel + pad);
+          break;
       }
-      default:
-        local_extent = sz + float3(bevel + pad);
-        break;
     }
 
-    /* Expand for domain modifiers (read from packed GPU modifiers) */
+    /* Expand extent for domain modifiers (excluding array) */
     for (int mi = gpu_obj.modifier_start;
          mi < gpu_obj.modifier_start + gpu_obj.modifier_count; mi++)
     {
@@ -951,60 +1061,60 @@ class Instance : public DrawEngine {
         case SDF_MOD_MIRROR: {
           float offset = fabsf(mod.params.x);
           float3 local_org = float3(mod.params.y, mod.params.z, mod.params.w);
-          float4x4 inv_rot = gpu_obj.inverse_matrix;
+          float4x4 mir_inv = gpu_obj.inverse_matrix;
           if (mflags & SDF_MOD_MIRROR_X) {
-            float3 N = float3(inv_rot[0][0], inv_rot[0][1], inv_rot[0][2]);
-            float ea = math::dot(local_extent, math::abs(N));
+            float3 N = float3(mir_inv[0][0], mir_inv[0][1], mir_inv[0][2]);
+            float ea = math::dot(base_local_extent, math::abs(N));
             float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, ea);
-            local_extent += math::abs(N) * disp;
+            base_local_extent += math::abs(N) * disp;
           }
           if (mflags & SDF_MOD_MIRROR_Y) {
-            float3 N = float3(inv_rot[1][0], inv_rot[1][1], inv_rot[1][2]);
-            float ea = math::dot(local_extent, math::abs(N));
+            float3 N = float3(mir_inv[1][0], mir_inv[1][1], mir_inv[1][2]);
+            float ea = math::dot(base_local_extent, math::abs(N));
             float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, ea);
-            local_extent += math::abs(N) * disp;
+            base_local_extent += math::abs(N) * disp;
           }
           if (mflags & SDF_MOD_MIRROR_Z) {
-            float3 N = float3(inv_rot[2][0], inv_rot[2][1], inv_rot[2][2]);
-            float ea = math::dot(local_extent, math::abs(N));
+            float3 N = float3(mir_inv[2][0], mir_inv[2][1], mir_inv[2][2]);
+            float ea = math::dot(base_local_extent, math::abs(N));
             float disp = fmax(2.0f * fabsf(math::dot(local_org, N)) + offset, ea);
-            local_extent += math::abs(N) * disp;
+            base_local_extent += math::abs(N) * disp;
           }
           break;
         }
         case SDF_MOD_ELONGATE:
-          local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
+          base_local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
           break;
         case SDF_MOD_SOLIDIFY:
         case SDF_MOD_ONION:
-          local_extent += float3(mod.params.x);
+          base_local_extent += float3(mod.params.x);
           break;
         case SDF_MOD_DISPLACE:
-          local_extent += float3(math::abs(mod.params.x));
+          base_local_extent += float3(math::abs(mod.params.x));
           break;
         case SDF_MOD_ROUND:
         case SDF_MOD_BEVEL:
-          local_extent = math::max(local_extent + float3(mod.params.x), float3(0.0f));
+          base_local_extent = math::max(base_local_extent + float3(mod.params.x), float3(0.0f));
           break;
         case SDF_MOD_TWIST: {
           int axis = int(mod.params.y);
           if (axis == 1) {
-            float xz = math::sqrt(local_extent.x * local_extent.x +
-                                  local_extent.z * local_extent.z);
-            local_extent.x = xz;
-            local_extent.z = xz;
+            float xz = math::sqrt(base_local_extent.x * base_local_extent.x +
+                                  base_local_extent.z * base_local_extent.z);
+            base_local_extent.x = xz;
+            base_local_extent.z = xz;
           }
           else if (axis == 2) {
-            float yz = math::sqrt(local_extent.y * local_extent.y +
-                                  local_extent.z * local_extent.z);
-            local_extent.y = yz;
-            local_extent.z = yz;
+            float yz = math::sqrt(base_local_extent.y * base_local_extent.y +
+                                  base_local_extent.z * base_local_extent.z);
+            base_local_extent.y = yz;
+            base_local_extent.z = yz;
           }
           else {
-            float xy = math::sqrt(local_extent.x * local_extent.x +
-                                  local_extent.y * local_extent.y);
-            local_extent.x = xy;
-            local_extent.y = xy;
+            float xy = math::sqrt(base_local_extent.x * base_local_extent.x +
+                                  base_local_extent.y * base_local_extent.y);
+            base_local_extent.x = xy;
+            base_local_extent.y = xy;
           }
           break;
         }
@@ -1015,9 +1125,9 @@ class Instance : public DrawEngine {
           if (fabsf(k) > 0.0001f) {
             float3 new_ext = float3(0.0f);
             for (int c = 0; c < 8; c++) {
-              float3 pt = float3((c & 1) ? local_extent.x : -local_extent.x,
-                                 (c & 2) ? local_extent.y : -local_extent.y,
-                                 (c & 4) ? local_extent.z : -local_extent.z);
+              float3 pt = float3((c & 1) ? base_local_extent.x : -base_local_extent.x,
+                                 (c & 2) ? base_local_extent.y : -base_local_extent.y,
+                                 (c & 4) ? base_local_extent.z : -base_local_extent.z);
               pt -= origin;
               float drive, curve, free_val;
               if (axis == 1) { drive = pt.y; curve = pt.z; free_val = pt.x; }
@@ -1033,25 +1143,7 @@ class Instance : public DrawEngine {
               bent += origin;
               new_ext = math::max(new_ext, math::abs(bent));
             }
-            local_extent = new_ext;
-          }
-          break;
-        }
-        case SDF_MOD_ARRAY: {
-          float count = mod.params.x;
-          if (count > 0.5f) {
-            if (mflags == SDF_MOD_ARRAY_LINEAR) {
-              float3 arr_offset = float3(mod.params.y, mod.params.z, mod.params.w);
-              local_extent += math::abs(arr_offset) * (count - 1.0f);
-            }
-            else if (mflags == SDF_MOD_ARRAY_RADIAL) {
-              float radius = mod.params.y;
-              local_extent.x += radius;
-              local_extent.y += radius;
-              /* Spherical AABB when rotation offset or Y bias is active */
-              float r = math::length(local_extent);
-              local_extent = float3(r);
-            }
+            base_local_extent = new_ext;
           }
           break;
         }
@@ -1060,88 +1152,258 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Transform local AABB to world */
-    float3 world_min = float3(1e30f);
-    float3 world_max = float3(-1e30f);
-    for (int corner = 0; corner < 8; corner++) {
-      float3 local_corner = float3((corner & 1) ? local_extent.x : -local_extent.x,
-                                   (corner & 2) ? local_extent.y : -local_extent.y,
-                                   (corner & 4) ? local_extent.z : -local_extent.z);
-      float3 world_corner = float3(rot_mat * float4(local_corner, 0.0f)) +
-                            float3(mat[3].x, mat[3].y, mat[3].z);
-      world_min = math::min(world_min, world_corner);
-      world_max = math::max(world_max, world_corner);
+    /* Instance array copies (or single object when no array) */
+    int copy_count = (array_mod != nullptr && array_mod->count > 1) ? array_mod->count : 1;
+
+    /* Precompute object offset delta (local space) */
+    float4x4 obj_delta = float4x4::identity();
+    bool has_obj_offset = (array_mod != nullptr && array_mod->use_object_offset &&
+                           array_mod->offset_object != nullptr);
+    if (has_obj_offset) {
+      float4x4 inv_base = math::invert(mat);
+      obj_delta = inv_base * array_mod->offset_object->object_to_world();
     }
 
-    gpu_obj.bbox_min = float4(world_min, 0.0f);
-    gpu_obj.bbox_max = float4(world_max, 0.0f);
-    gpu_obj.orig_bbox_min = gpu_obj.bbox_min;
-    gpu_obj.orig_bbox_max = gpu_obj.bbox_max;
+    /* Precompute linear offset in world space from object dimensions */
+    float3 world_linear_offset(0.0f);
+    if (array_mod != nullptr && array_mod->array_type == MOD_SDF_ARRAY_LINEAR) {
+      float3 dimensions(sdf_data->size[0] * scale.x * 2.0f,
+                        sdf_data->size[1] * scale.y * 2.0f,
+                        sdf_data->size[2] * scale.z * 2.0f);
+      float3 local_off(0.0f);
+      if (array_mod->use_relative_offset) {
+        local_off += float3(array_mod->relative_offset[0],
+                            array_mod->relative_offset[1],
+                            array_mod->relative_offset[2]) * dimensions;
+      }
+      if (array_mod->use_constant_offset) {
+        local_off += float3(array_mod->constant_offset[0],
+                            array_mod->constant_offset[1],
+                            array_mod->constant_offset[2]);
+      }
+      world_linear_offset = float3(rot_mat * float4(local_off, 0.0f));
+    }
 
-    /* Early frustum cull — skip objects entirely outside the viewport */
-    if (use_frustum_cull_) {
-      if (!frustum_valid_) {
-        const View &view = View::default_get();
-        float4x4 vp = view.winmat() * view.viewmat();
-        for (int i = 0; i < 4; i++) {
-          frustum_planes_[0][i] = vp[i][3] + vp[i][0];
-          frustum_planes_[1][i] = vp[i][3] - vp[i][0];
-          frustum_planes_[2][i] = vp[i][3] + vp[i][1];
-          frustum_planes_[3][i] = vp[i][3] - vp[i][1];
-          frustum_planes_[4][i] = vp[i][3] + vp[i][2];
-          frustum_planes_[5][i] = vp[i][3] - vp[i][2];
+    float group_pad = 0.0f;
+    if (sdf_data->sdf_group != nullptr) {
+      const SDFGroup *grp = sdf_data->sdf_group;
+      float gb = (grp->csg_operation == SDF_CSG_SHELL)
+                     ? std::max(grp->shell_blend_top, grp->shell_blend_bottom)
+                     : grp->blend;
+      group_pad = gb + fabsf(grp->shell_distance);
+    }
+
+    float4x4 accum_delta = float4x4::identity();
+    for (int ci = 0; ci < copy_count; ci++) {
+      /* Compute per-copy world matrix */
+      float4x4 copy_mat;
+      if (ci == 0) {
+        copy_mat = mat;
+      }
+      else if (array_mod->array_type == MOD_SDF_ARRAY_RADIAL) {
+        float angle = 2.0f * float(M_PI) * float(ci) / float(copy_count);
+        float ca = cosf(angle), sa = sinf(angle);
+        float4x4 radial_rot = float4x4::identity();
+        radial_rot[0][0] = ca;  radial_rot[0][1] = sa;
+        radial_rot[1][0] = -sa; radial_rot[1][1] = ca;
+        float4x4 radial_xlate = float4x4::identity();
+        radial_xlate[3][0] = array_mod->array_radius;
+        /* Per-copy rotation offset (accumulated) */
+        float3 rot = float3(array_mod->rotation_offset[0],
+                             array_mod->rotation_offset[1],
+                             array_mod->rotation_offset[2]) * float(ci);
+        float4x4 per_rot = float4x4::identity();
+        if (fabsf(rot.x) > 0.0001f) {
+          float cx = cosf(rot.x), sx = sinf(rot.x);
+          float4x4 rx = float4x4::identity();
+          rx[1][1] = cx; rx[1][2] = sx;
+          rx[2][1] = -sx; rx[2][2] = cx;
+          per_rot = per_rot * rx;
         }
+        if (fabsf(rot.y) > 0.0001f) {
+          float cy = cosf(rot.y), sy = sinf(rot.y);
+          float4x4 ry = float4x4::identity();
+          ry[0][0] = cy; ry[0][2] = -sy;
+          ry[2][0] = sy; ry[2][2] = cy;
+          per_rot = per_rot * ry;
+        }
+        if (fabsf(rot.z) > 0.0001f) {
+          float cz = cosf(rot.z), sz = sinf(rot.z);
+          float4x4 rz = float4x4::identity();
+          rz[0][0] = cz; rz[0][1] = sz;
+          rz[1][0] = -sz; rz[1][1] = cz;
+          per_rot = per_rot * rz;
+        }
+        float4x4 local_xform = radial_rot * radial_xlate * per_rot;
+        if (has_obj_offset) {
+          local_xform = local_xform * accum_delta;
+        }
+        copy_mat = mat * local_xform;
+      }
+      else {
+        /* Linear: base transform + object delta + world linear offset */
+        copy_mat = has_obj_offset ? (mat * accum_delta) : mat;
+        copy_mat[3] += float4(world_linear_offset * float(ci), 0.0f);
+      }
+
+      /* Accumulate object offset delta */
+      if (has_obj_offset && ci == 0) {
+        accum_delta = obj_delta;
+      }
+      else if (has_obj_offset && ci > 0) {
+        accum_delta = accum_delta * obj_delta;
+      }
+
+      /* Extract scale / rotation from copy matrix */
+      float3 copy_scale;
+      copy_scale.x = math::length(float3(copy_mat[0]));
+      copy_scale.y = math::length(float3(copy_mat[1]));
+      copy_scale.z = math::length(float3(copy_mat[2]));
+
+      float4x4 copy_rot = copy_mat;
+      if (copy_scale.x > 0.0f) {
+        copy_rot[0] = float4(float3(copy_mat[0]) / copy_scale.x, 0.0f);
+      }
+      if (copy_scale.y > 0.0f) {
+        copy_rot[1] = float4(float3(copy_mat[1]) / copy_scale.y, 0.0f);
+      }
+      if (copy_scale.z > 0.0f) {
+        copy_rot[2] = float4(float3(copy_mat[2]) / copy_scale.z, 0.0f);
+      }
+      copy_rot[3] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+      float4x4 copy_inv_rot = math::invert(copy_rot);
+
+      SDFObjectGPU copy_obj = gpu_obj;
+      copy_obj.inverse_matrix = copy_inv_rot;
+      copy_obj.position = float4(copy_mat[3].x, copy_mat[3].y, copy_mat[3].z, 0.0f);
+
+      /* Adjust sdf_size for per-copy scale changes */
+      if (ci > 0 && has_obj_offset) {
+        copy_obj.sdf_size = float4(sdf_data->size[0] * copy_scale.x,
+                                   sdf_data->size[1] * copy_scale.y,
+                                   sdf_data->size[2] * copy_scale.z,
+                                   0.0f);
+      }
+
+      /* All copies are exact clones of the original SDF (same blend, CSG, etc.) */
+
+      /* Per-copy AABB: recompute from SDF size with this copy's scale */
+      float3 copy_local_extent;
+      if (ci > 0 && has_obj_offset) {
+        float3 copy_sz = float3(copy_obj.sdf_size);
+        float copy_bevel = bevel * math::reduce_min(copy_scale) /
+                           math::max(math::reduce_min(scale), 0.001f);
+        float copy_pad = pad;
+        switch (sdf_data->sdf_type) {
+          case SDF_TYPE_CAPSULE: {
+            float r = copy_sz.x;
+            float h = math::max(copy_sz.y - copy_bevel, 0.0f);
+            copy_local_extent = float3(r + copy_pad, r + copy_pad, h + r + copy_pad);
+            break;
+          }
+          case SDF_TYPE_TORUS: {
+            float outer = copy_sz.x + copy_sz.y;
+            copy_local_extent = float3(outer + copy_pad, outer + copy_pad, copy_sz.y + copy_pad);
+            break;
+          }
+          case SDF_TYPE_CONE: {
+            float r = copy_sz.x, h = copy_sz.y;
+            copy_local_extent = float3(
+                r + copy_bevel + copy_pad, r + copy_bevel + copy_pad, h + copy_bevel + copy_pad);
+            break;
+          }
+          default:
+            copy_local_extent = copy_sz + float3(copy_bevel + copy_pad);
+            break;
+        }
+        /* Expand for shared domain modifiers */
+        for (int mi = copy_obj.modifier_start;
+             mi < copy_obj.modifier_start + copy_obj.modifier_count; mi++)
+        {
+          const SDFModifierGPU &mod = modifiers_[mi];
+          int mtype = mod.header.x;
+          switch (mtype) {
+            case SDF_MOD_ELONGATE:
+              copy_local_extent += float3(mod.params.x, mod.params.y, mod.params.z);
+              break;
+            case SDF_MOD_SOLIDIFY:
+            case SDF_MOD_ONION:
+              copy_local_extent += float3(mod.params.x);
+              break;
+            case SDF_MOD_DISPLACE:
+              copy_local_extent += float3(math::abs(mod.params.x));
+              break;
+            case SDF_MOD_ROUND:
+            case SDF_MOD_BEVEL:
+              copy_local_extent = math::max(copy_local_extent + float3(mod.params.x), float3(0.0f));
+              break;
+            default:
+              break;
+          }
+        }
+      }
+      else {
+        copy_local_extent = base_local_extent;
+      }
+
+      float3 world_min = float3(1e30f);
+      float3 world_max = float3(-1e30f);
+      for (int corner = 0; corner < 8; corner++) {
+        float3 lc = float3((corner & 1) ? copy_local_extent.x : -copy_local_extent.x,
+                           (corner & 2) ? copy_local_extent.y : -copy_local_extent.y,
+                           (corner & 4) ? copy_local_extent.z : -copy_local_extent.z);
+        float3 wc = float3(copy_rot * float4(lc, 0.0f)) +
+                     float3(copy_mat[3].x, copy_mat[3].y, copy_mat[3].z);
+        world_min = math::min(world_min, wc);
+        world_max = math::max(world_max, wc);
+      }
+
+      copy_obj.bbox_min = float4(world_min, 0.0f);
+      copy_obj.bbox_max = float4(world_max, 0.0f);
+      copy_obj.orig_bbox_min = copy_obj.bbox_min;
+      copy_obj.orig_bbox_max = copy_obj.bbox_max;
+
+      /* Per-copy frustum cull */
+      if (use_frustum_cull_) {
+        float3 pad_min = world_min - float3(group_pad);
+        float3 pad_max = world_max + float3(group_pad);
+        bool outside = false;
         for (int p = 0; p < 6; p++) {
-          frustum_planes_[p] /= math::length(float3(frustum_planes_[p]));
+          float3 n(frustum_planes_[p]);
+          float d = frustum_planes_[p].w;
+          float3 pos_vertex(n.x > 0 ? pad_max.x : pad_min.x,
+                            n.y > 0 ? pad_max.y : pad_min.y,
+                            n.z > 0 ? pad_max.z : pad_min.z);
+          if (math::dot(n, pos_vertex) + d < 0.0f) {
+            outside = true;
+            break;
+          }
         }
-        frustum_valid_ = true;
-      }
-
-      float group_pad = 0.0f;
-      if (sdf_data->sdf_group != nullptr) {
-        const SDFGroup *grp = sdf_data->sdf_group;
-        float gb = (grp->csg_operation == SDF_CSG_SHELL)
-                       ? std::max(grp->shell_blend_top, grp->shell_blend_bottom)
-                       : grp->blend;
-        group_pad = gb + fabsf(grp->shell_distance);
-      }
-      float3 pad_min = world_min - float3(group_pad);
-      float3 pad_max = world_max + float3(group_pad);
-      bool outside = false;
-      for (int p = 0; p < 6; p++) {
-        float3 n(frustum_planes_[p]);
-        float d = frustum_planes_[p].w;
-        float3 pos_vertex(n.x > 0 ? pad_max.x : pad_min.x,
-                          n.y > 0 ? pad_max.y : pad_min.y,
-                          n.z > 0 ? pad_max.z : pad_min.z);
-        if (math::dot(n, pos_vertex) + d < 0.0f) {
-          outside = true;
-          break;
+        if (outside) {
+          continue;
         }
       }
-      if (outside) {
-        return;
+
+      float sphere_radius = math::length(copy_local_extent);
+      float3 obj_center = float3(copy_mat[3].x, copy_mat[3].y, copy_mat[3].z);
+      scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
+      scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
+
+      max_blend_ = math::max(max_blend_, copy_obj.blend);
+      if (copy_obj.blend > 0.001f &&
+          (copy_obj.blend_type == SDF_BLEND_ROUND || copy_obj.blend_type == SDF_BLEND_CHAMFER))
+      {
+        step_factor_ = min_ff(step_factor_, 0.65f);
       }
-    }
+      if (copy_obj.csg_operation == SDF_CSG_SHELL) {
+        max_shell_distance_ = math::max(max_shell_distance_,
+                                        fabsf(copy_obj.shell_distance));
+      }
 
-    float sphere_radius = math::length(local_extent);
-    float3 obj_center = float3(mat[3].x, mat[3].y, mat[3].z);
-    scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
-    scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
-
-    max_blend_ = math::max(max_blend_, gpu_obj.blend);
-    if (gpu_obj.blend > 0.001f &&
-        (gpu_obj.blend_type == SDF_BLEND_ROUND || gpu_obj.blend_type == SDF_BLEND_CHAMFER))
-    {
-      step_factor_ = min_ff(step_factor_, 0.65f);
+      object_group_ptrs_.append(sdf_data->sdf_group);
+      object_ptrs_.append(ob);
+      objects_.append(copy_obj);
     }
-    if (sdf_data->csg_operation == SDF_CSG_SHELL) {
-      max_shell_distance_ = math::max(max_shell_distance_, fabsf(sdf_data->shell_distance));
-    }
-
-    object_group_ptrs_.append(sdf_data->sdf_group);
-    object_ptrs_.append(ob);
-    objects_.append(gpu_obj);
   }
 
   void end_sync() final
@@ -1341,7 +1603,7 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Fix first_object/object_count per group */
+      /* Fix first_object/object_count per group, force first member to Union */
       for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
         int first = -1;
         int count = 0;
@@ -1355,6 +1617,17 @@ class Instance : public DrawEngine {
         }
         groups_gpu_[gi].first_object = (first >= 0) ? first : 0;
         groups_gpu_[gi].object_count = count;
+        if (first >= 0) {
+          objects_[first].csg_operation = SDF_CSG_UNION;
+        }
+      }
+
+      /* Force first ungrouped object to Union */
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i].group_id < 0) {
+          objects_[i].csg_operation = SDF_CSG_UNION;
+          break;
+        }
       }
 
       /* Compute max blend per group, store in each member's _pad1 */
@@ -3049,13 +3322,28 @@ void sdf_bbox_debug_points_get(const float3 **pts, int *count,
   *pos = s_bbox_debug_pos;
 }
 
-bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
+bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
+                         float3 &out_min, float3 &out_max,
                          float4x4 &out_rot, float3 &out_pos)
 {
   s_bbox_debug_points.clear();
 
+  /* Find the GPU object closest to hint_pos among those with matching index. */
+  int best = -1;
+  float best_dist = 1e30f;
   for (int i = 0; i < s_objects_cpu_count; i++) {
     if (s_objects_cpu[i].original_index == sdf_index) {
+      float d = math::length(float3(s_objects_cpu[i].position) - hint_pos);
+      if (d < best_dist) {
+        best_dist = d;
+        best = i;
+      }
+    }
+  }
+
+  if (best >= 0) {
+    int i = best;
+    {
       const SDFObjectGPU &obj = s_objects_cpu[i];
       float3 sz(obj.sdf_size);
       float3 pos = float3(obj.position);

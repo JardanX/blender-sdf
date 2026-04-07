@@ -193,6 +193,8 @@ typedef struct SDF {
   float polygon_edge_bottom = 0.0f;
   float polygon_taper = 0.0f;
   int polygon_edge_mode = 0; /* eSDFBoxMode */
+  int polygon_is_line = 0;
+  float polygon_line_thickness = 0.1f;
   char _pad5[4] = {};
 
   float torus_angle = 6.2831853f;

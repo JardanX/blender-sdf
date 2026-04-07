@@ -1183,6 +1183,7 @@ RNA_MOD_OBJECT_SET(GreasePencilShrinkwrap, target, OB_MESH);
 RNA_MOD_OBJECT_SET(GreasePencilShrinkwrap, aux_target, OB_MESH);
 RNA_MOD_OBJECT_SET(GreasePencilBuild, object, OB_EMPTY);
 RNA_MOD_OBJECT_SET(SDFMirror, mirror_object, OB_EMPTY);
+RNA_MOD_OBJECT_SET(SDFArray, offset_object, OB_EMPTY);
 
 static void rna_HookModifier_object_set(PointerRNA *ptr,
                                         PointerRNA value,
@@ -11628,6 +11629,21 @@ static void rna_def_modifier_sdf_array(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
   RNA_def_property_ui_text(prop, "Blend Radius", "Array blend radius");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_object_offset", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_object_offset", 1);
+  RNA_def_property_ui_text(
+      prop, "Object Offset", "Use another object's transform as per-copy offset");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "offset_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "offset_object");
+  RNA_def_property_ui_text(
+      prop, "Object Offset", "Object whose transform defines the per-copy offset");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_SDFArrayModifier_offset_object_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_SELF_CHECK);
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
 
   RNA_define_lib_overridable(false);
 }

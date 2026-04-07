@@ -548,6 +548,12 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
 
     @staticmethod
     def draw_polygon(layout, sdf):
+        layout.prop(sdf, "polygon_is_line")
+
+        if sdf.polygon_is_line:
+            layout.prop(sdf, "polygon_line_thickness")
+            layout.separator()
+
         layout.label(text="Points")
         for i, pt in enumerate(sdf.polygon_points):
             row = layout.row(align=True)
@@ -785,13 +791,20 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        if not (sdf.sdf_group and sdf.group_order == 0):
-            layout.label(text="CSG Operation")
-            grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
-            grid.scale_y = 1.4
-            for item in sdf.bl_rna.properties["csg_operation"].enum_items:
-                grid.prop_enum(sdf, "csg_operation", item.identifier, text="")
+        is_first_in_group = (sdf.sdf_group is not None and sdf.group_order == 0)
+        is_first_in_scene = (sdf.sdf_index == 1 and sdf.sdf_group is None)
+        is_forced_union = is_first_in_group or is_first_in_scene
 
+        layout.label(text="CSG Operation")
+        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+        grid.scale_y = 1.4
+        grid.enabled = not is_forced_union
+        for item in sdf.bl_rna.properties["csg_operation"].enum_items:
+            grid.prop_enum(sdf, "csg_operation", item.identifier, text="")
+        if is_forced_union:
+            layout.label(text="First in stack — forced to Union", icon='INFO')
+
+        if not is_forced_union:
             layout.separator()
 
             layout.label(text="Blend Type")

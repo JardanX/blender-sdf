@@ -66,8 +66,9 @@ static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max
         mx.x = math::max(mx.x, pt->co[0]);
         mx.y = math::max(mx.y, pt->co[1]);
       }
-      out_min = float3(mn.x, mn.y, -sz.z);
-      out_max = float3(mx.x, mx.y, sz.z);
+      float line_pad = sdf->polygon_is_line ? sdf->polygon_line_thickness * 0.5f : 0.0f;
+      out_min = float3(mn.x - line_pad, mn.y - line_pad, -sz.z);
+      out_max = float3(mx.x + line_pad, mx.y + line_pad, sz.z);
       return;
     }
     default:
@@ -359,7 +360,8 @@ class Sdfs : Overlay {
     float3 obj_pos;
 
     /* Always try CPU SDF eval for tight bbox + debug points. */
-    if (!sdf::sdf_object_bbox_get(sel->sdf_index, lo, hi, rot, obj_pos)) {
+    float3 hint_pos = float3(sel->object_to_world[3]);
+    if (!sdf::sdf_object_bbox_get(sel->sdf_index, hint_pos, lo, hi, rot, obj_pos)) {
       if (sel->bb_min.x < sel->bb_max.x) {
         lo = sel->bb_min;
         hi = sel->bb_max;
@@ -445,20 +447,60 @@ class Sdfs : Overlay {
           if (count < 2) {
             continue;
           }
+          float4x4 obmat = sel->object_to_world;
+          float3 scl(math::length(float3(obmat[0])),
+                     math::length(float3(obmat[1])),
+                     math::length(float3(obmat[2])));
+
+          /* Object offset delta in local space */
+          float4x4 obj_delta = float4x4::identity();
+          bool has_obj_off = (m.use_object_offset && m.offset_object != nullptr);
+          if (has_obj_off) {
+            obj_delta = math::invert(obmat) * m.offset_object->object_to_world();
+          }
+
           if (m.array_type == MOD_SDF_ARRAY_LINEAR) {
-            float3 off(0.0f);
-            if (m.use_relative_offset && sel->sdf_data) {
-              float3 sz(sel->sdf_data->size[0], sel->sdf_data->size[1], sel->sdf_data->size[2]);
-              off += float3(m.relative_offset[0], m.relative_offset[1], m.relative_offset[2]) * sz * 2.0f;
+            float3 dimensions(sel->sdf_data->size[0] * scl.x * 2.0f,
+                              sel->sdf_data->size[1] * scl.y * 2.0f,
+                              sel->sdf_data->size[2] * scl.z * 2.0f);
+            float3 local_off(0.0f);
+            if (m.use_relative_offset) {
+              local_off += float3(m.relative_offset[0], m.relative_offset[1],
+                                  m.relative_offset[2]) * dimensions;
             }
             if (m.use_constant_offset) {
-              off += float3(m.constant_offset[0], m.constant_offset[1], m.constant_offset[2]);
+              local_off += float3(m.constant_offset[0], m.constant_offset[1],
+                                  m.constant_offset[2]);
             }
-            float3 world_off = float3(rot * float4(off, 0.0f));
+            float4x4 rot_only = obmat;
+            if (scl.x > 0) rot_only[0] = float4(float3(obmat[0]) / scl.x, 0);
+            if (scl.y > 0) rot_only[1] = float4(float3(obmat[1]) / scl.y, 0);
+            if (scl.z > 0) rot_only[2] = float4(float3(obmat[2]) / scl.z, 0);
+            rot_only[3] = float4(0, 0, 0, 1);
+            float3 world_off = float3(rot_only * float4(local_off, 0.0f));
             int cur = int(copies.size());
             for (int ci = 0; ci < cur; ci++) {
+              float4x4 local_acc = float4x4::identity();
+              if (has_obj_off) { local_acc = obj_delta; }
               for (int ai = 1; ai < count; ai++) {
-                copies.append({copies[ci].r, copies[ci].p + world_off * float(ai)});
+                float4x4 copy_mat;
+                if (has_obj_off) {
+                  copy_mat = obmat * local_acc;
+                  local_acc = local_acc * obj_delta;
+                }
+                else {
+                  copy_mat = obmat;
+                }
+                copy_mat[3] += float4(world_off * float(ai), 0.0f);
+                float4x4 copy_r = copy_mat;
+                float3 cs(math::length(float3(copy_mat[0])),
+                          math::length(float3(copy_mat[1])),
+                          math::length(float3(copy_mat[2])));
+                if (cs.x > 0) copy_r[0] = float4(float3(copy_mat[0]) / cs.x, 0);
+                if (cs.y > 0) copy_r[1] = float4(float3(copy_mat[1]) / cs.y, 0);
+                if (cs.z > 0) copy_r[2] = float4(float3(copy_mat[2]) / cs.z, 0);
+                copy_r[3] = float4(0, 0, 0, 1);
+                copies.append({copy_r, float3(copy_mat[3])});
               }
             }
           }
@@ -466,9 +508,6 @@ class Sdfs : Overlay {
             float radius = m.array_radius;
             float rx = m.rotation_offset[0], ry = m.rotation_offset[1],
                   rz = m.rotation_offset[2];
-            /* Shader applies Rx, Ry, Rz to eval point (EulerXYZ order).
-             * Object appears rotated by inverse. Use Blender's EulerXYZ
-             * to build the forward matrix, then invert. */
             float4x4 fwd = math::from_rotation<float4x4>(
                 math::EulerXYZ(rx, ry, rz));
             float4x4 rot_std = math::invert(fwd);
@@ -614,21 +653,31 @@ class Sdfs : Overlay {
     MEM_delete_void(static_cast<void *>(gbuf_data));
     MEM_delete_void(static_cast<void *>(depth_data));
 
+    printf("SDF pick: depth=%.4f obj_id_f=%.1f px=(%d,%d) gbuf=%dx%d entries=%d\n",
+           sdf_depth, obj_id_f, gx, gy, gbuf_w, gbuf_h, int(entries_.size()));
+
     if (sdf_depth <= 0.0f || sdf_depth >= 1.0f) {
+      printf("  -> no hit (depth out of range)\n");
       return;
     }
 
     int obj_id = int(obj_id_f + 0.5f);
     if (obj_id < 0 || obj_id >= int(select_table_.size())) {
+      printf("  -> obj_id %d out of range (table size %d)\n", obj_id, int(select_table_.size()));
       return;
     }
 
     uint sel_id = select_table_[obj_id];
-    if (sel_id == uint32_t(-1)) {
-      return;
+    printf("  -> obj_id=%d sel_id=%u buf_size=%d\n", obj_id, sel_id, select_buf_size_);
+    for (const SdfEntry &e : entries_) {
+      printf("     entry sdf_idx=%d sel_id=%u packed=0x%x select=%d active=%d\n",
+             e.sdf_index, e.select_id, e.outline_packed_id,
+             int((e.outline_packed_id >> 14u) == 1u || (e.outline_packed_id >> 14u) == 3u),
+             int((e.outline_packed_id >> 14u) == 3u));
     }
 
-    if (int(sel_id) >= select_buf_size_) {
+    if (sel_id == uint32_t(-1) || sel_id >= uint32_t(select_buf_size_)) {
+      printf("  -> sel_id invalid\n");
       return;
     }
     Vector<uint32_t> buf(select_buf_size_);
@@ -637,6 +686,7 @@ class Sdfs : Overlay {
     memcpy(&depth_bits, &sdf_depth, sizeof(uint32_t));
     buf[sel_id] = depth_bits;
     GPU_storagebuf_update(*select_output_buf_, buf.data());
+    printf("  -> wrote depth 0x%x at sel_id %u\n", depth_bits, sel_id);
   }
 };
 
