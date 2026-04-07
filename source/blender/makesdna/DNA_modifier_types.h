@@ -3694,6 +3694,10 @@ struct SDFArrayModifierData {
   /** #SDFBlendType */
   int blend_type = MOD_SDF_BLEND_SMOOTH;
   float rotation_offset[3] = {0.0f, 0.0f, 0.0f};
+
+  Object *offset_object = nullptr;
+  int use_object_offset = 0;
+  char _pad_arr[4] = {};
 };
 
 enum eSDFDisplaceNoiseType {

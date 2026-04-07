@@ -52,6 +52,8 @@
     .polygon_edge_bottom = 0.0f, \
     .polygon_taper = 0.0f, \
     .polygon_edge_mode = 0, \
+    .polygon_is_line = 0, \
+    .polygon_line_thickness = 0.1f, \
     .torus_angle = ((float)M_PI * 2.0f), \
     .sdf_index = 0, \
   }

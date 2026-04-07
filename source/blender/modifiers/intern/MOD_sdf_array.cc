@@ -3,10 +3,14 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "DNA_modifier_types.h"
+#include "DNA_object_types.h"
 
 #include "BKE_modifier.hh"
 
 #include "BLO_read_write.hh"
+
+#include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
@@ -31,6 +35,21 @@ static void init_data(ModifierData *md)
 static void copy_data(const ModifierData *md, ModifierData *target, const int flag)
 {
   BKE_modifier_copydata_generic(md, target, flag);
+}
+
+static void foreach_ID_link(ModifierData *md, Object *ob, IDWalkFunc walk, void *user_data)
+{
+  auto *smd = reinterpret_cast<SDFArrayModifierData *>(md);
+  walk(user_data, ob, reinterpret_cast<ID **>(&smd->offset_object), IDWALK_CB_NOP);
+}
+
+static void update_depsgraph(ModifierData *md, const ModifierUpdateDepsgraphContext *ctx)
+{
+  auto *smd = reinterpret_cast<SDFArrayModifierData *>(md);
+  if (smd->offset_object != nullptr) {
+    DEG_add_object_relation(
+        ctx->node, smd->offset_object, DEG_OB_COMP_TRANSFORM, "SDF Array Modifier");
+  }
 }
 
 /* Main panel */
@@ -90,6 +109,25 @@ static void constant_offset_draw(const bContext * /*C*/, Panel *panel)
   col.prop(ptr, "constant_offset", UI_ITEM_NONE, IFACE_("Distance"), ICON_NONE);
 }
 
+/* Object Offset sub-panel */
+static void object_offset_header_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+  layout.prop(ptr, "use_object_offset", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+}
+
+static void object_offset_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+  layout.use_property_split_set(true);
+
+  ui::Layout &col = layout.column(false);
+  col.active_set(RNA_boolean_get(ptr, "use_object_offset"));
+  col.prop(ptr, "offset_object", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+}
+
 /* Blend sub-panel */
 static void blend_panel_draw(const bContext * /*C*/, Panel *panel)
 {
@@ -118,6 +156,12 @@ static void panel_register(ARegionType *region_type)
                              "",
                              constant_offset_header_draw,
                              constant_offset_draw,
+                             panel_type);
+  modifier_subpanel_register(region_type,
+                             "object_offset",
+                             "",
+                             object_offset_header_draw,
+                             object_offset_draw,
                              panel_type);
   modifier_subpanel_register(
       region_type, "blend", "Blend", nullptr, blend_panel_draw, panel_type);
@@ -154,10 +198,10 @@ ModifierTypeInfo modifierType_SDFArray = {
     /*required_data_mask*/ nullptr,
     /*free_data*/ nullptr,
     /*is_disabled*/ nullptr,
-    /*update_depsgraph*/ nullptr,
+    /*update_depsgraph*/ update_depsgraph,
     /*depends_on_time*/ nullptr,
     /*depends_on_normals*/ nullptr,
-    /*foreach_ID_link*/ nullptr,
+    /*foreach_ID_link*/ foreach_ID_link,
     /*foreach_tex_link*/ nullptr,
     /*free_runtime_data*/ nullptr,
     /*panel_register*/ panel_register,

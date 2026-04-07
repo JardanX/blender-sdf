@@ -21,7 +21,7 @@ Moved SDF modifiers from custom system (on SDF data block) to Blender's native m
 | `modifiers/intern/MOD_sdf_round.cc` | SDF Round modifier (rounding radius) |
 | `modifiers/intern/MOD_sdf_onion.cc` | SDF Onion modifier (shell thickness) |
 | `modifiers/intern/MOD_sdf_bevel.cc` | SDF Bevel modifier (bevel radius) |
-| `modifiers/intern/MOD_sdf_array.cc` | SDF Array modifier (linear/radial, relative+constant offset, blend) |
+| `modifiers/intern/MOD_sdf_array.cc` | SDF Array modifier — instance-based (each copy is a separate SDF object with its own transform). Supports linear/radial modes, relative+constant+object offset, per-copy blend. Object offset uses another object's transform as accumulated per-copy delta (like Blender's mesh Array modifier). |
 
 ### Modified Files
 
@@ -2546,3 +2546,23 @@ Added always-on black edge outlines for all SDF objects with configurable opacit
 | `draw/engines/overlay/overlay_sdf.hh` | Added `edge_detect_sh_` shader, `sdf_outline_opacity_` state, `draw_edges()` method (fullscreen pass with alpha blending) |
 | `draw/engines/overlay/overlay_instance.cc` | Call `regular.sdfs.draw_edges()` in overlay line prepass |
 | `blenloader/intern/versioning_500.cc` | Fixed `static_cast` → `reinterpret_cast` for `ob.data` → `SDF*` (pre-existing issue surfaced by recompilation) |
+
+---
+
+## Fix SDF Selection, Overlay Clearing, and First-Object Union (2026-04-07)
+
+Fixed selection bugs where wrong SDF gets highlighted, overlays not clearing on deselect, and corrupt state when first SDF in stack has subtract operation.
+
+### Root Causes
+
+1. **Outline persistence**: Unselected SDF objects got non-zero `outline_packed_id` (color_id=2), causing the outline shader to render outlines for ALL SDFs instead of only selected ones.
+2. **Selection buffer overrun**: When `select_table_` mapped an obj_id to `uint32_t(-1)` (no entry), the signed comparison `int(sel_id) >= select_buf_size_` evaluated to `-1 >= N` = false, allowing an out-of-bounds write to the select buffer.
+3. **Subtract-from-nothing**: If the first SDF in the sorted evaluation order had a subtract/intersect/shell operation, the distance field became malformed, corrupting obj_id tracking for all subsequent objects.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | After sorting objects, force first ungrouped object and first object in each group to `SDF_CSG_UNION` — prevents subtract-from-nothing |
+| `draw/engines/overlay/overlay_sdf.hh` | Set `outline_packed_id = 0` for unselected objects (was `(2 << 14) \| resource_id`); fix `sel_id` bounds check to use unsigned comparison |
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Show Operation panel for first group member and first scene SDF, but with CSG buttons disabled and "First in stack — forced to Union" info label |

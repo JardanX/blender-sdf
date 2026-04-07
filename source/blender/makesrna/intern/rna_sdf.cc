@@ -1082,6 +1082,20 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
+  /* Polygon Line Mode */
+  prop = RNA_def_property(srna, "polygon_is_line", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "polygon_is_line", 1);
+  RNA_def_property_ui_text(prop, "Line", "Treat points as an open polyline with thickness");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Polygon Line Thickness */
+  prop = RNA_def_property(srna, "polygon_line_thickness", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_line_thickness");
+  RNA_def_property_range(prop, 0.001f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Thickness", "Line thickness");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
   /* Torus Angle */
   prop = RNA_def_property(srna, "torus_angle", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_float_sdna(prop, nullptr, "torus_angle");

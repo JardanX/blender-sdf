@@ -36,8 +36,11 @@ gpu::Texture *sdf_gbuf_color_texture_get();
 
 float2 sdf_uv_scale_get();
 
-/* Get local-space bbox + rotation/position for an SDF object. Returns false if not found. */
-bool sdf_object_bbox_get(int sdf_index, float3 &out_min, float3 &out_max,
+/* Get local-space bbox + rotation/position for an SDF object.
+ * hint_pos: world position of the object to disambiguate modifier copies.
+ * Returns false if not found. */
+bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
+                         float3 &out_min, float3 &out_max,
                          float4x4 &out_rot, float3 &out_pos);
 
 /* Debug: get near-surface grid points from last bbox computation. */
