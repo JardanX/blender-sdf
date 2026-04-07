@@ -259,6 +259,9 @@ void main()
   /* NOTE: We never set alpha to 1.0 to avoid Anti-aliasing destroying the line. */
   frag_color *= (occluded ? alpha_occlu : 1.0f) * (254.0f / 255.0f);
 
+  /* Write outline depth so grid cannot overdraw outline pixels. */
+  gl_FragDepth = ref_depth;
+
   int edge_case = 0;
   edge_case += int(has_edge_pos_x) * XPOS;
   edge_case += int(has_edge_neg_x) * XNEG;

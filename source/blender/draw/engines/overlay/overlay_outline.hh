@@ -151,7 +151,8 @@ class Outline : Overlay {
     {
       auto &pass = outline_resolve_ps_;
       pass.init();
-      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA_PREMUL);
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA_PREMUL |
+                     DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_ALWAYS);
       pass.shader_set(res.shaders->outline_detect.get());
       /* Don't occlude the outline if in xray mode as it causes too much flickering. */
       pass.push_constant("alpha_occlu", state.xray_enabled ? 1.0f : 0.35f);
