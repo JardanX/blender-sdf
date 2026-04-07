@@ -9,6 +9,8 @@
 #include "BKE_colorband.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "DNA_sdf_types.h"
+
 #include "ED_view3d.hh"
 
 #include "BKE_paint.hh"
@@ -631,6 +633,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
       case OB_SPEAKER:
         layer.speakers.object_sync(manager, ob_ref, resources, state);
         break;
+      /* SDF group empties rendered via Origins (extra_point shader with AA) */
     }
     layer.attribute_viewer.object_sync(manager, ob_ref, resources, state);
     layer.attribute_texts.object_sync(manager, ob_ref, resources, state);
@@ -929,8 +932,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
      * We need to figure a way to merge the outline with correct depth awareness (see #130751). */
     regular.facing.draw(resources.overlay_fb, manager, view);
 
-    /* Line only pass. */
-    outline.draw_line_only_ex(resources.overlay_line_only_fb, resources, manager, view);
+    /* Line only pass. Draw into overlay_line_fb (with depth) so outline depth
+     * prevents grid from overdrawing outline pixels. */
+    outline.draw_line_only_ex(resources.overlay_line_fb, resources, manager, view);
   }
   {
     /* Overlay (+Line) pass. */
