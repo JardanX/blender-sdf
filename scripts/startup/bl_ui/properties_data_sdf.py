@@ -168,6 +168,8 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
         ob = context.object
         if not (ob and ob.type == 'SDF' and ob.data and ob.data.sdf_type == 'POLYGON'):
             return False
+        if not ob.select_get():
+            return False
         view = context.space_data
         if view and hasattr(view, 'overlay'):
             if not view.overlay.show_overlays or not view.overlay.show_sdf_ngon:
