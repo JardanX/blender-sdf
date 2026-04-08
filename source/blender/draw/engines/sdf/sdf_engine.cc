@@ -82,6 +82,8 @@ static gpu::StorageBuf *s_bvh_ssbo = nullptr;
 static int s_bvh_root = -1;
 static int s_group_count = 0;
 static Vector<int> s_depsgraph_to_sorted;
+static Map<const Object *, int> s_object_to_sorted;
+static Vector<const Object *> s_sorted_object_ptrs;
 static gpu::Texture *s_depth_tx = nullptr;
 static gpu::Texture *s_gbuf_color_tx = nullptr;
 static int2 s_render_size = {0, 0};
@@ -426,6 +428,8 @@ class Instance : public DrawEngine {
     polygon_points_.clear();
     groups_gpu_.clear();
     s_depsgraph_to_sorted.clear();
+    s_object_to_sorted.clear();
+    s_sorted_object_ptrs.clear();
     bvh_tree_.clear();
     mesh_transforms_.clear();
     scene_min_ = float3(1e30f);
@@ -1834,7 +1838,32 @@ class Instance : public DrawEngine {
             old_to_new[old_idx] = new_idx;
           }
           objects_ = std::move(sorted);
-          s_depsgraph_to_sorted = std::move(old_to_new);
+
+          /* Build sorted_index → Object* array for overlay */
+          s_sorted_object_ptrs.reinitialize(n);
+          for (int new_idx = 0; new_idx < n; new_idx++) {
+            int old_idx = sort_pairs[new_idx].second;
+            s_sorted_object_ptrs[new_idx] = object_ptrs_[old_idx];
+          }
+
+          /* Build depsgraph-to-sorted mapping for the overlay.
+           * The overlay has one entry per unique depsgraph object (no Array copies).
+           * Map each unique object to its first copy's sorted position. */
+          s_depsgraph_to_sorted.clear();
+          s_object_to_sorted.clear();
+          Object *prev_ptr = nullptr;
+          for (int old_idx = 0; old_idx < n; old_idx++) {
+            Object *ptr = object_ptrs_[old_idx];
+            if (ptr != prev_ptr) {
+              s_depsgraph_to_sorted.append(old_to_new[old_idx]);
+              /* Direct Object* → sorted index lookup (robust, order-independent) */
+              Object *orig = DEG_get_original(ptr);
+              if (!s_object_to_sorted.contains(orig)) {
+                s_object_to_sorted.add(orig, old_to_new[old_idx]);
+              }
+              prev_ptr = ptr;
+            }
+          }
         }
       }
 
@@ -2056,9 +2085,10 @@ class Instance : public DrawEngine {
         planes[p] /= math::length(float3(planes[p]));
       }
 
+      float min_pad = std::max(max_expansion, 2.0f);
       for (int i = 0; i < int(objects_.size()); i++) {
-        float3 bmin = float3(objects_[i].bbox_min) - float3(max_expansion);
-        float3 bmax = float3(objects_[i].bbox_max) + float3(max_expansion);
+        float3 bmin = float3(objects_[i].bbox_min) - float3(min_pad);
+        float3 bmax = float3(objects_[i].bbox_max) + float3(min_pad);
         bool visible = true;
         for (int p = 0; p < 6; p++) {
           float3 n(planes[p]);
@@ -2159,9 +2189,25 @@ class Instance : public DrawEngine {
           }
         }
 
+        /* Remap both index mappings through compaction */
         for (int &idx : s_depsgraph_to_sorted) {
           idx = (idx >= 0 && idx < int(obj_remap.size())) ? obj_remap[idx] : -1;
         }
+        for (auto item : s_object_to_sorted.items()) {
+          int old_si = item.value;
+          s_object_to_sorted.lookup(item.key) =
+              (old_si >= 0 && old_si < int(obj_remap.size())) ? obj_remap[old_si] : -1;
+        }
+
+        /* Compact sorted_object_ptrs */
+        Vector<const Object *> compact_sorted_ptrs;
+        compact_sorted_ptrs.reserve(visible_count);
+        for (int i = 0; i < int(s_sorted_object_ptrs.size()); i++) {
+          if (obj_remap[i] >= 0) {
+            compact_sorted_ptrs.append(s_sorted_object_ptrs[i]);
+          }
+        }
+        s_sorted_object_ptrs = std::move(compact_sorted_ptrs);
 
         objects_ = std::move(compact_objects);
         modifiers_ = std::move(compact_modifiers);
@@ -3826,6 +3872,18 @@ const int *sdf_depsgraph_to_sorted_get(int *out_count)
   }
   *out_count = int(s_depsgraph_to_sorted.size());
   return s_depsgraph_to_sorted.data();
+}
+
+int sdf_sorted_index_for_object(const Object *ob)
+{
+  const int *val = s_object_to_sorted.lookup_ptr(ob);
+  return val ? *val : -1;
+}
+
+const Object *const *sdf_sorted_object_ptrs_get(int *out_count)
+{
+  *out_count = int(s_sorted_object_ptrs.size());
+  return s_sorted_object_ptrs.data();
 }
 
 gpu::Texture *sdf_depth_texture_get()
