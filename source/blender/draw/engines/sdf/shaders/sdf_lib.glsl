@@ -485,7 +485,6 @@ float sdPolygon2D(float2 p, int ps, int pc)
 
     if (ab.w < 0.0f) {
       float4 ad = polygon_points[ps + i].arc_data;
-      /* Bezier segment */
       float2 ctrl = ed.zw;
       float2 end_pt = ad.xy;
 
@@ -1687,6 +1686,10 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
   float3 r = obj.sdf_size.xyz;
   float bevel = obj.sdf_size.w;
   float dist;
+
+#ifdef SDF_BENCH_BOX_ONLY
+  return sdBox(local_pos, r) - bevel;
+#endif
 
   if (obj.sdf_type == 1) { /* SPHERE / ELLIPSOID */
     dist = (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f)

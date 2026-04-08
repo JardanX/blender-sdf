@@ -12,6 +12,8 @@
 #include "BLI_assert.h"
 #include "BLI_vector.hh"
 
+#include "DEG_depsgraph_query.hh"
+
 #include "MEM_guardedalloc.h"
 
 #include "DNA_modifier_types.h"
@@ -241,37 +243,42 @@ class Sdfs : Overlay {
     select_buf_size_ = math::max(int(res.select_id_map.size()), 4);
     select_buf_size_ = (select_buf_size_ + 3) & ~3;
 
-    /* Build tables indexed by sdf_index (= original_index in GPU). */
-    /* Map entries to sorted GPU positions via dg_to_sorted.
-     * Both entries_ and engine's object_ptrs_ iterate the same depsgraph, skipping groups. */
+    /* Build tables indexed by sorted GPU position.
+     * Use direct Object* → sorted index lookup for robustness. */
     int obj_count = sdf::sdf_object_count_get();
     int table_size = math::max(obj_count, 1);
     Vector<uint32_t> outline_table(table_size, 0u);
     select_table_.reinitialize(table_size);
     select_table_.fill(uint32_t(-1));
 
-    int map_count = 0;
-    const int *dg_to_sorted = sdf::sdf_depsgraph_to_sorted_get(&map_count);
-    if (dg_to_sorted && map_count == int(entries_.size())) {
-      for (int i = 0; i < map_count; i++) {
-        int si = dg_to_sorted[i];
-        if (si >= 0 && si < table_size) {
-          entries_[i].sorted_index = si;
-          uint32_t color_id = entries_[i].outline_packed_id >> 14u;
-          uint32_t new_packed = (color_id << 14u) | (uint32_t(si + 1) & 0x3FFFu);
-          outline_table[si] = new_packed;
-          select_table_[si] = entries_[i].select_id;
+    /* Build Object* → entry index map */
+    Map<const Object *, int> obj_to_entry;
+    for (int i = 0; i < int(entries_.size()); i++) {
+      if (entries_[i].object) {
+        const Object *orig = DEG_get_original(entries_[i].object);
+        if (!obj_to_entry.contains(orig)) {
+          obj_to_entry.add(orig, i);
         }
       }
     }
-    else if (int(entries_.size()) <= table_size) {
-      for (int i = 0; i < int(entries_.size()); i++) {
-        entries_[i].sorted_index = i;
-        uint32_t color_id = entries_[i].outline_packed_id >> 14u;
-        uint32_t new_packed = (color_id << 14u) | (uint32_t(i + 1) & 0x3FFFu);
-        outline_table[i] = new_packed;
-        select_table_[i] = entries_[i].select_id;
+
+    /* Populate tables for ALL sorted positions (including Array copies).
+     * Use sorted_to_object map from engine to find each position's entry. */
+    int sorted_obj_count = 0;
+    const Object *const *sorted_ptrs = sdf::sdf_sorted_object_ptrs_get(&sorted_obj_count);
+    for (int si = 0; si < math::min(sorted_obj_count, table_size); si++) {
+      if (!sorted_ptrs || !sorted_ptrs[si]) { continue; }
+      const Object *orig = DEG_get_original(const_cast<Object *>(sorted_ptrs[si]));
+      const int *ei_ptr = obj_to_entry.lookup_ptr(orig);
+      if (!ei_ptr) { continue; }
+      int ei = *ei_ptr;
+      if (entries_[ei].sorted_index < 0) {
+        entries_[ei].sorted_index = si;
       }
+      uint32_t color_id = entries_[ei].outline_packed_id >> 14u;
+      uint32_t new_packed = (color_id << 14u) | (uint32_t(si + 1) & 0x3FFFu);
+      outline_table[si] = new_packed;
+      select_table_[si] = entries_[ei].select_id;
     }
 
     Vector<int32_t> sel_indices;

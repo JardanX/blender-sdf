@@ -35,6 +35,8 @@ int sdf_group_count_get();
 const SDFObjectGPU *sdf_objects_cpu_get();
 
 const int *sdf_depsgraph_to_sorted_get(int *out_count);
+int sdf_sorted_index_for_object(const Object *ob);
+const Object *const *sdf_sorted_object_ptrs_get(int *out_count);
 
 gpu::Texture *sdf_depth_texture_get();
 gpu::Texture *sdf_gbuf_color_texture_get();
