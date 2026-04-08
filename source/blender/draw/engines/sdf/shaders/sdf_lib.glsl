@@ -1682,51 +1682,31 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
 
 float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
 {
-  float3 size = obj.sdf_size.xyz;
-  float min_dim = min(size.x, min(size.y, size.z));
-  float bevel = max(obj.bevel, min(0.005f, min_dim * 0.5f));
+  /* sdf_size.xyz = pre-subtracted (size - bevel), pre-clamped on CPU.
+   * sdf_size.w = effective bevel. */
+  float3 r = obj.sdf_size.xyz;
+  float bevel = obj.sdf_size.w;
   float dist;
 
   if (obj.sdf_type == 1) { /* SPHERE / ELLIPSOID */
-    float3 r = size - float3(bevel);
-    r = max(r, float3(0.001f));
-    if (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f) {
-      dist = sdSphere(local_pos, r.x);
-    }
-    else {
-      dist = sdEllipsoid(local_pos, r);
-    }
+    dist = (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f)
+           ? sdSphere(local_pos, r.x) : sdEllipsoid(local_pos, r);
   }
   else if (obj.sdf_type == 2) { /* CYLINDER */
-    float3 cyl_size = size - float3(bevel);
-    cyl_size = max(cyl_size, float3(0.001f));
-    dist = sdCylinder(local_pos, cyl_size);
+    dist = sdCylinder(local_pos, r);
   }
   else if (obj.sdf_type == 3) { /* CONE */
-    float cone_r = max(size.x - bevel, 0.001f);
-    float cone_h = max(size.y - bevel, 0.001f);
-    dist = sdCone(local_pos, cone_r, cone_h);
+    dist = sdCone(local_pos, r.x, r.y);
   }
   else if (obj.sdf_type == 4) { /* CAPSULE */
-    float3 cap_size = size - float3(bevel);
-    cap_size = max(cap_size, float3(0.001f));
-    dist = sdCapsule(local_pos, cap_size);
+    dist = sdCapsule(local_pos, r);
   }
   else if (obj.sdf_type == 5) { /* TORUS */
-    float major = size.x - bevel;
-    float minor = size.y - bevel;
-    major = max(major, 0.001f);
-    minor = max(minor, 0.001f);
-    if (obj.box_modes.w != 0) {
-      dist = sdCappedTorus(local_pos, obj.box_corners.xy, major, minor);
-    }
-    else {
-      dist = sdTorus(local_pos, float2(major, minor));
-    }
+    dist = (obj.box_modes.w != 0)
+           ? sdCappedTorus(local_pos, obj.box_corners.xy, r.x, r.y)
+           : sdTorus(local_pos, float2(r.x, r.y));
   }
   else if (obj.sdf_type == 6) { /* NGON */
-    float R = max(size.x - bevel, 0.001f);
-    float halfH = max(size.z - bevel, 0.001f);
     int sides = obj.box_modes.z;
     float corner = obj.box_corners.x;
     float star = obj.box_corners.y;
@@ -1735,42 +1715,36 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
     float tapTop = obj.box_edges.z;
     float tapBot = obj.box_edges.w;
     int edgeMode = obj.box_modes.y;
-    bool hasAdvanced = (corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f;
-    if (hasAdvanced) {
-      dist = sdAdvancedNgon(local_pos, R, halfH, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH, star);
+    if ((corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f) {
+      dist = sdAdvancedNgon(local_pos, r.x, r.z, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z, star);
     }
     else {
-      float d2d = sdRegularPolygon2D(local_pos.xy, R, sides);
-      float dz = abs(local_pos.z) - halfH;
+      float d2d = sdRegularPolygon2D(local_pos.xy, r.x, sides);
+      float dz = abs(local_pos.z) - r.z;
       float2 dd = float2(d2d, dz);
       dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
     }
   }
   else if (obj.sdf_type == 7) { /* POLYGON */
-    float halfH = max(size.z - bevel, 0.001f);
     int ps = obj.polygon_point_start;
     int pc = obj.polygon_point_count;
-    float maxCorner = obj.box_corners.x;
     float edgeTop = obj.box_edges.x;
     float edgeBot = obj.box_edges.y;
     float tapTop = obj.box_edges.z;
     float tapBot = obj.box_edges.w;
     int edgeMode = obj.box_modes.y;
-    bool hasEdgeTaper = (edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
     if (pc >= 3) {
-      if (hasEdgeTaper || maxCorner > 0.001f) {
-        dist = sdAdvancedPolygon(local_pos, halfH, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, halfH);
+      if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f || obj.box_corners.x > 0.001f) {
+        dist = sdAdvancedPolygon(local_pos, r.z, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z);
       }
       else {
         float d2d = sdPolygon2D(local_pos.xy, ps, pc);
-        float dz = abs(local_pos.z) - halfH;
+        float dz = abs(local_pos.z) - r.z;
         float2 dd = float2(d2d, dz);
         dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
       }
     }
-    else {
-      dist = 1e10f;
-    }
+    else { dist = 1e10f; }
   }
   else { /* BOX (default) */
     float4 corners = obj.box_corners;
@@ -1778,16 +1752,11 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
     float edgeBot = obj.box_edges.y;
     float tapTop = obj.box_edges.z;
     float tapBot = obj.box_edges.w;
-    bool hasAdvanced = (corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot + tapTop + tapBot) > 0.001f;
-    if (hasAdvanced) {
-      float3 box_size = size - float3(bevel);
-      box_size = max(box_size, float3(0.001f));
-      dist = sdAdvancedBox(local_pos, box_size, corners, edgeTop, edgeBot, tapTop, tapBot, obj.box_modes.x, obj.box_modes.y, box_size.z);
+    if ((corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot + tapTop + tapBot) > 0.001f) {
+      dist = sdAdvancedBox(local_pos, r, corners, edgeTop, edgeBot, tapTop, tapBot, obj.box_modes.x, obj.box_modes.y, r.z);
     }
     else {
-      float3 box_size = size - float3(bevel);
-      box_size = max(box_size, float3(0.001f));
-      dist = sdBox(local_pos, box_size);
+      dist = sdBox(local_pos, r);
     }
   }
 

@@ -201,6 +201,7 @@ enum {
   OB_EMPTY_SPHERE = 6,
   OB_EMPTY_CONE = 7,
   OB_EMPTY_IMAGE = 8,
+  OB_EMPTY_CIRCLE_FILLED = 9,
 };
 
 /**

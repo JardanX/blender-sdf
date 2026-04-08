@@ -13,7 +13,7 @@ COMPUTE_SHADER_CREATE_INFO(sdf_cone_march_comp)
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-#define kMaxTileObjects 128
+#define kMaxTileObjects 256
 
 float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float out_aabb_skip)
 {
@@ -58,7 +58,6 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
     SDFObjectGPU obj = objects[i];
     float3 eval_pos = (gid >= 0) ? grp_pos : world_pos;
     float da = point_aabb_dist(eval_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
-    float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
 
     int obj_op = obj.csg_operation;
     bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT) &&
@@ -66,7 +65,7 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
                       (gid < 0 && scene_dist < 1e9f));
 
     float d;
-    if (da > skip_threshold) {
+    if (da > aabb.max_group_blend) {
       if (!must_eval) {
         out_aabb_skip = min(out_aabb_skip, da);
         cur_group = gid;

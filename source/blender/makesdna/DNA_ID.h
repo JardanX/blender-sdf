@@ -1237,7 +1237,6 @@ enum IDRecalcFlag {
 #define FILTER_ID_GP (1ULL << 40)
 #define FILTER_ID_IP (1ULL << 41)
 #define FILTER_ID_SF (1ULL << 42)
-#define FILTER_ID_SG (1ULL << 43)
 
 #define FILTER_ID_ALL \
   (FILTER_ID_AC | FILTER_ID_AR | FILTER_ID_BR | FILTER_ID_CA | FILTER_ID_CU_LEGACY | \
@@ -1247,7 +1246,7 @@ enum IDRecalcFlag {
    FILTER_ID_SPK | FILTER_ID_SO | FILTER_ID_TE | FILTER_ID_TXT | FILTER_ID_VF | FILTER_ID_WO | \
    FILTER_ID_CF | FILTER_ID_WS | FILTER_ID_LP | FILTER_ID_CV | FILTER_ID_PT | FILTER_ID_VO | \
    FILTER_ID_SIM | FILTER_ID_KE | FILTER_ID_SCR | FILTER_ID_WM | FILTER_ID_LI | FILTER_ID_GP | \
-   FILTER_ID_IP | FILTER_ID_SF | FILTER_ID_SG)
+   FILTER_ID_IP | FILTER_ID_SF)
 
 /**
  * This enum defines the index assigned to each type of IDs in the array returned by
@@ -1338,7 +1337,6 @@ enum eID_Index {
   INDEX_ID_LP,
   INDEX_ID_GP,
   INDEX_ID_SF,
-  INDEX_ID_SG,
 
   /* Collection and object types. */
   INDEX_ID_OB,

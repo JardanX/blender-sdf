@@ -155,18 +155,12 @@ void OBJECT_OT_volume_add(wmOperatorType *ot);
 /* `object_sdf.cc` */
 
 void OBJECT_OT_sdf_add(wmOperatorType *ot);
-void OBJECT_OT_sdf_group_add(wmOperatorType *ot);
-void OBJECT_OT_sdf_group_assign(wmOperatorType *ot);
-void OBJECT_OT_sdf_group_remove_member(wmOperatorType *ot);
-void OBJECT_OT_sdf_group_reorder(wmOperatorType *ot);
 void OBJECT_OT_sdf_set_csg(wmOperatorType *ot);
 void OBJECT_OT_sdf_set_blend(wmOperatorType *ot);
-void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot);
-void OBJECT_OT_move_to_sdf_group(wmOperatorType *ot);
 void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot);
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_shell_distance_adjust(wmOperatorType *ot);
-void OBJECT_OT_sdf_group_cycle(wmOperatorType *ot);
+void OBJECT_OT_sdf_profile_frame(wmOperatorType *ot);
 /**
  * Called by other space types too.
  */

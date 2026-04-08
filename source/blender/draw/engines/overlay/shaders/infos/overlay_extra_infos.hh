@@ -196,6 +196,28 @@ CREATE_INFO_VARIANT(overlay_extra_point, overlay_extra_point_base, draw_modelmat
 CREATE_INFO_VARIANT(overlay_extra_point_selectable, overlay_extra_point_base, draw_modelmat_with_custom_id, overlay_select)
 CREATE_INFO_VARIANT(overlay_extra_point_clipped, overlay_extra_point, drw_clipped)
 CREATE_INFO_VARIANT(overlay_extra_point_selectable_clipped, overlay_extra_point_selectable, drw_clipped)
+
+/* clang-format on */
+
+/* SDF group point overlay */
+GPU_SHADER_CREATE_INFO(overlay_sdf_group_point_base)
+DEFINE_VALUE("blender_srgb_to_framebuffer_space(a)", "a")
+VERTEX_OUT(overlay_extra_point_iface)
+FRAGMENT_OUT(0, float4, frag_color)
+PUSH_CONSTANT(float, sdf_point_size)
+VERTEX_SOURCE("overlay_sdf_group_point_vert.glsl")
+FRAGMENT_SOURCE("overlay_point_varying_color_varying_outline_aa_frag.glsl")
+ADDITIONAL_INFO(draw_view)
+ADDITIONAL_INFO(draw_globals)
+TYPEDEF_SOURCE("overlay_shader_shared.hh")
+STORAGE_BUF(0, read, VertexData, data_buf[])
+GPU_SHADER_CREATE_END()
+
+/* clang-format off */
+CREATE_INFO_VARIANT(overlay_sdf_group_point, overlay_sdf_group_point_base, draw_modelmat)
+CREATE_INFO_VARIANT(overlay_sdf_group_point_selectable, overlay_sdf_group_point_base, draw_modelmat_with_custom_id, overlay_select)
+CREATE_INFO_VARIANT(overlay_sdf_group_point_clipped, overlay_sdf_group_point, drw_clipped)
+CREATE_INFO_VARIANT(overlay_sdf_group_point_selectable_clipped, overlay_sdf_group_point_selectable, drw_clipped)
 /* clang-format on */
 
 GPU_SHADER_INTERFACE_INFO(overlay_extra_loose_point_iface)

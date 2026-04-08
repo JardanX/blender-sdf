@@ -51,7 +51,6 @@
 #  include "BKE_pointcloud.hh"
 #  include "BKE_scene.hh"
 #  include "BKE_sdf.hh"
-#  include "BKE_sdf_group.hh"
 #  include "BKE_sound.hh"
 #  include "BKE_speaker.hh"
 #  include "BKE_text.h"
@@ -84,7 +83,6 @@
 #  include "DNA_particle_types.h"
 #  include "DNA_pointcloud_types.h"
 #  include "DNA_sdf_types.h"
-#  include "DNA_sdf_group_types.h"
 #  include "DNA_sound_types.h"
 #  include "DNA_speaker_types.h"
 #  include "DNA_text_types.h"
@@ -863,19 +861,6 @@ static SDF *rna_Main_sdfs_new(Main *bmain, const char *name)
   return sdf;
 }
 
-static SDFGroup *rna_Main_sdf_groups_new(Main *bmain, const char *name)
-{
-  char safe_name[MAX_ID_NAME - 2];
-  rna_idname_validate(name, safe_name);
-
-  SDFGroup *group = BKE_sdf_group_add(bmain, safe_name);
-  id_us_min(&group->id);
-
-  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
-
-  return group;
-}
-
 /* tag functions, all the same */
 #  define RNA_MAIN_ID_TAG_FUNCS_DEF(_func_name, _listbase_name, _id_type) \
     static void rna_Main_##_func_name##_tag(Main *bmain, bool value) \
@@ -923,11 +908,6 @@ RNA_MAIN_ID_TAG_FUNCS_DEF(hair_curves, hair_curves, ID_CV)
 RNA_MAIN_ID_TAG_FUNCS_DEF(pointclouds, pointclouds, ID_PT)
 RNA_MAIN_ID_TAG_FUNCS_DEF(volumes, volumes, ID_VO)
 RNA_MAIN_ID_TAG_FUNCS_DEF(sdfs, sdfs, ID_SF)
-static void rna_Main_sdf_groups_tag(Main *bmain, bool value)
-{
-  BKE_main_id_tag_listbase(
-      reinterpret_cast<ListBaseT<ID> *>(&bmain->sdf_groups), ID_TAG_DOIT, value);
-}
 
 #  undef RNA_MAIN_ID_TAG_FUNCS_DEF
 
@@ -2525,48 +2505,6 @@ void RNA_def_main_sdfs(BlenderRNA *brna, PropertyRNA *cprop)
       func, "do_ui_user", true, "", "Make sure interface does not reference this SDF data");
 
   func = RNA_def_function(srna, "tag", "rna_Main_sdfs_tag");
-  parm = RNA_def_boolean(func, "value", false, "Value", "");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-}
-
-void RNA_def_main_sdf_groups(BlenderRNA *brna, PropertyRNA *cprop)
-{
-  StructRNA *srna;
-  FunctionRNA *func;
-  PropertyRNA *parm;
-
-  RNA_def_property_srna(cprop, "BlendDataSDFGroups");
-  srna = RNA_def_struct(brna, "BlendDataSDFGroups", nullptr);
-  RNA_def_struct_sdna(srna, "Main");
-  RNA_def_struct_ui_text(srna, "Main SDF Groups", "Collection of SDF group data-blocks");
-
-  func = RNA_def_function(srna, "new", "rna_Main_sdf_groups_new");
-  RNA_def_function_ui_description(func, "Add a new SDF group to the main database");
-  parm = RNA_def_string(func, "name", "SDFGroup", 0, "", "New name for the data-block");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_pointer(func, "sdf_group", "SDFGroup", "", "New SDF group data-block");
-  RNA_def_function_return(func, parm);
-
-  func = RNA_def_function(srna, "remove", "rna_Main_ID_remove");
-  RNA_def_function_flag(func, FUNC_USE_REPORTS);
-  RNA_def_function_ui_description(func, "Remove an SDF group from the current blendfile");
-  parm = RNA_def_pointer(func, "sdf_group", "SDFGroup", "", "SDF group to remove");
-  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
-  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
-  RNA_def_boolean(func,
-                  "do_unlink",
-                  true,
-                  "",
-                  "Unlink all usages of this SDF group before deleting it");
-  RNA_def_boolean(func,
-                  "do_id_user",
-                  true,
-                  "",
-                  "Decrement user counter of all data-blocks used by this SDF group");
-  RNA_def_boolean(
-      func, "do_ui_user", true, "", "Make sure interface does not reference this SDF group");
-
-  func = RNA_def_function(srna, "tag", "rna_Main_sdf_groups_tag");
   parm = RNA_def_boolean(func, "value", false, "Value", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 }

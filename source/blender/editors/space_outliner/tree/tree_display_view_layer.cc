@@ -6,10 +6,11 @@
  * \ingroup spoutliner
  */
 
+#include <algorithm>
+
 #include "DNA_collection_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
@@ -17,8 +18,6 @@
 #include "BKE_layer.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
-#include "BKE_sdf_group.hh"
-
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
@@ -90,7 +89,7 @@ ListBaseT<TreeElement> TreeDisplayViewLayer::build_tree(const TreeSourceData &so
         continue;
       }
 
-      add_sdf_groups(*source_data.bmain, tree, nullptr);
+      add_sdf_hierarchy(*source_data.bmain, tree, nullptr);
       add_view_layer(*scene, tree, static_cast<TreeElement *>(nullptr));
     }
     else {
@@ -106,7 +105,7 @@ ListBaseT<TreeElement> TreeDisplayViewLayer::build_tree(const TreeSourceData &so
       te_view_layer.name = view_layer->name;
       te_view_layer.directdata = view_layer;
 
-      add_sdf_groups(*source_data.bmain, te_view_layer.subtree, &te_view_layer);
+      add_sdf_hierarchy(*source_data.bmain, te_view_layer.subtree, &te_view_layer);
       add_view_layer(*scene, te_view_layer.subtree, &te_view_layer);
     }
   }
@@ -114,51 +113,127 @@ ListBaseT<TreeElement> TreeDisplayViewLayer::build_tree(const TreeSourceData &so
   return tree;
 }
 
-void TreeDisplayViewLayer::add_sdf_groups(Main &bmain,
-                                          ListBaseT<TreeElement> &tree,
-                                          TreeElement *parent)
+static int sdf_sort_index(Object *ob)
 {
-  if (BLI_listbase_is_empty(&bmain.sdf_groups)) {
-    return;
+  if (!ob || !ob->data) {
+    return 0;
   }
+  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+  return sdf->sdf_index;
+}
 
-  for (SDFGroup *group = static_cast<SDFGroup *>(bmain.sdf_groups.first); group;
-       group = reinterpret_cast<SDFGroup *>(group->id.next))
-  {
-    BKE_sdf_group_cleanup_null_members(group);
+void TreeDisplayViewLayer::add_sdf_hierarchy(Main & /*bmain*/,
+                                              ListBaseT<TreeElement> &tree,
+                                              TreeElement *parent)
+{
+  BKE_view_layer_synced_ensure(scene_, view_layer_);
 
-    TreeElement *te_group = add_element(
-        &tree, &group->id, nullptr, parent, TSE_SOME_ID, 0, false);
-    if (!te_group) {
+  /* Collect group empties and build parent map */
+  Vector<Object *> group_empties;
+  Set<Object *> grouped_objects;
+
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
+    Object *ob = base.object;
+    if (ob->type != OB_SDF) {
       continue;
     }
-
-    TreeStoreElem *tselem = TREESTORE(te_group);
-    if (!tselem->used) {
-      tselem->flag &= ~TSE_CLOSED;
+    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+    if (sdf && sdf->sdf_type == SDF_TYPE_GROUP) {
+      group_empties.append(ob);
     }
+  }
 
-    BKE_view_layer_synced_ensure(scene_, view_layer_);
-    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
-         member = member->next)
-    {
-      if (!member->object) {
+  /* Mark children of group empties */
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
+    Object *ob = base.object;
+    if (ob->type != OB_SDF || !ob->parent) {
+      continue;
+    }
+    for (Object *grp : group_empties) {
+      if (ob->parent == grp) {
+        grouped_objects.add(ob);
+        break;
+      }
+    }
+  }
+
+  /* Collect ALL top-level SDF items (groups + ungrouped) into one list */
+  Vector<std::pair<Object *, Base *>> top_level;
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
+    Object *ob = base.object;
+    if (ob->type != OB_SDF) {
+      continue;
+    }
+    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+    if (!sdf) {
+      continue;
+    }
+    /* Skip children of groups */
+    if (grouped_objects.contains(ob)) {
+      continue;
+    }
+    top_level.append({ob, &base});
+  }
+
+  /* Sort ALL top-level items together by sdf_index */
+  std::sort(top_level.begin(), top_level.end(),
+            [](const auto &a, const auto &b) {
+              return sdf_sort_index(a.first) < sdf_sort_index(b.first);
+            });
+
+  /* Add top-level items; groups expand their children */
+  for (auto &[ob, base] : top_level) {
+    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+
+    if (sdf->sdf_type == SDF_TYPE_GROUP) {
+      TreeElement *te_group = add_element(
+          &tree, reinterpret_cast<ID *>(ob), nullptr, parent, TSE_SOME_ID, 0, false);
+      if (!te_group) {
         continue;
       }
-      Base *base = BKE_view_layer_base_find(view_layer_, member->object);
-      if (!base) {
-        continue;
+      te_group->directdata = base;
+
+      TreeStoreElem *tselem = TREESTORE(te_group);
+      if (!tselem->used) {
+        tselem->flag &= ~TSE_CLOSED;
       }
-      TreeElement *te_member = add_element(
-          &te_group->subtree,
-          reinterpret_cast<ID *>(member->object),
-          nullptr,
-          te_group,
-          TSE_SOME_ID,
-          0,
-          false);
-      if (te_member) {
-        te_member->directdata = base;
+
+      /* Collect and sort children by sdf_index */
+      Vector<std::pair<Object *, Base *>> children;
+      for (Base &cbase : *BKE_view_layer_object_bases_get(view_layer_)) {
+        Object *cob = cbase.object;
+        if (cob->type != OB_SDF || cob->parent != ob) {
+          continue;
+        }
+        const SDF *csdf = reinterpret_cast<const SDF *>(cob->data);
+        if (csdf && csdf->sdf_type == SDF_TYPE_GROUP) {
+          continue;
+        }
+        children.append({cob, &cbase});
+      }
+      std::sort(children.begin(), children.end(),
+                [](const auto &a, const auto &b) {
+                  return sdf_sort_index(a.first) < sdf_sort_index(b.first);
+                });
+      for (auto &[cob, cbase] : children) {
+        TreeElement *te_member = add_element(
+            &te_group->subtree,
+            reinterpret_cast<ID *>(cob),
+            nullptr,
+            te_group,
+            TSE_SOME_ID,
+            0,
+            false);
+        if (te_member) {
+          te_member->directdata = cbase;
+        }
+      }
+    }
+    else {
+      TreeElement *te_obj = add_element(
+          &tree, reinterpret_cast<ID *>(ob), nullptr, parent, TSE_SOME_ID, 0, false);
+      if (te_obj) {
+        te_obj->directdata = base;
       }
     }
   }

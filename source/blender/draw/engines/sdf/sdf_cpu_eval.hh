@@ -79,40 +79,31 @@ inline float sdTorus(float3 p, float2 t)
 
 inline float evalPrimitive(const SDFObjectGPU &obj, float3 p)
 {
+  /* sdf_size.xyz = pre-subtracted (size - bevel), sdf_size.w = effective bevel */
   float3 size(obj.sdf_size);
-  float min_dim = std::min(size.x, std::min(size.y, size.z));
-  float bevel = std::max(obj.bevel, std::min(0.005f, min_dim * 0.5f));
+  float bevel = obj.sdf_size.w;
 
+  /* size is already (raw_size - bevel) clamped to 0.001 */
   float dist;
   switch (obj.sdf_type) {
     case 1: { /* SPHERE */
-      float3 r = size - float3(bevel);
-      r = math::max(r, float3(0.001f));
-      dist = sdSphere(p, r.x);
+      dist = sdSphere(p, size.x);
       break;
     }
     case 2: { /* CYLINDER */
-      float3 cs = size - float3(bevel);
-      cs = math::max(cs, float3(0.001f));
-      dist = sdCylinder(p, cs);
+      dist = sdCylinder(p, size);
       break;
     }
     case 3: { /* CONE */
-      float cr = std::max(size.x - bevel, 0.001f);
-      float ch = std::max(size.y - bevel, 0.001f);
-      dist = sdCone(p, cr, ch);
+      dist = sdCone(p, size.x, size.y);
       break;
     }
     case 4: { /* CAPSULE */
-      float3 cs = size - float3(bevel);
-      cs = math::max(cs, float3(0.001f));
-      dist = sdCapsule(p, cs);
+      dist = sdCapsule(p, size);
       break;
     }
     case 5: { /* TORUS */
-      float major = std::max(size.x - bevel, 0.001f);
-      float minor = std::max(size.y - bevel, 0.001f);
-      dist = sdTorus(p, float2(major, minor));
+      dist = sdTorus(p, float2(size.x, size.y));
       break;
     }
     default: { /* BOX */

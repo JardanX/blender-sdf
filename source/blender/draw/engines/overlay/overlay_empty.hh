@@ -48,6 +48,7 @@ class Empties : Overlay {
     EmptyInstanceBuf cone_buf = {selection_type_, "cone_buf"};
     EmptyInstanceBuf arrows_buf = {selection_type_, "arrows_buf"};
     EmptyInstanceBuf image_buf = {selection_type_, "image_buf"};
+    EmptyInstanceBuf filled_circle_buf = {selection_type_, "filled_circle_buf"};
   } call_buffers_;
 
   View::OffsetData offset_data_;
@@ -55,6 +56,15 @@ class Empties : Overlay {
 
  public:
   Empties(const SelectionType selection_type) : call_buffers_{selection_type} {};
+
+  void object_sync_direct(const select::ID select_id,
+                          const float4x4 &matrix,
+                          const float draw_size,
+                          const char empty_drawtype,
+                          const float4 &color)
+  {
+    object_sync(select_id, matrix, draw_size, empty_drawtype, color, call_buffers_);
+  }
 
   void begin_sync(Resources &res, const State &state) final
   {
@@ -108,6 +118,7 @@ class Empties : Overlay {
     call_buffers.cone_buf.clear();
     call_buffers.arrows_buf.clear();
     call_buffers.image_buf.clear();
+    call_buffers.filled_circle_buf.clear();
   }
 
   void object_sync(Manager &manager,
@@ -164,6 +175,9 @@ class Empties : Overlay {
       case OB_ARROWS:
         call_buffers.arrows_buf.append(data, select_id);
         break;
+      case OB_EMPTY_CIRCLE_FILLED:
+        call_buffers.filled_circle_buf.append(data, select_id);
+        break;
     }
   }
 
@@ -197,6 +211,14 @@ class Empties : Overlay {
     call_buffers.cone_buf.end_sync(ps, res.shapes.empty_cone.get());
     call_buffers.arrows_buf.end_sync(ps, res.shapes.arrows.get());
     call_buffers.image_buf.end_sync(ps, res.shapes.quad_wire.get());
+
+    /* SDF group empties: draw on top (no depth test) */
+    ps.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_WRITE_DEPTH,
+                 state.clipping_plane_count);
+    ps.shader_set(res.shaders->extra_shape.get());
+    ps.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+    ps.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+    call_buffers.filled_circle_buf.end_sync(ps, res.shapes.filled_circle.get());
   }
 
   void pre_draw(Manager &manager, View &view) final

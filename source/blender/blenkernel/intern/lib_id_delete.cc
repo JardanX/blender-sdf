@@ -29,7 +29,6 @@
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
-#include "BKE_sdf_group.hh"
 #include "BKE_lib_override.hh"
 #include "BKE_lib_remap.hh"
 #include "BKE_library.hh"
@@ -371,11 +370,6 @@ static size_t id_delete(Main *bmain, Set<ID *> &ids_to_delete, const int extra_r
       id_remapper,
       (ID_REMAP_FORCE_INTERNAL_RUNTIME_POINTERS | ID_REMAP_SKIP_USER_CLEAR));
   cleanup_ids.clear();
-
-  /* Clean up SDFGroup members whose object was just deleted.  The remap above
-   * should have nullified the member->object pointers; this removes the zombie
-   * member structs so they don't accumulate. */
-  BKE_sdf_groups_cleanup_all_null_members(bmain);
 
   /* Now we can safely mark that ID as not being in Main database anymore. */
   /* NOTE: This needs to be done in a separate loop than above, otherwise some user-counts of

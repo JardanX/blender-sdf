@@ -370,6 +370,7 @@ class ShapeCache {
   BatchPtr circle;
   BatchPtr empty_sphere;
   BatchPtr empty_cone;
+  BatchPtr filled_circle;
   BatchPtr cylinder;
   BatchPtr capsule_body;
   BatchPtr capsule_cap;
@@ -544,6 +545,7 @@ class ShaderModule {
   StaticShader depth_pointcloud = shader_selectable("overlay_depth_pointcloud");
   StaticShader extra_shape = shader_selectable("overlay_extra");
   StaticShader extra_point = shader_selectable("overlay_extra_point");
+  StaticShader sdf_group_point = shader_selectable("overlay_sdf_group_point");
   StaticShader extra_wire = shader_selectable("overlay_extra_wire");
   StaticShader extra_wire_object = shader_selectable("overlay_extra_wire_object");
   StaticShader extra_loose_points = shader_selectable("overlay_extra_loose_point");
@@ -722,6 +724,7 @@ struct Resources : public select::SelectMap {
     shaders->extra_ground_line.ensure_compile_async();
     shaders->extra_loose_points.ensure_compile_async();
     shaders->extra_point.ensure_compile_async();
+    shaders->sdf_group_point.ensure_compile_async();
     shaders->extra_shape.ensure_compile_async();
     shaders->extra_wire_object.ensure_compile_async();
     shaders->extra_wire.ensure_compile_async();

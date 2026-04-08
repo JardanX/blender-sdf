@@ -10,7 +10,6 @@
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
@@ -37,7 +36,6 @@
 #include "BKE_main.hh"
 #include "BKE_report.hh"
 #include "BKE_sdf.hh"
-#include "BKE_sdf_group.hh"
 
 #include "BLT_translation.hh"
 
@@ -74,24 +72,19 @@
 
 #include "sdf_meshing.hh"
 
-namespace blender::ed::object {
+#include "BLI_fileops.h"
+#include "BLI_path_utils.hh"
 
-static void remove_from_current_sdf_group(Object *ob)
-{
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  if (!sdf || !sdf->sdf_group) return;
-  SDFGroup *old_group = sdf->sdf_group;
-  SDFGroupMember *member_next;
-  for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
-       member; member = member_next)
-  {
-    member_next = member->next;
-    if (member->object == ob) {
-      BKE_sdf_group_member_remove(old_group, member);
-      break;
-    }
-  }
-}
+#include "BKE_appdir.hh"
+
+namespace blender::draw::sdf {
+void sdf_profile_request();
+bool sdf_profile_is_ready();
+bool sdf_profile_is_pending();
+std::string sdf_profile_format_text();
+}  // namespace blender::draw::sdf
+
+namespace blender::ed::object {
 
 /* SDF Add */
 
@@ -131,15 +124,7 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
     name = sdf_type_name(type);
   }
 
-  /* Capture active group before add_type changes the active object */
   Main *bmain = CTX_data_main(C);
-  SDFGroup *active_group = nullptr;
-  {
-    Object *active = CTX_data_active_object(C);
-    if (active && active->type == OB_SDF && active->data) {
-      active_group = id_cast<SDF *>(active->data)->sdf_group;
-    }
-  }
 
   Object *ob = add_type(C, OB_SDF, name, loc, rot, false, local_view_bits);
   if (ob && ob->data) {
@@ -178,14 +163,6 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         break;
     }
 
-    SDFGroup *group = active_group;
-    if (!group) {
-      group = static_cast<SDFGroup *>(bmain->sdf_groups.last);
-    }
-    if (!group) {
-      group = BKE_sdf_group_add(bmain, "SDF Group");
-    }
-    BKE_sdf_group_member_add(group, ob);
   }
   return ob;
 }
@@ -212,80 +189,6 @@ void OBJECT_OT_sdf_add(wmOperatorType *ot)
                SDF_TYPE_BOX,
                "Type",
                "SDF primitive type");
-}
-
-/* SDF Group Operators */
-
-static wmOperatorStatus object_sdf_group_add_exec(bContext *C, wmOperator * /*op*/)
-{
-  Main *bmain = CTX_data_main(C);
-  SDFGroup *group = BKE_sdf_group_add(bmain, "SDF Group");
-
-  CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
-    if (ob->type == OB_SDF && ob->data) {
-      remove_from_current_sdf_group(ob);
-      BKE_sdf_group_member_add(group, ob);
-    }
-  }
-  CTX_DATA_END;
-
-  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_sdf_group_add(wmOperatorType *ot)
-{
-  ot->name = "Add SDF Group";
-  ot->description = "Create a new SDF group, optionally adding selected SDF objects";
-  ot->idname = "OBJECT_OT_sdf_group_add";
-
-  ot->exec = object_sdf_group_add_exec;
-  ot->poll = ED_operator_objectmode;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-}
-
-static wmOperatorStatus object_sdf_group_assign_exec(bContext *C, wmOperator *op)
-{
-  Main *bmain = CTX_data_main(C);
-  const int group_index = RNA_int_get(op->ptr, "group_index");
-
-  SDFGroup *target = static_cast<SDFGroup *>(BLI_findlink(&bmain->sdf_groups, group_index));
-  if (!target) {
-    return OPERATOR_CANCELLED;
-  }
-
-  CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
-    if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = id_cast<SDF *>(ob->data);
-      if (sdf->sdf_group != target) {
-        remove_from_current_sdf_group(ob);
-        BKE_sdf_group_member_add(target, ob);
-      }
-    }
-  }
-  CTX_DATA_END;
-
-  DEG_id_tag_update(&target->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_sdf_group_assign(wmOperatorType *ot)
-{
-  ot->name = "Assign to SDF Group";
-  ot->description = "Assign selected SDF objects to an SDF group";
-  ot->idname = "OBJECT_OT_sdf_group_assign";
-
-  ot->exec = object_sdf_group_assign_exec;
-  ot->poll = ED_operator_objectmode;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  RNA_def_int(ot->srna, "group_index", 0, 0, INT_MAX, "Group Index", "Index of target group", 0, 100);
 }
 
 /* SDF CSG / Blend Cycle Operators */
@@ -350,356 +253,6 @@ void OBJECT_OT_sdf_set_blend(wmOperatorType *ot)
 
   RNA_def_string(ot->srna, "object_name", nullptr, MAX_ID_NAME - 2, "Object Name", "");
   RNA_def_int(ot->srna, "blend_type", 0, 0, 10, "Blend Type", "", 0, 10);
-}
-
-/* Resolve SDFGroup: operator prop -> pinned -> active object */
-static SDFGroup *sdf_group_from_operator(bContext *C, wmOperator *op)
-{
-  Main *bmain = CTX_data_main(C);
-
-  char group_name[MAX_ID_NAME - 2];
-  RNA_string_get(op->ptr, "group_name", group_name);
-  if (group_name[0] != '\0') {
-    ID *id = BKE_libblock_find_name(bmain, ID_SG, group_name);
-    if (id) {
-      return (SDFGroup *)id;
-    }
-  }
-
-  SpaceProperties *sbuts = CTX_wm_space_properties(C);
-  if (sbuts && sbuts->pinid && GS(sbuts->pinid->name) == ID_SG) {
-    return (SDFGroup *)sbuts->pinid;
-  }
-
-  Object *ob = CTX_data_active_object(C);
-  if (ob && ob->type == OB_SDF && ob->data) {
-    return id_cast<SDF *>(ob->data)->sdf_group;
-  }
-
-  return nullptr;
-}
-
-static wmOperatorStatus object_sdf_group_remove_member_exec(bContext *C, wmOperator *op)
-{
-  const int member_index = RNA_int_get(op->ptr, "member_index");
-
-  SDFGroup *group = sdf_group_from_operator(C, op);
-  if (!group) {
-    return OPERATOR_CANCELLED;
-  }
-
-  SDFGroupMember *member = static_cast<SDFGroupMember *>(
-      BLI_findlink(&group->members, member_index));
-  if (!member) {
-    return OPERATOR_CANCELLED;
-  }
-
-  BKE_sdf_group_member_remove(group, member);
-
-  Main *bmain = CTX_data_main(C);
-  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
-  DEG_relations_tag_update(bmain);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_sdf_group_remove_member(wmOperatorType *ot)
-{
-  ot->name = "Remove from SDF Group";
-  ot->description = "Remove a member from its SDF group";
-  ot->idname = "OBJECT_OT_sdf_group_remove_member";
-
-  ot->exec = object_sdf_group_remove_member_exec;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  RNA_def_int(ot->srna, "member_index", 0, 0, INT_MAX, "Member Index", "Index of member to remove", 0, 100);
-  RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group");
-}
-
-static wmOperatorStatus object_sdf_group_reorder_exec(bContext *C, wmOperator *op)
-{
-  const int member_index = RNA_int_get(op->ptr, "member_index");
-  const int direction = RNA_int_get(op->ptr, "direction");
-
-  SDFGroup *group = sdf_group_from_operator(C, op);
-  if (!group) {
-    return OPERATOR_CANCELLED;
-  }
-
-  SDFGroupMember *member = static_cast<SDFGroupMember *>(
-      BLI_findlink(&group->members, member_index));
-  if (!member) {
-    return OPERATOR_CANCELLED;
-  }
-
-  BKE_sdf_group_member_move(group, member, direction);
-
-  Main *bmain = CTX_data_main(C);
-  DEG_id_tag_update(&group->id, ID_RECALC_GEOMETRY);
-  DEG_relations_tag_update(bmain);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_sdf_group_reorder(wmOperatorType *ot)
-{
-  ot->name = "Reorder in SDF Group";
-  ot->description = "Move member up or down within its SDF group";
-  ot->idname = "OBJECT_OT_sdf_group_reorder";
-
-  ot->exec = object_sdf_group_reorder_exec;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  RNA_def_int(ot->srna, "member_index", 0, 0, INT_MAX, "Member Index", "Index of member to move", 0, 100);
-  RNA_def_int(ot->srna, "direction", -1, -1, 1, "Direction", "Move direction (-1=up, 1=down)", -1, 1);
-  RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group");
-}
-
-/* Move to SDF Group */
-
-static wmOperatorStatus move_to_sdf_group_exec(bContext *C, wmOperator *op)
-{
-  Main *bmain = CTX_data_main(C);
-  const bool is_new = RNA_boolean_get(op->ptr, "is_new");
-
-  SDFGroup *target = nullptr;
-
-  if (is_new) {
-    char name[MAX_ID_NAME - 2];
-    RNA_string_get(op->ptr, "new_group_name", name);
-    target = BKE_sdf_group_add(bmain, name[0] ? name : "SDF Group");
-  }
-  else {
-    char group_name[MAX_ID_NAME - 2];
-    RNA_string_get(op->ptr, "group_name", group_name);
-    if (group_name[0] == '\0') {
-      BKE_report(op->reports, RPT_ERROR, "No SDF group selected");
-      return OPERATOR_CANCELLED;
-    }
-    ID *id = BKE_libblock_find_name(bmain, ID_SG, group_name);
-    if (!id) {
-      BKE_report(op->reports, RPT_ERROR, "SDF group not found");
-      return OPERATOR_CANCELLED;
-    }
-    target = (SDFGroup *)id;
-  }
-
-  int moved_count = 0;
-  CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
-    if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = id_cast<SDF *>(ob->data);
-      if (sdf->sdf_group != target) {
-        remove_from_current_sdf_group(ob);
-        BKE_sdf_group_member_add(target, ob);
-        moved_count++;
-      }
-    }
-  }
-  CTX_DATA_END;
-
-  if (moved_count == 0) {
-    BKE_report(op->reports, RPT_WARNING, "No SDF objects were moved");
-    return OPERATOR_CANCELLED;
-  }
-
-  DEG_id_tag_update(&target->id, ID_RECALC_GEOMETRY);
-  DEG_relations_tag_update(bmain);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_LAYER, nullptr);
-
-  BKE_reportf(
-      op->reports, RPT_INFO, "Moved %d object(s) to %s", moved_count, target->id.name + 2);
-
-  return OPERATOR_FINISHED;
-}
-
-static wmOperatorStatus move_to_sdf_group_invoke(bContext *C,
-                                                  wmOperator *op,
-                                                  const wmEvent * /*event*/)
-{
-  if (!RNA_boolean_get(op->ptr, "is_new")) {
-    return move_to_sdf_group_exec(C, op);
-  }
-
-  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "new_group_name");
-  if (!RNA_property_is_set(op->ptr, prop)) {
-    RNA_property_string_set(op->ptr, prop, "SDF Group");
-    return WM_operator_props_dialog_popup(
-        C, op, 200, IFACE_("Move to New SDF Group"), IFACE_("Create"));
-  }
-
-  return move_to_sdf_group_exec(C, op);
-}
-
-void OBJECT_OT_move_to_sdf_group(wmOperatorType *ot)
-{
-  PropertyRNA *prop;
-
-  ot->name = "Move to SDF Group";
-  ot->description = "Move selected SDF objects to an SDF group";
-  ot->idname = "OBJECT_OT_move_to_sdf_group";
-
-  ot->exec = move_to_sdf_group_exec;
-  ot->invoke = move_to_sdf_group_invoke;
-  ot->poll = ED_operator_objectmode;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  prop = RNA_def_string(ot->srna,
-                        "group_name",
-                        nullptr,
-                        MAX_ID_NAME - 2,
-                        "Group Name",
-                        "Name of the target SDF group");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
-
-  prop = RNA_def_boolean(ot->srna, "is_new", false, "New", "Move objects to a new SDF group");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
-
-  prop = RNA_def_string(ot->srna,
-                        "new_group_name",
-                        nullptr,
-                        MAX_ID_NAME - 2,
-                        "Name",
-                        "Name of the newly created SDF group");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
-  ot->prop = prop;
-}
-
-/* SDF Group Reorder */
-
-static wmOperatorStatus object_sdf_group_reorder_group_exec(bContext *C, wmOperator *op)
-{
-  Main *bmain = CTX_data_main(C);
-  char group_name[MAX_ID_NAME - 2];
-  RNA_string_get(op->ptr, "group_name", group_name);
-  const int direction = RNA_int_get(op->ptr, "direction");
-
-  ID *id = BKE_libblock_find_name(bmain, ID_SG, group_name);
-  if (!id) {
-    return OPERATOR_CANCELLED;
-  }
-  SDFGroup *group = (SDFGroup *)id;
-
-  if (direction == -1) {
-    SDFGroup *prev = (SDFGroup *)group->id.prev;
-    if (prev) {
-      BLI_remlink(&bmain->sdf_groups, group);
-      BLI_insertlinkbefore(&bmain->sdf_groups, prev, group);
-    }
-  }
-  else if (direction == 1) {
-    SDFGroup *next = (SDFGroup *)group->id.next;
-    if (next) {
-      BLI_remlink(&bmain->sdf_groups, group);
-      BLI_insertlinkafter(&bmain->sdf_groups, next, group);
-    }
-  }
-
-  int i = 0;
-  for (SDFGroup *g = reinterpret_cast<SDFGroup *>(bmain->sdf_groups.first); g; g = reinterpret_cast<SDFGroup *>(g->id.next)) {
-    g->group_order = i++;
-  }
-
-  DEG_relations_tag_update(bmain);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
-  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_sdf_group_reorder_group(wmOperatorType *ot)
-{
-  ot->name = "Reorder SDF Group";
-  ot->description = "Move an SDF group up or down relative to other groups";
-  ot->idname = "OBJECT_OT_sdf_group_reorder_group";
-
-  ot->exec = object_sdf_group_reorder_group_exec;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  RNA_def_string(ot->srna, "group_name", nullptr, MAX_ID_NAME - 2, "Group Name", "Name of the SDF group to move");
-  RNA_def_int(ot->srna, "direction", -1, -1, 1, "Direction", "Move direction (-1=up, 1=down)", -1, 1);
-}
-
-/* SDF Group Cycle */
-
-static bool sdf_group_cycle_poll(bContext *C)
-{
-  Object *ob = CTX_data_active_object(C);
-  if (!ob || ob->type != OB_SDF || !ob->data) {
-    return false;
-  }
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  return sdf->sdf_group != nullptr;
-}
-
-static wmOperatorStatus object_sdf_group_cycle_exec(bContext *C, wmOperator *op)
-{
-  Scene *scene = CTX_data_scene(C);
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-  const int direction = RNA_int_get(op->ptr, "direction");
-
-  Object *ob = CTX_data_active_object(C);
-  if (!ob || ob->type != OB_SDF || !ob->data) {
-    return OPERATOR_CANCELLED;
-  }
-
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  SDFGroup *group = sdf->sdf_group;
-  if (!group) {
-    return OPERATOR_CANCELLED;
-  }
-
-  SDFGroupMember *current = BKE_sdf_group_member_find_by_object(group, ob);
-  if (!current) {
-    return OPERATOR_CANCELLED;
-  }
-
-  SDFGroupMember *target = (direction > 0) ? current->next : current->prev;
-  if (!target) {
-    target = (direction > 0) ? static_cast<SDFGroupMember *>(group->members.first)
-                             : static_cast<SDFGroupMember *>(group->members.last);
-  }
-  if (!target || !target->object || target == current) {
-    return OPERATOR_CANCELLED;
-  }
-
-  BKE_view_layer_synced_ensure(scene, view_layer);
-  Base *base_new = BKE_view_layer_base_find(view_layer, target->object);
-  if (!base_new) {
-    return OPERATOR_CANCELLED;
-  }
-
-  base_deselect_all(scene, view_layer, nullptr, SEL_DESELECT);
-  base_select(base_new, BA_SELECT);
-  base_activate(C, base_new);
-
-  DEG_id_tag_update(&scene->id, ID_RECALC_SELECT);
-  WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
-  ED_outliner_select_sync_from_object_tag(C);
-
-  return OPERATOR_FINISHED;
-}
-
-void OBJECT_OT_sdf_group_cycle(wmOperatorType *ot)
-{
-  ot->name = "Cycle SDF Group Member";
-  ot->description = "Cycle through SDF group members";
-  ot->idname = "OBJECT_OT_sdf_group_cycle";
-
-  ot->exec = object_sdf_group_cycle_exec;
-  ot->poll = sdf_group_cycle_poll;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  RNA_def_int(ot->srna, "direction", 1, -1, 1, "Direction", "Cycle direction (-1=previous, 1=next)", -1, 1);
 }
 
 /* SDF Blend / Distance Adjust (Modal) */
@@ -1208,6 +761,116 @@ void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot)
               "Voxels per Blender unit",
               1,
               256);
+}
+
+/* -------------------------------------------------------------------- */
+/* SDF Frame Profile Operator */
+
+static void sdf_profile_tag_3d_redraw(bContext *C)
+{
+  /* Force the 3D viewport to redraw so the SDF draw engine runs */
+  ARegion *region = CTX_wm_region(C);
+  if (region) {
+    ED_region_tag_redraw(region);
+  }
+  /* Also notify globally in case region isn't the 3D view */
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+}
+
+static wmOperatorStatus sdf_profile_frame_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent * /*event*/)
+{
+  blender::draw::sdf::sdf_profile_request();
+
+  sdf_profile_tag_3d_redraw(C);
+
+  wmWindow *win = CTX_wm_window(C);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  op->customdata = WM_event_timer_add(wm, win, TIMER, 0.016);
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus sdf_profile_frame_modal(bContext *C,
+                                                 wmOperator *op,
+                                                 const wmEvent *event)
+{
+  if (event->type != TIMER) {
+    return OPERATOR_PASS_THROUGH;
+  }
+
+  if (blender::draw::sdf::sdf_profile_is_pending()) {
+    sdf_profile_tag_3d_redraw(C);
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+  wmWindow *win = CTX_wm_window(C);
+  WM_event_timer_remove(wm, win, static_cast<wmTimer *>(op->customdata));
+  op->customdata = nullptr;
+
+  if (!blender::draw::sdf::sdf_profile_is_ready()) {
+    BKE_report(op->reports, RPT_WARNING, "SDF profile: no data collected");
+    return OPERATOR_CANCELLED;
+  }
+
+  std::string text = blender::draw::sdf::sdf_profile_format_text();
+
+  char filepath[FILE_MAX];
+  const char *basepath = BKE_main_blendfile_path(CTX_data_main(C));
+  if (basepath[0] != '\0') {
+    BLI_path_split_dir_part(basepath, filepath, sizeof(filepath));
+  }
+  else {
+    BLI_path_split_dir_part(BKE_tempdir_session(), filepath, sizeof(filepath));
+  }
+  BLI_path_append(filepath, sizeof(filepath), "sdf_profile.txt");
+
+  FILE *f = BLI_fopen(filepath, "w");
+  if (f) {
+    fputs(text.c_str(), f);
+    fclose(f);
+  }
+
+  /* Print full profile to console */
+  printf("\n%s\n", text.c_str());
+
+  /* Show save path prominently */
+  if (f) {
+    printf(">>> Profile saved to: %s\n\n", filepath);
+    BKE_reportf(op->reports, RPT_INFO, "SDF profile saved: %s", filepath);
+  }
+  else {
+    BKE_reportf(op->reports, RPT_WARNING, "Failed to write: %s", filepath);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static void sdf_profile_frame_cancel(bContext *C, wmOperator *op)
+{
+  if (op->customdata) {
+    wmWindowManager *wm = CTX_wm_manager(C);
+    wmWindow *win = CTX_wm_window(C);
+    WM_event_timer_remove(wm, win, static_cast<wmTimer *>(op->customdata));
+    op->customdata = nullptr;
+  }
+}
+
+void OBJECT_OT_sdf_profile_frame(wmOperatorType *ot)
+{
+  ot->name = "SDF Profile Frame";
+  ot->description = "Profile one SDF render frame with per-pass GPU timing and export to file";
+  ot->idname = "OBJECT_OT_sdf_profile_frame";
+
+  ot->invoke = sdf_profile_frame_invoke;
+  ot->modal = sdf_profile_frame_modal;
+  ot->cancel = sdf_profile_frame_cancel;
+  ot->poll = ED_operator_objectmode;
+
+  ot->flag = OPTYPE_REGISTER;
 }
 
 }  // namespace blender::ed::object

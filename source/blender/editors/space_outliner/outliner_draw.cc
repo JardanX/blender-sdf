@@ -15,7 +15,6 @@
 #include "DNA_lightprobe_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_text_types.h"
@@ -2550,8 +2549,6 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       return ICON_OUTLINER_DATA_VOLUME;
     case ID_SF:
       return ICON_SDF_DATA;
-    case ID_SG:
-      return ICON_SDF_GROUP;
     case ID_LI:
       if (id->tag & ID_TAG_MISSING) {
         return ICON_LIBRARY_DATA_BROKEN;
@@ -3507,37 +3504,11 @@ static void outliner_draw_tree_element(ui::Block *block,
       }
       text_color[3] *= alpha_fac;
 
-      char sdf_prefixed_name[256];
-      const char *display_name = te->name;
-      if (tselem->type == TSE_SOME_ID && te->idcode == ID_OB && te->parent) {
-        TreeStoreElem *parent_tselem = TREESTORE(te->parent);
-        if (parent_tselem->type == TSE_SOME_ID && GS(parent_tselem->id->name) == ID_SG) {
-          int pos = BLI_findindex(&te->parent->subtree, te);
-          BLI_snprintf(sdf_prefixed_name, sizeof(sdf_prefixed_name), "%d. %s", pos + 1, te->name);
-          display_name = sdf_prefixed_name;
-        }
-      }
-      else if (tselem->type == TSE_SOME_ID && te->idcode == ID_SG) {
-      }
-
       ui::fontstyle_draw_simple(
-          fstyle, startx + offsx, *starty + 5 * ufac, display_name, text_color);
+          fstyle, startx + offsx, *starty + 5 * ufac, te->name, text_color);
     }
 
-    {
-      const char *width_name = te->name;
-      char sdf_prefixed_name2[256];
-      if (tselem->type == TSE_SOME_ID && te->idcode == ID_OB && te->parent) {
-        TreeStoreElem *parent_tselem2 = TREESTORE(te->parent);
-        if (parent_tselem2->type == TSE_SOME_ID && GS(parent_tselem2->id->name) == ID_SG) {
-          int pos = BLI_findindex(&te->parent->subtree, te);
-          BLI_snprintf(
-              sdf_prefixed_name2, sizeof(sdf_prefixed_name2), "%d. %s", pos + 1, te->name);
-          width_name = sdf_prefixed_name2;
-        }
-      }
-      offsx += int(UI_UNIT_X + ui::fontstyle_string_width(fstyle, width_name));
-    }
+    offsx += int(UI_UNIT_X + ui::fontstyle_string_width(fstyle, te->name));
 
     /* Closed item, we draw the icons, not when it's a scene, or master-server list though. */
     if (!TSELEM_OPEN(tselem, space_outliner)) {

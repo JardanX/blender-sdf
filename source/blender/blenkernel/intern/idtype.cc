@@ -97,7 +97,6 @@ static void id_type_init()
   INIT_TYPE(ID_VO);
   INIT_TYPE(ID_GP);
   INIT_TYPE(ID_SF);
-  INIT_TYPE(ID_SG);
 
   /* Special case. */
   BLI_assert(IDType_ID_LINK_PLACEHOLDER.main_listbase_index == INDEX_ID_NULL);
@@ -285,7 +284,6 @@ int BKE_idtype_idcode_to_index(const short idcode)
     CASE_IDINDEX(SCE);
     CASE_IDINDEX(SCR);
     CASE_IDINDEX(SF);
-    CASE_IDINDEX(SG);
     CASE_IDINDEX(SPK);
     CASE_IDINDEX(SO);
     CASE_IDINDEX(TE);
@@ -345,7 +343,6 @@ int BKE_idtype_idfilter_to_index(const uint64_t id_filter)
     CASE_IDINDEX(SCE);
     CASE_IDINDEX(SCR);
     CASE_IDINDEX(SF);
-    CASE_IDINDEX(SG);
     CASE_IDINDEX(SPK);
     CASE_IDINDEX(SO);
     CASE_IDINDEX(TE);

@@ -411,7 +411,6 @@ struct Main : NonCopyable, NonMovable {
   ListBaseT<PointCloud> pointclouds = {};
   ListBaseT<Volume> volumes = {};
   ListBaseT<SDF> sdfs = {};
-  ListBase sdf_groups = {};
 
   /**
    * Must be generated, used and freed by same code - never assume this is valid data unless you

@@ -10,7 +10,6 @@
 
 #include "DNA_material_types.h"
 #include "DNA_object_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 
 #include "BLI_listbase.h"
@@ -66,10 +65,6 @@ static void sdf_copy_data(Main *bmain,
   sdf_dst->runtime->proxy_batch = nullptr;
   sdf_dst->runtime->proxy_hash = 0;
 
-  /* Copy is not a member of any group — clear stale pointer */
-  sdf_dst->sdf_group = nullptr;
-  sdf_dst->group_order = 0;
-
   if (bmain) {
     sdf_dst->sdf_index = BKE_sdf_next_index(bmain);
   }
@@ -95,8 +90,6 @@ static void sdf_foreach_id(ID *id, LibraryForeachIDData *data)
   for (int i = 0; i < sdf->totcol; i++) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->mat[i], IDWALK_CB_USER);
   }
-  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->sdf_group, IDWALK_CB_USER);
-
   for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod; mod = mod->next) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mod->mirror_ob, IDWALK_CB_NOP);
   }
@@ -130,7 +123,7 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
 IDTypeInfo IDType_ID_SF = {
     /*id_code*/ SDF::id_type,
     /*id_filter*/ FILTER_ID_SF,
-    /*dependencies_id_types*/ FILTER_ID_MA | FILTER_ID_SG,
+    /*dependencies_id_types*/ FILTER_ID_MA,
     /*main_listbase_index*/ INDEX_ID_SF,
     /*struct_size*/ sizeof(SDF),
     /*name*/ "SDF",

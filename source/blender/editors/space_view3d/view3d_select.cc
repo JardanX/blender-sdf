@@ -569,6 +569,11 @@ static void do_lasso_tag_pose(const ViewContext *vc, const Span<int2> mcoords)
 
 static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
 {
+  if (sdf->sdf_type == SDF_TYPE_GROUP) {
+    r_min[0] = r_min[1] = r_min[2] = -0.5f;
+    r_max[0] = r_max[1] = r_max[2] = 0.5f;
+    return;
+  }
   const float *sz = sdf->size;
   float ext[3] = {sz[0], sz[1], sz[2]};
   switch (sdf->sdf_type) {
@@ -2566,19 +2571,32 @@ static Base *mouse_select_object_center(const ViewContext *vc, Base *startbase, 
   Base *base = startbase;
   while (base) {
     if (BASE_SELECTABLE(v3d, base)) {
-      float screen_co[2];
-      if (ED_view3d_project_float_global(region,
-                                         base->object->object_to_world().location(),
-                                         screen_co,
-                                         V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
-      {
-        float dist_test = len_manhattan_v2v2(mval_fl, screen_co);
-        if (base == oldbasact) {
-          dist_test += penalty_dist;
+      /* SDF: allow center picking for group empties and group children
+       * (children of subtract groups have no gbuffer pixels). */
+      bool skip = false;
+      if (base->object->type == OB_SDF) {
+        const SDF *sdf = reinterpret_cast<const SDF *>(base->object->data);
+        bool is_group = sdf && sdf->sdf_type == SDF_TYPE_GROUP;
+        bool is_group_child = base->object->parent && base->object->parent->type == OB_SDF;
+        if (!is_group && !is_group_child) {
+          skip = true;
         }
-        if (dist_test < dist) {
-          dist = dist_test;
-          basact = base;
+      }
+      if (!skip) {
+        float screen_co[2];
+        if (ED_view3d_project_float_global(region,
+                                           base->object->object_to_world().location(),
+                                           screen_co,
+                                           V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
+        {
+          float dist_test = len_manhattan_v2v2(mval_fl, screen_co);
+          if (base == oldbasact) {
+            dist_test += penalty_dist;
+          }
+          if (dist_test < dist) {
+            dist = dist_test;
+            basact = base;
+          }
         }
       }
     }
@@ -2917,6 +2935,8 @@ static bool ed_object_select_pick(bContext *C,
                                                           nullptr) :
                                  nullptr;
     }
+
+    /* Group point selection handled by GPU buffer (DEPTH_ALWAYS) */
 
     /* See comment for `has_pose_old`, the same rationale applies here. */
     const bool has_pose_new = (basact &&
@@ -3673,9 +3693,6 @@ static wmOperatorStatus view3d_select_exec(bContext *C, wmOperator *op)
       continue;
     }
     SpaceProperties *sbuts = static_cast<SpaceProperties *>(area.spacedata.first);
-    if (sbuts->pinid && GS(sbuts->pinid->name) == ID_SG) {
-      sbuts->pinid = nullptr;
-    }
   }
 
   Scene *scene = CTX_data_scene(C);

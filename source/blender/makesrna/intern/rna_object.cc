@@ -116,6 +116,7 @@ const EnumPropertyItem rna_enum_object_empty_drawtype_items[] = {
     {OB_EMPTY_SPHERE, "SPHERE", ICON_SPHERE, "Sphere", ""},
     {OB_EMPTY_CONE, "CONE", ICON_CONE, "Cone", ""},
     {OB_EMPTY_IMAGE, "IMAGE", ICON_FILE_IMAGE, "Image", ""},
+    {OB_EMPTY_CIRCLE_FILLED, "CIRCLE_FILLED", ICON_DOT, "Circle Filled", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

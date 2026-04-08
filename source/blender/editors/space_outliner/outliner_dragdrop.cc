@@ -13,7 +13,6 @@
 #include "DNA_collection_types.h"
 #include "DNA_material_types.h"
 #include "DNA_object_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
 
@@ -30,7 +29,6 @@
 #include "BKE_material.hh"
 #include "BKE_object.hh"
 #include "BKE_report.hh"
-#include "BKE_sdf_group.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
@@ -1603,15 +1601,25 @@ void OUTLINER_OT_item_drag_drop(wmOperatorType *ot)
 /** \name SDF Group Drop Operator
  * \{ */
 
-struct SDFGroupDropTarget {
-  SDFGroup *group;
-  Object *member_ob;
+struct SDFDropTarget {
+  Object *group_empty;
+  Object *target_ob;
   TreeElementInsertType insert_type;
+  bool create_group;
 };
 
-static SDFGroupDropTarget sdf_group_drop_find(bContext *C, const int xy[2])
+static bool is_sdf_group_empty(Object *ob)
 {
-  SDFGroupDropTarget result = {nullptr, nullptr, TE_INSERT_INTO};
+  if (!ob || ob->type != OB_SDF || !ob->data) {
+    return false;
+  }
+  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+  return sdf->sdf_type == SDF_TYPE_GROUP;
+}
+
+static SDFDropTarget sdf_group_drop_find(bContext *C, const int xy[2])
+{
+  SDFDropTarget result = {nullptr, nullptr, TE_INSERT_INTO, false};
   TreeElementInsertType insert_type = TE_INSERT_INTO;
 
   TreeElement *te = outliner_drop_insert_find(C, xy, &insert_type);
@@ -1620,31 +1628,50 @@ static SDFGroupDropTarget sdf_group_drop_find(bContext *C, const int xy[2])
   }
 
   TreeStoreElem *tselem = TREESTORE(te);
-  if (!tselem->id) {
+
+  /* Drop on non-SDF element (e.g. Scene Collection) — ungroup target */
+  if (!tselem->id || GS(tselem->id->name) != ID_OB ||
+      ((Object *)tselem->id)->type != OB_SDF)
+  {
+    result.insert_type = TE_INSERT_AFTER;
     return result;
   }
 
-  /* Dropped on an SDF Group header */
-  if (GS(tselem->id->name) == ID_SG) {
-    result.group = (SDFGroup *)tselem->id;
+  Object *ob = (Object *)tselem->id;
+
+  /* Drop on a group empty */
+  if (is_sdf_group_empty(ob)) {
+    if (insert_type == TE_INSERT_INTO) {
+      result.group_empty = ob;
+      result.insert_type = insert_type;
+    }
+    else {
+      /* BEFORE/AFTER on a group empty = reorder groups */
+      result.target_ob = ob;
+      result.insert_type = insert_type;
+    }
+    return result;
+  }
+
+  /* Drop on an SDF that is a child of a group empty */
+  if (ob->parent && is_sdf_group_empty(ob->parent)) {
+    result.group_empty = ob->parent;
+    result.target_ob = ob;
+    result.insert_type = insert_type;
+    return result;
+  }
+
+  /* Drop on an ungrouped SDF — will create a new group */
+  if (insert_type == TE_INSERT_INTO) {
+    result.target_ob = ob;
+    result.create_group = true;
     result.insert_type = TE_INSERT_INTO;
     return result;
   }
 
-  /* Dropped on an SDF object that is a child of a group */
-  if (GS(tselem->id->name) == ID_OB) {
-    Object *ob = (Object *)tselem->id;
-    if (ob->type == OB_SDF && ob->data) {
-      SDF *sdf = id_cast<SDF *>(ob->data);
-      if (sdf->sdf_group) {
-        result.group = sdf->sdf_group;
-        result.member_ob = ob;
-        result.insert_type = insert_type;
-        return result;
-      }
-    }
-  }
-
+  /* BEFORE/AFTER on ungrouped SDF — reorder only (no grouping) */
+  result.target_ob = ob;
+  result.insert_type = insert_type;
   return result;
 }
 
@@ -1676,36 +1703,54 @@ static bool sdf_group_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
     return false;
   }
 
-  SDFGroupDropTarget target = sdf_group_drop_find(C, event->xy);
-  if (!target.group) {
+  SDFDropTarget target = sdf_group_drop_find(C, event->xy);
+
+  /* Allow drop on empty space if dragging a group child (ungroup) */
+  bool is_ungroup = (!target.group_empty && !target.target_ob &&
+                     ob->parent && is_sdf_group_empty(ob->parent));
+  if (!target.group_empty && !target.target_ob && !is_ungroup) {
     if (changed) {
       ED_region_tag_redraw_no_rebuild(region);
     }
     return false;
   }
 
-  /* Reorder within same group: must be dropping on a different member */
-  SDF *sdf_data = (ob->data && ob->type == OB_SDF) ? id_cast<SDF *>(ob->data) : nullptr;
-  if (sdf_data && sdf_data->sdf_group == target.group && !target.member_ob) {
+  /* Can't drop on self */
+  if (target.target_ob == ob) {
     if (changed) {
       ED_region_tag_redraw_no_rebuild(region);
     }
     return false;
   }
-  if (target.member_ob && target.member_ob == ob) {
-    if (changed) {
-      ED_region_tag_redraw_no_rebuild(region);
+
+  /* Group empties can only reorder, not create or join groups */
+  if (is_sdf_group_empty(ob)) {
+    if (target.create_group || target.group_empty) {
+      if (changed) {
+        ED_region_tag_redraw_no_rebuild(region);
+      }
+      return false;
     }
-    return false;
+  }
+
+  /* Same-group siblings: INTO means reorder (place after target) */
+  if (target.group_empty && target.target_ob &&
+      target.insert_type == TE_INSERT_INTO &&
+      ob->parent == target.group_empty)
+  {
+    target.insert_type = TE_INSERT_AFTER;
   }
 
   /* Highlight */
-  TreeElementInsertType insert_type = TE_INSERT_INTO;
-  TreeElement *te = outliner_drop_insert_find(C, event->xy, &insert_type);
+  TreeElementInsertType highlight_type = TE_INSERT_INTO;
+  TreeElement *te = outliner_drop_insert_find(C, event->xy, &highlight_type);
   if (te) {
     TreeStoreElem *tselem = TREESTORE(te);
-    if (target.member_ob) {
-      tselem->flag |= (insert_type == TE_INSERT_BEFORE) ? TSE_DRAG_BEFORE : TSE_DRAG_AFTER;
+    if (highlight_type == TE_INSERT_BEFORE) {
+      tselem->flag |= TSE_DRAG_BEFORE;
+    }
+    else if (highlight_type == TE_INSERT_AFTER) {
+      tselem->flag |= TSE_DRAG_AFTER;
     }
     else {
       tselem->flag |= TSE_DRAG_INTO;
@@ -1724,14 +1769,99 @@ static std::string sdf_group_drop_tooltip(bContext *C,
                                            const int xy[2],
                                            wmDropBox * /*drop*/)
 {
-  SDFGroupDropTarget target = sdf_group_drop_find(C, xy);
-  if (!target.group) {
-    return {};
+  SDFDropTarget target = sdf_group_drop_find(C, xy);
+  if (target.create_group) {
+    return TIP_("Create SDF Group");
   }
-  if (target.member_ob) {
+  if (target.group_empty && target.target_ob) {
     return TIP_("Reorder in SDF Group");
   }
-  return TIP_("Add to SDF Group");
+  if (target.group_empty) {
+    return TIP_("Add to SDF Group");
+  }
+  if (target.target_ob) {
+    return TIP_("Reorder SDF");
+  }
+  return {};
+}
+
+static void sdf_reindex_siblings(Scene *scene,
+                                 ViewLayer *view_layer,
+                                 Object *drag_ob,
+                                 Object *target_ob,
+                                 bool before,
+                                 Object *parent_filter)
+{
+  BKE_view_layer_synced_ensure(scene, view_layer);
+  Vector<Object *> siblings;
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+    Object *ob = base.object;
+    if (ob->type != OB_SDF || !ob->data) {
+      continue;
+    }
+    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+    if (parent_filter) {
+      /* Inside a group: children of this group (not sub-groups) */
+      if (ob->parent != parent_filter) continue;
+      if (sdf->sdf_type == SDF_TYPE_GROUP) continue;
+    }
+    else {
+      /* Top level: groups + ungrouped SDFs (not children of groups) */
+      bool is_grouped_child = ob->parent && is_sdf_group_empty(ob->parent);
+      if (is_grouped_child) continue;
+    }
+    siblings.append(ob);
+  }
+
+  std::sort(siblings.begin(), siblings.end(), [](Object *a, Object *b) {
+    const SDF *sa = reinterpret_cast<const SDF *>(a->data);
+    const SDF *sb = reinterpret_cast<const SDF *>(b->data);
+    return sa->sdf_index < sb->sdf_index;
+  });
+
+  /* Remove drag from list */
+  int drag_pos = -1;
+  for (int i = 0; i < int(siblings.size()); i++) {
+    if (siblings[i] == drag_ob) { drag_pos = i; break; }
+  }
+  if (drag_pos >= 0) {
+    siblings.remove(drag_pos);
+  }
+
+  /* Find target position */
+  int insert_pos = int(siblings.size());
+  for (int i = 0; i < int(siblings.size()); i++) {
+    if (siblings[i] == target_ob) {
+      insert_pos = before ? i : i + 1;
+      break;
+    }
+  }
+
+  siblings.insert(insert_pos, drag_ob);
+
+  /* Re-index sequentially with globally unique indices.
+   * Find max sdf_index in scene to avoid collisions. */
+  int max_idx = 0;
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+    if (base.object->type == OB_SDF && base.object->data) {
+      const SDF *s = reinterpret_cast<const SDF *>(base.object->data);
+      /* Only count objects NOT in this sibling set */
+      bool in_set = false;
+      for (Object *sib : siblings) {
+        if (sib == base.object) { in_set = true; break; }
+      }
+      if (!in_set) {
+        max_idx = std::max(max_idx, s->sdf_index + 1);
+      }
+    }
+  }
+
+  for (int i = 0; i < int(siblings.size()); i++) {
+    SDF *sdf = reinterpret_cast<SDF *>(siblings[i]->data);
+    sdf->sdf_index = max_idx + i;
+    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
+    DEG_id_tag_update(&siblings[i]->id, ID_RECALC_TRANSFORM | ID_RECALC_GEOMETRY);
+  }
 }
 
 static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
@@ -1739,6 +1869,8 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
                                                const wmEvent *event)
 {
   Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
 
   if (event->custom != EVT_DATA_DRAGDROP) {
     return OPERATOR_CANCELLED;
@@ -1747,9 +1879,32 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
   ListBaseT<wmDrag> *lb = static_cast<ListBaseT<wmDrag> *>(event->customdata);
   wmDrag *drag = static_cast<wmDrag *>(lb->first);
 
-  SDFGroupDropTarget target = sdf_group_drop_find(C, event->xy);
-  if (!target.group) {
-    return OPERATOR_CANCELLED;
+  SDFDropTarget target = sdf_group_drop_find(C, event->xy);
+  /* Allow ungroup (both null = drop on non-SDF area) */
+  {
+    wmDragID *chk = static_cast<wmDragID *>(drag->ids.first);
+    bool any_grouped = false;
+    if (chk && chk->id && GS(chk->id->name) == ID_OB) {
+      Object *chk_ob = (Object *)chk->id;
+      if (chk_ob->parent && is_sdf_group_empty(chk_ob->parent)) {
+        any_grouped = true;
+      }
+    }
+    if (!target.group_empty && !target.target_ob && !any_grouped) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  /* Pre-scan: get the dragged object to fix same-group INTO */
+  wmDragID *first_drag = static_cast<wmDragID *>(drag->ids.first);
+  if (first_drag && first_drag->id && GS(first_drag->id->name) == ID_OB) {
+    Object *drag_ob = (Object *)first_drag->id;
+    if (target.group_empty && target.target_ob &&
+        target.insert_type == TE_INSERT_INTO &&
+        drag_ob->parent == target.group_empty)
+    {
+      target.insert_type = TE_INSERT_AFTER;
+    }
   }
 
   for (wmDragID &drag_id : drag->ids) {
@@ -1762,62 +1917,206 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       continue;
     }
 
-    SDF *sdf_data = id_cast<SDF *>(ob->data);
-
-    /* Reorder within same group */
-    if (sdf_data->sdf_group == target.group && target.member_ob) {
-      SDFGroupMember *drag_member = BKE_sdf_group_member_find_by_object(target.group, ob);
-      SDFGroupMember *target_member = BKE_sdf_group_member_find_by_object(target.group,
-                                                                           target.member_ob);
-      if (drag_member && target_member) {
-        bool before = (target.insert_type == TE_INSERT_BEFORE);
-        BKE_sdf_group_member_move_to(target.group, drag_member, target_member, before);
+    /* Group empties can only reorder, skip everything else */
+    if (is_sdf_group_empty(ob)) {
+      if (target.target_ob && !target.create_group &&
+          (target.insert_type == TE_INSERT_BEFORE || target.insert_type == TE_INSERT_AFTER))
+      {
+        printf("  -> calling sdf_reindex_siblings\n");
+        sdf_reindex_siblings(scene, view_layer, ob, target.target_ob,
+                             target.insert_type == TE_INSERT_BEFORE, nullptr);
+      }
+      else {
+        printf("  -> SKIPPED (conditions not met)\n");
       }
       continue;
     }
 
-    /* Move from old group */
-    if (sdf_data->sdf_group && sdf_data->sdf_group != target.group) {
-      SDFGroup *old_group = sdf_data->sdf_group;
-      SDFGroupMember *member = BKE_sdf_group_member_find_by_object(old_group, ob);
-      if (member) {
-        BKE_sdf_group_member_remove(old_group, member);
-      }
-      DEG_id_tag_update(&old_group->id, ID_RECALC_GEOMETRY);
-    }
+    /* Create new group from two ungrouped SDFs */
+    if (target.create_group && target.target_ob) {
+      SDF *grp_sdf = reinterpret_cast<SDF *>(BKE_id_new(bmain, ID_SF, "SDF Group"));
+      grp_sdf->sdf_type = SDF_TYPE_GROUP;
+      grp_sdf->csg_operation = SDF_CSG_UNION;
+      grp_sdf->blend_type = 0;
+      grp_sdf->blend = 0.0f;
 
-    if (sdf_data->sdf_group == target.group) {
+      /* Group takes the target's position; children get 0, 1 */
+      SDF *target_sdf = reinterpret_cast<SDF *>(target.target_ob->data);
+      SDF *drag_sdf = reinterpret_cast<SDF *>(ob->data);
+      grp_sdf->sdf_index = target_sdf->sdf_index;
+      target_sdf->sdf_index = 0;
+      drag_sdf->sdf_index = 1;
+
+      Object *grp_ob = BKE_object_add_only_object(bmain, OB_SDF, "SDF Group");
+      grp_ob->data = &grp_sdf->id;
+      id_us_plus(&grp_sdf->id);
+
+      /* Group origin = bbox center of both SDFs */
+      const float *loc_a = target.target_ob->object_to_world().location();
+      const float *loc_b = ob->object_to_world().location();
+      grp_ob->loc[0] = (loc_a[0] + loc_b[0]) * 0.5f;
+      grp_ob->loc[1] = (loc_a[1] + loc_b[1]) * 0.5f;
+      grp_ob->loc[2] = (loc_a[2] + loc_b[2]) * 0.5f;
+
+      BKE_view_layer_synced_ensure(scene, view_layer);
+      Collection *active_collection = BKE_view_layer_active_collection_get(view_layer)->collection;
+      BKE_collection_object_add(bmain, active_collection, grp_ob);
+
+      BKE_view_layer_synced_ensure(scene, view_layer);
+      Base *grp_base = BKE_view_layer_base_find(view_layer, grp_ob);
+      if (grp_base) {
+        BKE_view_layer_base_select_and_set_active(view_layer, grp_base);
+      }
+
+      /* Parent both SDFs — adjust local positions to keep world positions */
+      target.target_ob->parent = grp_ob;
+      target.target_ob->loc[0] = loc_a[0] - grp_ob->loc[0];
+      target.target_ob->loc[1] = loc_a[1] - grp_ob->loc[1];
+      target.target_ob->loc[2] = loc_a[2] - grp_ob->loc[2];
+      DEG_id_tag_update(&target.target_ob->id, ID_RECALC_TRANSFORM);
+
+      ob->parent = grp_ob;
+      ob->loc[0] = loc_b[0] - grp_ob->loc[0];
+      ob->loc[1] = loc_b[1] - grp_ob->loc[1];
+      ob->loc[2] = loc_b[2] - grp_ob->loc[2];
+      DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+
+      DEG_id_tag_update(&grp_ob->id, ID_RECALC_TRANSFORM);
+
+      target.create_group = false;
+      target.group_empty = grp_ob;
       continue;
     }
 
-    /* Insert at position or append */
-    if (target.member_ob) {
-      SDFGroupMember *target_member = BKE_sdf_group_member_find_by_object(target.group,
-                                                                           target.member_ob);
-      if (target_member) {
-        SDFGroupMember *new_member = MEM_new<SDFGroupMember>(__func__);
-        new_member->object = ob;
-        if (target.insert_type == TE_INSERT_BEFORE) {
-          BLI_insertlinkbefore(&target.group->members, target_member, new_member);
-        }
-        else {
-          BLI_insertlinkafter(&target.group->members, target_member, new_member);
-        }
-        target.group->totmember++;
-        sdf_data->sdf_group = target.group;
-        id_us_plus(&target.group->id);
-        BKE_sdf_group_reindex_members(target.group);
+    /* Reorder */
+    if (target.target_ob && !target.create_group &&
+        (target.insert_type == TE_INSERT_BEFORE || target.insert_type == TE_INSERT_AFTER))
+    {
+      if (target.group_empty && ob->parent != target.group_empty) {
+        /* Dragged into a different group — re-parent */
+        const float *world_loc = ob->object_to_world().location();
+        const float *grp_loc = target.group_empty->object_to_world().location();
+        ob->parent = target.group_empty;
+        ob->loc[0] = world_loc[0] - grp_loc[0];
+        ob->loc[1] = world_loc[1] - grp_loc[1];
+        ob->loc[2] = world_loc[2] - grp_loc[2];
+        DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
       }
+      else if (!target.group_empty && ob->parent && is_sdf_group_empty(ob->parent)) {
+        /* Dragged OUT of group to top level — unparent */
+        Object *old_group = ob->parent;
+        const float *world_loc = ob->object_to_world().location();
+        ob->parent = nullptr;
+        ob->loc[0] = world_loc[0];
+        ob->loc[1] = world_loc[1];
+        ob->loc[2] = world_loc[2];
+        DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+        /* Delete old group if now empty */
+        bool still_has_children = false;
+        for (Object &check : bmain->objects) {
+          if (&check != ob && check.parent == old_group) {
+            still_has_children = true;
+            break;
+          }
+        }
+        if (!still_has_children) {
+          ed::object::base_free_and_unlink(bmain, scene, old_group);
+        }
+      }
+
+      Object *parent_filter = target.group_empty;
+      sdf_reindex_siblings(scene, view_layer, ob, target.target_ob,
+                           target.insert_type == TE_INSERT_BEFORE, parent_filter);
+      continue;
     }
-    else {
-      BKE_sdf_group_member_add(target.group, ob);
+
+    /* Ungroup: drop on empty space / Scene Collection */
+    if (!target.group_empty && !target.target_ob &&
+        ob->parent && is_sdf_group_empty(ob->parent))
+    {
+      Object *old_group = ob->parent;
+      const SDF *grp_sdf = reinterpret_cast<const SDF *>(old_group->data);
+      int grp_idx = grp_sdf ? grp_sdf->sdf_index : 0;
+
+      const float *world_loc = ob->object_to_world().location();
+      ob->parent = nullptr;
+      ob->loc[0] = world_loc[0];
+      ob->loc[1] = world_loc[1];
+      ob->loc[2] = world_loc[2];
+
+      SDF *sdf = reinterpret_cast<SDF *>(ob->data);
+      if (sdf) {
+        sdf->sdf_index = grp_idx + 1;
+      }
+
+      DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+      DEG_id_tag_update(static_cast<ID *>(ob->data), ID_RECALC_GEOMETRY);
+
+      /* Delete old group if now empty */
+      bool still_has_children = false;
+      for (Object &check : bmain->objects) {
+        if (&check != ob && check.parent == old_group) {
+          still_has_children = true;
+          break;
+        }
+      }
+      if (!still_has_children) {
+        ed::object::base_free_and_unlink(bmain, scene, old_group);
+      }
+      continue;
+    }
+
+    /* Add to existing group (drop INTO) */
+    if (target.group_empty) {
+      if (ob->parent && is_sdf_group_empty(ob->parent) && ob->parent != target.group_empty) {
+        /* Restore world-space loc before re-parenting */
+        const float *old_parent_loc = ob->parent->object_to_world().location();
+        ob->loc[0] += old_parent_loc[0];
+        ob->loc[1] += old_parent_loc[1];
+        ob->loc[2] += old_parent_loc[2];
+        ob->parent = nullptr;
+      }
+
+      if (ob->parent != target.group_empty) {
+        const float *world_loc = ob->object_to_world().location();
+        const float *grp_loc = target.group_empty->object_to_world().location();
+        ob->parent = target.group_empty;
+        ob->loc[0] = world_loc[0] - grp_loc[0];
+        ob->loc[1] = world_loc[1] - grp_loc[1];
+        ob->loc[2] = world_loc[2] - grp_loc[2];
+      }
+      DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+      continue;
     }
   }
 
-  DEG_id_tag_update(&target.group->id, ID_RECALC_GEOMETRY);
+  /* Auto-delete empty groups */
+  {
+    Vector<Object *> empty_groups;
+    for (Object &ob_iter : bmain->objects) {
+      if (!is_sdf_group_empty(&ob_iter)) {
+        continue;
+      }
+      bool has_children = false;
+      for (Object &child_iter : bmain->objects) {
+        if (child_iter.parent == &ob_iter) {
+          has_children = true;
+          break;
+        }
+      }
+      if (!has_children) {
+        empty_groups.append(&ob_iter);
+      }
+    }
+    for (Object *grp : empty_groups) {
+      ed::object::base_free_and_unlink(bmain, scene, grp);
+    }
+  }
+
   DEG_relations_tag_update(bmain);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
   WM_event_add_notifier(C, NC_SCENE | ND_OB_ACTIVE, nullptr);
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, nullptr);
 
   return OPERATOR_FINISHED;
 }
@@ -1825,7 +2124,7 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
 void OUTLINER_OT_sdf_group_drop(wmOperatorType *ot)
 {
   ot->name = "SDF Group Drop";
-  ot->description = "Drag SDF object into or reorder within an SDF group in Outliner";
+  ot->description = "Drag SDF object to group, reorder, or create new group in Outliner";
   ot->idname = "OUTLINER_OT_sdf_group_drop";
 
   ot->invoke = sdf_group_drop_invoke;
@@ -1844,6 +2143,13 @@ void outliner_dropboxes()
 {
   ListBaseT<wmDropBox> *lb = WM_dropboxmap_find("Outliner", SPACE_OUTLINER, RGN_TYPE_WINDOW);
 
+  /* SDF group drop must be first to intercept SDF-on-SDF before parent_drop */
+  WM_dropbox_add(lb,
+                 "OUTLINER_OT_sdf_group_drop",
+                 sdf_group_drop_poll,
+                 nullptr,
+                 nullptr,
+                 sdf_group_drop_tooltip);
   WM_dropbox_add(lb, "OUTLINER_OT_parent_drop", parent_drop_poll, nullptr, nullptr, nullptr);
   WM_dropbox_add(lb, "OUTLINER_OT_parent_clear", parent_clear_poll, nullptr, nullptr, nullptr);
   WM_dropbox_add(lb, "OUTLINER_OT_scene_drop", scene_drop_poll, nullptr, nullptr, nullptr);
@@ -1854,12 +2160,6 @@ void outliner_dropboxes()
                  nullptr,
                  nullptr,
                  datastack_drop_tooltip);
-  WM_dropbox_add(lb,
-                 "OUTLINER_OT_sdf_group_drop",
-                 sdf_group_drop_poll,
-                 nullptr,
-                 nullptr,
-                 sdf_group_drop_tooltip);
   WM_dropbox_add(lb,
                  "OUTLINER_OT_collection_drop",
                  collection_drop_poll,

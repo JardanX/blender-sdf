@@ -557,7 +557,6 @@ void RNA_def_main_hair_curves(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_pointclouds(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_volumes(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_sdfs(BlenderRNA *brna, PropertyRNA *cprop);
-void RNA_def_main_sdf_groups(BlenderRNA *brna, PropertyRNA *cprop);
 
 /* ID Properties */
 

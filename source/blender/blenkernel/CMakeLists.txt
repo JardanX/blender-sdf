@@ -305,7 +305,6 @@ set(SRC
   intern/vfontdata_freetype.cc
   intern/viewer_path.cc
   intern/sdf.cc
-  intern/sdf_group.cc
   intern/volume.cc
   intern/volume_grid.cc
   intern/volume_grid_fields.cc
@@ -527,7 +526,6 @@ set(SRC
   BKE_vfontdata.hh
   BKE_viewer_path.hh
   BKE_sdf.hh
-  BKE_sdf_group.hh
   BKE_volume.hh
   BKE_volume_enums.hh
   BKE_volume_grid.hh

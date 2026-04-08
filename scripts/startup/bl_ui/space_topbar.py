@@ -499,6 +499,10 @@ class TOPBAR_MT_render(Menu):
 
         layout.prop(rd, "use_lock_interface", text="Lock Interface")
 
+        layout.separator()
+
+        layout.operator("object.sdf_profile_frame", text="SDF Profile Frame", icon='CONSOLE')
+
 
 class TOPBAR_MT_edit(Menu):
     bl_label = "Edit"
