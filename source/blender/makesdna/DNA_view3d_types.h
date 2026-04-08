@@ -690,7 +690,7 @@ struct View3DOverlay {
   float sculpt_curves_cage_opacity = 0;
 
   /** SDF edge outline opacity (always-on black outlines). */
-  float sdf_outline_opacity = 0.5f;
+  float sdf_outline_opacity = 1.0f;
 };
 
 struct View3D_Runtime {

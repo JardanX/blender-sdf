@@ -71,6 +71,7 @@ set(SRC_GLSL_VERT
   overlay_extra_lightprobe_grid_vert.glsl
   overlay_extra_loose_point_vert.glsl
   overlay_extra_point_vert.glsl
+  overlay_sdf_group_point_vert.glsl
   overlay_extra_vert.glsl
   overlay_extra_wire_vert.glsl
   overlay_facing_vert.glsl

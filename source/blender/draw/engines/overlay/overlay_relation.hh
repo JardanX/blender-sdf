@@ -13,6 +13,7 @@
 #include "DNA_constraint_types.h"
 #include "DNA_gpencil_modifier_types.h"
 #include "DNA_modifier_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_rigidbody_types.h"
 
 #include "overlay_base.hh"
@@ -68,9 +69,18 @@ class Relations : Overlay {
     const float4 &constraint_color = res.theme.colors.grid_axis_z; /* ? */
 
     if (ob->parent && (DRW_object_visibility_in_active_context(ob->parent) & OB_VISIBLE_SELF)) {
-      const float3 &parent_pos = ob->runtime->parent_display_origin;
-      /* Reverse order to have less stipple overlap. */
-      relations_buf_.append(ob->object_to_world().location(), parent_pos, relation_color);
+      /* Skip parenting lines for SDF group members */
+      bool skip_sdf_relation = false;
+      if (ob->parent->type == OB_SDF && ob->parent->data) {
+        const SDF *psdf = reinterpret_cast<const SDF *>(ob->parent->data);
+        if (psdf && psdf->sdf_type == SDF_TYPE_GROUP) {
+          skip_sdf_relation = true;
+        }
+      }
+      if (!skip_sdf_relation) {
+        const float3 &parent_pos = ob->runtime->parent_display_origin;
+        relations_buf_.append(ob->object_to_world().location(), parent_pos, relation_color);
+      }
     }
 
     /* Drawing the hook lines. */

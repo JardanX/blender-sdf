@@ -661,6 +661,23 @@ ShapeCache::ShapeCache()
     empty_cone = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_LINES, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
   }
+  /* filled_circle — SDF group point */
+  {
+    constexpr int resolution = 32;
+    constexpr float radius = 6.0f;
+    Vector<float2> ring = ring_vertices(radius, resolution);
+
+    Vector<Vertex> verts;
+    for (int i : IndexRange(resolution)) {
+      verts.append({{0.0f, 0.0f, 0.0f}, VCLASS_SCREENSPACE});
+      verts.append({{ring[i].x, ring[i].y, 0.0f}, VCLASS_SCREENSPACE});
+      verts.append({{ring[(i + 1) % resolution].x, ring[(i + 1) % resolution].y, 0.0f},
+                    VCLASS_SCREENSPACE});
+    }
+
+    filled_circle = BatchPtr(
+        GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
+  }
   /* cylinder */
   {
     constexpr int n_segments = 12;

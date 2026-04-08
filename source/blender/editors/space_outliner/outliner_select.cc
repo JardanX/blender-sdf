@@ -14,7 +14,6 @@
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_shader_fx_types.h"
@@ -1295,7 +1294,6 @@ static void outliner_set_properties_tab(bContext *C, TreeElement *te, TreeStoreE
       case ID_PT:
       case ID_VO:
       case ID_SF:
-      case ID_SG:
         context = BCONTEXT_DATA;
         break;
       case ID_MA:
@@ -1452,28 +1450,6 @@ static void outliner_set_properties_tab(bContext *C, TreeElement *te, TreeStoreE
 
 /* ================================================ */
 
-static void outliner_sdf_group_update_pin(bContext *C, ID *id)
-{
-  bScreen *screen = CTX_wm_screen(C);
-  const bool is_sdf_group = (id && GS(id->name) == ID_SG);
-
-  for (ScrArea &area : screen->areabase) {
-    if (area.spacetype != SPACE_PROPERTIES) {
-      continue;
-    }
-    SpaceProperties *sbuts = static_cast<SpaceProperties *>(area.spacedata.first);
-    if (!ED_buttons_should_sync_with_outliner(C, sbuts, &area)) {
-      continue;
-    }
-    if (is_sdf_group) {
-      sbuts->pinid = id;
-    }
-    else if (sbuts->pinid && GS(sbuts->pinid->name) == ID_SG) {
-      sbuts->pinid = nullptr;
-    }
-  }
-}
-
 /**
  * Action when clicking to activate an item (typically under the mouse cursor),
  * but don't do any cursor intersection checks.
@@ -1489,10 +1465,6 @@ static void do_outliner_item_activate_tree_element(bContext *C,
                                                    const bool recursive,
                                                    const bool do_activate_data)
 {
-  if (!(tselem->type == TSE_SOME_ID && te->idcode == ID_SG)) {
-    outliner_sdf_group_update_pin(C, nullptr);
-  }
-
   /* Always makes active object, except for some specific types. */
   if (ELEM(tselem->type,
            TSE_STRIP,
@@ -1571,41 +1543,6 @@ static void do_outliner_item_activate_tree_element(bContext *C,
         }
         FOREACH_COLLECTION_OBJECT_RECURSIVE_END;
       }
-
-      DEG_id_tag_update(&tvc.scene->id, ID_RECALC_SELECT);
-      WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, tvc.scene);
-    }
-    else if (te->idcode == ID_SG) {
-      SDFGroup *group = (SDFGroup *)tselem->id;
-      BKE_view_layer_synced_ensure(tvc.scene, tvc.view_layer);
-
-      if (!extend) {
-        BKE_view_layer_base_deselect_all(tvc.scene, tvc.view_layer);
-      }
-
-      Object *first_ob = nullptr;
-      for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
-           member = member->next)
-      {
-        if (member->object) {
-          Base *base = BKE_view_layer_base_find(tvc.view_layer, member->object);
-          if (base) {
-            object::base_select(base, object::BA_SELECT);
-            if (!first_ob) {
-              first_ob = member->object;
-            }
-          }
-        }
-      }
-
-      if (first_ob) {
-        Base *active_base = BKE_view_layer_base_find(tvc.view_layer, first_ob);
-        if (active_base) {
-          object::base_activate(C, active_base);
-        }
-      }
-
-      outliner_sdf_group_update_pin(C, &group->id);
 
       DEG_id_tag_update(&tvc.scene->id, ID_RECALC_SELECT);
       WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, tvc.scene);

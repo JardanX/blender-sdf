@@ -21,14 +21,12 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_sdf.hh"
-#include "BKE_sdf_group.hh"
 #include "BKE_studiolight.h"
 
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_enums.h"
@@ -62,7 +60,10 @@
 #include "sdf_engine.h"
 #include "sdf_meshing.hh"
 
-#include <chrono>
+#include "BLI_string.h"
+
+#include <epoxy/gl.h>
+
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -91,6 +92,132 @@ static const SDFPolygonPointGPU *s_polygon_pts_cpu = nullptr;
 static int s_polygon_pts_count = 0;
 static const SDFModifierGPU *s_modifiers_cpu = nullptr;
 static int s_modifier_count = 0;
+
+/* Frame profiling */
+
+static constexpr int SDF_PROFILE_MAX_PASSES = 16;
+static constexpr int SDF_PROFILE_MAX_OBJECTS = 1024;
+static constexpr int SDF_PROFILE_MAX_MODS_PER_OBJ = 32;
+
+struct SdfProfileModInfo {
+  int type;
+  int flags;
+};
+
+struct SdfProfileObjectInfo {
+  char name[128];
+  int sdf_type;
+  int blend_type;
+  int csg_operation;
+  float blend;
+  float bevel;
+  float size[3];
+  int modifier_count;
+  SdfProfileModInfo modifiers[SDF_PROFILE_MAX_MODS_PER_OBJ];
+};
+
+struct SdfProfilePassTiming {
+  char name[64];
+  double time_ns;
+};
+
+/* Global trace diagnostics — layout matches GPU SSBO (16 uints) */
+struct SdfTraceStats {
+  uint32_t total_rays;
+  uint32_t total_hits;
+  uint32_t total_steps;
+  uint32_t total_empty_steps;
+  uint32_t total_evals;
+  uint32_t total_aabb_skips;
+  uint32_t total_sor_failures;
+  uint32_t max_steps_any_ray;
+  uint32_t _pad[8];
+};
+
+struct SdfProfileResult {
+  bool valid;
+  int render_width;
+  int render_height;
+  float resolution_scale;
+  int object_count;
+  int group_count;
+  int modifier_total;
+  int bvh_node_count;
+  int pass_count;
+  SdfProfilePassTiming passes[SDF_PROFILE_MAX_PASSES];
+  double total_ns;
+  int profiled_object_count;
+  SdfProfileObjectInfo objects[SDF_PROFILE_MAX_OBJECTS];
+  uint32_t eval_counts[SDF_PROFILE_MAX_OBJECTS];
+  SdfTraceStats trace_stats;
+};
+
+static bool s_profile_pending = false;
+static SdfProfileResult s_profile_result = {};
+
+/* GL timestamp query profiler — nanosecond GPU-clock precision */
+static constexpr int PROF_MAX_SLOTS = 16;
+
+struct SdfFrameProfiler {
+  bool active = false;
+  int slot_count = 0;
+  char names[PROF_MAX_SLOTS][64];
+  GLuint queries[PROF_MAX_SLOTS * 2];
+
+  void begin()
+  {
+    slot_count = 0;
+    active = true;
+    glGenQueries(PROF_MAX_SLOTS * 2, queries);
+  }
+
+  void mark_start(const char *name)
+  {
+    if (!active || slot_count >= PROF_MAX_SLOTS) return;
+    BLI_strncpy(names[slot_count], name, sizeof(names[slot_count]));
+    glQueryCounter(queries[slot_count * 2], GL_TIMESTAMP);
+  }
+
+  void mark_end()
+  {
+    if (!active || slot_count >= PROF_MAX_SLOTS) return;
+    glQueryCounter(queries[slot_count * 2 + 1], GL_TIMESTAMP);
+    slot_count++;
+  }
+
+  void finish(SdfProfileResult &result)
+  {
+    if (!active) return;
+    active = false;
+
+    if (slot_count > 0) {
+      GLint ready = 0;
+      while (!ready) {
+        glGetQueryObjectiv(
+            queries[(slot_count - 1) * 2 + 1], GL_QUERY_RESULT_AVAILABLE, &ready);
+      }
+    }
+
+    int pass_count = 0;
+    double total_ns = 0.0;
+    for (int i = 0; i < slot_count; i++) {
+      GLuint64 t0 = 0, t1 = 0;
+      glGetQueryObjectui64v(queries[i * 2], GL_QUERY_RESULT, &t0);
+      glGetQueryObjectui64v(queries[i * 2 + 1], GL_QUERY_RESULT, &t1);
+      double ns = double(t1 - t0);
+      auto &p = result.passes[pass_count++];
+      BLI_strncpy(p.name, names[i], sizeof(p.name));
+      p.time_ns = ns;
+      total_ns += ns;
+    }
+    result.pass_count = pass_count;
+    result.total_ns = total_ns;
+
+    glDeleteQueries(PROF_MAX_SLOTS * 2, queries);
+  }
+};
+
+static SdfFrameProfiler s_profiler = {};
 
 /* Static shader cache — survives engine instance destruction (mode switches). */
 enum ShaderIndex {
@@ -152,7 +279,6 @@ void sdf_shaders_free()
 class Instance : public DrawEngine {
  private:
   Vector<SDFObjectGPU> objects_;
-  Vector<SDFGroup *> object_group_ptrs_;
   Vector<Object *> object_ptrs_;
   Vector<Object *> group_empties_;
 
@@ -236,6 +362,10 @@ class Instance : public DrawEngine {
   int tile_prim_counts_ssbo_tiles_ = 0;
   gpu::StorageBuf *tile_prim_lists_ssbo_ = nullptr;
 
+  gpu::StorageBuf *prof_eval_ssbo_ = nullptr;
+  gpu::StorageBuf *prof_stats_ssbo_ = nullptr;
+  int prof_eval_ssbo_count_ = 0;
+
   gpu::Batch *fullscreen_batch_ = nullptr;
 
   const DRWContext *draw_ctx_ = nullptr;
@@ -290,7 +420,6 @@ class Instance : public DrawEngine {
     }
 
     objects_.clear();
-    object_group_ptrs_.clear();
     object_ptrs_.clear();
     group_empties_.clear();
     modifiers_.clear();
@@ -377,10 +506,21 @@ class Instance : public DrawEngine {
     gpu_obj.inverse_matrix = inv_rot;
     gpu_obj.position = float4(mat[3].x, mat[3].y, mat[3].z, 0.0f);
 
-    gpu_obj.sdf_size = float4(sdf_data->size[0] * scale.x,
-                              sdf_data->size[1] * scale.y,
-                              sdf_data->size[2] * scale.z,
-                              0.0f);
+    float3 raw_size = float3(sdf_data->size[0] * scale.x,
+                             sdf_data->size[1] * scale.y,
+                             sdf_data->size[2] * scale.z);
+
+    /* Detect group parent early — needed for bevel accumulation and modifier propagation */
+    Object *group_parent_ob = nullptr;
+    {
+      Object *orig_ob = DEG_get_original(ob);
+      if (orig_ob->parent) {
+        const SDF *parent_sdf = id_cast<const SDF *>(orig_ob->parent->data);
+        if (parent_sdf && parent_sdf->sdf_type == SDF_TYPE_GROUP) {
+          group_parent_ob = orig_ob->parent;
+        }
+      }
+    }
 
     float bevel = 0.0f;
     for (const ModifierData *bmd = static_cast<const ModifierData *>(ob->modifiers.first); bmd; bmd = bmd->next) {
@@ -388,7 +528,21 @@ class Instance : public DrawEngine {
         bevel += reinterpret_cast<const SDFBevelModifierData *>(bmd)->radius;
       }
     }
+    /* Also accumulate bevel from group parent */
+    if (group_parent_ob) {
+      for (const ModifierData *bmd = static_cast<const ModifierData *>(
+               group_parent_ob->modifiers.first); bmd; bmd = bmd->next) {
+        if ((bmd->mode & eModifierMode_Realtime) && bmd->type == eModifierType_SDFBevel) {
+          bevel += reinterpret_cast<const SDFBevelModifierData *>(bmd)->radius;
+        }
+      }
+    }
     bevel *= math::reduce_min(scale);
+    float min_dim = math::reduce_min(raw_size);
+    float eff_bevel = std::max(bevel, std::min(0.005f, min_dim * 0.5f));
+    /* Store pre-bevel-subtracted size in xyz, effective bevel in w */
+    float3 net_size = math::max(raw_size - float3(eff_bevel), float3(0.001f));
+    gpu_obj.sdf_size = float4(net_size.x, net_size.y, net_size.z, eff_bevel);
     gpu_obj.bevel = bevel;
 
     gpu_obj.blend = sdf_data->blend;
@@ -415,24 +569,24 @@ class Instance : public DrawEngine {
       float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
       float aabb_pad = blend_pad + shell_expand;
       float3 local_extent;
-      float3 sz = float3(gpu_obj.sdf_size);
+      float3 sz = raw_size;
       switch (sdf_data->sdf_type) {
         case SDF_TYPE_SPHERE:
-          local_extent = sz + float3(bevel + aabb_pad);
+          local_extent = sz + float3(aabb_pad);
           break;
         case SDF_TYPE_CAPSULE: {
           float r = sz.x;
-          float h = math::max(sz.y - bevel, 0.0f);
+          float h = sz.y;
           local_extent = float3(r + aabb_pad, r + aabb_pad, h + r + aabb_pad);
           break;
         }
         case SDF_TYPE_CYLINDER:
-          local_extent = sz + float3(bevel + aabb_pad);
+          local_extent = sz + float3(aabb_pad);
           break;
         case SDF_TYPE_CONE: {
           float r = sz.x;
           float h = sz.y;
-          local_extent = float3(r + bevel + aabb_pad, r + bevel + aabb_pad, h + bevel + aabb_pad);
+          local_extent = float3(r + aabb_pad, r + aabb_pad, h + aabb_pad);
           break;
         }
         case SDF_TYPE_TORUS: {
@@ -442,7 +596,7 @@ class Instance : public DrawEngine {
         }
         case SDF_TYPE_NGON: {
           float r = sz.x;
-          local_extent = float3(r + bevel + aabb_pad, r + bevel + aabb_pad, sz.z + bevel + aabb_pad);
+          local_extent = float3(r + aabb_pad, r + aabb_pad, sz.z + aabb_pad);
           break;
         }
         case SDF_TYPE_POLYGON: {
@@ -455,13 +609,13 @@ class Instance : public DrawEngine {
                                sdf_data->polygon_line_thickness * 0.5f *
                                    math::min(scale.x, scale.y) :
                                0.0f;
-          local_extent = float3(max_x + line_pad + bevel + aabb_pad,
-                                max_y + line_pad + bevel + aabb_pad,
-                                sz.z + bevel + aabb_pad);
+          local_extent = float3(max_x + line_pad + aabb_pad,
+                                max_y + line_pad + aabb_pad,
+                                sz.z + aabb_pad);
           break;
         }
         default:
-          local_extent = sz + float3(bevel + aabb_pad);
+          local_extent = sz + float3(aabb_pad);
           break;
       }
 
@@ -1009,21 +1163,21 @@ class Instance : public DrawEngine {
     float pad = blend_pad + shell_expand;
     float3 base_local_extent;
     {
-      float3 sz = float3(gpu_obj.sdf_size);
+      float3 sz = raw_size;
       switch (sdf_data->sdf_type) {
         case SDF_TYPE_CAPSULE: {
           float r = sz.x;
-          float h = math::max(sz.y - bevel, 0.0f);
+          float h = sz.y;
           base_local_extent = float3(r + pad, r + pad, h + r + pad);
           break;
         }
         case SDF_TYPE_CYLINDER:
-          base_local_extent = sz + float3(bevel + pad);
+          base_local_extent = sz + float3(pad);
           break;
         case SDF_TYPE_CONE: {
           float r = sz.x;
           float h = sz.y;
-          base_local_extent = float3(r + bevel + pad, r + bevel + pad, h + bevel + pad);
+          base_local_extent = float3(r + pad, r + pad, h + pad);
           break;
         }
         case SDF_TYPE_TORUS: {
@@ -1033,7 +1187,7 @@ class Instance : public DrawEngine {
         }
         case SDF_TYPE_NGON: {
           float r = sz.x;
-          base_local_extent = float3(r + bevel + pad, r + bevel + pad, sz.z + bevel + pad);
+          base_local_extent = float3(r + pad, r + pad, sz.z + pad);
           break;
         }
         case SDF_TYPE_POLYGON: {
@@ -1050,11 +1204,11 @@ class Instance : public DrawEngine {
                              math::min(scale.x, scale.y) :
                          0.0f;
           base_local_extent = float3(
-              max_x + lp + bevel + pad, max_y + lp + bevel + pad, sz.z + bevel + pad);
+              max_x + lp + pad, max_y + lp + pad, sz.z + pad);
           break;
         }
         default:
-          base_local_extent = sz + float3(bevel + pad);
+          base_local_extent = sz + float3(pad);
           break;
       }
     }
@@ -1161,6 +1315,125 @@ class Instance : public DrawEngine {
       }
     }
 
+    /* Propagate group parent's modifiers to this child.
+     * Each child gets the group's modifiers applied individually:
+     * Array → instancing, others → appended as GPU modifiers. */
+    if (group_parent_ob) {
+      for (const ModifierData *gmd = static_cast<const ModifierData *>(
+               group_parent_ob->modifiers.first);
+           gmd; gmd = gmd->next)
+      {
+        if (!(gmd->mode & eModifierMode_Realtime)) {
+          continue;
+        }
+        if (gmd->type == eModifierType_SDFArray) {
+          if (!array_mod) {
+            array_mod = reinterpret_cast<const SDFArrayModifierData *>(gmd);
+          }
+          continue;
+        }
+        /* Bevel is handled via sdf_size shrink, not as GPU modifier */
+        if (gmd->type == eModifierType_SDFBevel) {
+          continue;
+        }
+        SDFModifierGPU gpu_mod = {};
+        bool valid = false;
+        switch (gmd->type) {
+          case eModifierType_SDFMirror: {
+            const auto &m = *reinterpret_cast<const SDFMirrorModifierData *>(gmd);
+            float3 obj_pos = float3(mat[3]);
+            float3 mirror_pos(0.0f);
+            if (m.mirror_object != nullptr) {
+              mirror_pos = float3(m.mirror_object->object_to_world()[3]);
+            }
+            float3 world_origin = mirror_pos - obj_pos;
+            float3 local_origin = float3(inv_rot * float4(world_origin, 0.0f));
+            int sides = ((obj_pos.x >= mirror_pos.x) ? 1 : 0) |
+                        ((obj_pos.y >= mirror_pos.y) ? 2 : 0) |
+                        ((obj_pos.z >= mirror_pos.z) ? 4 : 0);
+            gpu_mod.header = int4(SDF_MOD_MIRROR, m.flag, m.blend_type, sides);
+            gpu_mod.params = float4(
+                m.offset_distance, local_origin.x, local_origin.y, local_origin.z);
+            gpu_mod.params2 = float4(m.blend, 0.0f, float(m.blend_type), 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFTwist: {
+            const auto &m = *reinterpret_cast<const SDFTwistModifierData *>(gmd);
+            gpu_mod.header = int4(SDF_MOD_TWIST, 0, 0, 0);
+            gpu_mod.params = float4(m.strength, float(m.axis), 0.0f, 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFBend: {
+            const auto &m = *reinterpret_cast<const SDFBendModifierData *>(gmd);
+            gpu_mod.header = int4(SDF_MOD_BEND, 0, 0, 0);
+            gpu_mod.params = float4(m.strength, float(m.axis), m.origin[0], m.origin[1]);
+            gpu_mod.params2 = float4(m.origin[2], 0.0f, 0.0f, 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFElongate: {
+            const auto &m = *reinterpret_cast<const SDFElongateModifierData *>(gmd);
+            gpu_mod.header = int4(SDF_MOD_ELONGATE, 0, 0, 0);
+            gpu_mod.params = float4(m.elongation[0], m.elongation[1], m.elongation[2], 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFSolidify: {
+            const auto &m = *reinterpret_cast<const SDFSolidifyModifierData *>(gmd);
+            float inner_scale = 1.0f;
+            if (m.mode == SDF_SOLIDIFY_OPEN) {
+              int ax = math::clamp(m.axis, 0, 2);
+              float ssz = math::max(sdf_data->size[ax] * scale[ax], 0.001f);
+              inner_scale = math::max(1.0f - 2.0f * m.thickness / ssz, 0.1f);
+            }
+            gpu_mod.header = int4(SDF_MOD_SOLIDIFY, m.mode, m.axis, 0);
+            gpu_mod.params = float4(m.thickness, inner_scale, m.bevel, 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFRound: {
+            const auto &m = *reinterpret_cast<const SDFRoundModifierData *>(gmd);
+            gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
+            gpu_mod.params = float4(m.offset, 0.0f, 0.0f, 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFOnion: {
+            const auto &m = *reinterpret_cast<const SDFOnionModifierData *>(gmd);
+            int layers = math::max(m.layers, 1);
+            float3 osz = float3(gpu_obj.sdf_size);
+            float min_ext = math::min(osz.x, math::min(osz.y, osz.z));
+            gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
+            gpu_mod.params = float4(m.gap, min_ext, 0.0f, 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFBevel: {
+            const auto &m = *reinterpret_cast<const SDFBevelModifierData *>(gmd);
+            gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
+            gpu_mod.params = float4(m.radius, 0.0f, 0.0f, 0.0f);
+            valid = true;
+            break;
+          }
+          case eModifierType_SDFDisplace: {
+            const auto &m = *reinterpret_cast<const SDFDisplaceModifierData *>(gmd);
+            gpu_mod.header = int4(SDF_MOD_DISPLACE, m.noise_type, m.octaves, 0);
+            gpu_mod.params = float4(m.strength, m.frequency, m.lacunarity, m.roughness);
+            valid = true;
+            break;
+          }
+          default:
+            break;
+        }
+        if (valid) {
+          modifiers_.append(gpu_mod);
+          gpu_obj.modifier_count++;
+        }
+      }
+    }
+
     /* Instance array copies (or single object when no array) */
     int copy_count = (array_mod != nullptr && array_mod->count > 1) ? array_mod->count : 1;
 
@@ -1194,13 +1467,6 @@ class Instance : public DrawEngine {
     }
 
     float group_pad = 0.0f;
-    if (sdf_data->sdf_group != nullptr) {
-      const SDFGroup *grp = sdf_data->sdf_group;
-      float gb = (grp->csg_operation == SDF_CSG_SHELL)
-                     ? std::max(grp->shell_blend_top, grp->shell_blend_bottom)
-                     : grp->blend;
-      group_pad = gb + fabsf(grp->shell_distance);
-    }
 
     float4x4 accum_delta = float4x4::identity();
     for (int ci = 0; ci < copy_count; ci++) {
@@ -1288,10 +1554,13 @@ class Instance : public DrawEngine {
 
       /* Adjust sdf_size for per-copy scale changes */
       if (ci > 0 && has_obj_offset) {
-        copy_obj.sdf_size = float4(sdf_data->size[0] * copy_scale.x,
-                                   sdf_data->size[1] * copy_scale.y,
-                                   sdf_data->size[2] * copy_scale.z,
-                                   0.0f);
+        float3 crs = float3(sdf_data->size[0] * copy_scale.x,
+                             sdf_data->size[1] * copy_scale.y,
+                             sdf_data->size[2] * copy_scale.z);
+        float cmd = math::reduce_min(crs);
+        float cb = std::max(copy_obj.bevel, std::min(0.005f, cmd * 0.5f));
+        float3 cns = math::max(crs - float3(cb), float3(0.001f));
+        copy_obj.sdf_size = float4(cns.x, cns.y, cns.z, cb);
       }
 
       /* All copies are exact clones of the original SDF (same blend, CSG, etc.) */
@@ -1299,14 +1568,14 @@ class Instance : public DrawEngine {
       /* Per-copy AABB: recompute from SDF size with this copy's scale */
       float3 copy_local_extent;
       if (ci > 0 && has_obj_offset) {
-        float3 copy_sz = float3(copy_obj.sdf_size);
-        float copy_bevel = bevel * math::reduce_min(copy_scale) /
-                           math::max(math::reduce_min(scale), 0.001f);
+        float3 copy_sz = float3(sdf_data->size[0] * copy_scale.x,
+                                sdf_data->size[1] * copy_scale.y,
+                                sdf_data->size[2] * copy_scale.z);
         float copy_pad = pad;
         switch (sdf_data->sdf_type) {
           case SDF_TYPE_CAPSULE: {
             float r = copy_sz.x;
-            float h = math::max(copy_sz.y - copy_bevel, 0.0f);
+            float h = copy_sz.y;
             copy_local_extent = float3(r + copy_pad, r + copy_pad, h + r + copy_pad);
             break;
           }
@@ -1317,12 +1586,11 @@ class Instance : public DrawEngine {
           }
           case SDF_TYPE_CONE: {
             float r = copy_sz.x, h = copy_sz.y;
-            copy_local_extent = float3(
-                r + copy_bevel + copy_pad, r + copy_bevel + copy_pad, h + copy_bevel + copy_pad);
+            copy_local_extent = float3(r + copy_pad, r + copy_pad, h + copy_pad);
             break;
           }
           default:
-            copy_local_extent = copy_sz + float3(copy_bevel + copy_pad);
+            copy_local_extent = copy_sz + float3(copy_pad);
             break;
         }
         /* Expand for shared domain modifiers */
@@ -1399,19 +1667,20 @@ class Instance : public DrawEngine {
       scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
       max_blend_ = math::max(max_blend_, copy_obj.blend);
-      if (copy_obj.blend > 0.001f && copy_obj.blend_type > 0) {
-        float sf = (copy_obj.blend_type == SDF_BLEND_SMOOTH) ? 0.75f : 0.65f;
-        if (copy_obj.blend > 0.5f) {
-          sf = min_ff(sf, 0.5f);
+      {
+        float sf = 0.85f;
+        if (copy_obj.blend > 0.001f && copy_obj.blend_type > 0) {
+          sf = (copy_obj.blend_type == SDF_BLEND_SMOOTH) ? 0.75f : 0.65f;
+          if (copy_obj.blend > 0.5f) { sf = min_ff(sf, 0.5f); }
         }
         step_factor_ = min_ff(step_factor_, sf);
+        copy_obj.orig_bbox_min.w = sf;
       }
       if (copy_obj.csg_operation == SDF_CSG_SHELL) {
         max_shell_distance_ = math::max(max_shell_distance_,
                                         fabsf(copy_obj.shell_distance));
       }
 
-      object_group_ptrs_.append(sdf_data->sdf_group);
       object_ptrs_.append(ob);
       objects_.append(copy_obj);
     }
@@ -1429,14 +1698,7 @@ class Instance : public DrawEngine {
 
     /* Build group GPU data */
     {
-      Main *bmain = DEG_get_bmain(draw_ctx_->depsgraph);
-
-      for (SDFGroup *group = static_cast<SDFGroup *>(bmain->sdf_groups.first); group; group = reinterpret_cast<SDFGroup *>(group->id.next)) {
-        BKE_sdf_group_cleanup_null_members(group);
-      }
-
       groups_gpu_.clear();
-      Map<SDFGroup *, int> group_index_map;
 
       struct GroupMembership {
         int group_id;
@@ -1445,139 +1707,8 @@ class Instance : public DrawEngine {
       Map<Object *, GroupMembership> object_membership_map;
 
       int g_idx = 0;
-      int obj_offset = 0;
-      for (SDFGroup *group = static_cast<SDFGroup *>(bmain->sdf_groups.first); group; group = reinterpret_cast<SDFGroup *>(group->id.next)) {
-        SDFGroupGPU gpu_grp = {};
-        gpu_grp.csg_operation = group->csg_operation;
-        gpu_grp.blend_type = group->blend_type;
-        gpu_grp.blend = group->blend;
-        gpu_grp.shell_distance = group->shell_distance;
-        gpu_grp.shell_mode = group->shell_mode;
-        gpu_grp.shell_op = group->shell_op;
-        gpu_grp.shell_blend_top = group->shell_blend_top;
-        gpu_grp.shell_blend_bottom = group->shell_blend_bottom;
-        gpu_grp.chamfer_k2 = group->chamfer_k2;
-        gpu_grp.chamfer_k3 = group->chamfer_k3;
-        gpu_grp.chamfer_k4 = group->chamfer_k4;
-        gpu_grp.chamfer_k5 = group->chamfer_k5;
-        gpu_grp.flip_blend = group->flip_blend;
-        gpu_grp.flip_blend_end = group->flip_blend_end;
-        gpu_grp.first_object = obj_offset;
-        gpu_grp.object_count = group->totmember;
-        gpu_grp.color = float4(
-            group->color[0], group->color[1], group->color[2], group->color[3]);
 
-        /* Pack group modifiers */
-        gpu_grp.modifier_start = int(modifiers_.size());
-        gpu_grp.modifier_count = 0;
-        for (const SDFModifier *gmod = static_cast<const SDFModifier *>(group->modifiers.first);
-             gmod; gmod = gmod->next)
-        {
-          if (!gmod->show_viewport) {
-            continue;
-          }
-          SDFModifierGPU gpu_mod = {};
-          bool valid = false;
-          int mtype = gmod->type;
-
-          if (mtype == SDF_MOD_MIRROR) {
-            float3 mirror_pos(0.0f);
-            if (gmod->mirror_ob) {
-              mirror_pos = float3(gmod->mirror_ob->object_to_world()[3]);
-            }
-            int sides = 7;
-            int blend_type = int(gmod->params[5]);
-            gpu_mod.header = int4(SDF_MOD_MIRROR, gmod->flag, blend_type, sides);
-            gpu_mod.params = float4(gmod->params[0], mirror_pos.x, mirror_pos.y, mirror_pos.z);
-            gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_TWIST) {
-            gpu_mod.header = int4(SDF_MOD_TWIST, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], float(2), 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_BEND) {
-            int axis = int(gmod->params[1]);
-            gpu_mod.header = int4(SDF_MOD_BEND, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], float(axis), gmod->params[2], gmod->params[3]);
-            gpu_mod.params2 = float4(gmod->params[4], 0.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ELONGATE) {
-            gpu_mod.header = int4(SDF_MOD_ELONGATE, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_SOLIDIFY) {
-            int mode = int(gmod->params[1]);
-            int axis = int(gmod->params[2]);
-            gpu_mod.header = int4(SDF_MOD_SOLIDIFY, mode, axis, 0);
-            gpu_mod.params = float4(gmod->params[0], 0.8f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ROUND) {
-            gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ONION) {
-            int layers = std::max(int(gmod->params[1]), 1);
-            gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
-            gpu_mod.params = float4(gmod->params[2], 1.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_BEVEL) {
-            gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ARRAY) {
-            int array_type = gmod->flag;
-            int blend_type = int(gmod->params[5]);
-            gpu_mod.header = int4(SDF_MOD_ARRAY, array_type, blend_type, 0);
-            if (array_type == SDF_MOD_ARRAY_RADIAL) {
-              gpu_mod.params = float4(gmod->params[0], gmod->params[1], 0.0f, 0.0f);
-              gpu_mod.params2 = float4(gmod->params[4], gmod->params[5], gmod->params[6], gmod->params[7]);
-            }
-            else {
-              gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], gmod->params[3]);
-              gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
-            }
-            valid = true;
-          }
-          if (valid) {
-            modifiers_.append(gpu_mod);
-            gpu_grp.modifier_count++;
-          }
-        }
-
-        float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
-                                  ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
-                                  : gpu_grp.blend;
-        if (grp_eff_blend > 0.001f && gpu_grp.blend_type > 0) {
-          float sf = (gpu_grp.blend_type == SDF_BLEND_SMOOTH) ? 0.75f : 0.65f;
-          if (grp_eff_blend > 0.5f) {
-            sf = min_ff(sf, 0.5f);
-          }
-          step_factor_ = min_ff(step_factor_, sf);
-        }
-        groups_gpu_.append(gpu_grp);
-        group_index_map.add(group, g_idx);
-
-        int member_order = 0;
-        for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member; member = member->next) {
-          if (member->object) {
-            object_membership_map.add_overwrite(member->object, {g_idx, member_order});
-          }
-          member_order++;
-        }
-
-        g_idx++;
-        obj_offset += group->totmember;
-      }
-
-      /* New parent-child group path: SDF_TYPE_GROUP empties as parents */
+      /* Parent-child group path: SDF_TYPE_GROUP empties as parents */
       for (Object *group_ob : group_empties_) {
         Object *orig_group = DEG_get_original(group_ob);
         const SDF *grp_sdf = id_cast<const SDF *>(group_ob->data);
@@ -1605,90 +1736,10 @@ class Instance : public DrawEngine {
         gpu_grp.first_object = 0;
         gpu_grp.object_count = 0;
 
-        /* Pack group modifiers from the SDF modifier stack */
-        gpu_grp.modifier_start = int(modifiers_.size());
+        /* Group modifiers are now propagated to each child during per-object sync.
+         * No group-level modifier packing needed. */
+        gpu_grp.modifier_start = 0;
         gpu_grp.modifier_count = 0;
-        for (const SDFModifier *gmod = static_cast<const SDFModifier *>(grp_sdf->modifiers.first);
-             gmod; gmod = gmod->next)
-        {
-          if (!gmod->show_viewport) {
-            continue;
-          }
-          SDFModifierGPU gpu_mod = {};
-          bool valid = false;
-          int mtype = gmod->type;
-
-          if (mtype == SDF_MOD_MIRROR) {
-            float3 mirror_pos(0.0f);
-            if (gmod->mirror_ob) {
-              mirror_pos = float3(gmod->mirror_ob->object_to_world()[3]);
-            }
-            int sides = 7;
-            int blend_type = int(gmod->params[5]);
-            gpu_mod.header = int4(SDF_MOD_MIRROR, gmod->flag, blend_type, sides);
-            gpu_mod.params = float4(gmod->params[0], mirror_pos.x, mirror_pos.y, mirror_pos.z);
-            gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_TWIST) {
-            gpu_mod.header = int4(SDF_MOD_TWIST, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], float(2), 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_BEND) {
-            int axis = int(gmod->params[1]);
-            gpu_mod.header = int4(SDF_MOD_BEND, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], float(axis), gmod->params[2], gmod->params[3]);
-            gpu_mod.params2 = float4(gmod->params[4], 0.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ELONGATE) {
-            gpu_mod.header = int4(SDF_MOD_ELONGATE, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_SOLIDIFY) {
-            int mode = int(gmod->params[1]);
-            int axis = int(gmod->params[2]);
-            gpu_mod.header = int4(SDF_MOD_SOLIDIFY, mode, axis, 0);
-            gpu_mod.params = float4(gmod->params[0], 0.8f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ROUND) {
-            gpu_mod.header = int4(SDF_MOD_ROUND, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ONION) {
-            int layers = std::max(int(gmod->params[1]), 1);
-            gpu_mod.header = int4(SDF_MOD_ONION, layers, 0, 0);
-            gpu_mod.params = float4(gmod->params[2], 1.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_BEVEL) {
-            gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
-            gpu_mod.params = float4(gmod->params[0], 0.0f, 0.0f, 0.0f);
-            valid = true;
-          }
-          else if (mtype == SDF_MOD_ARRAY) {
-            int array_type = gmod->flag;
-            int blend_type = int(gmod->params[5]);
-            gpu_mod.header = int4(SDF_MOD_ARRAY, array_type, blend_type, 0);
-            if (array_type == SDF_MOD_ARRAY_RADIAL) {
-              gpu_mod.params = float4(gmod->params[0], gmod->params[1], 0.0f, 0.0f);
-              gpu_mod.params2 = float4(gmod->params[4], gmod->params[5], gmod->params[6], gmod->params[7]);
-            }
-            else {
-              gpu_mod.params = float4(gmod->params[0], gmod->params[1], gmod->params[2], gmod->params[3]);
-              gpu_mod.params2 = float4(gmod->params[4], 0.0f, float(blend_type), 0.0f);
-            }
-            valid = true;
-          }
-          if (valid) {
-            modifiers_.append(gpu_mod);
-            gpu_grp.modifier_count++;
-          }
-        }
 
         float grp_eff_blend = (gpu_grp.csg_operation == SDF_CSG_SHELL)
                                   ? std::max(gpu_grp.shell_blend_top, gpu_grp.shell_blend_bottom)
@@ -1703,15 +1754,30 @@ class Instance : public DrawEngine {
 
         groups_gpu_.append(gpu_grp);
 
-        /* Map children to this group */
-        int child_order = 0;
+        /* Map children to this group, ordered by sdf_index */
+        struct ChildEntry {
+          int obj_idx;
+          int sdf_index;
+        };
+        Vector<ChildEntry> child_entries;
         for (int i = 0; i < int(object_ptrs_.size()); i++) {
           Object *eval_ob = object_ptrs_[i];
           Object *orig_ob = DEG_get_original(eval_ob);
           if (orig_ob->parent == orig_group) {
-            object_membership_map.add_overwrite(orig_ob, {g_idx, child_order});
-            child_order++;
+            const SDF *child_sdf = id_cast<const SDF *>(eval_ob->data);
+            int sidx = child_sdf ? child_sdf->sdf_index : 0;
+            child_entries.append({i, sidx});
           }
+        }
+        std::sort(child_entries.begin(), child_entries.end(),
+                  [](const ChildEntry &a, const ChildEntry &b) {
+                    return a.sdf_index < b.sdf_index;
+                  });
+        int child_order = 0;
+        for (const auto &entry : child_entries) {
+          Object *orig_ob = DEG_get_original(object_ptrs_[entry.obj_idx]);
+          object_membership_map.add_overwrite(orig_ob, {g_idx, child_order});
+          child_order++;
         }
 
         g_idx++;
@@ -1729,17 +1795,33 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Sort objects by (group_id, group_order) */
+      /* (diagnostic moved after fix-up) */
+
+      /* Build map of group_id -> group empty's sdf_index for sorting */
+      Map<int, int> group_sort_key;
+      {
+        int gi = 0;
+        for (Object *group_ob : group_empties_) {
+          const SDF *gs = id_cast<const SDF *>(group_ob->data);
+          group_sort_key.add(gi, gs ? gs->sdf_index : 0);
+          gi++;
+        }
+      }
+
+      /* Sort objects: groups and ungrouped interleaved by sdf_index */
       {
         const int n = int(objects_.size());
         if (n > 0) {
           Vector<std::pair<int64_t, int>> sort_pairs(n);
           for (int i = 0; i < n; i++) {
             if (objects_[i].group_id >= 0) {
-              sort_pairs[i] = {int64_t(objects_[i].group_id) * 1000000LL + group_orders[i], i};
+              int gkey = 0;
+              const int *gk = group_sort_key.lookup_ptr(objects_[i].group_id);
+              if (gk) { gkey = *gk; }
+              sort_pairs[i] = {int64_t(gkey) * 1000000LL + group_orders[i], i};
             }
             else {
-              sort_pairs[i] = {int64_t(10000000) + objects_[i].original_index, i};
+              sort_pairs[i] = {int64_t(objects_[i].original_index) * 1000000LL, i};
             }
           }
           std::stable_sort(sort_pairs.begin(), sort_pairs.end());
@@ -1783,7 +1865,58 @@ class Instance : public DrawEngine {
         }
       }
 
-      /* Compute max blend per group, store in each member's _pad1 */
+      /* Expand group members' AABBs so they appear in all required tiles.
+       * Per-object AABBs already account for per-object modifiers (including
+       * group-propagated ones like Array). Just unify within each group. */
+      for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
+        int start = groups_gpu_[gi].first_object;
+        int cnt = groups_gpu_[gi].object_count;
+        if (cnt < 1) {
+          continue;
+        }
+        int op = groups_gpu_[gi].csg_operation;
+
+        float3 combined_min(1e30f), combined_max(-1e30f);
+        for (int m = start; m < start + cnt; m++) {
+          combined_min = math::min(combined_min, float3(objects_[m].bbox_min));
+          combined_max = math::max(combined_max, float3(objects_[m].bbox_max));
+        }
+
+        /* For intersect/subtract: also include all ungrouped objects */
+        if (op == SDF_CSG_INTERSECT || op == SDF_CSG_SUBTRACT || op == SDF_CSG_SHELL) {
+          for (int i = 0; i < int(objects_.size()); i++) {
+            if (objects_[i].group_id < 0) {
+              combined_min = math::min(combined_min, float3(objects_[i].bbox_min));
+              combined_max = math::max(combined_max, float3(objects_[i].bbox_max));
+            }
+          }
+        }
+
+        /* Expand by blend padding so members appear in blend-zone tiles */
+        float grp_blend = (groups_gpu_[gi].blend_type > 0) ? groups_gpu_[gi].blend : 0.0f;
+        if (op == SDF_CSG_SHELL) {
+          grp_blend = std::max(groups_gpu_[gi].shell_blend_top,
+                               groups_gpu_[gi].shell_blend_bottom);
+        }
+        if (grp_blend > 0.001f) {
+          float bpad = grp_blend * 2.0f;
+          combined_min -= float3(bpad);
+          combined_max += float3(bpad);
+        }
+
+        for (int m = start; m < start + cnt; m++) {
+          objects_[m].bbox_min = float4(combined_min, 0.0f);
+          objects_[m].bbox_max = float4(combined_max, 0.0f);
+          objects_[m].orig_bbox_min = float4(combined_min, objects_[m].orig_bbox_min.w);
+          objects_[m].orig_bbox_max = float4(combined_max, objects_[m].orig_bbox_max.w);
+        }
+        float diag = math::length(combined_max - combined_min);
+        for (int m = start; m < start + cnt; m++) {
+          objects_[m].max_group_blend = std::max(objects_[m].max_group_blend, diag);
+        }
+      }
+
+      /* Max blend per group */
       for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
         float grp_blend = (groups_gpu_[gi].csg_operation == SDF_CSG_SHELL)
                               ? std::max(groups_gpu_[gi].shell_blend_top,
@@ -1792,40 +1925,110 @@ class Instance : public DrawEngine {
         float max_blend = grp_blend;
         int start = groups_gpu_[gi].first_object;
         int cnt = groups_gpu_[gi].object_count;
-        bool has_shell = false;
-        float grp_diag = 0.0f;
         for (int m = start; m < start + cnt; m++) {
           float b = (objects_[m].blend_type == 0) ? 0.0f : objects_[m].blend;
           max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
-          if (objects_[m].csg_operation == SDF_CSG_SHELL) {
-            has_shell = true;
-          }
-          float3 ext = float3(objects_[m].bbox_max) - float3(objects_[m].bbox_min);
-          grp_diag = std::max(grp_diag, math::length(ext));
-        }
-        if (has_shell) {
-          max_blend = std::max(max_blend, grp_diag);
         }
         for (int m = start; m < start + cnt; m++) {
           objects_[m].max_group_blend = max_blend;
         }
       }
-      /* Ungrouped objects: use max blend across all ungrouped objects.
-       * Any ungrouped object may participate in another's smooth blend zone. */
-      float max_ungrouped_blend = 0.0f;
-      for (int i = 0; i < int(objects_.size()); i++) {
-        if (objects_[i].group_id < 0) {
-          float b = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
-          b += fabsf(objects_[i].shell_distance);
-          max_ungrouped_blend = std::max(max_ungrouped_blend, b);
+      /* Per-object spatial threshold for ungrouped objects:
+       * each object's threshold = max blend of any spatially overlapping neighbor.
+       * Zero-blend objects far from blended neighbors get threshold≈0 (tight culling). */
+      {
+        const int N = int(objects_.size());
+        for (int i = 0; i < N; i++) {
+          if (objects_[i].group_id >= 0) { continue; }
+          float own_b = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
+          own_b += fabsf(objects_[i].shell_distance);
+          float thresh = own_b;
+
+          for (int j = 0; j < N; j++) {
+            if (j == i || objects_[j].group_id >= 0) { continue; }
+            float jb = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
+            jb += fabsf(objects_[j].shell_distance);
+            if (jb <= thresh) { continue; }
+
+            float3 a_min = float3(objects_[i].orig_bbox_min) - float3(jb);
+            float3 a_max = float3(objects_[i].orig_bbox_max) + float3(jb);
+            float3 b_min = float3(objects_[j].orig_bbox_min);
+            float3 b_max = float3(objects_[j].orig_bbox_max);
+            if (a_min.x <= b_max.x && a_max.x >= b_min.x &&
+                a_min.y <= b_max.y && a_max.y >= b_min.y &&
+                a_min.z <= b_max.z && a_max.z >= b_min.z)
+            {
+              thresh = jb;
+            }
+          }
+          objects_[i].max_group_blend = thresh;
         }
       }
-      for (int i = 0; i < int(objects_.size()); i++) {
-        if (objects_[i].group_id < 0) {
-          objects_[i].max_group_blend = max_ungrouped_blend;
+
+      /* Expand ungrouped objects' AABBs and skip thresholds to cover group
+       * extent + blend padding. Required for any group with blend so that
+       * tiles/BVH include both the group and ungrouped objects in the blend zone. */
+      for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
+        int start = groups_gpu_[gi].first_object;
+        int cnt = groups_gpu_[gi].object_count;
+
+        /* Compute group's combined AABB */
+        float3 grp_min(1e30f), grp_max(-1e30f);
+        for (int m = start; m < start + cnt; m++) {
+          grp_min = math::min(grp_min, float3(objects_[m].bbox_min));
+          grp_max = math::max(grp_max, float3(objects_[m].bbox_max));
+        }
+        float grp_blend = (groups_gpu_[gi].csg_operation == SDF_CSG_SHELL)
+                              ? std::max(groups_gpu_[gi].shell_blend_top,
+                                         groups_gpu_[gi].shell_blend_bottom)
+                              : groups_gpu_[gi].blend;
+        float pad = grp_blend * 2.0f + 0.5f;
+        grp_min -= float3(pad);
+        grp_max += float3(pad);
+
+        for (int i = 0; i < int(objects_.size()); i++) {
+          if (objects_[i].group_id >= 0) {
+            continue;
+          }
+          /* Expand ungrouped object's AABB to cover the group */
+          objects_[i].bbox_min = float4(math::min(float3(objects_[i].bbox_min), grp_min), 0.0f);
+          objects_[i].bbox_max = float4(math::max(float3(objects_[i].bbox_max), grp_max), 0.0f);
+
+          /* Also expand skip threshold */
+          float3 u_min = float3(objects_[i].orig_bbox_min);
+          float3 u_max = float3(objects_[i].orig_bbox_max);
+          float max_dist = 0.0f;
+          for (int m = start; m < start + cnt; m++) {
+            float3 g_min = float3(objects_[m].orig_bbox_min);
+            float3 g_max = float3(objects_[m].orig_bbox_max);
+            for (int c = 0; c < 8; c++) {
+              float3 pt(c & 1 ? g_max.x : g_min.x,
+                        c & 2 ? g_max.y : g_min.y,
+                        c & 4 ? g_max.z : g_min.z);
+              float3 closest = math::clamp(pt, u_min, u_max);
+              max_dist = std::max(max_dist, math::length(pt - closest));
+            }
+          }
+          max_dist += pad;
+          objects_[i].max_group_blend = std::max(objects_[i].max_group_blend, max_dist);
         }
       }
     }
+
+      printf("SDF_FINAL: %d objects, %d groups\n",
+             int(objects_.size()), int(groups_gpu_.size()));
+      for (int i = 0; i < int(objects_.size()); i++) {
+        printf("  [%d] gid=%d csg=%d idx=%d mgb=%.3f %s\n",
+               i, objects_[i].group_id, objects_[i].csg_operation,
+               objects_[i].original_index, objects_[i].max_group_blend,
+               object_ptrs_.size() > size_t(i) ? object_ptrs_[i]->id.name + 2 : "?");
+      }
+      for (int g = 0; g < int(groups_gpu_.size()); g++) {
+        printf("  grp[%d] csg=%d first=%d count=%d mod_start=%d mod_count=%d\n",
+               g, groups_gpu_[g].csg_operation, groups_gpu_[g].first_object,
+               groups_gpu_[g].object_count, groups_gpu_[g].modifier_start,
+               groups_gpu_[g].modifier_count);
+      }
 
     /* Early frustum cull on pre-expansion AABBs with conservative padding */
     {
@@ -1965,6 +2168,11 @@ class Instance : public DrawEngine {
         polygon_points_ = std::move(compact_polygon_points);
         groups_gpu_ = std::move(compact_groups);
       }
+    }
+
+    /* Reassign original_index to sorted position (globally unique for gbuffer) */
+    for (int i = 0; i < int(objects_.size()); i++) {
+      objects_[i].original_index = i;
     }
 
     /* Expand AABBs for blend-aware CSG (now runs on visible set only) */
@@ -2303,10 +2511,66 @@ class Instance : public DrawEngine {
       }
     }
 
+    bool profiling = s_profile_pending;
+
+    if (profiling) {
+      s_profile_result = {};
+      s_profile_result.render_width = render_size_.x;
+      s_profile_result.render_height = render_size_.y;
+      s_profile_result.resolution_scale = resolution_scale_;
+      s_profile_result.object_count = int(objects_.size());
+      s_profile_result.group_count = int(groups_gpu_.size());
+      s_profile_result.modifier_total = int(modifiers_.size());
+      s_profile_result.bvh_node_count = int(bvh_tree_.nodes().size());
+      collect_profile_objects();
+
+      needs_upload_ = true;
+      compute_valid_ = false;
+
+      /* Create and zero eval counter SSBO */
+      int obj_count = int(objects_.size());
+      int n = std::max(obj_count, 1);
+      if (prof_eval_ssbo_ && prof_eval_ssbo_count_ != obj_count) {
+        GPU_storagebuf_free(prof_eval_ssbo_);
+        prof_eval_ssbo_ = nullptr;
+      }
+      {
+        Vector<uint32_t> zeros(n, 0);
+        size_t buf_sz = n * sizeof(uint32_t);
+        if (prof_eval_ssbo_ == nullptr) {
+          prof_eval_ssbo_ = GPU_storagebuf_create_ex(
+              buf_sz, zeros.data(), GPU_USAGE_DYNAMIC, "sdf_prof_eval_counts");
+          prof_eval_ssbo_count_ = obj_count;
+        }
+        else {
+          GPU_storagebuf_update(prof_eval_ssbo_, zeros.data());
+        }
+      }
+
+      /* Stats SSBO (16 uints) */
+      {
+        SdfTraceStats zero_stats = {};
+        if (prof_stats_ssbo_ == nullptr) {
+          prof_stats_ssbo_ = GPU_storagebuf_create_ex(
+              sizeof(SdfTraceStats), &zero_stats, GPU_USAGE_DYNAMIC, "sdf_prof_trace_stats");
+        }
+        else {
+          GPU_storagebuf_update(prof_stats_ssbo_, &zero_stats);
+        }
+      }
+
+      s_profiler.begin();
+    }
+
+#define PROF_START(name) if (profiling) { s_profiler.mark_start(name); }
+#define PROF_END()       if (profiling) { s_profiler.mark_end(); }
+
     if (needs_upload_ && (scene_changed_ || mesh_changed_ || !compute_valid_)) {
+      PROF_START("Upload");
       GPU_debug_group_begin("SDF Upload");
       upload_objects();
       GPU_debug_group_end();
+      PROF_END();
       needs_upload_ = false;
     }
 
@@ -2318,58 +2582,88 @@ class Instance : public DrawEngine {
                          res_changed || shading_changed;
 
     if (need_compute) {
+      PROF_START("AABB Project");
       GPU_debug_group_begin("SDF AABB Project");
       draw_aabb_project();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+      PROF_END();
 
+      PROF_START("Tile Cull");
       GPU_debug_group_begin("SDF Tile Cull");
       draw_tile_cull();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+      PROF_END();
 
+      PROF_START("Cone March");
       GPU_debug_group_begin("SDF Cone March");
       draw_cone_march();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+      PROF_END();
 
+      PROF_START("Trace");
       GPU_debug_group_begin("SDF Trace");
       draw_trace();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      PROF_END();
 
+      PROF_START("Color Resolve");
       GPU_debug_group_begin("SDF Color Resolve");
       draw_color_resolve();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      PROF_END();
 
+      PROF_START("Normal");
       GPU_debug_group_begin("SDF Normal");
       draw_normal();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      PROF_END();
 
+      PROF_START("Shade");
       GPU_debug_group_begin("SDF Shade");
       draw_shade();
       GPU_debug_group_end();
-
       GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+      PROF_END();
 
       compute_valid_ = true;
     }
 
+    PROF_START("Blit");
     GPU_debug_group_begin("SDF Blit");
     draw_blit();
     GPU_debug_group_end();
+    PROF_END();
 
+    PROF_START("FXAA");
     GPU_debug_group_begin("SDF FXAA");
     draw_fxaa();
     GPU_debug_group_end();
+    PROF_END();
+
+#undef PROF_START
+#undef PROF_END
+
+    if (profiling) {
+      s_profiler.finish(s_profile_result);
+
+      /* Read back eval counts + trace stats */
+      GPU_memory_barrier(GPU_BARRIER_BUFFER_UPDATE);
+      if (prof_eval_ssbo_ && prof_eval_ssbo_count_ > 0) {
+        GPU_storagebuf_read(prof_eval_ssbo_, s_profile_result.eval_counts);
+      }
+      if (prof_stats_ssbo_) {
+        GPU_storagebuf_read(prof_stats_ssbo_, &s_profile_result.trace_stats);
+      }
+
+      s_profile_result.valid = true;
+      s_profile_pending = false;
+    }
 
     prev_render_size_ = render_size_;
 
@@ -2403,6 +2697,40 @@ class Instance : public DrawEngine {
   }
 
  private:
+  void collect_profile_objects()
+  {
+    s_profile_result.profiled_object_count = 0;
+    for (int i = 0; i < int(objects_.size()) && i < SDF_PROFILE_MAX_OBJECTS; i++) {
+      auto &dst = s_profile_result.objects[i];
+      const SDFObjectGPU &src = objects_[i];
+      dst.sdf_type = src.sdf_type;
+      dst.blend_type = src.blend_type;
+      dst.csg_operation = src.csg_operation;
+      dst.blend = src.blend;
+      dst.bevel = src.bevel;
+      dst.size[0] = src.sdf_size.x;
+      dst.size[1] = src.sdf_size.y;
+      dst.size[2] = src.sdf_size.z;
+
+      if (i < int(object_ptrs_.size()) && object_ptrs_[i]) {
+        BLI_strncpy(dst.name, object_ptrs_[i]->id.name + 2, sizeof(dst.name));
+      }
+      else {
+        BLI_snprintf(dst.name, sizeof(dst.name), "Object_%d", i);
+      }
+
+      dst.modifier_count = std::min(src.modifier_count, SDF_PROFILE_MAX_MODS_PER_OBJ);
+      for (int m = 0; m < dst.modifier_count; m++) {
+        int mi = src.modifier_start + m;
+        if (mi >= 0 && mi < int(modifiers_.size())) {
+          dst.modifiers[m].type = modifiers_[mi].header.x;
+          dst.modifiers[m].flags = modifiers_[mi].header.y;
+        }
+      }
+      s_profile_result.profiled_object_count++;
+    }
+  }
+
   void sync_sdf_settings()
   {
     const View3D *v3d = draw_ctx_->v3d;
@@ -2996,9 +3324,16 @@ class Instance : public DrawEngine {
       if (slot >= 0) GPU_storagebuf_bind(tile_far_hint_ssbo_, slot);
     }
 
+    if (bvh_nodes_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "aabb_nodes");
+      if (slot >= 0) GPU_storagebuf_bind(bvh_nodes_ssbo_, slot);
+    }
+
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
+    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
     GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
     GPU_shader_uniform_3fv(sh, "scene_aabb_max", scene_max_);
     GPU_shader_uniform_1f(sh, "sdf_cone_aperture", sdf_cone_aperture_);
@@ -3026,6 +3361,18 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(sh);
     bind_ssbos(sh);
+
+    /* Profiling SSBOs + uniforms */
+    if (prof_eval_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "prof_eval_counts");
+      if (slot >= 0) GPU_storagebuf_bind(prof_eval_ssbo_, slot);
+    }
+    if (prof_stats_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "prof_trace_stats");
+      if (slot >= 0) GPU_storagebuf_bind(prof_stats_ssbo_, slot);
+    }
+    GPU_shader_uniform_1i(sh, "prof_enabled", s_profile_pending ? 1 : 0);
+    GPU_shader_uniform_1i(sh, "skip_object", -1);
 
     /* Bind tile SSBOs (tile-culled path) */
     if (cone_hit_ssbo_) {
@@ -3116,6 +3463,8 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
     GPU_shader_uniform_1i(sh, "group_count", int(groups_gpu_.size()));
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
+    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     int dispatch_x = (render_size_.x + 7) / 8;
@@ -3154,6 +3503,8 @@ class Instance : public DrawEngine {
     }
 
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
+    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
     GPU_shader_uniform_1i(sh, "debug_fd_normals", debug_fd_normals_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
@@ -3435,6 +3786,12 @@ class Instance : public DrawEngine {
     if (tile_prim_lists_ssbo_) {
       GPU_storagebuf_free(tile_prim_lists_ssbo_);
     }
+    if (prof_eval_ssbo_) {
+      GPU_storagebuf_free(prof_eval_ssbo_);
+    }
+    if (prof_stats_ssbo_) {
+      GPU_storagebuf_free(prof_stats_ssbo_);
+    }
     if (shading_ubo_) {
       GPU_uniformbuf_free(shading_ubo_);
     }
@@ -3454,6 +3811,11 @@ int sdf_object_count_get()
 int sdf_group_count_get()
 {
   return s_group_count;
+}
+
+const SDFObjectGPU *sdf_objects_cpu_get()
+{
+  return s_objects_cpu;
 }
 
 const int *sdf_depsgraph_to_sorted_get(int *out_count)
@@ -3935,6 +4297,253 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
 
   cleanup();
   return "";
+}
+
+void sdf_profile_request()
+{
+  s_profile_pending = true;
+  s_profile_result.valid = false;
+}
+
+bool sdf_profile_is_ready()
+{
+  return s_profile_result.valid;
+}
+
+bool sdf_profile_is_pending()
+{
+  return s_profile_pending;
+}
+
+static const char *sdf_type_name(int t)
+{
+  switch (t) {
+    case SDF_TYPE_BOX: return "Box";
+    case SDF_TYPE_SPHERE: return "Sphere";
+    case SDF_TYPE_CYLINDER: return "Cylinder";
+    case SDF_TYPE_CONE: return "Cone";
+    case SDF_TYPE_CAPSULE: return "Capsule";
+    case SDF_TYPE_TORUS: return "Torus";
+    case SDF_TYPE_NGON: return "Ngon";
+    case SDF_TYPE_POLYGON: return "Polygon";
+    case SDF_TYPE_GROUP: return "Group";
+    default: return "Unknown";
+  }
+}
+
+static const char *sdf_blend_name(int t)
+{
+  switch (t) {
+    case SDF_BLEND_LINEAR: return "Linear";
+    case SDF_BLEND_SMOOTH: return "Smooth";
+    case SDF_BLEND_CHAMFER: return "Chamfer";
+    case SDF_BLEND_ROUND: return "Round";
+    default: return "Unknown";
+  }
+}
+
+static const char *sdf_csg_name(int t)
+{
+  switch (t) {
+    case SDF_CSG_UNION: return "Union";
+    case SDF_CSG_SUBTRACT: return "Subtract";
+    case SDF_CSG_INTERSECT: return "Intersect";
+    case SDF_CSG_SHELL: return "Shell";
+    case SDF_CSG_PUSH: return "Push";
+    case SDF_CSG_AVOID: return "Avoid";
+    default: return "Unknown";
+  }
+}
+
+static const char *sdf_mod_name(int t)
+{
+  switch (t) {
+    case SDF_MOD_MIRROR: return "Mirror";
+    case SDF_MOD_TWIST: return "Twist";
+    case SDF_MOD_BEND: return "Bend";
+    case SDF_MOD_ELONGATE: return "Elongate";
+    case SDF_MOD_SOLIDIFY: return "Solidify";
+    case SDF_MOD_ROUND: return "Round";
+    case SDF_MOD_ONION: return "Onion";
+    case SDF_MOD_BEVEL: return "Bevel";
+    case SDF_MOD_ARRAY: return "Array";
+    case SDF_MOD_DISPLACE: return "Displace";
+    default: return "Unknown";
+  }
+}
+
+std::string sdf_profile_format_text()
+{
+  if (!s_profile_result.valid) {
+    return "No profiling data available.\n";
+  }
+
+  const SdfProfileResult &r = s_profile_result;
+  std::string out;
+  out.reserve(4096);
+
+  char buf[512];
+
+  out += "================================================================\n";
+  out += "SDF FRAME PROFILE\n";
+  out += "================================================================\n\n";
+
+  snprintf(buf, sizeof(buf),
+           "Resolution:   %d x %d (scale: %.0f%%)\n",
+           r.render_width, r.render_height, r.resolution_scale * 100.0f);
+  out += buf;
+
+  snprintf(buf, sizeof(buf),
+           "Objects:      %d\n"
+           "Groups:       %d\n"
+           "Modifiers:    %d\n"
+           "BVH Nodes:    %d\n\n",
+           r.object_count, r.group_count, r.modifier_total, r.bvh_node_count);
+  out += buf;
+
+  /* Pass timing */
+  out += "PASS TIMING\n";
+  out += "----------------------------------------------------------------\n";
+
+  double total_pass_ns = 0.0;
+  for (int i = 0; i < r.pass_count; i++) {
+    total_pass_ns += r.passes[i].time_ns;
+  }
+
+  for (int i = 0; i < r.pass_count; i++) {
+    const auto &p = r.passes[i];
+    double ms = p.time_ns / 1e6;
+    double us = p.time_ns / 1e3;
+    double pct = (r.total_ns > 0.0) ? (p.time_ns / r.total_ns * 100.0) : 0.0;
+
+    if (ms >= 1.0) {
+      snprintf(buf, sizeof(buf), "  %-18s %10.3f ms  (%5.1f%%)\n", p.name, ms, pct);
+    }
+    else {
+      snprintf(buf, sizeof(buf), "  %-18s %10.3f us  (%5.1f%%)\n", p.name, us, pct);
+    }
+    out += buf;
+  }
+
+  out += "----------------------------------------------------------------\n";
+  double total_ms = r.total_ns / 1e6;
+  double fps = (total_ms > 0.0) ? (1000.0 / total_ms) : 0.0;
+  snprintf(buf, sizeof(buf),
+           "  TOTAL              %10.3f ms  (%.1f FPS)\n\n", total_ms, fps);
+  out += buf;
+
+  /* Trace diagnostics */
+  const SdfTraceStats &s = r.trace_stats;
+  uint64_t total_evals = 0;
+  for (int i = 0; i < r.profiled_object_count; i++) {
+    total_evals += r.eval_counts[i];
+  }
+
+  int total_pixels = r.render_width * r.render_height;
+  double steps_per_ray = (s.total_rays > 0) ? double(s.total_steps) / double(s.total_rays) : 0;
+  double evals_per_step = (s.total_steps > 0) ? double(total_evals) / double(s.total_steps) : 0;
+  double evals_per_ray = (s.total_rays > 0) ? double(total_evals) / double(s.total_rays) : 0;
+  double hit_rate = (s.total_rays > 0) ? double(s.total_hits) / double(s.total_rays) * 100.0 : 0;
+  double empty_pct = (s.total_steps + s.total_empty_steps > 0) ?
+      double(s.total_empty_steps) / double(s.total_steps + s.total_empty_steps) * 100.0 : 0;
+  double sor_pct = (s.total_steps > 0) ?
+      double(s.total_sor_failures) / double(s.total_steps) * 100.0 : 0;
+  double skip_rate = (total_evals + s.total_aabb_skips > 0) ?
+      double(s.total_aabb_skips) / double(total_evals + s.total_aabb_skips) * 100.0 : 0;
+
+  out += "TRACE DIAGNOSTICS\n";
+  out += "----------------------------------------------------------------\n";
+  snprintf(buf, sizeof(buf),
+           "  Rays:               %u (of %d pixels)\n"
+           "  Hits:               %u (%.1f%% hit rate)\n"
+           "  Steps:              %u (%.1f steps/ray, max %u)\n"
+           "  Empty steps:        %u (%.1f%% of all steps)\n"
+           "  SOR failures:       %u (%.1f%% of steps)\n"
+           "  Object evals:       %llu (%.1f evals/step, %.1f evals/ray)\n"
+           "  AABB skips:         %u (%.1f%% skip rate)\n",
+           s.total_rays, total_pixels,
+           s.total_hits, hit_rate,
+           s.total_steps, steps_per_ray, s.max_steps_any_ray,
+           s.total_empty_steps, empty_pct,
+           s.total_sor_failures, sor_pct,
+           (unsigned long long)total_evals, evals_per_step, evals_per_ray,
+           s.total_aabb_skips, skip_rate);
+  out += buf;
+
+  /* Diagnosis */
+  out += "\n  BOTTLENECK ANALYSIS:\n";
+  if (steps_per_ray > 80) {
+    snprintf(buf, sizeof(buf),
+             "  >> HIGH STEP COUNT (%.0f/ray) — step_factor too low or SOR failing\n", steps_per_ray);
+    out += buf;
+  }
+  if (evals_per_step > 20) {
+    snprintf(buf, sizeof(buf),
+             "  >> HIGH EVALS/STEP (%.0f) — tile culling not eliminating objects\n", evals_per_step);
+    out += buf;
+  }
+  if (sor_pct > 10) {
+    snprintf(buf, sizeof(buf),
+             "  >> HIGH SOR FAILURE (%.1f%%) — over_relaxation too aggressive\n", sor_pct);
+    out += buf;
+  }
+  if (empty_pct > 30) {
+    snprintf(buf, sizeof(buf),
+             "  >> HIGH EMPTY STEPS (%.0f%%) — rays traversing void, scene AABBs too large\n", empty_pct);
+    out += buf;
+  }
+  if (skip_rate < 50 && r.object_count > 10) {
+    snprintf(buf, sizeof(buf),
+             "  >> LOW AABB SKIP RATE (%.0f%%) — per-step AABB culling ineffective\n", skip_rate);
+    out += buf;
+  }
+
+  /* Per-object eval counts (sorted by evals) */
+  out += "\nPER-OBJECT EVALS (sorted by evaluation count)\n";
+  out += "----------------------------------------------------------------\n";
+
+  Vector<int> sorted(r.profiled_object_count);
+  for (int i = 0; i < r.profiled_object_count; i++) sorted[i] = i;
+  std::sort(sorted.begin(), sorted.end(), [&](int a, int b) {
+    return r.eval_counts[a] > r.eval_counts[b];
+  });
+
+  snprintf(buf, sizeof(buf),
+           "  %-4s %-20s %-10s %-10s %-12s %10s %7s  %s\n",
+           "#", "Name", "Type", "CSG", "Blend", "Evals", "Share", "Mods");
+  out += buf;
+  out += "  ";
+  for (int c = 0; c < 100; c++) out += "-";
+  out += "\n";
+
+  for (int si = 0; si < r.profiled_object_count; si++) {
+    int i = sorted[si];
+    const auto &obj = r.objects[i];
+    uint32_t evals = r.eval_counts[i];
+    double pct = (total_evals > 0) ? (double(evals) / double(total_evals) * 100.0) : 0.0;
+
+    char mods_str[128] = "";
+    if (obj.modifier_count > 0) {
+      int pos = 0;
+      for (int m = 0; m < obj.modifier_count && pos < 120; m++) {
+        if (m > 0) pos += snprintf(mods_str + pos, sizeof(mods_str) - pos, ",");
+        pos += snprintf(mods_str + pos, sizeof(mods_str) - pos, "%s",
+                        sdf_mod_name(obj.modifiers[m].type));
+      }
+    }
+
+    snprintf(buf, sizeof(buf),
+             "  %-4d %-20s %-10s %-10s %-6s(%.2f) %10u %5.1f%%  %s\n",
+             i, obj.name,
+             sdf_type_name(obj.sdf_type),
+             sdf_csg_name(obj.csg_operation),
+             sdf_blend_name(obj.blend_type),
+             obj.blend, evals, pct, mods_str);
+    out += buf;
+  }
+
+  out += "================================================================\n";
+  return out;
 }
 
 }  // namespace blender::draw::sdf

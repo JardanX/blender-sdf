@@ -183,7 +183,6 @@ RNA_MAIN_LISTBASE_FUNCS_DEF(speakers)
 RNA_MAIN_LISTBASE_FUNCS_DEF(texts)
 RNA_MAIN_LISTBASE_FUNCS_DEF(textures)
 RNA_MAIN_LISTBASE_FUNCS_DEF(sdfs)
-RNA_MAIN_LISTBASE_FUNCS_DEF(sdf_groups)
 RNA_MAIN_LISTBASE_FUNCS_DEF(volumes)
 RNA_MAIN_LISTBASE_FUNCS_DEF(wm)
 RNA_MAIN_LISTBASE_FUNCS_DEF(workspaces)
@@ -510,12 +509,6 @@ void RNA_def_main(BlenderRNA *brna)
        "SDFs",
        "SDF data-blocks",
        RNA_def_main_sdfs},
-      {"sdf_groups",
-       "SDFGroup",
-       "rna_Main_sdf_groups_begin",
-       "SDF Groups",
-       "SDF group data-blocks",
-       RNA_def_main_sdf_groups},
       {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr},
   };
 

@@ -22,8 +22,6 @@ namespace blender {
 
 struct AnimData;
 struct Material;
-struct SDFGroup;
-
 #ifdef __cplusplus
 using SDFRuntimeHandle = bke::SDFRuntime;
 #else
@@ -40,6 +38,7 @@ typedef enum eSDFType {
   SDF_TYPE_TORUS = 5,
   SDF_TYPE_NGON = 6,
   SDF_TYPE_POLYGON = 7,
+  SDF_TYPE_GROUP = 100,
 } eSDFType;
 
 /* Box corner/edge blend mode */
@@ -200,9 +199,8 @@ typedef struct SDF {
   float torus_angle = 6.2831853f;
   char _pad4[4] = {};
 
-  struct SDFGroup *sdf_group = nullptr;
-  int group_order = 0;
   int sdf_index = 0;
+  char _pad_sg[4] = {};
 
   ListBase modifiers = {}; /* SDFModifier */
   int totmodifier = 0;

@@ -668,42 +668,27 @@ float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
 {
   float actual_dist = evalPrimitiveOnly(obj, local_pos);
 
-  float3 size = obj.sdf_size.xyz;
-  float min_dim = min(size.x, min(size.y, size.z));
-  float grad_bevel = max(obj.bevel, min(0.005f, min_dim * 0.5f));
+  /* sdf_size.xyz = pre-subtracted (size - bevel), pre-clamped on CPU. */
+  float3 r = obj.sdf_size.xyz;
   float4 dg;
 
   if (obj.sdf_type == 1) {
-    float3 r = max(size - float3(grad_bevel), float3(0.001f));
-    if (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f) {
-      dg = sdgSphere(local_pos, r.x);
-    }
-    else {
-      dg = sdgEllipsoid(local_pos, r);
-    }
+    dg = (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f)
+         ? sdgSphere(local_pos, r.x) : sdgEllipsoid(local_pos, r);
   }
   else if (obj.sdf_type == 2) {
-    float3 cyl_size = max(size - float3(grad_bevel), float3(0.001f));
-    dg = sdgCylinder(local_pos, cyl_size);
+    dg = sdgCylinder(local_pos, r);
   }
   else if (obj.sdf_type == 3) {
-    float cone_r = max(size.x - grad_bevel, 0.001f);
-    float cone_h = max(size.y - grad_bevel, 0.001f);
-    dg = sdgCone(local_pos, cone_r, cone_h);
+    dg = sdgCone(local_pos, r.x, r.y);
   }
   else if (obj.sdf_type == 4) {
-    float3 cap_size = max(size - float3(grad_bevel), float3(0.001f));
-    dg = sdgCapsule(local_pos, cap_size);
+    dg = sdgCapsule(local_pos, r);
   }
   else if (obj.sdf_type == 5) {
-    float major = max(size.x - grad_bevel, 0.001f);
-    float minor = max(size.y - grad_bevel, 0.001f);
-    if (obj.box_modes.w != 0) {
-      dg = sdgCappedTorus(local_pos, obj.box_corners.xy, major, minor);
-    }
-    else {
-      dg = sdgTorus(local_pos, float2(major, minor));
-    }
+    dg = (obj.box_modes.w != 0)
+         ? sdgCappedTorus(local_pos, obj.box_corners.xy, r.x, r.y)
+         : sdgTorus(local_pos, float2(r.x, r.y));
   }
   else if (obj.sdf_type == 6 || obj.sdf_type == 7) {
     float eps = 0.0005f;
@@ -727,11 +712,9 @@ float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
       float gl = max(length(g), 1e-8f);
       return float4(actual_dist, g / gl);
     }
-    float3 box_size = max(size - float3(grad_bevel), float3(0.001f));
-    dg = sdgBox(local_pos, box_size);
+    dg = sdgBox(local_pos, r);
   }
 
-  /* Return exact distance with beveled gradient direction. */
   return float4(actual_dist, dg.yzw);
 }
 

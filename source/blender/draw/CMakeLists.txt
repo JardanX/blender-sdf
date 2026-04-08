@@ -508,6 +508,7 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_extra_loose_point_frag.glsl
   engines/overlay/shaders/overlay_extra_loose_point_vert.glsl
   engines/overlay/shaders/overlay_extra_point_vert.glsl
+  engines/overlay/shaders/overlay_sdf_group_point_vert.glsl
   engines/overlay/shaders/overlay_extra_vert.glsl
   engines/overlay/shaders/overlay_extra_wire_frag.glsl
   engines/overlay/shaders/overlay_extra_wire_vert.glsl

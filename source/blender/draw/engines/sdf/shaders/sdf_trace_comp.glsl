@@ -14,7 +14,17 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 
 #define kFltMax 1e30f
 #define kTileSize 8
-#define kMaxTileObjects 128
+#define kMaxTileObjects 256
+
+/* Profiling stat indices (matches SdfTraceStats layout) */
+#define STAT_RAYS           0
+#define STAT_HITS           1
+#define STAT_STEPS          2
+#define STAT_EMPTY_STEPS    3
+#define STAT_EVALS          4
+#define STAT_AABB_SKIPS     5
+#define STAT_SOR_FAILURES   6
+#define STAT_MAX_STEPS      7
 
 #ifdef USE_TILE_CULLING
 shared uint s_tileObjCount;
@@ -66,167 +76,167 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
   out_obj_id = -1.0f;
   g_numEvaluated = 0;
 
-  /* Groups: per-object AABB check, substitute AABB distance when outside */
-  for (int g = 0; g < group_count; g++) {
-    SDFGroupGPU grp = groups[g];
-    float grp_dist = 1e10f;
-    float3 grp_color = grp.color.rgb;
-    bool grp_has_hit = false;
-    float grp_winner_id = -1.0f;
+  /* Unified evaluation: iterate all objects in sorted order.
+   * Grouped objects are evaluated as a single field, then combined with scene. */
+  int i = 0;
+  while (i < object_count) {
+    int gid = objects[i].group_id;
 
-    /* Group-level domain modifiers transform world_pos */
-    float3 grp_pos = world_pos;
-    float grp_scale = 1.0f;
-    if (grp.modifier_count > 0) {
-      float4 dm = applyDomainModifiers(world_pos, grp.modifier_start, grp.modifier_count, float4x4(1.0));
-      grp_pos = dm.xyz;
-      grp_scale = dm.w;
-    }
+    if (gid >= 0) {
+      /* Evaluate entire group as one field */
+      SDFGroupGPU grp = groups[gid];
+      float grp_dist = 1e10f;
+      float3 grp_tint = grp.color.rgb;
+      float3 grp_color = float3(0.5f);
+      bool grp_has_hit = false;
+      float grp_winner_id = -1.0f;
 
-    for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-      if (!is_shape_near(m)) { continue; }
-
-      float da = point_aabb_dist(grp_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz);
-      float aabb_skip_thresh = max(sdf_ray_epsilon, object_aabbs[m].max_group_blend);
-      int obj_op = objects[m].csg_operation;
-      bool must_eval = grp_has_hit &&
-                       (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT);
-
-      SDFObjectGPU obj = objects[m];
-      float d;
-
-      if (da > aabb_skip_thresh) {
-        if (!must_eval) {
-          continue;
-        }
-        d = da;
-      }
-      else {
-        float3 lp = (obj.inverse_matrix * float4(grp_pos - obj.position.xyz, 1.0f)).xyz;
-        d = evalPrimitive(lp, obj);
-        g_numEvaluated++;
+      float3 grp_pos = world_pos;
+      float grp_scale = 1.0f;
+      if (grp.modifier_count > 0) {
+        float4 dm = applyDomainModifiers(world_pos, grp.modifier_start, grp.modifier_count, float4x4(1.0));
+        grp_pos = dm.xyz;
+        grp_scale = dm.w;
       }
 
-      if (!grp_has_hit) {
-        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
-            obj.csg_operation != SDF_CSG_OP_INTERSECT) {
-          grp_dist = d;
-          grp_color = obj.color.rgb;
-          grp_winner_id = float(obj.original_index);
-          grp_has_hit = true;
+      int grp_end = i;
+      while (grp_end < object_count && objects[grp_end].group_id == gid) { grp_end++; }
+
+      for (int m = i; m < grp_end; m++) {
+        if (m == skip_object) { continue; }
+
+        SDFObjectGPU obj = objects[m];
+        float d;
+
+        /* Always evaluate group children — no BVH or AABB skip.
+         * All children define the combined group field; skipping any member
+         * breaks subtract/intersect which need max() over all members. */
+        {
+          float3 lp = (obj.inverse_matrix * float4(grp_pos - obj.position.xyz, 1.0f)).xyz;
+          d = evalPrimitive(lp, obj);
+          g_numEvaluated++;
+          if (prof_enabled != 0) { atomicAdd(prof_eval_counts[m], 1u); }
         }
-      }
-      else {
-        float prev = grp_dist;
-        grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
-            obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
-        if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
-          if (-d > prev) { grp_winner_id = float(obj.original_index); }
+
+        if (!grp_has_hit) {
+          if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
+              obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+            grp_dist = d;
+            grp_color = obj.color.rgb * grp_tint;
+            grp_winner_id = float(obj.original_index);
+            grp_has_hit = true;
+          }
         }
-        else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) {
-          if (d > prev) { grp_winner_id = float(obj.original_index); }
-        }
-        else if (obj.csg_operation == SDF_CSG_OP_PUSH) {
-          if (d - grp_dist < sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
-        }
-        else if (obj.csg_operation == SDF_CSG_OP_AVOID) {
-          if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
-        }
-        else if (obj.csg_operation == SDF_CSG_OP_SHELL) {
-          if (obj.shell_mode == SDF_SHELL_MODE_PUSH) {
+        else {
+          float prev = grp_dist;
+          grp_dist = combineCSG(
+              grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+              obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
+          if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
+            if (-d > prev) { grp_winner_id = float(obj.original_index); }
+          }
+          else if (obj.csg_operation == SDF_CSG_OP_INTERSECT) {
+            if (d > prev) { grp_winner_id = float(obj.original_index); }
+          }
+          else if (obj.csg_operation == SDF_CSG_OP_PUSH) {
             if (d - grp_dist < sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
           }
-          else if (obj.shell_mode == SDF_SHELL_MODE_AVOID) {
+          else if (obj.csg_operation == SDF_CSG_OP_AVOID) {
             if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
           }
-          else if (obj.shell_op == SDF_SHELL_OP_SUBTRACTION) {
-            if (-d > prev) { grp_winner_id = float(obj.original_index); }
+          else if (obj.csg_operation == SDF_CSG_OP_SHELL) {
+            if (obj.shell_mode == SDF_SHELL_MODE_PUSH) {
+              if (d - grp_dist < sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+            }
+            else if (obj.shell_mode == SDF_SHELL_MODE_AVOID) {
+              if (prev - grp_dist > sdf_ray_epsilon) { grp_winner_id = float(obj.original_index); }
+            }
+            else if (obj.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+              if (-d > prev) { grp_winner_id = float(obj.original_index); }
+            }
+            else {
+              if (d < prev) { grp_winner_id = float(obj.original_index); }
+            }
           }
           else {
             if (d < prev) { grp_winner_id = float(obj.original_index); }
           }
-        }
-        else {
-          if (d < prev) { grp_winner_id = float(obj.original_index); }
-        }
-        if (obj.csg_operation == SDF_CSG_OP_UNION) {
-          float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
-          grp_color = mix(grp_color, obj.color.rgb, t);
+          if (obj.csg_operation == SDF_CSG_OP_UNION) {
+            float t = colorBlendFactor(prev, d, obj.blend_type, obj.blend);
+            grp_color = mix(grp_color, obj.color.rgb * grp_tint, t);
+          }
         }
       }
-    }
 
-    /* Group-level distance modifiers */
-    if (grp_has_hit && grp.modifier_count > 0) {
-      grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, grp.modifier_start, grp.modifier_count);
-      grp_dist *= grp_scale;
-    }
-
-    if (!grp_has_hit) {
-      float grp_aabb = 1e30f;
-      for (int m = grp.first_object; m < grp.first_object + grp.object_count; m++) {
-        grp_aabb = min(grp_aabb, point_aabb_dist(world_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz));
+      if (grp_has_hit && grp.modifier_count > 0) {
+        grp_dist = applyGroupDistanceModifiers(grp_dist, grp_pos, grp.modifier_start, grp.modifier_count);
+        grp_dist *= grp_scale;
       }
-      out_aabb_skip = min(out_aabb_skip, grp_aabb);
+
+      if (!grp_has_hit) {
+        float grp_aabb = 1e30f;
+        for (int m = i; m < grp_end; m++) {
+          grp_aabb = min(grp_aabb, point_aabb_dist(world_pos, objects[m].orig_bbox_min.xyz, objects[m].orig_bbox_max.xyz));
+        }
+        out_aabb_skip = min(out_aabb_skip, grp_aabb);
+      }
+      else if (scene_dist >= 1e9f) {
+        scene_dist = grp_dist;
+        out_color = grp_color;
+        out_obj_id = grp_winner_id;
+      }
+      else {
+        float prev = scene_dist;
+        scene_dist = combineCSG(
+            scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+            grp.shell_distance, grp.shell_mode, grp.shell_op,
+            grp.shell_blend_top, grp.shell_blend_bottom,
+            grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
+        if (grp.csg_operation == SDF_CSG_OP_SUBTRACT) {
+          if (-grp_dist > prev) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp.csg_operation == SDF_CSG_OP_INTERSECT) {
+          if (grp_dist > prev) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp.csg_operation == SDF_CSG_OP_PUSH) {
+          if (grp_dist - scene_dist < sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp.csg_operation == SDF_CSG_OP_AVOID) {
+          if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp.csg_operation == SDF_CSG_OP_SHELL) {
+          if (grp.shell_mode == SDF_SHELL_MODE_PUSH) {
+            if (grp_dist - scene_dist < sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
+          }
+          else if (grp.shell_mode == SDF_SHELL_MODE_AVOID) {
+            if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
+          }
+          else if (grp.shell_op == SDF_SHELL_OP_SUBTRACTION) {
+            if (-grp_dist > prev) { out_obj_id = grp_winner_id; }
+          }
+          else {
+            if (grp_dist < prev) { out_obj_id = grp_winner_id; }
+          }
+        }
+        else if (grp.csg_operation == SDF_CSG_OP_UNION) {
+          if (grp_dist < prev) { out_obj_id = grp_winner_id; }
+        }
+        if (grp.csg_operation == SDF_CSG_OP_UNION) {
+          float t = colorBlendFactor(prev, grp_dist, grp.blend_type, grp.blend);
+          out_color = mix(out_color, grp_color, t);
+        }
+      }
+
+      i = grp_end;
       continue;
     }
 
-    if (scene_dist >= 1e9f) {
-      scene_dist = grp_dist;
-      out_color = grp_color;
-      out_obj_id = grp_winner_id;
-    }
-    else {
-      float prev = scene_dist;
-      scene_dist = combineCSG(
-          scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-          grp.shell_distance, grp.shell_mode, grp.shell_op,
-          grp.shell_blend_top, grp.shell_blend_bottom,
-          grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
-      if (grp.csg_operation == SDF_CSG_OP_SUBTRACT) {
-        if (-grp_dist > prev) { out_obj_id = grp_winner_id; }
-      }
-      else if (grp.csg_operation == SDF_CSG_OP_INTERSECT) {
-        if (grp_dist > prev) { out_obj_id = grp_winner_id; }
-      }
-      else if (grp.csg_operation == SDF_CSG_OP_PUSH) {
-        if (grp_dist - scene_dist < sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
-      }
-      else if (grp.csg_operation == SDF_CSG_OP_AVOID) {
-        if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
-      }
-      else if (grp.csg_operation == SDF_CSG_OP_SHELL) {
-        if (grp.shell_mode == SDF_SHELL_MODE_PUSH) {
-          if (grp_dist - scene_dist < sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
-        }
-        else if (grp.shell_mode == SDF_SHELL_MODE_AVOID) {
-          if (prev - scene_dist > sdf_ray_epsilon) { out_obj_id = grp_winner_id; }
-        }
-        else if (grp.shell_op == SDF_SHELL_OP_SUBTRACTION) {
-          if (-grp_dist > prev) { out_obj_id = grp_winner_id; }
-        }
-        else {
-          if (grp_dist < prev) { out_obj_id = grp_winner_id; }
-        }
-      }
-      else if (grp.csg_operation == SDF_CSG_OP_UNION) {
-        if (grp_dist < prev) { out_obj_id = grp_winner_id; }
-      }
-      if (grp.csg_operation == SDF_CSG_OP_UNION) {
-        float t = colorBlendFactor(prev, grp_dist, grp.blend_type, grp.blend);
-        out_color = mix(out_color, grp_color, t);
-      }
-    }
-  }
-
-  /* Ungrouped objects: per-step AABB test per object */
-  for (int i = 0; i < object_count; i++) {
-    if (!is_shape_near(i)) { continue; }
-    if (objects[i].group_id >= 0) { continue; }
+    /* Ungrouped object */
+    if (i == skip_object) { i++; continue; }
+    if (!is_shape_near(i)) { i++; continue; }
 
     float da = point_aabb_dist(world_pos, objects[i].orig_bbox_min.xyz, objects[i].orig_bbox_max.xyz);
-    float ungrouped_skip_thresh = max(0.0f, object_aabbs[i].max_group_blend);
+    float ungrouped_skip_thresh = object_aabbs[i].max_group_blend;
     int ungrouped_op = objects[i].csg_operation;
     bool ungrouped_must_eval = scene_dist < 1e9f &&
                                (ungrouped_op == SDF_CSG_OP_INTERSECT ||
@@ -235,17 +245,19 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     SDFObjectGPU obj = objects[i];
     float d;
 
-    if (da > ungrouped_skip_thresh) {
-      if (!ungrouped_must_eval) {
-        out_aabb_skip = min(out_aabb_skip, da);
-        continue;
-      }
-      d = da;
+    if (da > ungrouped_skip_thresh && !ungrouped_must_eval) {
+      out_aabb_skip = min(out_aabb_skip, da);
+      i++;
+      continue;
     }
-    else {
+
+    /* Always evaluate the actual primitive — never use AABB approximation
+     * for ungrouped objects, as subtract/intersect groups need accurate scene field. */
+    {
       float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
       d = evalPrimitive(lp, obj);
       g_numEvaluated++;
+      if (prof_enabled != 0) { atomicAdd(prof_eval_counts[i], 1u); }
     }
 
     if (scene_dist >= 1e9f) {
@@ -295,6 +307,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         out_color = mix(out_color, obj.color.rgb, t);
       }
     }
+    i++;
   }
 
   return scene_dist;
@@ -311,11 +324,12 @@ float evalSceneDistBVH(float3 world_pos)
 #ifdef USE_TILE_CULLING
 
 /* Distance-only tile evaluation (color resolved in separate pass). */
-float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj_id)
+float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj_id, out float out_step_factor)
 {
   float scene_dist = 1e10f;
   out_aabb_skip = 1e30f;
   out_obj_id = -1.0f;
+  out_step_factor = 0.95f;
 
   int cur_group = -2;
   float grp_dist = 1e10f;
@@ -325,14 +339,31 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
   uint n = min(s_tileObjCount, uint(kMaxTileObjects));
   for (uint u = 0u; u < n; u++) {
     int i = s_tileObjList[u];
+    if (i == skip_object) { continue; }
+    if (!is_shape_near(i)) { continue; }
 
-    /* Hot buffer: 48 bytes instead of 256 for AABB skip path */
     SDFObjectAABB aabb = object_aabbs[i];
     int gid = aabb.group_id;
 
     if (gid != cur_group && grp_has_hit) {
+      float prev_scene = scene_dist;
+      int grp_csg = (cur_group >= 0) ? groups[cur_group].csg_operation : 0;
       flushGroupDist(cur_group, grp_dist, scene_dist);
-      if (scene_dist < 1e9f) { out_obj_id = grp_winner_id; }
+      /* Per-operation winner check (same as evalSceneBVH) */
+      if (grp_winner_id >= 0.0f) {
+        if (prev_scene >= 1e9f) {
+          out_obj_id = grp_winner_id;
+        }
+        else if (grp_csg == SDF_CSG_OP_SUBTRACT) {
+          if (-grp_dist > prev_scene) { out_obj_id = grp_winner_id; }
+        }
+        else if (grp_csg == SDF_CSG_OP_INTERSECT) {
+          if (grp_dist > prev_scene) { out_obj_id = grp_winner_id; }
+        }
+        else {
+          if (grp_dist < prev_scene) { out_obj_id = grp_winner_id; }
+        }
+      }
       grp_has_hit = false;
       grp_dist = 1e10f;
       grp_winner_id = -1.0f;
@@ -340,7 +371,6 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
 
     SDFObjectGPU obj = objects[i];
     float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
-    float skip_threshold = max(sdf_ray_epsilon, aabb.max_group_blend);
     int tile_skip_op = obj.csg_operation;
     bool tile_must_eval = (tile_skip_op == SDF_CSG_OP_INTERSECT ||
                            tile_skip_op == SDF_CSG_OP_SUBTRACT) &&
@@ -349,18 +379,21 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
 
     float d;
 
-    if (da > skip_threshold) {
-      if (!tile_must_eval) {
-        out_aabb_skip = min(out_aabb_skip, da);
-        cur_group = gid;
-        continue;
-      }
-      d = da;
+    if (da > aabb.max_group_blend && !tile_must_eval) {
+      if (prof_enabled != 0) { atomicAdd(prof_trace_stats[STAT_AABB_SKIPS], 1u); }
+      out_aabb_skip = min(out_aabb_skip, da);
       cur_group = gid;
+      continue;
     }
-    else {
+
+    {
       float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
       d = evalPrimitive(lp, obj);
+      out_step_factor = min(out_step_factor, obj.orig_bbox_min.w);
+      if (prof_enabled != 0) {
+        atomicAdd(prof_eval_counts[i], 1u);
+        atomicAdd(prof_trace_stats[STAT_EVALS], 1u);
+      }
       cur_group = gid;
     }
 
@@ -456,9 +489,21 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
 
   if (grp_has_hit) {
     float prev_s = scene_dist;
+    int grp_csg = (cur_group >= 0) ? groups[cur_group].csg_operation : 0;
     flushGroupDist(cur_group, grp_dist, scene_dist);
-    if (prev_s >= 1e9f || grp_dist < prev_s) {
-      out_obj_id = grp_winner_id;
+    if (grp_winner_id >= 0.0f) {
+      if (prev_s >= 1e9f) {
+        out_obj_id = grp_winner_id;
+      }
+      else if (grp_csg == SDF_CSG_OP_SUBTRACT) {
+        if (-grp_dist > prev_s) { out_obj_id = grp_winner_id; }
+      }
+      else if (grp_csg == SDF_CSG_OP_INTERSECT) {
+        if (grp_dist > prev_s) { out_obj_id = grp_winner_id; }
+      }
+      else {
+        if (grp_dist < prev_s) { out_obj_id = grp_winner_id; }
+      }
     }
   }
 
@@ -525,6 +570,7 @@ void main()
     s_tileObjList[i] = tile_prim_lists[base + int(i)];
   }
   barrier();
+
 
   ViewMatrices vm = drw_view();
 #endif
@@ -598,10 +644,8 @@ void main()
       cone_skip_target = projected;
     }
   }
-
 #endif
 
-#ifndef USE_TILE_CULLING
   /* Per-ray BVH: mark objects whose AABB the ray intersects (done ONCE per ray) */
   g_numNearShapes = 0;
   g_numEvaluated = 0;
@@ -669,6 +713,8 @@ void main()
       g_bvh_bits[w] = 0xFFFFFFFFu;
     }
   }
+
+#ifndef USE_TILE_CULLING
 #endif
 
   float step_factor = sdf_step_factor;
@@ -690,7 +736,8 @@ void main()
     float3 skip_pos = ray_origin + ray_dir * cone_skip_target;
     float skip_aabb;
     float skip_id;
-    float skip_d = evalSceneTile(skip_pos, skip_aabb, skip_id);
+    float skip_sf;
+    float skip_d = evalSceneTile(skip_pos, skip_aabb, skip_id, skip_sf);
     if (skip_d > 0.0f) {
       t = cone_skip_target;
       if (skip_d < 1e9f) {
@@ -701,6 +748,8 @@ void main()
   }
 #endif
 
+  uint p_steps = 0u, p_empty = 0u, p_sor_fail = 0u;
+
   for (int step = 0; step < sdf_max_steps; step++) {
     if (t > t_exit) { break; }
     float3 pos = ray_origin + ray_dir * t;
@@ -708,10 +757,12 @@ void main()
     float d;
     float aabb_skip;
     float cur_obj_id;
+    float local_step_factor;
 #ifdef USE_TILE_CULLING
-    d = evalSceneTile(pos, aabb_skip, cur_obj_id);
+    d = evalSceneTile(pos, aabb_skip, cur_obj_id, local_step_factor);
 
     if (d >= 1e9f) {
+      p_empty++;
       t += max(aabb_skip, sdf_ray_epsilon);
       prev_radius = 0.0f;
       step_length = 0.0f;
@@ -719,17 +770,16 @@ void main()
       continue;
     }
 
-    /* Safe step: clamp by skipped AABBs with fixed floor to prevent crawling.
-     * Floor at 10x epsilon — safe for CSG cuts (features < 0.01 are sub-pixel). */
     if (aabb_skip < d) {
       d = max(aabb_skip, sdf_ray_epsilon * 10.0f);
     }
 #else
+    local_step_factor = sdf_step_factor;
     float3 color;
     d = evalSceneBVH(pos, color, aabb_skip, cur_obj_id);
 
-    /* If no AABB contains this point, skip by nearest AABB distance */
     if (d >= 1e9f) {
+      p_empty++;
       t += max(aabb_skip, sdf_ray_epsilon);
       prev_radius = 0.0f;
       step_length = 0.0f;
@@ -742,18 +792,17 @@ void main()
     }
 #endif
 
+    p_steps++;
     steps_taken++;
     float abs_d = abs(d);
 
-    /* Over-relaxation (Keinert et al. 2014).
-     * Margin ensures SOR triggers consistently at the boundary (linear SDF),
-     * preventing per-pixel divergence that causes banding in axis-aligned views. */
     bool sor_fail = omega > 1.0f && (abs_d + prev_radius) < step_length * 1.01f;
     if (sor_fail) {
+      p_sor_fail++;
       step_length -= omega * step_length;
       omega = 1.0f;
     } else {
-      step_length = abs_d * step_factor * omega;
+      step_length = abs_d * local_step_factor * omega;
     }
 
     float adaptive_epsilon = sdf_ray_epsilon * (1.0f + t * 0.001f);
@@ -797,6 +846,16 @@ void main()
     } else {
       t += max(step_length, sdf_ray_epsilon * 0.5f);
     }
+  }
+
+  /* Flush per-ray profiling stats */
+  if (prof_enabled != 0) {
+    atomicAdd(prof_trace_stats[STAT_RAYS], 1u);
+    atomicAdd(prof_trace_stats[STAT_STEPS], p_steps);
+    atomicAdd(prof_trace_stats[STAT_EMPTY_STEPS], p_empty);
+    atomicAdd(prof_trace_stats[STAT_SOR_FAILURES], p_sor_fail);
+    if (hit) { atomicAdd(prof_trace_stats[STAT_HITS], 1u); }
+    atomicMax(prof_trace_stats[STAT_MAX_STEPS], p_steps);
   }
 
   /* Debug views write directly to out_color/out_depth */

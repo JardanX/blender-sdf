@@ -574,16 +574,21 @@ static void outliner_sort(ListBaseT<TreeElement> *lb)
     return;
   }
 
+  /* Preserve SDF ordering (sorted by sdf_index, not alphabetically) */
   TreeElement *first_te_check = static_cast<TreeElement *>(lb->first);
-  if (first_te_check && first_te_check->parent) {
-    TreeStoreElem *parent_tselem = TREESTORE(first_te_check->parent);
-    if (parent_tselem->type == TSE_SOME_ID && parent_tselem->id &&
-        GS(parent_tselem->id->name) == ID_SG)
+  if (first_te_check) {
+    TreeStoreElem *first_tselem = TREESTORE(first_te_check);
+    /* Check if this is a list of SDF objects (children of SDF group or top-level SDFs) */
+    if (first_tselem->type == TSE_SOME_ID && first_tselem->id &&
+        GS(first_tselem->id->name) == ID_OB)
     {
-      for (TreeElement &te_iter : *lb) {
-        outliner_sort(&te_iter.subtree);
+      Object *first_ob = (Object *)first_tselem->id;
+      if (first_ob->type == OB_SDF) {
+        for (TreeElement &te_iter : *lb) {
+          outliner_sort(&te_iter.subtree);
+        }
+        return;
       }
-      return;
     }
   }
 
@@ -666,16 +671,20 @@ static void outliner_collections_children_sort(ListBaseT<TreeElement> *lb)
     return;
   }
 
+  /* Preserve SDF ordering */
   TreeElement *first_te_check = static_cast<TreeElement *>(lb->first);
-  if (first_te_check && first_te_check->parent) {
-    TreeStoreElem *parent_tselem = TREESTORE(first_te_check->parent);
-    if (parent_tselem->type == TSE_SOME_ID && parent_tselem->id &&
-        GS(parent_tselem->id->name) == ID_SG)
+  if (first_te_check) {
+    TreeStoreElem *first_tselem = TREESTORE(first_te_check);
+    if (first_tselem->type == TSE_SOME_ID && first_tselem->id &&
+        GS(first_tselem->id->name) == ID_OB)
     {
-      for (TreeElement &te_iter : *lb) {
-        outliner_collections_children_sort(&te_iter.subtree);
+      Object *first_ob = (Object *)first_tselem->id;
+      if (first_ob->type == OB_SDF) {
+        for (TreeElement &te_iter : *lb) {
+          outliner_collections_children_sort(&te_iter.subtree);
+        }
+        return;
       }
-      return;
     }
   }
 

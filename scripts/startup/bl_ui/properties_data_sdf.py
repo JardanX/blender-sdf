@@ -430,6 +430,11 @@ class DATA_PT_context_sdf(SDFButtonsPanel, Panel):
 class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
     bl_label = "Shape"
 
+    @classmethod
+    def poll(cls, context):
+        sdf = context.sdf
+        return sdf is not None and sdf.sdf_type != 'GROUP'
+
     def draw(self, context):
         layout = self.layout
         sdf = context.sdf
@@ -438,6 +443,8 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         grid.scale_x = 1.0
         grid.scale_y = 1.6
         for item in sdf.bl_rna.properties["sdf_type"].enum_items:
+            if item.identifier == 'GROUP':
+                continue
             grid.prop_enum(sdf, "sdf_type", item.identifier, text="")
 
         layout.separator()
@@ -445,6 +452,22 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(sdf, "color")
+
+
+class DATA_PT_sdf_group(SDFButtonsPanel, Panel):
+    bl_label = "Group"
+
+    @classmethod
+    def poll(cls, context):
+        sdf = context.sdf
+        return sdf is not None and sdf.sdf_type == 'GROUP'
+
+    def draw(self, context):
+        layout = self.layout
+        sdf = context.sdf
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(sdf, "color", text="Tint")
 
 
 # Shape Property Panel
@@ -793,9 +816,12 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        is_first_in_group = (sdf.sdf_group is not None and sdf.group_order == 0)
-        is_first_in_scene = (sdf.sdf_index == 1 and sdf.sdf_group is None)
-        is_forced_union = is_first_in_group or is_first_in_scene
+        ob = context.object
+        is_first_in_scene = (sdf.sdf_index == 0)
+        is_group = (sdf.sdf_type == 'GROUP')
+        is_child = (ob and ob.parent and ob.parent.type == 'SDF')
+        is_first_child = is_child and sdf.sdf_index == 0
+        is_forced_union = (is_first_in_scene and not is_group and not is_child) or is_first_child
 
         layout.label(text="CSG Operation")
         grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
@@ -898,21 +924,57 @@ classes = (
     VIEW3D_GGT_sdf_polygon,
     DATA_PT_context_sdf,
     DATA_PT_sdf_shape,
+    DATA_PT_sdf_group,
     DATA_PT_sdf_operation,
     DATA_PT_sdf_property,
 )
+
+
+_sdf_group_cleanup_pending = False
+
+def _sdf_group_cleanup_deferred():
+    global _sdf_group_cleanup_pending
+    _sdf_group_cleanup_pending = False
+    try:
+        to_delete = []
+        for ob in list(bpy.data.objects):
+            if ob.type != 'SDF' or ob.data is None:
+                continue
+            if ob.data.sdf_type != 'GROUP':
+                continue
+            has_children = False
+            for c in ob.children:
+                if c.type == 'SDF':
+                    has_children = True
+                    break
+            if not has_children:
+                to_delete.append(ob)
+        for ob in to_delete:
+            bpy.data.objects.remove(ob, do_unlink=True)
+    except Exception:
+        pass
+    return None
+
+def _sdf_group_cleanup(scene, depsgraph):
+    global _sdf_group_cleanup_pending
+    if not _sdf_group_cleanup_pending:
+        _sdf_group_cleanup_pending = True
+        bpy.app.timers.register(_sdf_group_cleanup_deferred, first_interval=0.2)
 
 
 def register():
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
+    bpy.app.handlers.depsgraph_update_post.append(_sdf_group_cleanup)
 
 
 def unregister():
     from bpy.utils import unregister_class
     for cls in reversed(classes):
         unregister_class(cls)
+    if _sdf_group_cleanup in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_sdf_group_cleanup)
 
 
 if __name__ == "__main__":

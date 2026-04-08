@@ -633,7 +633,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
       case OB_SPEAKER:
         layer.speakers.object_sync(manager, ob_ref, resources, state);
         break;
-      /* SDF group empties rendered via Origins (extra_point shader with AA) */
+      /* SDF group points rendered via Origins overlay */
     }
     layer.attribute_viewer.object_sync(manager, ob_ref, resources, state);
     layer.attribute_texts.object_sync(manager, ob_ref, resources, state);

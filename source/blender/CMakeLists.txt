@@ -73,7 +73,6 @@ set(SRC_DNA_INC
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_screen_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_sdna_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_sdf_types.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_sdf_group_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_sequence_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_session_uid_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_shader_fx_types.h

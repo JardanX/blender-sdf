@@ -28,7 +28,6 @@
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_speaker_types.h"
 #include "DNA_vfont_types.h"
@@ -98,7 +97,6 @@
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_sdf.hh"
-#include "BKE_sdf_group.hh"
 #include "BKE_vfont.hh"
 #include "BKE_volume.hh"
 
@@ -2542,10 +2540,8 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
   }
 
   if (tagged_count > 0) {
-    /* Remove SDF objects from their groups BEFORE deletion. */
     for (Object &del_ob : bmain->objects) {
       if ((del_ob.id.tag & ID_TAG_DOIT) && del_ob.type == OB_SDF) {
-        BKE_sdf_groups_remove_object(bmain, &del_ob);
         if (!del_ob.data) continue;
         for (ModifierData &md : del_ob.modifiers) {
           if (md.type == eModifierType_SDFMirror) {
@@ -4744,67 +4740,7 @@ static SDF *sdf_resolve_new_data(Object *object_src, Object *object_new, bool *r
   return id_cast<SDF *>(new_data_id);
 }
 
-/** Add duplicated SDF object to the same group as the original, right after it. */
-static void object_add_sync_sdf_group(Object *object_src, Object *object_new)
-{
-  if (object_src->type != OB_SDF || !object_src->data) {
-    return;
-  }
-  SDF *sdf_src = id_cast<SDF *>(object_src->data);
-  SDFGroup *group = sdf_src->sdf_group;
-  if (!group) {
-    return;
-  }
-
-  bool is_linked = false;
-  SDF *sdf_new = sdf_resolve_new_data(object_src, object_new, &is_linked);
-  if (!sdf_new) {
-    return;
-  }
-
-  /* Clean up auto-assigned group from copy system */
-  if (!is_linked && sdf_new->sdf_group) {
-    id_us_min(&sdf_new->sdf_group->id);
-    sdf_new->sdf_group = nullptr;
-  }
-
-  /* Add member directly: can't use BKE_sdf_group_member_insert_after
-   * because it reads new_ob->data which may not be remapped yet. */
-  SDFGroupMember *after_member = nullptr;
-  for (SDFGroupMember *member = (SDFGroupMember *)group->members.first; member;
-       member = member->next)
-  {
-    if (member->object == object_src) {
-      after_member = member;
-      break;
-    }
-  }
-
-  SDFGroupMember *new_member = MEM_new<SDFGroupMember>(__func__);
-  new_member->object = object_new;
-
-  if (after_member) {
-    BLI_insertlinkafter(&group->members, after_member, new_member);
-  }
-  else {
-    BLI_addtail(&group->members, new_member);
-  }
-  group->totmember++;
-
-  if (!is_linked) {
-    sdf_new->sdf_group = group;
-    id_us_plus(&group->id);
-  }
-
-  /* Reindex, then fix up: reindex reads member->object->data which for the
-   * new member may still point to the source SDF (pre-remapping), corrupting
-   * the source's group_order. Restore both orders explicitly. */
-  BKE_sdf_group_reindex_members(group);
-  if (!is_linked && after_member) {
-    sdf_src->group_order = after_member->order;
-    sdf_new->group_order = new_member->order;
-  }
-}
+/* MATHOPS: Removed — old SDFGroup sync (replaced by parent-child groups) */
 
 /** Create new mirror empties for duplicated SDF objects. */
 static void object_add_sync_sdf_mirrors(Main *bmain,
@@ -4907,7 +4843,7 @@ static Base *object_add_duplicate_internal(Main *bmain,
     object_add_sync_local_view(base_src, base_new);
   }
   object_add_sync_rigid_body(bmain, ob, object_new);
-  object_add_sync_sdf_group(ob, object_new);
+  /* MATHOPS: Removed — old SDFGroup sync */
   object_add_sync_sdf_mirrors(bmain, scene, view_layer, ob, object_new);
   return base_new;
 }
@@ -5002,7 +4938,7 @@ static wmOperatorStatus duplicate_exec(bContext *C, wmOperator *op)
     if (link.object_new) {
       object_add_sync_base_collection(bmain, scene, view_layer, link.base_src, link.object_new);
       object_add_sync_rigid_body(bmain, link.base_src->object, link.object_new);
-      object_add_sync_sdf_group(link.base_src->object, link.object_new);
+      /* MATHOPS: Removed — old SDFGroup sync */
       object_add_sync_sdf_mirrors(bmain, scene, view_layer, link.base_src->object, link.object_new);
     }
   }

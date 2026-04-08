@@ -72,7 +72,6 @@
 #include "BKE_asset.hh"
 #include "BKE_blender_version.h"
 #include "BKE_collection.hh"
-#include "BKE_sdf_group.hh"
 #include "BKE_global.hh" /* for G */
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
@@ -4497,7 +4496,6 @@ BlendFileData *blo_read_file_internal(FileData *fd, const char *filepath)
     BKE_layer_collection_resync_allow();
 
     BKE_collections_after_lib_link(bfd->main);
-    BKE_sdf_groups_after_lib_link(bfd->main);
 
     /* Make all relative paths, relative to the open blend file. */
     fix_relpaths_library(fd->relabase, bfd->main);
@@ -5350,7 +5348,6 @@ static void library_link_end(Main *mainl, FileData **fd, const int flag, ReportL
   /* FIXME: Probably also need to forbid layer collections updates until this call, as done in
    * #blo_read_file_internal? */
   BKE_collections_after_lib_link(mainvar);
-  BKE_sdf_groups_after_lib_link(mainvar);
 
   /* Yep, second splitting... but this is a very cheap operation, so no big deal. */
   blo_split_main(mainvar);

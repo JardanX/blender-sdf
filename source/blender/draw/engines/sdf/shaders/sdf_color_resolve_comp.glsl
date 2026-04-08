@@ -83,7 +83,6 @@ void main()
     SDFObjectGPU obj = objects[i];
     float3 eval_pos = (gid >= 0) ? grp_pos : world_pos;
     float da = point_aabb_dist(eval_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
-    float skip_threshold = max(0.001f, aabb.max_group_blend);
 
     int obj_op = obj.csg_operation;
     bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT) &&
@@ -91,7 +90,7 @@ void main()
                       (gid < 0 && scene_dist < 1e9f));
 
     float d;
-    if (da > skip_threshold) {
+    if (da > aabb.max_group_blend) {
       if (!must_eval) {
         cur_group = gid;
         continue;
@@ -123,11 +122,12 @@ void main()
       }
     }
     else {
+      float3 grp_tint = groups[gid].color.rgb;
       if (!grp_has_hit) {
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
             obj.csg_operation != SDF_CSG_OP_INTERSECT) {
           grp_dist = d;
-          grp_color = obj.color.rgb;
+          grp_color = obj.color.rgb * grp_tint;
           grp_has_hit = true;
         }
       }
@@ -138,7 +138,7 @@ void main()
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         float t = csgColorFactor(prev, d, obj.csg_operation, obj.blend_type, obj.blend,
                              obj.shell_distance, obj.shell_op);
-        grp_color = mix(grp_color, obj.color.rgb, t);
+        grp_color = mix(grp_color, obj.color.rgb * grp_tint, t);
       }
     }
   }

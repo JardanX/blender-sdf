@@ -155,7 +155,7 @@ void main()
 
     SDFObjectGPU obj = objects[i];
     float da = point_aabb_dist(p, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
-    if (da > max(margin, n_aabb.max_group_blend + margin)) {
+    if (da > max(margin, n_aabb.max_group_blend)) {
       cur_group = gid;
       continue;
     }
@@ -163,7 +163,7 @@ void main()
     float4 dg = evalObjectGrad(p, i);
     cur_group = gid;
 
-    int cop = objects[i].csg_operation;
+    int cop = obj.csg_operation;
     int cbt = objects[i].blend_type;
     float cbl = objects[i].blend;
     float csd = objects[i].shell_distance;

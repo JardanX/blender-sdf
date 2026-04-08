@@ -12,7 +12,6 @@
 
 #include "rna_internal.hh"
 
-#include "DNA_sdf_group_types.h"
 #include "DNA_sdf_types.h"
 
 #include "BLI_math_base.h"
@@ -28,6 +27,7 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
     {SDF_TYPE_NGON, "NGON", ICON_SDF_NGON, "N-Gon", "Regular polygon prism SDF primitive"},
     {SDF_TYPE_POLYGON, "POLYGON", ICON_SDF_POLYGON, "Polygon", "Arbitrary polygon prism SDF primitive"},
+    {SDF_TYPE_GROUP, "GROUP", ICON_DOT, "Group", "SDF group container"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -58,10 +58,8 @@ extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
 #  include "BKE_main.hh"
 #  include "BKE_report.hh"
 #  include "BKE_sdf.hh"
-#  include "BKE_sdf_group.hh"
 
 #  include "DNA_object_types.h"
-#  include "DNA_sdf_group_types.h"
 
 #  include "DEG_depsgraph.hh"
 
@@ -139,16 +137,6 @@ static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, Pointer
 {
   ID *owner = ptr->owner_id;
   DEG_id_tag_update(owner, ID_RECALC_GEOMETRY);
-  if (GS(owner->name) == ID_SG) {
-    SDFGroup *group = (SDFGroup *)owner;
-    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(group->members.first); member;
-         member = member->next)
-    {
-      if (member->object) {
-        DEG_id_tag_update(&member->object->id, ID_RECALC_GEOMETRY);
-      }
-    }
-  }
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
@@ -441,67 +429,6 @@ static void rna_SDF_polygon_point_move(SDF *sdf, ReportList *reports, int from, 
   }
   DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
-}
-
-static void rna_SDF_sdf_group_set(PointerRNA *ptr,
-                                   PointerRNA value,
-                                   ReportList * /*reports*/)
-{
-  SDF *sdf = (SDF *)ptr->owner_id;
-  SDFGroup *new_group = (SDFGroup *)value.data;
-  SDFGroup *old_group = sdf->sdf_group;
-
-  if (old_group == new_group) {
-    return;
-  }
-
-  Main *bmain = G_MAIN;
-  Object *ob = nullptr;
-
-  /* Find the Object that owns this SDF. */
-  if (old_group) {
-    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
-         member;
-         member = member->next)
-    {
-      if (member->object && member->object->type == OB_SDF &&
-          member->object->data == (void *)sdf)
-      {
-        ob = member->object;
-        break;
-      }
-    }
-  }
-  if (!ob) {
-    for (Object &obj : bmain->objects) {
-      if (obj.type == OB_SDF && obj.data == (void *)sdf) {
-        ob = &obj;
-        break;
-      }
-    }
-  }
-
-  if (old_group && ob) {
-    for (SDFGroupMember *member = static_cast<SDFGroupMember *>(old_group->members.first);
-         member;
-         member = member->next)
-    {
-      if (member->object == ob) {
-        BKE_sdf_group_member_remove(old_group, member);
-        break;
-      }
-    }
-  }
-
-  if (new_group && ob) {
-    BKE_sdf_group_member_add(new_group, ob);
-  }
-  else {
-    sdf->sdf_group = new_group;
-    if (new_group) {
-      id_us_plus(&new_group->id);
-    }
-  }
 }
 
 #else
@@ -1121,22 +1048,6 @@ static void rna_def_sdf(BlenderRNA *brna)
                                     "rna_IDMaterials_assign_int");
 
   /* MATHOPS: Removed old modifiers collection — modifiers now on Object */
-
-  /* SDF Group */
-  prop = RNA_def_property(srna, "sdf_group", PROP_POINTER, PROP_NONE);
-  RNA_def_property_pointer_sdna(prop, nullptr, "sdf_group");
-  RNA_def_property_struct_type(prop, "SDFGroup");
-  RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_pointer_funcs(
-      prop, nullptr, "rna_SDF_sdf_group_set", nullptr, nullptr);
-  RNA_def_property_ui_text(prop, "SDF Group", "Group this SDF belongs to");
-  RNA_def_property_update(prop, 0, "rna_SDF_update");
-
-  /* Group Order */
-  prop = RNA_def_property(srna, "group_order", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "group_order");
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Group Order", "Evaluation order within group");
 
   /* SDF Index */
   prop = RNA_def_property(srna, "sdf_index", PROP_INT, PROP_NONE);

@@ -40,6 +40,11 @@ namespace blender::draw::overlay {
 
 static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max)
 {
+  if (sdf->sdf_type == SDF_TYPE_GROUP) {
+    out_min = float3(-0.5f);
+    out_max = float3(0.5f);
+    return;
+  }
   float3 sz(sdf->size[0], sdf->size[1], sdf->size[2]);
   float3 ext = sz;
   switch (sdf->sdf_type) {
@@ -88,6 +93,7 @@ class Sdfs : Overlay {
   /* Per-SDF object data collected during object_sync. */
   struct SdfEntry {
     int sdf_index;
+    int sorted_index;
     uint32_t outline_packed_id;
     uint32_t select_id;
     float4x4 object_to_world;
@@ -165,6 +171,11 @@ class Sdfs : Overlay {
       return;
     }
 
+    /* Group empties have no geometry — skip bbox/outline */
+    if (sdf_data->sdf_type == SDF_TYPE_GROUP) {
+      return;
+    }
+
     const bool is_select = (ob_ref.object->base_flag & BASE_SELECTED) != 0;
     const bool is_active = (ob_ref.object == state.object_active);
 
@@ -208,7 +219,7 @@ class Sdfs : Overlay {
       poly_min.z = -sdf_data->size[2];
       poly_max.z = sdf_data->size[2];
     }
-    entries_.append({idx, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data, ob_ref.object});
+    entries_.append({idx, -1, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data, ob_ref.object});
   }
 
   void end_sync(Resources &res, const State & /*state*/) final
@@ -231,31 +242,41 @@ class Sdfs : Overlay {
     select_buf_size_ = (select_buf_size_ + 3) & ~3;
 
     /* Build tables indexed by sdf_index (= original_index in GPU). */
-    int table_size = max_sdf_index_ + 1;
+    /* Map entries to sorted GPU positions via dg_to_sorted.
+     * Both entries_ and engine's object_ptrs_ iterate the same depsgraph, skipping groups. */
+    int obj_count = sdf::sdf_object_count_get();
+    int table_size = math::max(obj_count, 1);
     Vector<uint32_t> outline_table(table_size, 0u);
     select_table_.reinitialize(table_size);
     select_table_.fill(uint32_t(-1));
-    for (const SdfEntry &e : entries_) {
-      if (e.sdf_index >= 0 && e.sdf_index < table_size) {
-        outline_table[e.sdf_index] = e.outline_packed_id;
-        select_table_[e.sdf_index] = e.select_id;
+
+    int map_count = 0;
+    const int *dg_to_sorted = sdf::sdf_depsgraph_to_sorted_get(&map_count);
+    if (dg_to_sorted && map_count == int(entries_.size())) {
+      for (int i = 0; i < map_count; i++) {
+        int si = dg_to_sorted[i];
+        if (si >= 0 && si < table_size) {
+          entries_[i].sorted_index = si;
+          uint32_t color_id = entries_[i].outline_packed_id >> 14u;
+          uint32_t new_packed = (color_id << 14u) | (uint32_t(si + 1) & 0x3FFFu);
+          outline_table[si] = new_packed;
+          select_table_[si] = entries_[i].select_id;
+        }
+      }
+    }
+    else if (int(entries_.size()) <= table_size) {
+      for (int i = 0; i < int(entries_.size()); i++) {
+        entries_[i].sorted_index = i;
+        uint32_t color_id = entries_[i].outline_packed_id >> 14u;
+        uint32_t new_packed = (color_id << 14u) | (uint32_t(i + 1) & 0x3FFFu);
+        outline_table[i] = new_packed;
+        select_table_[i] = entries_[i].select_id;
       }
     }
 
-    /* Build list of GPU array indices for selected objects. */
-    int obj_count = sdf::sdf_object_count_get();
-    int map_count = 0;
-    const int *dg_to_sorted = sdf::sdf_depsgraph_to_sorted_get(&map_count);
     Vector<int32_t> sel_indices;
-    if (dg_to_sorted && map_count == int(entries_.size())) {
-      for (int i = 0; i < map_count; i++) {
-        if (entries_[i].outline_packed_id != 0u) {
-          int si = dg_to_sorted[i];
-          if (si >= 0 && si < obj_count) {
-            sel_indices.append(si);
-          }
-        }
-      }
+    for (int si = 0; si < table_size; si++) {
+      if (outline_table[si] != 0u) { sel_indices.append(si); }
     }
     if (selected_indices_ssbo_) {
       GPU_storagebuf_free(selected_indices_ssbo_);
@@ -361,7 +382,7 @@ class Sdfs : Overlay {
 
     /* Always try CPU SDF eval for tight bbox + debug points. */
     float3 hint_pos = float3(sel->object_to_world[3]);
-    if (!sdf::sdf_object_bbox_get(sel->sdf_index, hint_pos, lo, hi, rot, obj_pos)) {
+    if (!sdf::sdf_object_bbox_get(sel->sorted_index, hint_pos, lo, hi, rot, obj_pos)) {
       if (sel->bb_min.x < sel->bb_max.x) {
         lo = sel->bb_min;
         hi = sel->bb_max;

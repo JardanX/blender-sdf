@@ -597,7 +597,6 @@ void DepsgraphRelationBuilder::build_id(ID *id)
     case ID_PAL:
     case ID_PC:
     case ID_WS:
-    case ID_SG:
     case ID_MB:
       BLI_assert(!deg_eval_copy_is_needed(id_type));
       build_generic_id(id);

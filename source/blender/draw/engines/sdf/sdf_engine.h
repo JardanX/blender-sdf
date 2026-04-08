@@ -11,10 +11,14 @@
 
 #pragma once
 
+#include <string>
+
 #include "BLI_math_vector_types.hh"
 
 #include "GPU_storage_buffer.hh"
 #include "GPU_texture.hh"
+
+#include "sdf_shader_shared.hh"
 
 #include "DRW_render.hh"
 
@@ -28,6 +32,7 @@ struct Engine : public DrawEngine::Pointer {
 
 int sdf_object_count_get();
 int sdf_group_count_get();
+const SDFObjectGPU *sdf_objects_cpu_get();
 
 const int *sdf_depsgraph_to_sorted_get(int *out_count);
 
@@ -49,5 +54,11 @@ void sdf_bbox_debug_points_get(const float3 **pts, int *count,
 
 /* Free static shader cache (call on application exit). */
 void sdf_shaders_free();
+
+/* Frame profiling */
+void sdf_profile_request();
+bool sdf_profile_is_ready();
+bool sdf_profile_is_pending();
+std::string sdf_profile_format_text();
 
 }  // namespace blender::draw::sdf
