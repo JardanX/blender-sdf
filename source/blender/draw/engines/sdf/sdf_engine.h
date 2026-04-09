@@ -63,7 +63,4 @@ bool sdf_profile_is_ready();
 bool sdf_profile_is_pending();
 std::string sdf_profile_format_text();
 
-/* Blobtree debug dump */
-std::string sdf_blobtree_format_text();
-
 }  // namespace blender::draw::sdf
