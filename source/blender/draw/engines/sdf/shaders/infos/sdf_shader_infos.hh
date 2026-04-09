@@ -206,30 +206,15 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Normal Compute Shader (analytical gradient)
+/** \name SDF Normal Compute Shader (screen-space reconstruction)
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_normal_comp)
 LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
-DEFINE_VALUE("kTileSize", "8")
-DEFINE_VALUE("kMaxTileObjects", "256")
-STORAGE_BUF(0, read, SDFObjectGPU, objects[])
-STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
-STORAGE_BUF(2, read, SDFGroupGPU, groups[])
-STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
-STORAGE_BUF(5, read, int, tile_prim_counts[])
-STORAGE_BUF(6, read, int, tile_prim_lists[])
-STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
-STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
 IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
 IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
-PUSH_CONSTANT(float, sdf_ray_epsilon)
-PUSH_CONSTANT(int, use_bvh)
-PUSH_CONSTANT(int, bvh_root)
-PUSH_CONSTANT(int, debug_fd_normals)
 PUSH_CONSTANT(int2, screen_size)
-TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_normal_comp.glsl")
 GPU_SHADER_CREATE_END()
 
