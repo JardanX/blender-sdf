@@ -94,6 +94,8 @@ static const SDFPolygonPointGPU *s_polygon_pts_cpu = nullptr;
 static int s_polygon_pts_count = 0;
 static const SDFModifierGPU *s_modifiers_cpu = nullptr;
 static int s_modifier_count = 0;
+static Vector<BlobTreeNodeGPU> s_tree_nodes_snapshot;
+static int s_tree_root_index = -1;
 
 /* Frame profiling */
 
@@ -354,6 +356,12 @@ class Instance : public DrawEngine {
   SdfAabbTree bvh_tree_;
   gpu::StorageBuf *bvh_nodes_ssbo_ = nullptr;
   int bvh_nodes_ssbo_count_ = 0;
+
+  SdfBlobTree blob_tree_;
+  Vector<BlobTreeNodeGPU> tree_nodes_;
+  int tree_root_index_ = -1;
+  gpu::StorageBuf *tree_nodes_ssbo_ = nullptr;
+  int tree_nodes_ssbo_count_ = 0;
 
   gpu::StorageBuf *cone_hit_ssbo_ = nullptr;
   gpu::StorageBuf *tile_far_hint_ssbo_ = nullptr;
@@ -1936,30 +1944,21 @@ class Instance : public DrawEngine {
         for (int m = start; m < start + cnt; m++) {
           objects_[m].bbox_min = float4(combined_min, 0.0f);
           objects_[m].bbox_max = float4(combined_max, 0.0f);
-          objects_[m].orig_bbox_min = float4(combined_min, objects_[m].orig_bbox_min.w);
-          objects_[m].orig_bbox_max = float4(combined_max, objects_[m].orig_bbox_max.w);
-        }
-        float diag = math::length(combined_max - combined_min);
-        for (int m = start; m < start + cnt; m++) {
-          objects_[m].max_group_blend = std::max(objects_[m].max_group_blend, diag);
         }
       }
 
-      /* Max blend per group */
+      /* Per-object blend threshold for group members:
+       * each member's threshold = its own blend influence radius.
+       * Intersect objects are never skipped (handled in shader). */
       for (int gi = 0; gi < int(groups_gpu_.size()); gi++) {
-        float grp_blend = (groups_gpu_[gi].csg_operation == SDF_CSG_SHELL)
-                              ? std::max(groups_gpu_[gi].shell_blend_top,
-                                         groups_gpu_[gi].shell_blend_bottom)
-                              : fabsf(groups_gpu_[gi].blend);
-        float max_blend = grp_blend;
         int start = groups_gpu_[gi].first_object;
         int cnt = groups_gpu_[gi].object_count;
         for (int m = start; m < start + cnt; m++) {
           float b = (objects_[m].blend_type == 0) ? 0.0f : objects_[m].blend;
-          max_blend = std::max(max_blend, b + fabsf(objects_[m].shell_distance));
-        }
-        for (int m = start; m < start + cnt; m++) {
-          objects_[m].max_group_blend = max_blend;
+          b += fabsf(objects_[m].shell_distance);
+          b = std::max(b, objects_[m].shell_blend_top);
+          b = std::max(b, objects_[m].shell_blend_bottom);
+          objects_[m].max_group_blend = b;
         }
       }
       /* Per-object spatial threshold for ungrouped objects:
@@ -2058,6 +2057,13 @@ class Instance : public DrawEngine {
                groups_gpu_[g].object_count, groups_gpu_[g].modifier_start,
                groups_gpu_[g].modifier_count);
       }
+
+      /* Build blobtree from flat object list + groups */
+      blob_tree_.build_from_scene(objects_, groups_gpu_);
+      tree_nodes_ = blob_tree_.linearize_postorder(tree_root_index_);
+      s_tree_nodes_snapshot = tree_nodes_;
+      s_tree_root_index = tree_root_index_;
+      printf("BLOBTREE: %d nodes, root=%d\n", int(tree_nodes_.size()), tree_root_index_);
 
     /* Early frustum cull on pre-expansion AABBs with conservative padding */
     {
@@ -3118,6 +3124,31 @@ class Instance : public DrawEngine {
         GPU_storagebuf_update(bvh_nodes_ssbo_, gpu_nodes.data());
       }
     }
+
+    /* Blobtree SSBO */
+    const int tree_count = math::max(int(tree_nodes_.size()), 1);
+    const size_t tree_buf_size = tree_count * sizeof(BlobTreeNodeGPU);
+    if (tree_nodes_ssbo_ != nullptr && tree_nodes_ssbo_count_ != tree_count) {
+      GPU_storagebuf_free(tree_nodes_ssbo_);
+      tree_nodes_ssbo_ = nullptr;
+    }
+    if (tree_nodes_ssbo_ == nullptr) {
+      if (tree_nodes_.is_empty()) {
+        BlobTreeNodeGPU dummy = {};
+        tree_nodes_ssbo_ = GPU_storagebuf_create_ex(
+            tree_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_tree_nodes_ssbo");
+      }
+      else {
+        tree_nodes_ssbo_ = GPU_storagebuf_create_ex(
+            tree_buf_size, tree_nodes_.data(), GPU_USAGE_DYNAMIC, "sdf_tree_nodes_ssbo");
+      }
+      tree_nodes_ssbo_count_ = tree_count;
+    }
+    else {
+      if (!tree_nodes_.is_empty()) {
+        GPU_storagebuf_update(tree_nodes_ssbo_, tree_nodes_.data());
+      }
+    }
   }
 
   void ensure_compute_targets()
@@ -3206,6 +3237,12 @@ class Instance : public DrawEngine {
       int slot = GPU_shader_get_ssbo_binding(sh, "object_aabbs");
       if (slot >= 0) {
         GPU_storagebuf_bind(object_aabb_ssbo_, slot);
+      }
+    }
+    if (tree_nodes_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(sh, "tree_nodes");
+      if (slot >= 0) {
+        GPU_storagebuf_bind(tree_nodes_ssbo_, slot);
       }
     }
   }
@@ -3380,6 +3417,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
     GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
     GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
+    GPU_shader_uniform_1i(sh, "tree_node_count", int(tree_nodes_.size()));
     GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
     GPU_shader_uniform_3fv(sh, "scene_aabb_max", scene_max_);
     GPU_shader_uniform_1f(sh, "sdf_cone_aperture", sdf_cone_aperture_);
@@ -3462,6 +3500,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(sh, "sdf_over_relaxation", sdf_over_relaxation_);
     GPU_shader_uniform_1f(sh, "sdf_step_factor", step_factor_);
     GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
+    GPU_shader_uniform_1i(sh, "tree_node_count", int(tree_nodes_.size()));
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
     GPU_shader_uniform_3fv(sh, "scene_aabb_min", scene_min_);
     GPU_shader_uniform_3fv(sh, "scene_aabb_max", scene_max_);
@@ -3535,23 +3574,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
-    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
 
-    bind_ssbos(sh);
-
-    if (tile_prim_counts_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
-      if (slot >= 0) GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
-    }
-    if (tile_prim_lists_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
-      if (slot >= 0) GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
-    }
-
-    GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
-    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
-    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
-    GPU_shader_uniform_1i(sh, "debug_fd_normals", debug_fd_normals_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     int dispatch_x = (render_size_.x + 7) / 8;
@@ -3560,7 +3583,6 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
-    GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
   }
 
@@ -4601,6 +4623,110 @@ std::string sdf_profile_format_text()
   }
 
   out += "================================================================\n";
+  return out;
+}
+
+std::string sdf_blobtree_format_text()
+{
+  static const char *csg_names[] = {
+      "Union", "Subtract", "Intersect", "Shell", "Push", "Avoid"};
+
+  std::string out;
+  char buf[512];
+
+  out += "================================================================\n";
+  out += "SDF BLOBTREE DUMP\n";
+  out += "================================================================\n\n";
+
+  snprintf(buf, sizeof(buf), "Total GPU nodes:  %d\n", int(s_tree_nodes_snapshot.size()));
+  out += buf;
+  snprintf(buf, sizeof(buf), "Root index:       %d\n", s_tree_root_index);
+  out += buf;
+  snprintf(buf, sizeof(buf), "Objects (leaves): %d\n", s_objects_cpu_count);
+  out += buf;
+  out += "\n";
+
+  /* Recursive tree printer */
+  struct TreePrinter {
+    const Vector<BlobTreeNodeGPU> &nodes;
+    const Vector<const Object *> &obj_ptrs;
+    std::string &out;
+
+    void print(int idx, int depth)
+    {
+      if (idx < 0 || idx >= int(nodes.size())) {
+        return;
+      }
+      const BlobTreeNodeGPU &n = nodes[idx];
+      char buf[512];
+      std::string indent(depth * 2, ' ');
+
+      if (n.node_type == SDF_TREE_LEAF) {
+        const char *name = "?";
+        if (n.prim_index >= 0 && n.prim_index < int(obj_ptrs.size()) && obj_ptrs[n.prim_index]) {
+          name = obj_ptrs[n.prim_index]->id.name + 2;
+        }
+        snprintf(buf,
+                 sizeof(buf),
+                 "%s[%d] LEAF \"%s\" (prim=%d) aabb=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f)\n",
+                 indent.c_str(),
+                 idx,
+                 name,
+                 n.prim_index,
+                 n.subtree_aabb_min.x,
+                 n.subtree_aabb_min.y,
+                 n.subtree_aabb_min.z,
+                 n.subtree_aabb_max.x,
+                 n.subtree_aabb_max.y,
+                 n.subtree_aabb_max.z);
+        out += buf;
+      }
+      else if (n.node_type == SDF_TREE_BINARY_OP) {
+        const char *csg = (n.csg_operation >= 0 && n.csg_operation <= 5)
+                              ? csg_names[n.csg_operation]
+                              : "?";
+        snprintf(buf,
+                 sizeof(buf),
+                 "%s[%d] %s (blend=%.3f mgb=%.3f) "
+                 "aabb=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f)\n",
+                 indent.c_str(),
+                 idx,
+                 csg,
+                 n.blend,
+                 n.subtree_aabb_min.w,
+                 n.subtree_aabb_min.x,
+                 n.subtree_aabb_min.y,
+                 n.subtree_aabb_min.z,
+                 n.subtree_aabb_max.x,
+                 n.subtree_aabb_max.y,
+                 n.subtree_aabb_max.z);
+        out += buf;
+        print(n.left_child, depth + 1);
+        print(n.right_child, depth + 1);
+      }
+      else if (n.node_type == SDF_TREE_UNARY_WARP) {
+        snprintf(buf,
+                 sizeof(buf),
+                 "%s[%d] WARP (mod_start=%d mod_count=%d)\n",
+                 indent.c_str(),
+                 idx,
+                 n.modifier_start,
+                 n.modifier_count);
+        out += buf;
+        print(n.left_child, depth + 1);
+      }
+    }
+  };
+
+  if (s_tree_nodes_snapshot.is_empty()) {
+    out += "(no tree built)\n";
+  }
+  else {
+    TreePrinter printer{s_tree_nodes_snapshot, s_sorted_object_ptrs, out};
+    printer.print(s_tree_root_index, 0);
+  }
+
+  out += "\n================================================================\n";
   return out;
 }
 

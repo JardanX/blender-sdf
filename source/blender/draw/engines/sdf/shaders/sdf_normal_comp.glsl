@@ -2,231 +2,110 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Normal pass: analytical SDF gradients with tile-based iteration.
- * Each primitive returns float4(dist, grad.xyz) in a single eval.
- * Correct for all CSG blend operations. */
+/* Screen-space normal reconstruction from world-space position buffer.
+ * Central differences on smooth surfaces, one-sided at discontinuities.
+ * Discontinuity detection via position extrapolation (catches tile boundaries,
+ * silhouettes, and CSG edges). */
 
 #include "infos/sdf_shader_infos.hh"
 
 COMPUTE_SHADER_CREATE_INFO(sdf_normal_comp)
 
-#include "sdf_lib.glsl"
-#include "sdf_grad_lib.glsl"
-
-shared int s_candidates[kMaxTileObjects];
-shared int s_numCandidates;
-
-/* Evaluate primitive gradient in local space + apply distance modifiers. */
-float4 evalLocalGrad(float3 lp, SDFObjectGPU obj, float scale)
+float4 loadPos(int2 p)
 {
-  float4 dg = evalPrimitiveGrad(lp, obj, sdf_ray_epsilon);
-  if (obj.modifier_count > 0) {
-    dg = applyDistanceModifiersGrad(dg, lp, obj, obj.modifier_start, obj.modifier_count);
-  }
-  dg.x *= scale;
-  return dg;
-}
-
-/* Reflect gradient through mirrors applied in a forking cell. */
-float3 reflectForkMirrorGrad(float3 grad, int ci, int mflags,
-                             float3 N_x, float3 N_y, float3 N_z)
-{
-  int flip_idx = ci;
-  if ((mflags & SDF_MOD_MIRROR_X) != 0) {
-    if ((flip_idx & 1) != 0) {
-      grad -= 2.0f * dot(grad, N_x) * N_x;
-    }
-    flip_idx >>= 1;
-  }
-  if ((mflags & SDF_MOD_MIRROR_Y) != 0) {
-    if ((flip_idx & 1) != 0) {
-      grad -= 2.0f * dot(grad, N_y) * N_y;
-    }
-    flip_idx >>= 1;
-  }
-  if ((mflags & SDF_MOD_MIRROR_Z) != 0) {
-    if ((flip_idx & 1) != 0) {
-      grad -= 2.0f * dot(grad, N_z) * N_z;
-    }
-  }
-  return grad;
-}
-
-/* Evaluate one object's analytical gradient in world space.
- * Mirrors evalObjectSDF: handles forking (mirror/array with CSG blending). */
-float4 evalObjectGrad(float3 world_pos, int i)
-{
-  SDFObjectGPU obj = objects[i];
-  float3 off = obj.position.xyz;
-  float4x4 inv = obj.inverse_matrix;
-
-  /* Fast path: no modifiers (most common case).
-   * Skip fork detection, domain mods, invertDomainModifiersGrad. */
-  if (obj.modifier_count == 0) {
-    float3 lp = (inv * float4(world_pos - off, 1.0f)).xyz;
-    float4 dg = evalPrimitiveGrad(lp, obj, sdf_ray_epsilon);
-    float3x3 inv3 = float3x3(inv[0].xyz, inv[1].xyz, inv[2].xyz);
-    float3 gw = transpose(inv3) * dg.yzw;
-    float gl = max(length(gw), 1e-8f);
-    return float4(dg.x, gw / gl);
-  }
-
-  /* Transform to local space */
-  float3 p = (inv * float4(world_pos - off, 1.0f)).xyz;
-  float3 orig_p = p;
-  float4 dg;
-  float domain_scale = 1.0f;
-  if (obj.modifier_count > 0) {
-    float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, inv);
-    p = dm.xyz;
-    domain_scale = dm.w;
-  }
-  dg = evalLocalGrad(p, obj, domain_scale);
-  if (obj.modifier_count > 0) {
-    dg.yzw = invertDomainModifiersGrad(dg.yzw, orig_p,
-                                       obj.modifier_start, obj.modifier_count, inv);
-  }
-
-  /* Transform gradient from local to world space */
-  float3x3 inv3 = float3x3(inv[0].xyz, inv[1].xyz, inv[2].xyz);
-  float3 gw = transpose(inv3) * dg.yzw;
-  float gl = max(length(gw), 1e-8f);
-
-  return float4(dg.x, gw / gl);
+  p = clamp(p, int2(0), screen_size - int2(1));
+  return imageLoad(gbuf_pos_img, p);
 }
 
 void main()
 {
   int2 pixel = int2(gl_GlobalInvocationID.xy);
-
-  /* Load tile candidates into shared memory */
-  int tilesX = (screen_size.x + kTileSize - 1) / kTileSize;
-  int tileIdx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * tilesX;
-  if (gl_LocalInvocationIndex == 0u) {
-    s_numCandidates = min(tile_prim_counts[tileIdx], kMaxTileObjects);
-  }
-  barrier();
-  int base = tileIdx * kMaxTileObjects;
-  int nc = s_numCandidates;
-  for (int i = int(gl_LocalInvocationIndex); i < nc; i += 64) {
-    s_candidates[i] = tile_prim_lists[base + i];
-  }
-  barrier();
-
   if (pixel.x >= screen_size.x || pixel.y >= screen_size.y) {
     return;
   }
 
-  float4 gbuf = imageLoad(gbuf_pos_img, pixel);
-  if (gbuf.w < 0.5f) {
+  float4 c = loadPos(pixel);
+  if (c.w < 0.5f) {
     imageStore(gbuf_normal_img, pixel, float4(0.0f));
     return;
   }
 
-  float3 p = gbuf.xyz;
-  float margin = sdf_ray_epsilon * 1.5f;
+  float3 pc = c.xyz;
 
-  float4 scene_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
+  float4 pl1 = loadPos(pixel + int2(-1, 0));
+  float4 pr1 = loadPos(pixel + int2( 1, 0));
+  float4 pd1 = loadPos(pixel + int2( 0,-1));
+  float4 pu1 = loadPos(pixel + int2( 0, 1));
 
-  int cur_group = -2;
-  float4 grp_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
-  bool grp_has_hit = false;
+  float4 pl2 = loadPos(pixel + int2(-2, 0));
+  float4 pr2 = loadPos(pixel + int2( 2, 0));
+  float4 pd2 = loadPos(pixel + int2( 0,-2));
+  float4 pu2 = loadPos(pixel + int2( 0, 2));
 
-  for (int u = 0; u < nc; u++) {
-    int i = s_candidates[u];
-    SDFObjectAABB n_aabb = object_aabbs[i];
-    int gid = n_aabb.group_id;
+  float3 l = pc - pl1.xyz;
+  float3 r = pr1.xyz - pc;
+  float3 d = pc - pd1.xyz;
+  float3 u = pu1.xyz - pc;
 
-    if (gid != cur_group && grp_has_hit) {
-      if (scene_dg.x >= 1e9f) {
-        scene_dg = grp_dg;
-      }
-      else {
-        SDFGroupGPU grp = groups[cur_group];
-        scene_dg = combineCSGGrad(scene_dg, grp_dg,
-                                  grp.csg_operation, grp.blend_type, grp.blend,
-                                  grp.shell_distance, grp.shell_mode, grp.shell_op,
-                                  grp.shell_blend_top, grp.shell_blend_bottom,
-                                  grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
-      }
-      grp_has_hit = false;
-      grp_dg = float4(1e10f, 0.0f, 0.0f, 1.0f);
-    }
+  float3 hDeriv, vDeriv;
 
-    SDFObjectGPU obj = objects[i];
-    float da = point_aabb_dist(p, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
-    if (da > max(margin, n_aabb.max_group_blend)) {
-      cur_group = gid;
-      continue;
-    }
+  /* Extrapolation test: 2*p[±1] - p[±2] should ≈ center on a smooth surface.
+   * Large error = discontinuity (tile boundary, silhouette, CSG edge). */
+  bool vl = pl1.w > 0.5f && pl2.w > 0.5f;
+  bool vr = pr1.w > 0.5f && pr2.w > 0.5f;
+  bool vd = pd1.w > 0.5f && pd2.w > 0.5f;
+  bool vu = pu1.w > 0.5f && pu2.w > 0.5f;
 
-    float4 dg = evalObjectGrad(p, i);
-    cur_group = gid;
+  float he_l = vl ? length(2.0f * pl1.xyz - pl2.xyz - pc) : 1e10f;
+  float he_r = vr ? length(2.0f * pr1.xyz - pr2.xyz - pc) : 1e10f;
+  float ve_d = vd ? length(2.0f * pd1.xyz - pd2.xyz - pc) : 1e10f;
+  float ve_u = vu ? length(2.0f * pu1.xyz - pu2.xyz - pc) : 1e10f;
 
-    int cop = obj.csg_operation;
-    int cbt = objects[i].blend_type;
-    float cbl = objects[i].blend;
-    float csd = objects[i].shell_distance;
-    int csm = objects[i].shell_mode;
-    int cso = objects[i].shell_op;
-    float cst = objects[i].shell_blend_top;
-    float csb = objects[i].shell_blend_bottom;
-    float ck2 = objects[i].chamfer_k2;
-    float ck3 = objects[i].chamfer_k3;
-    float ck4 = objects[i].chamfer_k4;
-    float ck5 = objects[i].chamfer_k5;
-    int cfb = objects[i].flip_blend;
-    int cfbe = objects[i].flip_blend_end;
-
-    if (gid < 0) {
-      if (scene_dg.x >= 1e9f) {
-        if (cop == SDF_CSG_OP_UNION) { scene_dg = dg; }
-      }
-      else if (cop == SDF_CSG_OP_UNION && cbl <= 0.0001f) {
-        /* Sharp union fast path: skip combineCSGGrad entirely. */
-        scene_dg = (dg.x < scene_dg.x) ? dg : scene_dg;
-      }
-      else {
-        scene_dg = combineCSGGrad(scene_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3, ck4, ck5, cfb, cfbe);
-      }
+  /* Horizontal derivative */
+  if (vl && vr) {
+    float ratio = max(he_l, he_r) / max(min(he_l, he_r), 1e-20f);
+    if (ratio > 4.0f) {
+      hDeriv = he_l < he_r ? l : r;
     }
     else {
-      if (!grp_has_hit) {
-        if (cop != SDF_CSG_OP_SUBTRACT && cop != SDF_CSG_OP_SHELL &&
-            cop != SDF_CSG_OP_INTERSECT) {
-          grp_dg = dg;
-          grp_has_hit = true;
-        }
-      }
-      else if (cop == SDF_CSG_OP_UNION && cbl <= 0.0001f) {
-        grp_dg = (dg.x < grp_dg.x) ? dg : grp_dg;
-      }
-      else {
-        grp_dg = combineCSGGrad(grp_dg, dg, cop, cbt, cbl, csd, csm, cso, cst, csb, ck2, ck3, ck4, ck5, cfb, cfbe);
-      }
+      hDeriv = (pr1.xyz - pl1.xyz) * 0.5f;
     }
   }
+  else if (pr1.w > 0.5f) {
+    hDeriv = r;
+  }
+  else if (pl1.w > 0.5f) {
+    hDeriv = l;
+  }
+  else {
+    hDeriv = float3(1.0f, 0.0f, 0.0f);
+  }
 
-  if (grp_has_hit) {
-    if (scene_dg.x >= 1e9f) {
-      scene_dg = grp_dg;
+  /* Vertical derivative */
+  if (vd && vu) {
+    float ratio = max(ve_d, ve_u) / max(min(ve_d, ve_u), 1e-20f);
+    if (ratio > 4.0f) {
+      vDeriv = ve_d < ve_u ? d : u;
     }
     else {
-      SDFGroupGPU grp = groups[cur_group];
-      scene_dg = combineCSGGrad(scene_dg, grp_dg,
-                                grp.csg_operation, grp.blend_type, grp.blend,
-                                grp.shell_distance, grp.shell_mode, grp.shell_op,
-                                grp.shell_blend_top, grp.shell_blend_bottom,
-                                grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
+      vDeriv = (pu1.xyz - pd1.xyz) * 0.5f;
     }
   }
+  else if (pu1.w > 0.5f) {
+    vDeriv = u;
+  }
+  else if (pd1.w > 0.5f) {
+    vDeriv = d;
+  }
+  else {
+    vDeriv = float3(0.0f, 1.0f, 0.0f);
+  }
 
-  float3 n = scene_dg.yzw;
-  float nl = length(n);
-  n = nl > 1e-8f ? n / nl : float3(0.0f, 0.0f, 1.0f);
+  float3 n = normalize(cross(vDeriv, hDeriv));
 
   if (any(isnan(n))) {
     n = float3(0.0f, 0.0f, 1.0f);
   }
+
   imageStore(gbuf_normal_img, pixel, float4(n, 1.0f));
 }

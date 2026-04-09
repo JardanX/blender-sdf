@@ -82,6 +82,7 @@ void sdf_profile_request();
 bool sdf_profile_is_ready();
 bool sdf_profile_is_pending();
 std::string sdf_profile_format_text();
+std::string sdf_blobtree_format_text();
 }  // namespace blender::draw::sdf
 
 namespace blender::ed::object {
@@ -868,6 +869,48 @@ void OBJECT_OT_sdf_profile_frame(wmOperatorType *ot)
   ot->invoke = sdf_profile_frame_invoke;
   ot->modal = sdf_profile_frame_modal;
   ot->cancel = sdf_profile_frame_cancel;
+  ot->poll = ED_operator_objectmode;
+
+  ot->flag = OPTYPE_REGISTER;
+}
+
+/* -------------------------------------------------------------------- */
+/* Blobtree dump operator */
+
+static wmOperatorStatus sdf_blobtree_dump_exec(bContext *C, wmOperator *op)
+{
+  std::string text = blender::draw::sdf::sdf_blobtree_format_text();
+
+  char filepath[FILE_MAX];
+  const char *basepath = BKE_main_blendfile_path(CTX_data_main(C));
+  if (basepath[0] != '\0') {
+    BLI_path_split_dir_part(basepath, filepath, sizeof(filepath));
+  }
+  else {
+    BLI_path_split_dir_part(BKE_tempdir_session(), filepath, sizeof(filepath));
+  }
+  BLI_path_append(filepath, sizeof(filepath), "sdf_blobtree.txt");
+
+  FILE *f = BLI_fopen(filepath, "w");
+  if (f) {
+    fputs(text.c_str(), f);
+    fclose(f);
+    BKE_reportf(op->reports, RPT_INFO, "Blobtree saved: %s", filepath);
+  }
+  else {
+    BKE_reportf(op->reports, RPT_WARNING, "Failed to write: %s", filepath);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+void OBJECT_OT_sdf_blobtree_dump(wmOperatorType *ot)
+{
+  ot->name = "SDF Dump Blobtree";
+  ot->description = "Export the SDF blobtree structure to a text file";
+  ot->idname = "OBJECT_OT_sdf_blobtree_dump";
+
+  ot->exec = sdf_blobtree_dump_exec;
   ot->poll = ED_operator_objectmode;
 
   ot->flag = OPTYPE_REGISTER;
