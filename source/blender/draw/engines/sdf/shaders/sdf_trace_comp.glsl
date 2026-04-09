@@ -108,9 +108,17 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         SDFObjectGPU obj = objects[m];
         float d;
 
-        /* Always evaluate group children — no BVH or AABB skip.
-         * All children define the combined group field; skipping any member
-         * breaks subtract/intersect which need max() over all members. */
+        /* Per-step AABB skip for group children.
+         * Intersect always needs eval; union/subtract/shell/push can be
+         * skipped when the sample point is outside the object's influence radius. */
+        if (obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+          float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
+          if (da > obj.max_group_blend) {
+            out_aabb_skip = min(out_aabb_skip, da);
+            continue;
+          }
+        }
+
         {
           float3 lp = (obj.inverse_matrix * float4(grp_pos - obj.position.xyz, 1.0f)).xyz;
           d = evalPrimitive(lp, obj);
@@ -349,7 +357,6 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
       float prev_scene = scene_dist;
       int grp_csg = (cur_group >= 0) ? groups[cur_group].csg_operation : 0;
       flushGroupDist(cur_group, grp_dist, scene_dist);
-      /* Per-operation winner check (same as evalSceneBVH) */
       if (grp_winner_id >= 0.0f) {
         if (prev_scene >= 1e9f) {
           out_obj_id = grp_winner_id;
@@ -372,8 +379,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
     SDFObjectGPU obj = objects[i];
     float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
     int tile_skip_op = obj.csg_operation;
-    bool tile_must_eval = (tile_skip_op == SDF_CSG_OP_INTERSECT ||
-                           tile_skip_op == SDF_CSG_OP_SUBTRACT) &&
+    bool tile_must_eval = (tile_skip_op == SDF_CSG_OP_INTERSECT) &&
                           ((gid >= 0 && grp_has_hit && gid == cur_group) ||
                            (gid < 0 && scene_dist < 1e9f));
 
@@ -385,7 +391,6 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
       cur_group = gid;
       continue;
     }
-
     {
       float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
       d = evalPrimitive(lp, obj);
@@ -570,7 +575,6 @@ void main()
     s_tileObjList[i] = tile_prim_lists[base + int(i)];
   }
   barrier();
-
 
   ViewMatrices vm = drw_view();
 #endif
@@ -986,10 +990,13 @@ void main()
   if (!hit) {
     imageStore(gbuf_pos_img, pixel, float4(0.0));
     imageStore(gbuf_color_img, pixel, float4(0.0));
+    imageStore(out_depth_img, pixel, float4(0.0));
     return;
   }
 
   /* Output G-buffer */
+  float ndc_depth = drw_point_world_to_screen(hit_pos).z;
   imageStore(gbuf_pos_img, pixel, float4(hit_pos, 1.0));
   imageStore(gbuf_color_img, pixel, float4(0.0f, 0.0f, 0.0f, hit_obj_id));
+  imageStore(out_depth_img, pixel, float4(ndc_depth));
 }

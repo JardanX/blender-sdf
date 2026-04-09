@@ -60,7 +60,7 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
     float da = point_aabb_dist(eval_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
 
     int obj_op = obj.csg_operation;
-    bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT) &&
+    bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT) &&
                      ((gid >= 0 && grp_has_hit && gid == cur_group) ||
                       (gid < 0 && scene_dist < 1e9f));
 

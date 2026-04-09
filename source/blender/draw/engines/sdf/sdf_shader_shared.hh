@@ -110,6 +110,42 @@ struct [[host_shared]] SdfAabbNodeGPU {
 };
 BLI_STATIC_ASSERT_ALIGN(SdfAabbNodeGPU, 16)
 
+/* Blobtree node types */
+#define SDF_TREE_LEAF 0
+#define SDF_TREE_BINARY_OP 1
+#define SDF_TREE_UNARY_WARP 2
+
+struct [[host_shared]] BlobTreeNodeGPU {
+  float4 subtree_aabb_min;
+  float4 subtree_aabb_max;
+  int node_type;
+  int prim_index;
+  int left_child;
+  int right_child;
+  int csg_operation;
+  int blend_type;
+  float blend;
+  float shell_distance;
+  int shell_mode;
+  int shell_op;
+  float shell_blend_top;
+  float shell_blend_bottom;
+  float chamfer_k2;
+  float chamfer_k3;
+  float chamfer_k4;
+  float chamfer_k5;
+  int flip_blend;
+  int flip_blend_end;
+  int modifier_start;
+  int modifier_count;
+  int original_index;
+  int warp_depth;
+  int _pad_tree0;
+  int _pad_tree1;
+  float4 color;
+};
+BLI_STATIC_ASSERT_ALIGN(BlobTreeNodeGPU, 16)
+
 struct [[host_shared]] DCVertexGPU {
   float4 position;
   float4 normal;

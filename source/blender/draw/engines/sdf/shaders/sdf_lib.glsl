@@ -1940,3 +1940,165 @@ void flushGroupDist(int gid, float grp_dist, inout float scene_dist)
 
 /** \} */
 
+/* ---- Blobtree evaluation: top-down recursive with AABB pruning ---- */
+
+#define TREE_MAX_DEPTH 32
+
+/* Top-down recursive blobtree evaluation.
+ * Checks AABB at each operator BEFORE visiting children — this is where
+ * O(log N) subtree pruning happens. Implemented with explicit stack
+ * since GLSL has no recursion.
+ *
+ * Stack frame states:
+ *   0 = just entered node (check AABB, decide to visit children or prune)
+ *   1 = left child done, need to visit right child
+ *   2 = both children done, combine results */
+float evalSceneTree(float3 world_pos,
+                    int node_count,
+                    int root_idx,
+                    out float3 out_color,
+                    out float out_obj_id,
+                    out float out_aabb_skip)
+{
+  out_color = float3(0.5f);
+  out_obj_id = -1.0f;
+  out_aabb_skip = 1e30f;
+
+  if (node_count <= 0 || root_idx < 0) {
+    return 1e10f;
+  }
+
+  /* Explicit recursion stack */
+  int frame_node[TREE_MAX_DEPTH];
+  int frame_state[TREE_MAX_DEPTH];
+  float frame_left_dist[TREE_MAX_DEPTH];
+  float frame_left_id[TREE_MAX_DEPTH];
+  int sp = 0;
+
+  /* Push root */
+  frame_node[0] = root_idx;
+  frame_state[0] = 0;
+  sp = 1;
+
+  float result_dist = 1e10f;
+  float result_id = -1.0f;
+
+  for (int iter = 0; iter < 512 && sp > 0; iter++) {
+    int fi = sp - 1;
+    int ni = frame_node[fi];
+    int state = frame_state[fi];
+
+    if (ni < 0 || ni >= node_count) {
+      result_dist = 1e10f;
+      result_id = -1.0f;
+      sp--;
+      continue;
+    }
+
+    BlobTreeNodeGPU node = tree_nodes[ni];
+
+    if (state == 0) {
+      /* Just entered this node */
+
+      if (node.node_type == SDF_TREE_LEAF) {
+        /* Leaf: evaluate primitive */
+        SDFObjectGPU obj = objects[node.prim_index];
+        float3 lp = (obj.inverse_matrix * float4(world_pos - obj.position.xyz, 1.0f)).xyz;
+        result_dist = evalPrimitive(lp, obj);
+        result_id = float(obj.original_index);
+        sp--;
+      }
+      else if (node.node_type == SDF_TREE_BINARY_OP) {
+        /* Operator: AABB pruning check BEFORE visiting children */
+        float da = point_aabb_dist(world_pos,
+                                   node.subtree_aabb_min.xyz,
+                                   node.subtree_aabb_max.xyz);
+        if (da > node.subtree_aabb_min.w) {
+          /* Prune entire subtree */
+          out_aabb_skip = min(out_aabb_skip, da);
+          result_dist = 1e10f;
+          result_id = -1.0f;
+          sp--;
+        }
+        else {
+          /* Visit left child first */
+          frame_state[fi] = 1;
+          if (sp < TREE_MAX_DEPTH && node.left_child >= 0) {
+            frame_node[sp] = node.left_child;
+            frame_state[sp] = 0;
+            sp++;
+          }
+        }
+      }
+      else if (node.node_type == SDF_TREE_UNARY_WARP) {
+        /* Warp: visit child */
+        frame_state[fi] = 1;
+        if (sp < TREE_MAX_DEPTH && node.left_child >= 0) {
+          frame_node[sp] = node.left_child;
+          frame_state[sp] = 0;
+          sp++;
+        }
+      }
+    }
+    else if (state == 1) {
+      /* Left child (or warp child) done — result_dist/result_id has the result */
+
+      if (node.node_type == SDF_TREE_BINARY_OP) {
+        /* Save left result, visit right child */
+        frame_left_dist[fi] = result_dist;
+        frame_left_id[fi] = result_id;
+        frame_state[fi] = 2;
+        if (sp < TREE_MAX_DEPTH && node.right_child >= 0) {
+          frame_node[sp] = node.right_child;
+          frame_state[sp] = 0;
+          sp++;
+        }
+        else {
+          result_dist = 1e10f;
+          result_id = -1.0f;
+          frame_state[fi] = 2;
+        }
+      }
+      else if (node.node_type == SDF_TREE_UNARY_WARP) {
+        /* Apply group distance modifiers to child result */
+        if (node.modifier_count > 0) {
+          result_dist = applyGroupDistanceModifiers(
+              result_dist, world_pos, node.modifier_start, node.modifier_count);
+        }
+        sp--;
+      }
+    }
+    else {
+      /* state == 2: Both children done (binary op only) */
+      float l_dist = frame_left_dist[fi];
+      float l_id = frame_left_id[fi];
+      float r_dist = result_dist;
+      float r_id = result_id;
+
+      result_dist = combineCSG(l_dist, r_dist,
+                               node.csg_operation, node.blend_type, node.blend,
+                               node.shell_distance, node.shell_mode, node.shell_op,
+                               node.shell_blend_top, node.shell_blend_bottom,
+                               node.chamfer_k2, node.chamfer_k3,
+                               node.chamfer_k4, node.chamfer_k5,
+                               node.flip_blend, node.flip_blend_end);
+
+      result_id = l_id;
+      if (node.csg_operation == SDF_CSG_OP_SUBTRACT) {
+        if (-r_dist > l_dist) { result_id = r_id; }
+      }
+      else if (node.csg_operation == SDF_CSG_OP_INTERSECT) {
+        if (r_dist > l_dist) { result_id = r_id; }
+      }
+      else {
+        if (r_dist < l_dist) { result_id = r_id; }
+      }
+
+      sp--;
+    }
+  }
+
+  out_obj_id = result_id;
+  return result_dist;
+}
+
