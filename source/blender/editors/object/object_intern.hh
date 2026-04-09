@@ -161,7 +161,6 @@ void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot);
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_shell_distance_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_profile_frame(wmOperatorType *ot);
-void OBJECT_OT_sdf_blobtree_dump(wmOperatorType *ot);
 /**
  * Called by other space types too.
  */
