@@ -510,6 +510,12 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
   return scene_dist;
 }
 
+float evalSceneDistTile(float3 world_pos)
+{
+  float dummy_skip, dummy_id, dummy_sf;
+  return evalSceneTile(world_pos, dummy_skip, dummy_id, dummy_sf);
+}
+
 int tile_active_obj_count()
 {
   return int(min(s_tileObjCount, uint(kMaxTileObjects)));
@@ -832,6 +838,21 @@ void main()
       else {
         hit_pos = pos + ray_dir * d;
       }
+      /* History-independent surface snap: estimate cos_theta from two fresh
+       * SDF evals. Eliminates cone march tile-boundary position artifacts. */
+      {
+        float eps_snap = sdf_ray_epsilon * 0.5f;
+#ifdef USE_TILE_CULLING
+        float d0 = evalSceneDistTile(hit_pos);
+        float d1 = evalSceneDistTile(hit_pos + ray_dir * eps_snap);
+#else
+        float d0 = evalSceneDistBVH(hit_pos);
+        float d1 = evalSceneDistBVH(hit_pos + ray_dir * eps_snap);
+#endif
+        float cos_est = clamp((d0 - d1) / eps_snap, 0.1f, 1.0f);
+        hit_pos += ray_dir * d0 / cos_est;
+      }
+
       hit_obj_id = cur_obj_id;
       break;
     }

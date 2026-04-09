@@ -3535,23 +3535,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
-    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
 
-    bind_ssbos(sh);
-
-    if (tile_prim_counts_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_counts");
-      if (slot >= 0) GPU_storagebuf_bind(tile_prim_counts_ssbo_, slot);
-    }
-    if (tile_prim_lists_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(sh, "tile_prim_lists");
-      if (slot >= 0) GPU_storagebuf_bind(tile_prim_lists_ssbo_, slot);
-    }
-
-    GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
-    GPU_shader_uniform_1i(sh, "use_bvh", use_bvh_);
-    GPU_shader_uniform_1i(sh, "bvh_root", bvh_tree_.root());
-    GPU_shader_uniform_1i(sh, "debug_fd_normals", debug_fd_normals_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     int dispatch_x = (render_size_.x + 7) / 8;
@@ -3560,7 +3544,6 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
-    GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
   }
 
