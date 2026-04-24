@@ -29,6 +29,24 @@ save/load in .blend files, undo/redo, duplicate, Python API (`bpy.data.sdfs`).
 | `source/blender/draw/CMakeLists.txt` | Registered the new SDF hierarchy build shader source so Blender packages and compiles it with the draw shader set. |
 | `source/blender/draw/engines/sdf/sdf_shader_shared.hh` | Fixed the active-brick flag enum declaration so the shared SDF shader header builds cleanly through Blender’s GLSL preprocessing pipeline. |
 
+## Recent Cleanup (2026-04-24)
+
+### Modified Files (Draw)
+
+| File | Change | Why |
+|------|--------|-----|
+| `source/blender/draw/engines/overlay/overlay_sdf.hh` | Kept selection ID uploads in depsgraph/original order, removed unused group bindings, and freed the cached select shader. | Fixes incorrect SDF picking after engine-side object sorting and trims dead selection-path state. |
+| `source/blender/draw/engines/overlay/overlay_outline.hh` | Filtered invalid remapped selected indices and freed the cached outline shader. | Prevents outline draws from indexing past the exported SDF object array in mismatch states and closes a small GPU shader leak. |
+| `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed unused `groups` and `group_count` bindings from the selection shader create info. | Keeps the shader interface aligned with the actual fragment shader inputs. |
+| `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Removed unused shared variables from the bake shader. | Simplifies the shader and avoids carrying dead shared-memory state. |
+
+### Modified Files (Python UI)
+
+| File | Change | Why |
+|------|--------|-----|
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Added non-negative index validation to modifier remove/move operators. | Prevents malformed operator calls from mutating the wrong modifier through Python-style negative indexing. |
+| `scripts/startup/bl_ui/properties_data_sdf_group.py` | Removed an unused import and deleted an unreachable context branch in the panel draw function. | Simplifies the panel logic without changing reachable behavior. |
+
 ---
 
 ## New Files (6)
@@ -2489,24 +2507,20 @@ through a chunk hash instead of a single scene-sized indirection texture.
 | `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Fixed occupied-chunk BVH traversal to keep searching for the nearest hit instead of returning on the first leaf hit. The old behavior caused rendering artifacts with multiple SDFs and rotated SDFs that spanned several chunks because an earlier-tested leaf could hide a closer actual hit in another intersected chunk |
 | `draw/engines/overlay/overlay_sdf.hh` | Remapped select IDs from depsgraph order into the SDF engine's sorted `sdf_objects[]` order before uploading the picking SSBO. This fixes broken SDF picking when the engine reorders objects for grouped CSG evaluation |
 | `editors/space_outliner/tree/tree_display_view_layer.cc` | Restored SDF objects to the normal view-layer and collection hierarchy in the native Outliner instead of filtering them out. SDFs now appear in the standard Blender object hierarchy while the separate SDF Group section remains available |
-| `draw/engines/sdf/sdf_shader_shared.hh` | Extended `BrickCounter` with an explicit overflow flag and added `ActiveBrick` rebake flags so full-slot allocation and partial incremental updates can share the same buffers safely |
-| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added incremental classify push constants and bound `dirty_flags` for the bake shader so per-voxel incremental checks can run on the GPU |
-| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Enabled incremental classify inside a dirty brick window. Stable bricks keep their existing atlas slots, while newly activated bricks allocate fresh slots and tag themselves for full rebake |
-| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Added the cheap dirty-object vs voxel-point intersection gate. Incremental frames now keep clean samples untouched and only recompute voxels touched by dirty objects, while newly active bricks still full-rebake |
-| `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | Switched grid augmentation to the same explicit atlas-slot allocator and full-rebake flag path as classify so mixed object/grid bakes stay consistent |
-| `draw/engines/sdf/sdf_engine.cc` | Re-enabled incremental rebake when chunk layout stays stable, preserved chunk-brick/atlas data across incremental frames, rebuilt the active-brick list from persistent chunk slots after partial bakes, and added a new dirty-voxel debug overlay that keeps rebaked voxels red for one second |
-| `makesrna/intern/rna_space.cc` | Added a `Dirty Voxels` SDF debug mode in the viewport shading settings to visualize the one-second dirty-voxel overlay |
-| `draw/engines/sdf/sdf_engine.cc` | Tightened the dirty-voxel coverage test from point-in-AABB to voxel-cell overlap against an expanded dirty-object influence volume, then made chunk-page coverage sticky so motion reuses the previous sparse layout whenever the new required chunks fit inside it. This removes the stop-motion behavior caused by tiny transforms repeatedly invalidating the incremental path |
-| `draw/engines/sdf/sdf_engine.cc` | Fixed a coordinate-space bug in the incremental dirty-brick window: the CPU was computing atlas-local brick coordinates while the classify shader compares global brick coordinates. This caused the wrong bricks to be reclassified/rebaked, leaving moved SDFs visibly behind the transform and breaking the dirty-voxel overlay. Also raised the debug overlay limits so the voxel grid no longer disappears at higher resolutions like 64/128 |
-| `draw/engines/sdf/sdf_engine.cc` | Moved full active-brick reconstruction for the debug grid back into the bake path when the overlay is enabled, instead of rescanning the full persistent `chunk_bricks` table every draw frame. The overlay now reads the compact active-brick list again, which reduces debug-time stalls and lowers the chance of OpenGL driver crashes while moving SDFs |
-| `draw/engines/sdf/sdf_engine.cc` | Hardened the dirty debug overlay for overlap-heavy motion. Dirty marks are now collected only when `Dirty Voxels` mode is active, large dirty regions fall back to dirty-brick highlights instead of emitting pathological voxel batches, and both dirty-brick and dirty-voxel batches are now drawn/cleared consistently |
-| `draw/engines/sdf/sdf_engine.cc` | Made incremental diagnostics explicit. The engine now stores dirty object/brick counts plus the reason it chose incremental vs full, prints those diagnostics to the console for each bake, exposes them in the SDF perf overlay, always marks the computed dirty brick window in the debug overlay, and colors dirty bricks orange when the engine fell back to a full rebake so users can see immediately whether incremental is actually working |
-| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added push constants so the march shader can see the incremental dirty brick window and rebake status |
-| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced the unstable `Dirty Voxels` wireframe concept with a surface-space rebake tint. The hit surface is now tinted red when incremental rebake is active inside the dirty brick window, or orange when the engine computed a dirty window but fell back to a full rebake |
-| `draw/engines/sdf/sdf_engine.cc` | Stopped using the `Dirty Voxels` mode as a 3D line-grid overlay. The mode now relies on the march shader surface tint instead of building/drawing dirty voxel batches, which removes the most crash-prone debug path in large overlap scenes |
-| `makesrna/intern/rna_space.cc` | Renamed the `Dirty Voxels` debug mode label/description to reflect the new rebake surface tint behavior instead of a 3D voxel grid |
-| `draw/engines/sdf/sdf_engine.cc` | Removed the persistent-history chunk layout growth that kept old chunk pages forever. Chunk coverage now reflects the current scene again instead of accumulating every place an SDF ever moved through, which was the strongest crash candidate in large overlap scenes and also made incremental decisions degrade over time |
-| `draw/engines/sdf/sdf_engine.cc` | Strengthened incremental dirty detection by hashing the full 3x3 inverse rotation matrix plus the final expanded `bbox_min/bbox_max`, instead of only the diagonal matrix terms. This reduces false "clean" detections that could leave stale atlas regions when rotated or blend-expanded SDFs move |
-| `draw/engines/sdf/sdf_engine.cc` | Switched chunk-brick slot sizing/limits to use checked 64-bit intermediate counts before converting back to `int`, avoiding silent overflow in large sparse scenes |
-| `draw/engines/sdf/sdf_engine.cc` | Added a conservative incremental safety gate: if one move dirties too many objects or too large a dirty brick region, the engine now falls back to a full rebake with an explicit `reason` instead of forcing a risky partial update through the OpenGL path |
-| `draw/engines/sdf/sdf_engine.cc` | Added an overlap-complexity gate for the real worst case: even when only one object is dirty, incremental now falls back to full rebake when the dirty region intersects too many other SDFs (`reason: too-many-overlaps`). This targets the "move one SDF through dozens of overlapping SDFs" crash case more directly than the dirty-object count alone |
+
+### Follow-up Fixes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Restored the bake pipeline back to the earlier chunked brickmap baseline from `79125bdbcb2`, keeping incremental rebake disabled again, and widened the object hash to cover the full 3x3 inverse rotation basis so rotated SDFs cannot miss a required rebake |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Restored the pre-incremental shader interfaces so the non-incremental bake path uses the older shader ABI again |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Moved candidate-object gathering from per-brick to per-chunk scope. Each classify workgroup now builds one shared candidate list for the whole chunk, does a cheap chunk-center surface-distance reject, and only then evaluates individual bricks. This makes classify much lighter in long sparse arrays where thousands of chunks used to repeat the same BVH walk 4096 times per chunk |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Removed the `-2` fully-interior brick tagging so the marcher no longer lands on coarse interior placeholders that showed up as gray voxel blocks on the surface |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Kept the exact chunk/brick/voxel DDA path from the older baseline, added a short in-brick sphere-trace prepass using the sampled baked field to skip obvious empty space before voxel interpolation, and removed the gray interior-brick hit path |
+| `draw/engines/sdf/sdf_engine.cc` | Added a dense active-chunk lookup upload for compact active layouts, and `draw/engines/sdf/shaders/sdf_march_frag.glsl` now uses that direct lookup mode instead of always paying hash/BVH chunk traversal overhead. Rendering the same voxel count across many chunks is now much closer to compacted layouts when the active chunk grid still fits a reasonable dense table |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Restored the simpler pre-incremental active-brick and brick-counter structs so the engine/shader ABI matches the non-incremental bake path again |
+| `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | Restored the older grid-augmentation allocator contract so dense grid bricks write only `ActiveBrick.coord` and use `brick_counter.next_slot` purely as the overflow signal again |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Restored the full-rebake bake shader so every active brick is rebaked every frame instead of mixing in partial dirty-voxel updates |
+| `draw/engines/sdf/shaders/sdf_hierarchy_build_comp.glsl` | Removed the temporary hierarchy-build shader again because the final safe skip path no longer depends on a separate hierarchy texture pass |
+| `draw/CMakeLists.txt` | Removed `engines/sdf/shaders/sdf_hierarchy_build_comp.glsl` from the draw shader source list so the build graph matches the restored march-only implementation |
+| `makesrna/intern/rna_space.cc` | Restored the older SDF debug-grid UI text from the same baseline so the viewport debug controls no longer describe incremental rebake tint behavior |

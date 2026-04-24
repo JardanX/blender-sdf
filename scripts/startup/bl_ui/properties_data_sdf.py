@@ -304,7 +304,7 @@ class SDF_OT_modifier_remove(Operator):
         sdf = getattr(context, 'sdf', None)
         if sdf is None:
             return {'CANCELLED'}
-        if self.index < len(sdf.modifiers):
+        if 0 <= self.index < len(sdf.modifiers):
             sdf.modifiers.remove(sdf.modifiers[self.index])
         return {'FINISHED'}
 
@@ -325,6 +325,8 @@ class SDF_OT_modifier_move(Operator):
     def execute(self, context):
         sdf = getattr(context, 'sdf', None)
         if sdf is None:
+            return {'CANCELLED'}
+        if not (0 <= self.index < len(sdf.modifiers)):
             return {'CANCELLED'}
         new_index = self.index + self.direction
         if 0 <= new_index < len(sdf.modifiers):

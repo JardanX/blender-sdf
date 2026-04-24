@@ -4761,11 +4761,6 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   static const EnumPropertyItem sdf_debug_grid_items[] = {
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},
-      {2,
-       "DIRTY_VOXELS",
-       0,
-       "Rebake Surface",
-       "Tint rebaked SDF surface regions directly instead of drawing a 3D voxel grid"},
       {3,
        "BVH_BOUNDS",
        0,
