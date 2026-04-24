@@ -45,6 +45,13 @@ void main()
     int flat_index = local_brick.x + local_brick.y * CHUNK_BRICK_RES +
                      local_brick.z * CHUNK_BRICK_RES * CHUNK_BRICK_RES;
     int3 brick = chunk.coord.xyz * CHUNK_BRICK_RES + local_brick;
+    int previous_slot = chunk_bricks[chunk_offset + flat_index];
+
+    if (incremental_mode != 0 &&
+        (any(lessThan(brick, dirty_brick_min)) || any(greaterThanEqual(brick, dirty_brick_max))))
+    {
+      continue;
+    }
 
     float3 brick_center =
         (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
@@ -150,14 +157,33 @@ void main()
     }
 
     int out_slot = -1;
+    uint out_flags = ACTIVE_BRICK_FLAG_NONE;
     if (abs(acc_dist) <= brick_half_diag) {
-      uint slot = atomicAdd(brick_counter.count, 1u);
-      if (slot < uint(max_active_bricks)) {
-        out_slot = int(slot);
-        active_bricks[slot].coord = int4(brick, out_slot);
+      int atlas_slot = previous_slot;
+      if (atlas_slot < 0) {
+        uint alloc_index = atomicAdd(brick_counter.next_slot, 1u);
+        if (alloc_index < uint(free_slot_count)) {
+          atlas_slot = free_slots[alloc_index];
+        }
+        else {
+          atlas_slot = next_slot_base + int(alloc_index) - free_slot_count;
+        }
+        out_flags |= ACTIVE_BRICK_FLAG_FULL_REBAKE;
+      }
+
+      if (atlas_slot < max_atlas_slots) {
+        uint active_idx = atomicAdd(brick_counter.count, 1u);
+        if (active_idx < uint(max_active_bricks)) {
+          out_slot = atlas_slot;
+          active_bricks[active_idx].coord = int4(brick, out_slot);
+          active_bricks[active_idx].meta = int4(int(out_flags), 0, 0, 0);
+        }
+        else {
+          atomicMax(brick_counter.overflow, 1u);
+        }
       }
       else {
-        atomicMax(brick_counter.next_slot, 1u);
+        atomicMax(brick_counter.overflow, 1u);
       }
     }
     else if (acc_dist < -brick_half_diag) {

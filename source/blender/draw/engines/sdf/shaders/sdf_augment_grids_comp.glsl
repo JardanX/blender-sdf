@@ -52,13 +52,15 @@ void main()
       continue;
     }
 
-    uint slot = atomicAdd(brick_counter.count, 1u);
-    if (slot < uint(max_active_bricks)) {
-      chunk_bricks[chunk_offset + flat_index] = int(slot);
-      active_bricks[slot].coord = int4(brick, int(slot));
+    uint active_idx = atomicAdd(brick_counter.count, 1u);
+    uint atlas_slot = atomicAdd(brick_counter.next_slot, 1u);
+    if (active_idx < uint(max_active_bricks)) {
+      chunk_bricks[chunk_offset + flat_index] = int(atlas_slot);
+      active_bricks[active_idx].coord = int4(brick, int(atlas_slot));
+      active_bricks[active_idx].meta = int4(int(ACTIVE_BRICK_FLAG_FULL_REBAKE), 0, 0, 0);
     }
     else {
-      atomicMax(brick_counter.next_slot, 1u);
+      atomicMax(brick_counter.overflow, 1u);
     }
   }
 }

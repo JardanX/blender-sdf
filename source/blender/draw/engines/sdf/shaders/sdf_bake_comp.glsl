@@ -102,6 +102,8 @@ void main()
   int4 brick_data = active_bricks[brick_idx].coord;
   int3 brick = brick_data.xyz;
   int slot = brick_data.w;
+  bool full_rebake = (active_bricks[brick_idx].meta.x & int(ACTIVE_BRICK_FLAG_FULL_REBAKE)) != 0;
+  float dirty_expand = float(BRICK_SIZE) * voxel_size * 0.866025f + voxel_size * 2.0f;
 
   int bpa = bricks_per_axis;
   int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
@@ -191,7 +193,7 @@ void main()
       }
     }
 
-    shared_any_dirty = 1;
+    shared_any_dirty = full_rebake ? 1 : 0;
 
     if (shared_overflow == 0) {
       for (int i = 0; i < object_count; i++) {
@@ -230,6 +232,25 @@ void main()
             j--;
           }
           shared_candidates[j + 1] = key;
+        }
+      }
+    }
+
+    if (shared_any_dirty == 0) {
+      if (shared_overflow == 0) {
+        for (int c = 0; c < shared_num_candidates; c++) {
+          if (dirty_flags[shared_candidates[c]] != 0) {
+            shared_any_dirty = 1;
+            break;
+          }
+        }
+      }
+      else {
+        for (int i = 0; i < object_count; i++) {
+          if (dirty_flags[i] != 0) {
+            shared_any_dirty = 1;
+            break;
+          }
         }
       }
     }
@@ -324,6 +345,31 @@ void main()
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
     float3 world_pos = float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
+
+    if (incremental_mode != 0 && !full_rebake) {
+      bool voxel_dirty = false;
+      float voxel_pad = voxel_size * 0.5f;
+      float3 voxel_min = world_pos - float3(voxel_pad);
+      float3 voxel_max = world_pos + float3(voxel_pad);
+      for (int c = 0; c < total_count; c++) {
+        int i = (shared_overflow == 1) ? c : shared_candidates[c];
+        if (dirty_flags[i] == 0) {
+          continue;
+        }
+
+        SDFObjectGPU obj = objects[i];
+        float3 dirty_min = obj.bbox_min.xyz - float3(dirty_expand);
+        float3 dirty_max = obj.bbox_max.xyz + float3(dirty_expand);
+        if (!any(greaterThan(voxel_min, dirty_max)) && !any(lessThan(voxel_max, dirty_min))) {
+          voxel_dirty = true;
+          break;
+        }
+      }
+
+      if (!voxel_dirty) {
+        continue;
+      }
+    }
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);
