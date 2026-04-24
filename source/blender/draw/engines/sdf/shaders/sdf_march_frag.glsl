@@ -58,22 +58,6 @@ float4 sampleCompactField(float3 grid_pos_in_brick, int slot, int bpa)
   return textureLod(compact_atlas, atlas_uv, 0.0f);
 }
 
-float conservativeHierarchySkip(int3 cell, int slot, int bpa)
-{
-  int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
-  float cell_half_diag = voxel_size * 0.866025f;
-  float lower_bound = -1e20f;
-
-  int3 coarse4 = slot_block * 4 + clamp(cell >> 1, int3(0), int3(3));
-  lower_bound = max(lower_bound, texelFetch(hierarchy4_atlas, coarse4, 0).r - cell_half_diag);
-
-  int3 coarse2 = slot_block * 2 + clamp(cell >> 2, int3(0), int3(1));
-  lower_bound = max(lower_bound, texelFetch(hierarchy2_atlas, coarse2, 0).r - cell_half_diag);
-
-  lower_bound = max(lower_bound, texelFetch(hierarchy1_atlas, slot_block, 0).r - cell_half_diag);
-  return lower_bound;
-}
-
 float3 normalizeVoxelGradient(float3 grad)
 {
   float l = length(grad);
@@ -230,14 +214,6 @@ void march_chunk_local(float3 ray_origin,
     int slot = readChunkBrickSlot(chunk_idx, brick_cell);
     int3 world_brick = chunk_coord * CHUNK_BRICK_RES + brick_cell;
 
-    if (slot == -2) {
-      out_hit_t = t_brick_current;
-      out_hit_brick = world_brick;
-      out_hit_cell = int3(0);
-      out_hit_slot = -2;
-      return;
-    }
-
     float t_brick_exit = min(min(brick_tMax.x, brick_tMax.y), brick_tMax.z);
     t_brick_exit = min(t_brick_exit, t_exit);
 
@@ -265,13 +241,12 @@ void march_chunk_local(float3 ray_origin,
         }
 
         float3 trace_pos = V + vt_current * VD;
-        int3 trace_cell = clamp(int3(floor(trace_pos)), int3(0), int3(BRICK_SIZE - 1));
-        float dist = conservativeHierarchySkip(trace_cell, slot, bricks_per_axis);
-        if (dist <= trace_min_step) {
+        float trace_dist = sampleCompactField(trace_pos, slot, bricks_per_axis).r;
+        if (trace_dist <= trace_min_step) {
           break;
         }
 
-        float trace_step = min(dist * trace_safety, trace_remaining);
+        float trace_step = min(trace_dist * trace_safety, trace_remaining);
         if (trace_step <= trace_min_step) {
           break;
         }
@@ -715,7 +690,7 @@ void march_world_exact(float3 ray_origin,
                        out_hit_brick,
                        out_hit_cell,
                        out_hit_slot);
-    }
+  }
 }
 
 /* Main */
@@ -772,20 +747,11 @@ void main()
   float3 hit_color = float3(0.5f);
   float3 hit_normal = float3(0.0f, 0.0f, 1.0f);
 
-  if (hit_slot == -2) {
-    if (lighting_type != 0) {
-      hit_normal = -ray_dir;
-    }
-  }
-  else {
-    float3 brick_origin = float3(hit_brick * BRICK_SIZE) * voxel_size;
-    float3 local_pos = (hit_pos - brick_origin) / voxel_size;
+  float3 brick_origin = float3(hit_brick * BRICK_SIZE) * voxel_size;
+  float3 local_pos = (hit_pos - brick_origin) / voxel_size;
 
-    hit_color = sampleCompactField(local_pos, hit_slot, bricks_per_axis).gba;
-    if (lighting_type != 0) {
-      hit_normal = computeDualVoxelNormal(local_pos, hit_brick, hit_slot, bricks_per_axis);
-    }
-  }
+  hit_color = sampleCompactField(local_pos, hit_slot, bricks_per_axis).gba;
+  hit_normal = computeDualVoxelNormal(local_pos, hit_brick, hit_slot, bricks_per_axis);
 
   float3 normal = hit_normal;
   float3 obj_color = hit_color;
@@ -867,14 +833,6 @@ void main()
     float3 specular = textureLod(matcap_tx, float3(matcap_uv, 1.0f), 0.0f).rgb;
 
     shaded_color = diffuse * obj_color + specular * float(use_specular);
-  }
-
-  if (debug_grid_mode == 2 && dirty_brick_count > 0 &&
-      all(greaterThanEqual(hit_brick, dirty_brick_min)) && all(lessThan(hit_brick, dirty_brick_max)))
-  {
-    float3 debug_tint = (incremental_status != 0) ? float3(1.0f, 0.15f, 0.12f) :
-                                                  float3(1.0f, 0.65f, 0.12f);
-    shaded_color = mix(shaded_color, debug_tint, 0.75f);
   }
 
   out_color = float4(shaded_color, 1.0f);

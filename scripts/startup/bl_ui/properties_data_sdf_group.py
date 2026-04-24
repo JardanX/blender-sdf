@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-import bpy
 from bpy.types import Panel
 
 
@@ -24,14 +23,8 @@ class DATA_PT_context_sdf_group(SDFGroupButtonsPanel, Panel):
 
     def draw(self, context):
         layout = self.layout
-        sdf = context.sdf
-        grp = context.sdf_group
-
-        if sdf and grp:
-            layout.template_ID(sdf, "sdf_group")
-        elif grp:
-            space = context.space_data
-            layout.template_ID(space, "pin_id")
+        space = context.space_data
+        layout.template_ID(space, "pin_id")
 
 
 class DATA_PT_sdf_group_operation(SDFGroupButtonsPanel, Panel):

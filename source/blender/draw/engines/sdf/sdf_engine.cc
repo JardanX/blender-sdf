@@ -114,15 +114,7 @@ static constexpr int PERF_PASS_GRID = 2;
 static constexpr int PERF_PASS_MARCH = 3;
 static constexpr int PERF_PASS_FXAA = 4;
 static constexpr int PERF_FPS_SAMPLES = 8;
-static constexpr int SDF_DEBUG_GRID_MAX_BRICKS = 262144;
-static constexpr int SDF_DEBUG_DIRTY_VOXEL_MAX = 65536;
-static constexpr int SDF_DEBUG_DIRTY_BRICK_MAX = 16384;
-static constexpr int SDF_DEBUG_DIRTY_VOXEL_FALLBACK = 8192;
-static constexpr int SDF_INCREMENTAL_MAX_DIRTY_OBJECTS = 24;
-static constexpr int SDF_INCREMENTAL_MAX_AFFECTED_OBJECTS = 12;
-static constexpr int SDF_INCREMENTAL_MAX_DIRTY_BRICKS = 4096;
-static constexpr double SDF_DIRTY_VOXEL_HOLD_SEC = 1.0;
-static constexpr int SDF_DEBUG_VOXEL_KEY_BITS = 21;
+static constexpr int SDF_DEBUG_GRID_MAX_BRICKS = 32768;
 static constexpr int SDF_DENSE_CHUNK_LOOKUP_MAX_CELLS = 262144;
 
 static char s_perf_text[SDF_PERF_BUF_SIZE] = "";
@@ -159,9 +151,6 @@ class Instance : public DrawEngine {
   float3 scene_max_ = float3(-1e30f);
 
   gpu::Texture *compact_atlas_tx_ = nullptr;
-  gpu::Texture *hierarchy4_tx_ = nullptr;
-  gpu::Texture *hierarchy2_tx_ = nullptr;
-  gpu::Texture *hierarchy1_tx_ = nullptr;
   gpu::StorageBuf *brick_counter_ = nullptr;
   gpu::StorageBuf *active_bricks_ = nullptr;
   gpu::StorageBuf *chunk_pages_ssbo_ = nullptr;
@@ -169,14 +158,12 @@ class Instance : public DrawEngine {
   gpu::StorageBuf *chunk_hash_ssbo_ = nullptr;
   gpu::StorageBuf *chunk_bricks_ssbo_ = nullptr;
   gpu::StorageBuf *chunk_bvh_ssbo_ = nullptr;
-  gpu::StorageBuf *incremental_free_slots_ssbo_ = nullptr;
   int active_bricks_capacity_ = 0;
   int chunk_pages_ssbo_count_ = 0;
   int chunk_grid_lookup_ssbo_count_ = 0;
   int chunk_hash_ssbo_count_ = 0;
   int chunk_bricks_ssbo_count_ = 0;
   int chunk_bvh_ssbo_count_ = 0;
-  int incremental_free_slots_ssbo_count_ = 0;
 
   enum eChunkMarchMode {
     CHUNK_MARCH_DIRECT = 0,
@@ -197,7 +184,6 @@ class Instance : public DrawEngine {
   int atlas_capacity_ = 0;
   int bricks_per_axis_ = 1;
   int debug_grid_ = 0;
-  bool active_bricks_full_list_valid_ = true;
   bool fxaa_enabled_ = true;
   float surface_margin_ = 1.0f;
   float max_blend_ = 0.0f;
@@ -206,7 +192,6 @@ class Instance : public DrawEngine {
   uint64_t scene_hash_ = 0;
   uint64_t grid_hash_ = 0;
   uint64_t spatial_hash_ = 0;
-  uint64_t chunk_layout_hash_ = 0;
   bool needs_bake_ = true;
   bool needs_upload_ = true;
   bool needs_bvh_rebuild_ = true;
@@ -216,15 +201,11 @@ class Instance : public DrawEngine {
   Vector<uint64_t> prev_object_hashes_;
   Vector<float4> prev_bbox_mins_;
   Vector<float4> prev_bbox_maxs_;
-  Vector<float4> prev_raw_bbox_mins_;
-  Vector<float4> prev_raw_bbox_maxs_;
-  Vector<int> incremental_free_slots_;
   int prev_object_count_ = 0;
   float3 prev_atlas_origin_ = float3(0);
   int3 prev_grid_res_ = int3(0);
   float prev_voxel_size_ = 0.0f;
   uint64_t prev_group_structure_hash_ = 0;
-  uint64_t prev_chunk_layout_hash_ = 0;
   float prev_max_blend_ = 0.0f;
   float prev_max_shell_distance_ = 0.0f;
   bool prev_had_grid_objects_ = false;
@@ -232,11 +213,6 @@ class Instance : public DrawEngine {
   int3 dirty_brick_min_ = int3(0);
   int3 dirty_brick_max_ = int3(0);
   int total_allocated_slots_ = 0;
-  int dirty_object_count_ = 0;
-  int affected_object_count_ = 0;
-  int dirty_brick_count_ = 0;
-  bool incremental_status_ = false;
-  std::string incremental_reason_ = "startup";
 
   struct PendingGridObject {
     const Object *ob;
@@ -260,7 +236,6 @@ class Instance : public DrawEngine {
     SH_CLASSIFY = 0,
     SH_AUGMENT_GRIDS,
     SH_BAKE,
-    SH_BUILD_HIERARCHY,
     SH_MARCH,
     SH_GRID_BLEND,
     SH_FXAA,
@@ -271,7 +246,6 @@ class Instance : public DrawEngine {
       "sdf_classify",
       "sdf_augment_grids",
       "sdf_bake",
-      "sdf_build_hierarchy",
       "sdf_march",
       "sdf_grid_blend",
       "sdf_fxaa",
@@ -282,7 +256,6 @@ class Instance : public DrawEngine {
   gpu::Shader *&classify_sh_ = shaders_[SH_CLASSIFY];
   gpu::Shader *&augment_grids_sh_ = shaders_[SH_AUGMENT_GRIDS];
   gpu::Shader *&bake_sh_ = shaders_[SH_BAKE];
-  gpu::Shader *&build_hierarchy_sh_ = shaders_[SH_BUILD_HIERARCHY];
   gpu::Shader *&march_sh_ = shaders_[SH_MARCH];
   gpu::Shader *&grid_blend_sh_ = shaders_[SH_GRID_BLEND];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
@@ -325,13 +298,8 @@ class Instance : public DrawEngine {
 
   /** Debug grid wireframe batch (GPU_PRIM_LINES). */
   gpu::Batch *grid_batch_ = nullptr;
-  gpu::Batch *dirty_brick_batch_ = nullptr;
-  gpu::Batch *dirty_voxel_batch_ = nullptr;
   int grid_batch_mode_ = 0;
   int3 grid_batch_res_ = int3(0);
-  bool dirty_voxel_batch_dirty_ = true;
-  Map<uint64_t, double> dirty_brick_expiry_;
-  Map<uint64_t, double> dirty_voxel_expiry_;
 
   /** Debug BVH wireframe batch (GPU_PRIM_LINES, per-vertex color). */
   gpu::Batch *bvh_batch_ = nullptr;
@@ -762,11 +730,6 @@ class Instance : public DrawEngine {
     return int64_t(grid_res_.x) * int64_t(grid_res_.y) * int64_t(grid_res_.z);
   }
 
-  int64_t chunk_brick_slot_count() const
-  {
-    return int64_t(chunk_pages_.size()) * int64_t(SDF_CHUNK_BRICK_COUNT);
-  }
-
   bool use_dense_chunk_lookup() const
   {
     return !chunk_grid_lookup_.is_empty();
@@ -777,10 +740,10 @@ class Instance : public DrawEngine {
     if (use_dense_chunk_lookup()) {
       return CHUNK_MARCH_DIRECT;
     }
-
-    const int chunk_grid_span = grid_res_.x + grid_res_.y + grid_res_.z;
-    return (int(chunk_bvh_nodes_.size()) > 127 && chunk_grid_span > 24) ? CHUNK_MARCH_BVH :
-                                                                      CHUNK_MARCH_HASH;
+    if (!chunk_bvh_nodes_.is_empty()) {
+      return CHUNK_MARCH_BVH;
+    }
+    return CHUNK_MARCH_HASH;
   }
 
   const char *chunk_march_mode_name() const
@@ -878,6 +841,7 @@ class Instance : public DrawEngine {
   void rebuild_render_chunk_bvh()
   {
     chunk_bvh_nodes_.clear();
+    chunk_grid_lookup_.clear();
 
     if (!active_bricks_ || active_brick_count_ <= 0 || active_bricks_capacity_ <= 0) {
       return;
@@ -921,22 +885,37 @@ class Instance : public DrawEngine {
       render_chunk_indices.append(chunk_idx);
     }
 
+    const int64_t grid_cell_count = chunk_grid_cell_count();
+    if (grid_cell_count > 0 && grid_cell_count <= SDF_DENSE_CHUNK_LOOKUP_MAX_CELLS) {
+      chunk_grid_lookup_.resize(int(grid_cell_count));
+      chunk_grid_lookup_.fill(-1);
+
+      const int stride_y = grid_res_.x;
+      const int stride_z = grid_res_.x * grid_res_.y;
+      for (const int chunk_idx : render_chunk_indices) {
+        const int3 coord = int3(chunk_pages_[chunk_idx].coord) - atlas_chunk_min_;
+        const int flat_index = coord.x + coord.y * stride_y + coord.z * stride_z;
+        chunk_grid_lookup_[flat_index] = chunk_idx;
+      }
+      return;
+    }
+
     build_chunk_bvh_from_indices(render_chunk_indices);
   }
 
   void build_chunk_pages()
   {
+    chunk_pages_.clear();
+    chunk_grid_lookup_.clear();
+    chunk_hash_entries_.clear();
+    chunk_bvh_nodes_.clear();
+    chunk_hash_mask_ = -1;
+
     if (objects_.is_empty() && grid_objects_.is_empty()) {
-      chunk_pages_.clear();
-      chunk_grid_lookup_.clear();
-      chunk_hash_entries_.clear();
-      chunk_bvh_nodes_.clear();
-      chunk_hash_mask_ = -1;
       atlas_origin_ = float3(0.0f);
       atlas_extent_ = float3(0.0f);
       atlas_chunk_min_ = int3(0);
       grid_res_ = int3(0);
-      chunk_layout_hash_ = 0;
       return;
     }
 
@@ -967,34 +946,17 @@ class Instance : public DrawEngine {
     for (const SDFObjectGPU &obj : objects_) {
       add_bounds(float3(obj.bbox_min), float3(obj.bbox_max));
     }
-    if (prev_raw_bbox_mins_.size() == objects_.size() && prev_raw_bbox_maxs_.size() == objects_.size()) {
-      for (int i = 0; i < int(prev_raw_bbox_mins_.size()); i++) {
-        add_bounds(float3(prev_raw_bbox_mins_[i]), float3(prev_raw_bbox_maxs_[i]));
-      }
-    }
     for (const GridObject &grid : grid_objects_) {
       add_bounds(grid.world_min, grid.world_max);
     }
 
     if (chunk_map.is_empty()) {
-      chunk_pages_.clear();
-      chunk_grid_lookup_.clear();
-      chunk_hash_entries_.clear();
-      chunk_bvh_nodes_.clear();
-      chunk_hash_mask_ = -1;
       atlas_origin_ = float3(0.0f);
       atlas_extent_ = float3(0.0f);
       atlas_chunk_min_ = int3(0);
       grid_res_ = int3(0);
-      chunk_layout_hash_ = 0;
       return;
     }
-
-    chunk_pages_.clear();
-    chunk_grid_lookup_.clear();
-    chunk_hash_entries_.clear();
-    chunk_bvh_nodes_.clear();
-    chunk_hash_mask_ = -1;
 
     Vector<ChunkCoord> coords;
     coords.reserve(chunk_map.size());
@@ -1024,31 +986,6 @@ class Instance : public DrawEngine {
     atlas_extent_ = float3(chunk_max - chunk_min) * chunk_world;
     atlas_chunk_min_ = chunk_min;
     grid_res_ = chunk_max - chunk_min;
-
-    uint64_t chunk_hash = 14695981039346656037ULL;
-    for (const ChunkCoord &coord : coords) {
-      chunk_hash ^= uint64_t(uint32_t(coord.x));
-      chunk_hash *= 1099511628211ULL;
-      chunk_hash ^= uint64_t(uint32_t(coord.y));
-      chunk_hash *= 1099511628211ULL;
-      chunk_hash ^= uint64_t(uint32_t(coord.z));
-      chunk_hash *= 1099511628211ULL;
-    }
-    chunk_layout_hash_ = chunk_hash;
-
-    const int64_t grid_cell_count = chunk_grid_cell_count();
-    if (grid_cell_count > 0 && grid_cell_count <= SDF_DENSE_CHUNK_LOOKUP_MAX_CELLS) {
-      chunk_grid_lookup_.resize(int(grid_cell_count));
-      chunk_grid_lookup_.fill(-1);
-
-      const int stride_y = grid_res_.x;
-      const int stride_z = grid_res_.x * grid_res_.y;
-      for (int chunk_idx = 0; chunk_idx < int(chunk_pages_.size()); chunk_idx++) {
-        const int3 coord = int3(chunk_pages_[chunk_idx].coord) - atlas_chunk_min_;
-        const int flat_index = coord.x + coord.y * stride_y + coord.z * stride_z;
-        chunk_grid_lookup_[flat_index] = chunk_idx;
-      }
-    }
 
     const int hash_capacity = next_power_of_two(math::max(int(chunk_pages_.size()) * 2, 1));
     chunk_hash_entries_.resize(hash_capacity);
@@ -1268,13 +1205,6 @@ class Instance : public DrawEngine {
      * plus the intersection of its blend-expanded bounds with the bounds
      * of any subsequent operation that blends with it.
      * This avoids the O(N^2) volume blowup, keeping BVH culling efficient. */
-    Vector<float4> raw_cur_mins(objects_.size());
-    Vector<float4> raw_cur_maxs(objects_.size());
-    for (int i = 0; i < int(objects_.size()); i++) {
-      raw_cur_mins[i] = objects_[i].bbox_min;
-      raw_cur_maxs[i] = objects_[i].bbox_max;
-    }
-
     Vector<float3> new_mins(objects_.size());
     Vector<float3> new_maxs(objects_.size());
     for (int i = 0; i < int(objects_.size()); i++) {
@@ -1429,40 +1359,24 @@ class Instance : public DrawEngine {
       }
 
       incremental_bake_ = false;
-      incremental_status_ = false;
       dirty_flags_.reinitialize(n);
       dirty_flags_.fill(0);
-      Vector<int> dirty_indices;
-      dirty_object_count_ = 0;
-      affected_object_count_ = 0;
-      dirty_brick_count_ = 0;
-      incremental_reason_ = "full-scene";
 
       /* Incremental is possible when the grid geometry and structure are stable
        * and only a subset of objects changed their intrinsic properties. */
-      if (prev_object_count_ != n) {
-        incremental_reason_ = "object-count";
-      }
-      else if (prev_atlas_origin_ != atlas_origin_ || prev_grid_res_ != grid_res_ ||
-               prev_voxel_size_ != voxel_size_)
-      {
-        incremental_reason_ = "grid-shift";
-      }
-      else if (prev_group_structure_hash_ != group_struct_hash) {
-        incremental_reason_ = "group-structure";
-      }
-      else if (prev_chunk_layout_hash_ != chunk_layout_hash_) {
-        incremental_reason_ = "chunk-layout";
-      }
-      else if (grids_changed || !grid_objects_.is_empty() || prev_had_grid_objects_) {
-        incremental_reason_ = "grid-objects";
-      }
-      else if (compact_atlas_tx_ == nullptr || total_allocated_slots_ <= 0) {
-        incremental_reason_ = "no-atlas";
-      }
-      else
+      if (false && prev_object_count_ == n &&            /* Incremental disabled. */
+          prev_atlas_origin_ == atlas_origin_ &&          /* Grid didn't shift. */
+          prev_grid_res_ == grid_res_ &&                  /* Grid didn't resize. */
+          prev_voxel_size_ == voxel_size_ &&              /* Voxel density unchanged. */
+          prev_group_structure_hash_ == group_struct_hash && /* Group structure stable. */
+          !grids_changed &&                               /* No grid object changes. */
+          grid_objects_.is_empty() &&                      /* No grid objects this frame. */
+          !prev_had_grid_objects_ &&                       /* No grid objects last frame. */
+          compact_atlas_tx_ != nullptr &&                  /* Atlas exists. */
+          total_allocated_slots_ > 0)                      /* Had a previous bake. */
       {
         /* Find which objects changed. */
+        Vector<int> dirty_indices;
         for (int i = 0; i < n; i++) {
           if (current_hashes[i] != prev_object_hashes_[i]) {
             dirty_indices.append(i);
@@ -1470,47 +1384,28 @@ class Instance : public DrawEngine {
           }
         }
 
-        dirty_object_count_ = int(dirty_indices.size());
-
         if (!dirty_indices.is_empty() && dirty_indices.size() < n) {
           /* Compute dirty AABB: union of old+new AABBs for all dirty objects. */
           float3 dirty_min = float3(1e30f);
           float3 dirty_max = float3(-1e30f);
 
           for (int idx : dirty_indices) {
-            dirty_min = math::min(dirty_min, float3(raw_cur_mins[idx]));
-            dirty_max = math::max(dirty_max, float3(raw_cur_maxs[idx]));
-            dirty_min = math::min(dirty_min, float3(prev_raw_bbox_mins_[idx]));
-            dirty_max = math::max(dirty_max, float3(prev_raw_bbox_maxs_[idx]));
+            dirty_min = math::min(dirty_min, float3(objects_[idx].bbox_min));
+            dirty_max = math::max(dirty_max, float3(objects_[idx].bbox_max));
+            dirty_min = math::min(dirty_min, float3(prev_bbox_mins_[idx]));
+            dirty_max = math::max(dirty_max, float3(prev_bbox_maxs_[idx]));
           }
 
-          /* Convert to global brick coordinates. */
-          const float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
-          const int3 brick_grid_min = atlas_chunk_min_ * SDF_CHUNK_BRICK_RES;
-          const int3 brick_grid_max = (atlas_chunk_min_ + grid_res_) * SDF_CHUNK_BRICK_RES;
+          /* Convert to brick coordinates. */
+          float chunk = float(SDF_BRICK_SIZE) * voxel_size_;
+          dirty_brick_min_ = int3(math::floor((dirty_min - atlas_origin_) / chunk));
+          dirty_brick_max_ = int3(math::ceil((dirty_max - atlas_origin_) / chunk));
 
-          dirty_brick_min_ = int3(math::floor(dirty_min / brick_world));
-          dirty_brick_max_ = int3(math::ceil(dirty_max / brick_world));
-
-          dirty_brick_min_ = math::clamp(dirty_brick_min_, brick_grid_min, brick_grid_max);
-          dirty_brick_max_ = math::clamp(dirty_brick_max_, brick_grid_min, brick_grid_max);
+          dirty_brick_min_ = math::clamp(dirty_brick_min_, int3(0), grid_res_);
+          dirty_brick_max_ = math::clamp(dirty_brick_max_, int3(0), grid_res_);
 
           int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
           int dirty_volume = dirty_size.x * dirty_size.y * dirty_size.z;
-          dirty_brick_count_ = dirty_volume;
-
-          int affected_objects = 0;
-          for (int i = 0; i < n; i++) {
-            const float3 obj_min = float3(raw_cur_mins[i]);
-            const float3 obj_max = float3(raw_cur_maxs[i]);
-            if (obj_min.x > dirty_max.x || obj_max.x < dirty_min.x || obj_min.y > dirty_max.y ||
-                obj_max.y < dirty_min.y || obj_min.z > dirty_max.z || obj_max.z < dirty_min.z)
-            {
-              continue;
-            }
-            affected_objects++;
-          }
-          affected_object_count_ = affected_objects;
 
           /* Per-brick dirty flags let the shaders skip clean bricks even
            * when the dirty AABB is large, so no volume threshold needed.
@@ -1522,8 +1417,6 @@ class Instance : public DrawEngine {
                   prev_active_brick_count_ == 0 || dirty_volume == 0)
               {
                 incremental_bake_ = true;
-                incremental_status_ = true;
-                incremental_reason_ = "incremental";
 
                 if (G.debug & G_DEBUG_GPU) {
                   printf(
@@ -1539,20 +1432,8 @@ class Instance : public DrawEngine {
                       dirty_volume);
                 }
               }
-              else {
-                incremental_reason_ = "fragmentation";
-              }
-            }
-            else {
-              incremental_reason_ = "atlas-capacity";
             }
           }
-        }
-        else if (dirty_indices.is_empty()) {
-          incremental_reason_ = "no-dirty";
-        }
-        else {
-          incremental_reason_ = "all-dirty";
         }
       }
 
@@ -1577,17 +1458,9 @@ class Instance : public DrawEngine {
                 math::max(float3(objects_[i].bbox_max), float3(prev_bbox_maxs_[i])), 0);
           }
         }
-
-      }
-      else if (!dirty_voxel_expiry_.is_empty() || !dirty_brick_expiry_.is_empty()) {
-        dirty_brick_expiry_.clear();
-        dirty_voxel_expiry_.clear();
-        dirty_voxel_batch_dirty_ = true;
       }
 
       prev_object_hashes_ = std::move(current_hashes);
-      prev_raw_bbox_mins_ = std::move(raw_cur_mins);
-      prev_raw_bbox_maxs_ = std::move(raw_cur_maxs);
       prev_bbox_mins_ = std::move(cur_mins);
       prev_bbox_maxs_ = std::move(cur_maxs);
       prev_object_count_ = n;
@@ -1595,7 +1468,6 @@ class Instance : public DrawEngine {
       prev_grid_res_ = grid_res_;
       prev_voxel_size_ = voxel_size_;
       prev_group_structure_hash_ = group_struct_hash;
-      prev_chunk_layout_hash_ = chunk_layout_hash_;
       prev_max_blend_ = max_blend_;
       prev_max_shell_distance_ = max_shell_distance_;
       prev_had_grid_objects_ = !grid_objects_.is_empty();
@@ -1732,19 +1604,10 @@ class Instance : public DrawEngine {
         GPU_batch_discard(grid_batch_);
         grid_batch_ = nullptr;
       }
-      if (dirty_brick_batch_) {
-        GPU_batch_discard(dirty_brick_batch_);
-        dirty_brick_batch_ = nullptr;
-      }
-      if (dirty_voxel_batch_) {
-        GPU_batch_discard(dirty_voxel_batch_);
-        dirty_voxel_batch_ = nullptr;
-      }
       if (bvh_batch_) {
         GPU_batch_discard(bvh_batch_);
         bvh_batch_ = nullptr;
       }
-      dirty_voxel_batch_dirty_ = true;
 
       if (perf_enabled_) {
         perf_begin_pass(PERF_PASS_CLASSIFY);
@@ -1754,25 +1617,11 @@ class Instance : public DrawEngine {
       bool overflow = false;
       do {
         ensure_active_brick_capacity(active_capacity);
-        if (incremental_bake_) {
-          prepare_incremental_region_free_slots();
-          reset_brick_counter();
-        }
-        else {
-          clear_chunk_bricks();
-        }
-        upload_incremental_free_slots();
+        clear_chunk_bricks();
 
         overflow = false;
         if (!objects_.is_empty()) {
           overflow = dispatch_classify();
-        }
-        if (overflow && incremental_bake_) {
-          incremental_status_ = false;
-          incremental_reason_ = "incremental-overflow";
-          incremental_bake_ = false;
-          active_capacity = 1;
-          continue;
         }
         if (!overflow && !grid_objects_.is_empty()) {
           overflow = augment_indirection_for_grids();
@@ -1780,13 +1629,33 @@ class Instance : public DrawEngine {
         if (overflow) {
           active_capacity = math::max(active_capacity * 2, active_brick_count_ * 2);
         }
-      } while (overflow && int64_t(active_capacity) < chunk_brick_slot_count());
+      } while (overflow && active_capacity < int(chunk_pages_.size()) * SDF_CHUNK_BRICK_COUNT);
+
+      total_allocated_slots_ = active_brick_count_;
+      rebuild_render_chunk_bvh();
+      upload_chunks();
+
+      const int3 chunk_grid_res = math::max(grid_res_, int3(1));
+      printf("[SDF] bake classify: res=%d voxel=%.6f objs=%d grids=%d candidate_chunks=%d active_bricks=%d active_capacity=%d march=%s chunk_grid=(%d,%d,%d) chunk_bvh_nodes=%d\n",
+             sdf_resolution_,
+             voxel_size_,
+             int(objects_.size()),
+             int(grid_objects_.size()),
+             int(chunk_pages_.size()),
+             active_brick_count_,
+             active_bricks_capacity_,
+             chunk_march_mode_name(),
+             chunk_grid_res.x,
+             chunk_grid_res.y,
+             chunk_grid_res.z,
+             int(chunk_bvh_nodes_.size()));
+      fflush(stdout);
 
       if (perf_enabled_) {
         perf_end_pass(PERF_PASS_CLASSIFY);
       }
 
-      if (!incremental_bake_) {
+      {
         int estimated = math::max(active_brick_count_, prev_active_brick_count_);
         int capacity = math::max(estimated + estimated / 2, 64);
         if (capacity > atlas_capacity_) {
@@ -1800,10 +1669,10 @@ class Instance : public DrawEngine {
           new_bpa = 1;
         }
         bricks_per_axis_ = new_bpa;
-
-        ensure_compact_atlas();
-        clear_compact_atlas();
       }
+
+      ensure_compact_atlas();
+      clear_compact_atlas();
 
       if (perf_enabled_) {
         perf_begin_pass(PERF_PASS_BAKE);
@@ -1827,46 +1696,6 @@ class Instance : public DrawEngine {
         perf_end_pass(PERF_PASS_BAKE);
       }
 
-      if (incremental_bake_) {
-        if (debug_grid_ == 1 || perf_enabled_) {
-          rebuild_active_bricks_from_chunk_bricks();
-          active_bricks_full_list_valid_ = true;
-        }
-        else {
-          active_bricks_full_list_valid_ = false;
-        }
-        chunk_bvh_nodes_.clear();
-      }
-      else {
-        active_bricks_full_list_valid_ = true;
-        rebuild_render_chunk_bvh();
-      }
-      upload_chunks();
-
-      const int3 chunk_grid_res = math::max(grid_res_, int3(1));
-      printf("[SDF] bake classify: mode=%s res=%d voxel=%.6f objs=%d grids=%d candidate_chunks=%d active_bricks=%d active_capacity=%d march=%s chunk_grid=(%d,%d,%d) chunk_bvh_nodes=%d\n",
-             incremental_bake_ ? "incremental" : "full",
-             sdf_resolution_,
-             voxel_size_,
-             int(objects_.size()),
-             int(grid_objects_.size()),
-             int(chunk_pages_.size()),
-             active_brick_count_,
-             active_bricks_capacity_,
-             chunk_march_mode_name(),
-             chunk_grid_res.x,
-             chunk_grid_res.y,
-             chunk_grid_res.z,
-             int(chunk_bvh_nodes_.size()));
-      fflush(stdout);
-      printf("[SDF] rebake diagnostics: status=%s dirty_objects=%d affected_objects=%d dirty_bricks=%d reason=%s\n",
-             incremental_status_ ? "incremental" : "full",
-             dirty_object_count_,
-             affected_object_count_,
-             dirty_brick_count_,
-             incremental_reason_.c_str());
-      fflush(stdout);
-
       if (perf_enabled_) {
         perf_begin_pass(PERF_PASS_GRID);
       }
@@ -1877,14 +1706,7 @@ class Instance : public DrawEngine {
         perf_end_pass(PERF_PASS_GRID);
       }
 
-      if (active_brick_count_ > 0) {
-        ensure_distance_hierarchy_atlas();
-        dispatch_build_distance_hierarchy();
-      }
-
-      if (!incremental_bake_) {
-        prev_active_brick_count_ = active_brick_count_;
-      }
+      prev_active_brick_count_ = active_brick_count_;
       printf("[SDF] bake done: atlas_bpa=%d atlas_slots=%d compact_dim=%d total_ms=%.2f\n",
              bricks_per_axis_,
              atlas_capacity_,
@@ -1976,12 +1798,6 @@ class Instance : public DrawEngine {
         mix(float_as_uint(obj.inverse_matrix[row][col]));
       }
     }
-    mix(float_as_uint(obj.bbox_min.x));
-    mix(float_as_uint(obj.bbox_min.y));
-    mix(float_as_uint(obj.bbox_min.z));
-    mix(float_as_uint(obj.bbox_max.x));
-    mix(float_as_uint(obj.bbox_max.y));
-    mix(float_as_uint(obj.bbox_max.z));
     mix(uint64_t(uint32_t(obj.group_id + 1)));
     mix(uint64_t(obj.group_first));
     mix(uint64_t(uint32_t(obj.group_order + 1)));
@@ -2001,157 +1817,6 @@ class Instance : public DrawEngine {
       }
     }
     return h;
-  }
-
-  static uint64_t pack_debug_voxel_key(const int3 &voxel)
-  {
-    BLI_assert(voxel.x >= 0 && voxel.y >= 0 && voxel.z >= 0);
-    return uint64_t(voxel.x) | (uint64_t(voxel.y) << SDF_DEBUG_VOXEL_KEY_BITS) |
-           (uint64_t(voxel.z) << (SDF_DEBUG_VOXEL_KEY_BITS * 2));
-  }
-
-  static int3 unpack_debug_voxel_key(const uint64_t key)
-  {
-    const uint64_t mask = (uint64_t(1) << SDF_DEBUG_VOXEL_KEY_BITS) - 1;
-    return int3(int(key & mask),
-                int((key >> SDF_DEBUG_VOXEL_KEY_BITS) & mask),
-                int((key >> (SDF_DEBUG_VOXEL_KEY_BITS * 2)) & mask));
-  }
-
-  void prune_dirty_voxel_marks()
-  {
-    if (dirty_voxel_expiry_.is_empty() && dirty_brick_expiry_.is_empty()) {
-      return;
-    }
-
-    const double now = BLI_time_now_seconds();
-    Vector<uint64_t> expired_keys;
-    for (const auto &item : dirty_voxel_expiry_.items()) {
-      if (item.value <= now) {
-        expired_keys.append(item.key);
-      }
-    }
-
-    Vector<uint64_t> expired_bricks;
-    for (const auto &item : dirty_brick_expiry_.items()) {
-      if (item.value <= now) {
-        expired_bricks.append(item.key);
-      }
-    }
-
-    if (expired_keys.is_empty() && expired_bricks.is_empty()) {
-      return;
-    }
-
-    for (const uint64_t key : expired_keys) {
-      dirty_voxel_expiry_.remove(key);
-    }
-    for (const uint64_t key : expired_bricks) {
-      dirty_brick_expiry_.remove(key);
-    }
-    dirty_voxel_batch_dirty_ = true;
-  }
-
-  void mark_dirty_brick_window_for_debug(const int3 &brick_min, const int3 &brick_max)
-  {
-    if (debug_grid_ != 2) {
-      return;
-    }
-
-    const double expire_time = BLI_time_now_seconds() + SDF_DIRTY_VOXEL_HOLD_SEC;
-    for (int z = brick_min.z; z < brick_max.z; z++) {
-      for (int y = brick_min.y; y < brick_max.y; y++) {
-        for (int x = brick_min.x; x < brick_max.x; x++) {
-          const uint64_t key = pack_debug_voxel_key(int3(x, y, z));
-          if (dirty_brick_expiry_.lookup_ptr(key) == nullptr &&
-              dirty_brick_expiry_.size() >= SDF_DEBUG_DIRTY_BRICK_MAX)
-          {
-            dirty_voxel_batch_dirty_ = true;
-            return;
-          }
-          dirty_brick_expiry_.add_overwrite(key, expire_time);
-        }
-      }
-    }
-    dirty_voxel_batch_dirty_ = true;
-  }
-
-  void mark_dirty_voxels_for_debug(const Vector<int> &dirty_indices)
-  {
-    if (debug_grid_ != 2 || dirty_indices.is_empty() || voxel_size_ <= 0.0f) {
-      return;
-    }
-
-    const int3 voxel_res = grid_res_ * (SDF_CHUNK_BRICK_RES * SDF_BRICK_SIZE);
-    if (voxel_res.x <= 0 || voxel_res.y <= 0 || voxel_res.z <= 0) {
-      return;
-    }
-
-    const float dirty_expand = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f + voxel_size_ * 2.0f;
-    const float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
-    const int3 brick_grid_min = atlas_chunk_min_ * SDF_CHUNK_BRICK_RES;
-    const int3 brick_grid_max = (atlas_chunk_min_ + grid_res_) * SDF_CHUNK_BRICK_RES;
-    const double expire_time = BLI_time_now_seconds() + SDF_DIRTY_VOXEL_HOLD_SEC;
-    for (const int idx : dirty_indices) {
-      float3 dirty_min = math::min(float3(objects_[idx].bbox_min), float3(prev_bbox_mins_[idx])) -
-                         float3(dirty_expand);
-      float3 dirty_max = math::max(float3(objects_[idx].bbox_max), float3(prev_bbox_maxs_[idx])) +
-                         float3(dirty_expand);
-
-      int3 brick_min = int3(math::floor(dirty_min / brick_world));
-      int3 brick_max = int3(math::ceil(dirty_max / brick_world));
-      brick_min = math::clamp(brick_min, brick_grid_min, brick_grid_max);
-      brick_max = math::clamp(brick_max, brick_grid_min, brick_grid_max);
-
-      int3 voxel_min = int3(math::floor((dirty_min - atlas_origin_) / voxel_size_)) - int3(1);
-      int3 voxel_max = int3(math::ceil((dirty_max - atlas_origin_) / voxel_size_)) + int3(1);
-
-      voxel_min = math::clamp(voxel_min, int3(0), voxel_res);
-      voxel_max = math::clamp(voxel_max, int3(0), voxel_res);
-      if (voxel_min.x >= voxel_max.x || voxel_min.y >= voxel_max.y || voxel_min.z >= voxel_max.z) {
-        continue;
-      }
-
-      const int64_t voxel_volume = int64_t(voxel_max.x - voxel_min.x) * int64_t(voxel_max.y - voxel_min.y) *
-                                   int64_t(voxel_max.z - voxel_min.z);
-      const bool use_brick_fallback = voxel_volume > SDF_DEBUG_DIRTY_VOXEL_FALLBACK ||
-                                      dirty_voxel_expiry_.size() >= SDF_DEBUG_DIRTY_VOXEL_MAX / 2;
-
-      if (use_brick_fallback) {
-        for (int z = brick_min.z; z < brick_max.z; z++) {
-          for (int y = brick_min.y; y < brick_max.y; y++) {
-            for (int x = brick_min.x; x < brick_max.x; x++) {
-              const uint64_t key = pack_debug_voxel_key(int3(x, y, z));
-              if (dirty_brick_expiry_.lookup_ptr(key) == nullptr &&
-                  dirty_brick_expiry_.size() >= SDF_DEBUG_DIRTY_BRICK_MAX)
-              {
-                dirty_voxel_batch_dirty_ = true;
-                return;
-              }
-              dirty_brick_expiry_.add_overwrite(key, expire_time);
-            }
-          }
-        }
-        continue;
-      }
-
-      for (int z = voxel_min.z; z < voxel_max.z; z++) {
-        for (int y = voxel_min.y; y < voxel_max.y; y++) {
-          for (int x = voxel_min.x; x < voxel_max.x; x++) {
-            const uint64_t key = pack_debug_voxel_key(int3(x, y, z));
-            if (dirty_voxel_expiry_.lookup_ptr(key) == nullptr &&
-                dirty_voxel_expiry_.size() >= SDF_DEBUG_DIRTY_VOXEL_MAX)
-            {
-              dirty_voxel_batch_dirty_ = true;
-              return;
-            }
-            dirty_voxel_expiry_.add_overwrite(key, expire_time);
-          }
-        }
-      }
-    }
-
-    dirty_voxel_batch_dirty_ = true;
   }
 
   void sync_sdf_settings()
@@ -2179,10 +1844,6 @@ class Instance : public DrawEngine {
       scene_hash_ = 0;
       atlas_capacity_ = 0;
       prev_active_brick_count_ = 0;
-      active_bricks_full_list_valid_ = false;
-      dirty_brick_expiry_.clear();
-      dirty_voxel_expiry_.clear();
-      dirty_voxel_batch_dirty_ = true;
     }
 
     debug_grid_ = int(shading.sdf_debug_grid);
@@ -2461,9 +2122,7 @@ class Instance : public DrawEngine {
       GPU_storagebuf_update(chunk_bvh_ssbo_, chunk_bvh_data);
     }
 
-    const int64_t brick_slot_count64 = math::max<int64_t>(chunk_brick_slot_count(), 1);
-    BLI_assert(brick_slot_count64 <= INT_MAX);
-    const int brick_slot_count = int(math::min<int64_t>(brick_slot_count64, INT_MAX));
+    const int brick_slot_count = math::max(int(chunk_pages_.size()) * SDF_CHUNK_BRICK_COUNT, 1);
     if (chunk_bricks_ssbo_ != nullptr && chunk_bricks_ssbo_count_ != brick_slot_count) {
       GPU_storagebuf_free(chunk_bricks_ssbo_);
       chunk_bricks_ssbo_ = nullptr;
@@ -2489,12 +2148,11 @@ class Instance : public DrawEngine {
     active_bricks_capacity_ = clamped_capacity;
   }
 
-  void reset_brick_counter(const uint initial_slot = 0)
+  void reset_brick_counter()
   {
     BrickCounter counter = {};
     counter.count = 0;
-    counter.next_slot = initial_slot;
-    counter.overflow = 0;
+    counter.next_slot = 0;
 
     if (brick_counter_ == nullptr) {
       brick_counter_ = GPU_storagebuf_create_ex(
@@ -2507,137 +2165,12 @@ class Instance : public DrawEngine {
 
   void clear_chunk_bricks()
   {
-    incremental_free_slots_.clear();
     reset_brick_counter();
     if (chunk_bricks_ssbo_) {
       GPU_storagebuf_clear(chunk_bricks_ssbo_, 0xFFFFFFFFu);
       GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     }
     active_brick_count_ = 0;
-  }
-
-  void prepare_incremental_region_free_slots()
-  {
-    incremental_free_slots_.clear();
-    if (!incremental_bake_ || chunk_bricks_ssbo_ == nullptr || chunk_pages_.is_empty()) {
-      return;
-    }
-
-    const int64_t slot_count64 = chunk_brick_slot_count();
-    BLI_assert(slot_count64 <= INT_MAX);
-    const int slot_count = int(math::min<int64_t>(slot_count64, INT_MAX));
-    Vector<int> chunk_slots(slot_count);
-    GPU_storagebuf_read(chunk_bricks_ssbo_, chunk_slots.data());
-
-    for (int chunk_idx = 0; chunk_idx < int(chunk_pages_.size()); chunk_idx++) {
-      const int3 chunk_coord = int3(chunk_pages_[chunk_idx].coord);
-      const int chunk_offset = chunk_idx * SDF_CHUNK_BRICK_COUNT;
-
-      for (int lz = 0; lz < SDF_CHUNK_BRICK_RES; lz++) {
-        for (int ly = 0; ly < SDF_CHUNK_BRICK_RES; ly++) {
-          for (int lx = 0; lx < SDF_CHUNK_BRICK_RES; lx++) {
-            const int3 brick = chunk_coord * SDF_CHUNK_BRICK_RES + int3(lx, ly, lz);
-            if (brick.x < dirty_brick_min_.x || brick.y < dirty_brick_min_.y ||
-                brick.z < dirty_brick_min_.z || brick.x >= dirty_brick_max_.x ||
-                brick.y >= dirty_brick_max_.y || brick.z >= dirty_brick_max_.z)
-            {
-              continue;
-            }
-
-            const int flat_index = lx + ly * SDF_CHUNK_BRICK_RES +
-                                   lz * SDF_CHUNK_BRICK_RES * SDF_CHUNK_BRICK_RES;
-            int &slot = chunk_slots[chunk_offset + flat_index];
-            if (slot >= 0) {
-              incremental_free_slots_.append(slot);
-            }
-            slot = -1;
-          }
-        }
-      }
-    }
-
-    if (chunk_bricks_ssbo_) {
-      GPU_storagebuf_update(chunk_bricks_ssbo_, chunk_slots.data());
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-    }
-  }
-
-  void upload_incremental_free_slots()
-  {
-    const int free_count = math::max(int(incremental_free_slots_.size()), 1);
-    const size_t buf_size = size_t(free_count) * sizeof(int);
-    const int dummy = -1;
-    const void *data = incremental_free_slots_.is_empty() ? static_cast<const void *>(&dummy) :
-                                                            static_cast<const void *>(incremental_free_slots_.data());
-
-    if (incremental_free_slots_ssbo_ != nullptr && incremental_free_slots_ssbo_count_ != free_count) {
-      GPU_storagebuf_free(incremental_free_slots_ssbo_);
-      incremental_free_slots_ssbo_ = nullptr;
-    }
-    if (incremental_free_slots_ssbo_ == nullptr) {
-      incremental_free_slots_ssbo_ = GPU_storagebuf_create_ex(
-          buf_size, data, GPU_USAGE_DYNAMIC, "sdf_incremental_free_slots_ssbo");
-      incremental_free_slots_ssbo_count_ = free_count;
-    }
-    else {
-      GPU_storagebuf_update(incremental_free_slots_ssbo_, data);
-    }
-  }
-
-  void rebuild_active_bricks_from_chunk_bricks()
-  {
-    if (chunk_bricks_ssbo_ == nullptr || chunk_pages_.is_empty()) {
-      active_brick_count_ = 0;
-      return;
-    }
-
-    const int64_t slot_count64 = chunk_brick_slot_count();
-    BLI_assert(slot_count64 <= INT_MAX);
-    const int slot_count = int(math::min<int64_t>(slot_count64, INT_MAX));
-    Vector<int> chunk_slots(slot_count);
-    GPU_storagebuf_read(chunk_bricks_ssbo_, chunk_slots.data());
-
-    int surface_count = 0;
-    for (const int slot : chunk_slots) {
-      if (slot >= 0) {
-        surface_count++;
-      }
-    }
-
-    ensure_active_brick_capacity(surface_count);
-    active_brick_count_ = surface_count;
-    if (surface_count == 0) {
-      return;
-    }
-
-    Vector<ActiveBrick> active_data(surface_count);
-    int active_index = 0;
-    for (int chunk_idx = 0; chunk_idx < int(chunk_pages_.size()); chunk_idx++) {
-      const int3 chunk_coord = int3(chunk_pages_[chunk_idx].coord);
-      const int chunk_offset = chunk_idx * SDF_CHUNK_BRICK_COUNT;
-
-      for (int lz = 0; lz < SDF_CHUNK_BRICK_RES; lz++) {
-        for (int ly = 0; ly < SDF_CHUNK_BRICK_RES; ly++) {
-          for (int lx = 0; lx < SDF_CHUNK_BRICK_RES; lx++) {
-            const int flat_index = lx + ly * SDF_CHUNK_BRICK_RES +
-                                   lz * SDF_CHUNK_BRICK_RES * SDF_CHUNK_BRICK_RES;
-            const int slot = chunk_slots[chunk_offset + flat_index];
-            if (slot < 0) {
-              continue;
-            }
-
-            const int3 local_brick = int3(lx, ly, lz);
-            const int3 brick = chunk_coord * SDF_CHUNK_BRICK_RES + local_brick;
-            active_data[active_index].coord = int4(brick, slot);
-            active_data[active_index].meta = int4(ACTIVE_BRICK_FLAG_NONE, 0, 0, 0);
-            active_index++;
-          }
-        }
-      }
-    }
-
-    BLI_assert(active_index == surface_count);
-    GPU_storagebuf_update(active_bricks_, active_data.data());
   }
 
   void ensure_compact_atlas()
@@ -2666,34 +2199,6 @@ class Instance : public DrawEngine {
                                               usage,
                                               nullptr);
     GPU_texture_filter_mode(compact_atlas_tx_, true);
-  }
-
-  void ensure_hierarchy_texture(gpu::Texture *&texture, const char *name, const int dim)
-  {
-    const int safe_dim = math::max(dim, 1);
-
-    if (texture != nullptr) {
-      const bool matches = GPU_texture_width(texture) == safe_dim &&
-                           GPU_texture_height(texture) == safe_dim &&
-                           GPU_texture_depth(texture) == safe_dim;
-      if (matches) {
-        return;
-      }
-      GPU_texture_free(texture);
-      texture = nullptr;
-    }
-
-    const eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
-    texture = GPU_texture_create_3d(
-        name, safe_dim, safe_dim, safe_dim, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
-    GPU_texture_filter_mode(texture, false);
-  }
-
-  void ensure_distance_hierarchy_atlas()
-  {
-    ensure_hierarchy_texture(hierarchy4_tx_, "sdf_hierarchy4", bricks_per_axis_ * 4);
-    ensure_hierarchy_texture(hierarchy2_tx_, "sdf_hierarchy2", bricks_per_axis_ * 2);
-    ensure_hierarchy_texture(hierarchy1_tx_, "sdf_hierarchy1", bricks_per_axis_);
   }
 
   void upload_objects()
@@ -3070,11 +2575,6 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(chunk_bricks_ssbo_, chunk_bricks_slot);
     }
 
-    if (incremental_free_slots_ssbo_) {
-      int free_slots_slot = GPU_shader_get_ssbo_binding(classify_sh_, "free_slots");
-      GPU_storagebuf_bind(incremental_free_slots_ssbo_, free_slots_slot);
-    }
-
     GPU_shader_uniform_1i(classify_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(classify_sh_, "voxel_size", voxel_size_);
 
@@ -3089,17 +2589,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(classify_sh_, "chunk_count", int(chunk_pages_.size()));
     GPU_shader_uniform_1i(classify_sh_, "dispatch_width", int(dispatch_x));
     GPU_shader_uniform_1i(classify_sh_, "max_active_bricks", active_bricks_capacity_);
-    GPU_shader_uniform_1i(classify_sh_,
-                          "max_atlas_slots",
-                          incremental_bake_ ? math::max(atlas_capacity_, 1) :
-                                              int(math::min<int64_t>(
-                                                  math::max<int64_t>(chunk_brick_slot_count(), 1),
-                                                  INT_MAX)));
-    GPU_shader_uniform_1i(classify_sh_, "incremental_mode", incremental_bake_ ? 1 : 0);
-    GPU_shader_uniform_1i(classify_sh_, "free_slot_count", int(incremental_free_slots_.size()));
-    GPU_shader_uniform_1i(classify_sh_, "next_slot_base", total_allocated_slots_);
-    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_min", dirty_brick_min_);
-    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", dirty_brick_max_);
     GPU_compute_dispatch(classify_sh_, dispatch_x, dispatch_y, 1);
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
@@ -3108,14 +2597,7 @@ class Instance : public DrawEngine {
     BrickCounter readback = {};
     GPU_storagebuf_read(brick_counter_, &readback);
     active_brick_count_ = int(readback.count);
-    if (incremental_bake_) {
-      const int new_slots = math::max(int(readback.next_slot) - int(incremental_free_slots_.size()), 0);
-      total_allocated_slots_ += new_slots;
-    }
-    else {
-      total_allocated_slots_ = int(readback.next_slot);
-    }
-    return readback.overflow != 0;
+    return readback.next_slot != 0;
   }
 
   void dispatch_bake()
@@ -3153,11 +2635,6 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(group_ssbo_, grp_slot);
     }
 
-    if (dirty_flags_ssbo_) {
-      int dirty_slot = GPU_shader_get_ssbo_binding(bake_sh_, "dirty_flags");
-      GPU_storagebuf_bind(dirty_flags_ssbo_, dirty_slot);
-    }
-
     /* Bind atlas images. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
 
@@ -3167,7 +2644,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
-    GPU_shader_uniform_1i(bake_sh_, "incremental_mode", incremental_bake_ ? 1 : 0);
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
      * early-exit after reading brick_counter.count from SSBO. */
@@ -3180,47 +2656,6 @@ class Instance : public DrawEngine {
     GPU_texture_image_unbind(compact_atlas_tx_);
     GPU_shader_unbind();
     /* active_brick_count_ was already set by dispatch_classify() readback. */
-  }
-
-  void dispatch_build_distance_hierarchy()
-  {
-    if (active_brick_count_ <= 0 || compact_atlas_tx_ == nullptr || hierarchy4_tx_ == nullptr ||
-        hierarchy2_tx_ == nullptr || hierarchy1_tx_ == nullptr)
-    {
-      return;
-    }
-
-    if (!active_bricks_full_list_valid_ && chunk_bricks_ssbo_ != nullptr && !chunk_pages_.is_empty()) {
-      rebuild_active_bricks_from_chunk_bricks();
-      active_bricks_full_list_valid_ = true;
-    }
-
-    GPU_shader_bind(build_hierarchy_sh_);
-
-    int active_slot = GPU_shader_get_ssbo_binding(build_hierarchy_sh_, "active_bricks");
-    GPU_storagebuf_bind(active_bricks_, active_slot);
-
-    int compact_slot = GPU_shader_get_sampler_binding(build_hierarchy_sh_, "compact_atlas");
-    GPU_texture_bind(compact_atlas_tx_, compact_slot);
-
-    GPU_texture_image_bind(hierarchy4_tx_, 0);
-    GPU_texture_image_bind(hierarchy2_tx_, 1);
-    GPU_texture_image_bind(hierarchy1_tx_, 2);
-
-    GPU_shader_uniform_1i(build_hierarchy_sh_, "active_brick_count", active_brick_count_);
-    GPU_shader_uniform_1i(build_hierarchy_sh_, "bricks_per_axis", bricks_per_axis_);
-
-    uint dispatch_x = uint(math::min(active_brick_count_, 65535));
-    uint dispatch_y = uint(divide_ceil_u(active_brick_count_, 65535));
-    GPU_shader_uniform_1i(build_hierarchy_sh_, "dispatch_width", int(dispatch_x));
-    GPU_compute_dispatch(build_hierarchy_sh_, dispatch_x, dispatch_y, 1);
-
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_IMAGE_ACCESS);
-    GPU_texture_image_unbind(hierarchy4_tx_);
-    GPU_texture_image_unbind(hierarchy2_tx_);
-    GPU_texture_image_unbind(hierarchy1_tx_);
-    GPU_texture_unbind(compact_atlas_tx_);
-    GPU_shader_unbind();
   }
 
   void draw_march()
@@ -3305,18 +2740,6 @@ class Instance : public DrawEngine {
     if (compact_atlas_tx_) {
       GPU_texture_bind(compact_atlas_tx_, atlas_slot);
     }
-    if (hierarchy4_tx_) {
-      int slot = GPU_shader_get_sampler_binding(march_sh_, "hierarchy4_atlas");
-      GPU_texture_bind(hierarchy4_tx_, slot);
-    }
-    if (hierarchy2_tx_) {
-      int slot = GPU_shader_get_sampler_binding(march_sh_, "hierarchy2_atlas");
-      GPU_texture_bind(hierarchy2_tx_, slot);
-    }
-    if (hierarchy1_tx_) {
-      int slot = GPU_shader_get_sampler_binding(march_sh_, "hierarchy1_atlas");
-      GPU_texture_bind(hierarchy1_tx_, slot);
-    }
 
     if (chunk_hash_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "chunk_hash");
@@ -3353,11 +2776,6 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "chunk_march_mode", int(chunk_march_mode()));
     GPU_shader_uniform_1i(march_sh_, "chunk_hash_mask", chunk_hash_mask_);
     GPU_shader_uniform_1i(march_sh_, "chunk_bvh_node_count", int(chunk_bvh_nodes_.size()));
-    GPU_shader_uniform_1i(march_sh_, "debug_grid_mode", debug_grid_);
-    GPU_shader_uniform_1i(march_sh_, "incremental_status", incremental_status_ ? 1 : 0);
-    GPU_shader_uniform_1i(march_sh_, "dirty_brick_count", dirty_brick_count_);
-    GPU_shader_uniform_3iv(march_sh_, "dirty_brick_min", dirty_brick_min_);
-    GPU_shader_uniform_3iv(march_sh_, "dirty_brick_max", dirty_brick_max_);
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
@@ -3404,15 +2822,6 @@ class Instance : public DrawEngine {
 
     if (compact_atlas_tx_) {
       GPU_texture_unbind(compact_atlas_tx_);
-    }
-    if (hierarchy4_tx_) {
-      GPU_texture_unbind(hierarchy4_tx_);
-    }
-    if (hierarchy2_tx_) {
-      GPU_texture_unbind(hierarchy2_tx_);
-    }
-    if (hierarchy1_tx_) {
-      GPU_texture_unbind(hierarchy1_tx_);
     }
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
@@ -3542,17 +2951,12 @@ class Instance : public DrawEngine {
 
   void rebuild_grid_batch_active()
   {
-    if (!active_bricks_full_list_valid_ && chunk_bricks_ssbo_ != nullptr && !chunk_pages_.is_empty()) {
-      rebuild_active_bricks_from_chunk_bricks();
-      active_bricks_full_list_valid_ = true;
-    }
-
     if (!active_bricks_ || active_brick_count_ <= 0 || active_bricks_capacity_ <= 0) {
       return;
     }
 
-    const int surface_count = math::min(active_brick_count_, active_bricks_capacity_);
-    if (surface_count <= 0) {
+    const int safe_active_count = math::min(active_brick_count_, active_bricks_capacity_);
+    if (safe_active_count <= 0) {
       return;
     }
 
@@ -3560,133 +2964,43 @@ class Instance : public DrawEngine {
     GPU_storagebuf_read(active_bricks_, data.data());
 
     float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
-    const bool filter_dirty_region = (debug_grid_ == 2 && dirty_brick_count_ > 0);
 
-    Vector<float3> positions;
-    positions.reserve(math::min(surface_count,
-                                filter_dirty_region ? math::max(dirty_brick_count_, 1) :
-                                                     surface_count) *
-                      24);
+    Vector<float3> positions(safe_active_count * 24);
+    int vi = 0;
 
-    for (int i = 0; i < surface_count; i++) {
-      const int3 brick = int3(data[i].coord.x, data[i].coord.y, data[i].coord.z);
-      if (filter_dirty_region &&
-          (brick.x < dirty_brick_min_.x || brick.y < dirty_brick_min_.y ||
-           brick.z < dirty_brick_min_.z || brick.x >= dirty_brick_max_.x ||
-           brick.y >= dirty_brick_max_.y || brick.z >= dirty_brick_max_.z))
-      {
-        continue;
-      }
-      const float3 lo = float3(brick * SDF_BRICK_SIZE) * voxel_size_;
-      const float3 hi = lo + float3(brick_world);
+    for (int i = 0; i < safe_active_count; i++) {
+      int3 brick = int3(data[i].coord.x, data[i].coord.y, data[i].coord.z);
+      float3 lo = float3(brick * SDF_BRICK_SIZE) * voxel_size_;
+      float3 hi = lo + float3(brick_world);
 
-      if ((int(positions.size()) / 24) >= SDF_DEBUG_GRID_MAX_BRICKS) {
-        break;
-      }
+      positions[vi++] = float3(lo.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, hi.y, lo.z);
+      positions[vi++] = float3(hi.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, lo.y, lo.z);
 
-      positions.append(float3(lo.x, lo.y, lo.z));
-      positions.append(float3(hi.x, lo.y, lo.z));
-      positions.append(float3(hi.x, lo.y, lo.z));
-      positions.append(float3(hi.x, hi.y, lo.z));
-      positions.append(float3(hi.x, hi.y, lo.z));
-      positions.append(float3(lo.x, hi.y, lo.z));
-      positions.append(float3(lo.x, hi.y, lo.z));
-      positions.append(float3(lo.x, lo.y, lo.z));
+      positions[vi++] = float3(lo.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, hi.y, hi.z);
+      positions[vi++] = float3(hi.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, lo.y, hi.z);
 
-      positions.append(float3(lo.x, lo.y, hi.z));
-      positions.append(float3(hi.x, lo.y, hi.z));
-      positions.append(float3(hi.x, lo.y, hi.z));
-      positions.append(float3(hi.x, hi.y, hi.z));
-      positions.append(float3(hi.x, hi.y, hi.z));
-      positions.append(float3(lo.x, hi.y, hi.z));
-      positions.append(float3(lo.x, hi.y, hi.z));
-      positions.append(float3(lo.x, lo.y, hi.z));
-
-      positions.append(float3(lo.x, lo.y, lo.z));
-      positions.append(float3(lo.x, lo.y, hi.z));
-      positions.append(float3(hi.x, lo.y, lo.z));
-      positions.append(float3(hi.x, lo.y, hi.z));
-      positions.append(float3(hi.x, hi.y, lo.z));
-      positions.append(float3(hi.x, hi.y, hi.z));
-      positions.append(float3(lo.x, hi.y, lo.z));
-      positions.append(float3(lo.x, hi.y, hi.z));
+      positions[vi++] = float3(lo.x, lo.y, lo.z);
+      positions[vi++] = float3(lo.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, hi.y, lo.z);
+      positions[vi++] = float3(hi.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, hi.y, hi.z);
     }
-
-    if (positions.is_empty()) {
-      return;
-    }
-    grid_batch_ = create_line_batch(positions.data(), int(positions.size()));
-  }
-
-  static void emit_box_edges(Vector<float3> &positions, const float3 &lo, const float3 &hi)
-  {
-    positions.append(float3(lo.x, lo.y, lo.z));
-    positions.append(float3(hi.x, lo.y, lo.z));
-    positions.append(float3(hi.x, lo.y, lo.z));
-    positions.append(float3(hi.x, hi.y, lo.z));
-    positions.append(float3(hi.x, hi.y, lo.z));
-    positions.append(float3(lo.x, hi.y, lo.z));
-    positions.append(float3(lo.x, hi.y, lo.z));
-    positions.append(float3(lo.x, lo.y, lo.z));
-
-    positions.append(float3(lo.x, lo.y, hi.z));
-    positions.append(float3(hi.x, lo.y, hi.z));
-    positions.append(float3(hi.x, lo.y, hi.z));
-    positions.append(float3(hi.x, hi.y, hi.z));
-    positions.append(float3(hi.x, hi.y, hi.z));
-    positions.append(float3(lo.x, hi.y, hi.z));
-    positions.append(float3(lo.x, hi.y, hi.z));
-    positions.append(float3(lo.x, lo.y, hi.z));
-
-    positions.append(float3(lo.x, lo.y, lo.z));
-    positions.append(float3(lo.x, lo.y, hi.z));
-    positions.append(float3(hi.x, lo.y, lo.z));
-    positions.append(float3(hi.x, lo.y, hi.z));
-    positions.append(float3(hi.x, hi.y, lo.z));
-    positions.append(float3(hi.x, hi.y, hi.z));
-    positions.append(float3(lo.x, hi.y, lo.z));
-    positions.append(float3(lo.x, hi.y, hi.z));
-  }
-
-  void rebuild_dirty_voxel_batch()
-  {
-    prune_dirty_voxel_marks();
-    dirty_voxel_batch_dirty_ = false;
-
-    if (dirty_brick_batch_) {
-      GPU_batch_discard(dirty_brick_batch_);
-      dirty_brick_batch_ = nullptr;
-    }
-    if (dirty_voxel_batch_) {
-      GPU_batch_discard(dirty_voxel_batch_);
-      dirty_voxel_batch_ = nullptr;
-    }
-
-    if (!dirty_brick_expiry_.is_empty()) {
-      Vector<float3> positions;
-      positions.reserve(dirty_brick_expiry_.size() * 24);
-      const float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
-      for (const auto &item : dirty_brick_expiry_.items()) {
-        const int3 brick = unpack_debug_voxel_key(item.key);
-        const float3 lo = float3(brick * SDF_BRICK_SIZE) * voxel_size_;
-        const float3 hi = lo + float3(brick_world);
-        emit_box_edges(positions, lo, hi);
-      }
-      dirty_brick_batch_ = create_line_batch(positions.data(), int(positions.size()));
-    }
-
-    if (!dirty_voxel_expiry_.is_empty()) {
-      Vector<float3> positions;
-      positions.reserve(dirty_voxel_expiry_.size() * 24);
-      for (const auto &item : dirty_voxel_expiry_.items()) {
-        const int3 voxel = unpack_debug_voxel_key(item.key);
-        const float3 lo = atlas_origin_ + float3(voxel) * voxel_size_;
-        const float3 hi = lo + float3(voxel_size_);
-        emit_box_edges(positions, lo, hi);
-      }
-
-      dirty_voxel_batch_ = create_line_batch(positions.data(), int(positions.size()));
-    }
+    grid_batch_ = create_line_batch(positions.data(), vi);
   }
 
   /** Emit 12 wireframe edges (24 vertices) for an axis-aligned box. */
@@ -3904,14 +3218,6 @@ class Instance : public DrawEngine {
       GPU_batch_discard(grid_batch_);
       grid_batch_ = nullptr;
     }
-    if (dirty_brick_batch_) {
-      GPU_batch_discard(dirty_brick_batch_);
-      dirty_brick_batch_ = nullptr;
-    }
-    if (dirty_voxel_batch_) {
-      GPU_batch_discard(dirty_voxel_batch_);
-      dirty_voxel_batch_ = nullptr;
-    }
     if (bvh_batch_) {
       GPU_batch_discard(bvh_batch_);
       bvh_batch_ = nullptr;
@@ -3935,7 +3241,7 @@ class Instance : public DrawEngine {
     }
 
     /* Rebuild batch if settings changed. */
-    if (grid_batch_mode_ != debug_grid_ || grid_batch_res_ != grid_res_ || grid_batch_ == nullptr)
+    if (grid_batch_ == nullptr || grid_batch_mode_ != debug_grid_ || grid_batch_res_ != grid_res_)
     {
       rebuild_grid_batch();
     }
@@ -3960,19 +3266,22 @@ class Instance : public DrawEngine {
     GPU_blend(GPU_BLEND_ALPHA);
     GPU_depth_mask(false); /* Grid lines don't write depth. */
 
-    if (grid_batch_) {
-      GPU_batch_set_shader(grid_batch_, shader);
+    GPU_batch_set_shader(grid_batch_, shader);
 
-      GPU_depth_test(GPU_DEPTH_GREATER);
-      GPU_line_width(1.0f);
-      GPU_shader_uniform_4f(shader, "color", 0.3f, 0.5f, 0.7f, 0.08f);
-      GPU_batch_draw(grid_batch_);
+    /* --- Pass 1: Occluded lines (behind SDF surface) ---
+     * Drawn first so front lines overdraw on top. Faint ghost
+     * lines give spatial context without visual clutter. */
+    GPU_depth_test(GPU_DEPTH_GREATER);
+    GPU_line_width(1.0f);
+    GPU_shader_uniform_4f(shader, "color", 0.3f, 0.5f, 0.7f, 0.08f);
+    GPU_batch_draw(grid_batch_);
 
-      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-      GPU_line_width(1.5f);
-      GPU_shader_uniform_4f(shader, "color", 0.4f, 0.65f, 0.9f, 0.6f);
-      GPU_batch_draw(grid_batch_);
-    }
+    /* --- Pass 2: Front lines (in front of SDF surface) ---
+     * Bright and slightly thicker for clear readability. */
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_line_width(1.5f);
+    GPU_shader_uniform_4f(shader, "color", 0.4f, 0.65f, 0.9f, 0.6f);
+    GPU_batch_draw(grid_batch_);
 
     /* Restore state. */
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
@@ -4222,8 +3531,7 @@ class Instance : public DrawEngine {
     BrickCounter readback = {};
     GPU_storagebuf_read(brick_counter_, &readback);
     active_brick_count_ = int(readback.count);
-    total_allocated_slots_ = int(readback.next_slot);
-    return readback.overflow != 0;
+    return readback.next_slot != 0;
   }
 
   void clear_compact_atlas()
@@ -4424,8 +3732,6 @@ class Instance : public DrawEngine {
                   SDF_PERF_BUF_SIZE,
                   "SDF Performance\n"
                   "  fps: %.1f  frame: %.1f ms\n"
-                  "  rebake: %s  dirty: %d obj / %d overlaps / %d bricks\n"
-                  "  reason: %s\n"
                   "  classify: %s\n"
                   "  bake: %s\n"
                   "  grid blend: %s\n"
@@ -4438,11 +3744,6 @@ class Instance : public DrawEngine {
                   "  ssbo_mb: chunk=%.1f active=%.1f bvh=%.1f",
                   perf_fps_,
                   perf_frame_ms_,
-                  incremental_status_ ? "incremental" : "full",
-                  dirty_object_count_,
-                  affected_object_count_,
-                  dirty_brick_count_,
-                  incremental_reason_.c_str(),
                   classify_str,
                   bake_str,
                   grid_str,
@@ -4506,15 +3807,6 @@ class Instance : public DrawEngine {
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
     }
-    if (hierarchy4_tx_) {
-      GPU_texture_free(hierarchy4_tx_);
-    }
-    if (hierarchy2_tx_) {
-      GPU_texture_free(hierarchy2_tx_);
-    }
-    if (hierarchy1_tx_) {
-      GPU_texture_free(hierarchy1_tx_);
-    }
 
     if (brick_counter_) {
       GPU_storagebuf_free(brick_counter_);
@@ -4536,9 +3828,6 @@ class Instance : public DrawEngine {
     }
     if (chunk_bvh_ssbo_) {
       GPU_storagebuf_free(chunk_bvh_ssbo_);
-    }
-    if (incremental_free_slots_ssbo_) {
-      GPU_storagebuf_free(incremental_free_slots_ssbo_);
     }
     if (matcap_tx_) {
       GPU_texture_free(matcap_tx_);
@@ -4563,12 +3852,6 @@ class Instance : public DrawEngine {
     }
     if (grid_batch_) {
       GPU_batch_discard(grid_batch_);
-    }
-    if (dirty_brick_batch_) {
-      GPU_batch_discard(dirty_brick_batch_);
-    }
-    if (dirty_voxel_batch_) {
-      GPU_batch_discard(dirty_voxel_batch_);
     }
     if (bvh_batch_) {
       GPU_batch_discard(bvh_batch_);

@@ -29,6 +29,84 @@ float evalSDFPrimitive(float3 local_pos, SDFObjectGPU obj)
   return evalObjectSDF(prim_data, local_pos);
 }
 
+#define MAX_MASK_WORDS 64
+#define MAX_CHUNK_CANDIDATES (MAX_MASK_WORDS * 32)
+
+shared uint shared_mask[MAX_MASK_WORDS];
+shared int shared_candidates[MAX_CHUNK_CANDIDATES];
+shared int shared_num_candidates;
+shared int shared_use_candidates;
+shared int shared_skip_chunk;
+
+int candidate_count_get()
+{
+  return (shared_use_candidates != 0) ? shared_num_candidates : object_count;
+}
+
+int candidate_index_get(int candidate_idx)
+{
+  return (shared_use_candidates != 0) ? shared_candidates[candidate_idx] : candidate_idx;
+}
+
+float evalSceneDistance(float3 sample_pos, float3 sample_min, float3 sample_max, bool use_bounds)
+{
+  float acc_dist = 1e10f;
+  int prev_group = -2;
+  float grp_dist = 1e10f;
+  int candidate_count = candidate_count_get();
+
+  for (int c = 0; c < candidate_count; c++) {
+    SDFObjectGPU obj = objects[candidate_index_get(c)];
+
+    if (use_bounds && obj.csg_operation != SDF_CSG_OP_INTERSECT &&
+        (any(greaterThan(sample_min, obj.bbox_max.xyz)) ||
+         any(lessThan(sample_max, obj.bbox_min.xyz))))
+    {
+      if (obj.group_id >= 0 && obj.group_first == 1) {
+        grp_dist = 1e10f;
+      }
+      continue;
+    }
+
+    if (obj.group_id != prev_group) {
+      if (prev_group >= 0 && grp_dist < 1e10f) {
+        SDFGroupGPU grp = groups[prev_group];
+        acc_dist = combineCSG(
+            acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+      }
+      prev_group = obj.group_id;
+      if (prev_group >= 0) {
+        grp_dist = 1e10f;
+      }
+    }
+
+    float3 local_pos = (obj.inverse_matrix * float4(sample_pos - obj.position.xyz, 1.0f)).xyz;
+    float dist = evalSDFPrimitive(local_pos, obj);
+
+    if (obj.group_id >= 0) {
+      if (obj.group_first == 1) {
+        grp_dist = dist;
+      }
+      else {
+        grp_dist = combineCSG(
+            grp_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+      }
+    }
+    else {
+      acc_dist = combineCSG(
+          acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
+    }
+  }
+
+  if (prev_group >= 0 && grp_dist < 1e10f) {
+    SDFGroupGPU grp = groups[prev_group];
+    acc_dist = combineCSG(
+        acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
+  }
+
+  return acc_dist;
+}
+
 void main()
 {
   int chunk_idx = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * dispatch_width;
@@ -39,36 +117,22 @@ void main()
   ChunkPageGPU chunk = chunk_pages[chunk_idx];
   int2 local_xy = int2(gl_LocalInvocationID.xy);
   int chunk_offset = chunk_idx * (CHUNK_BRICK_RES * CHUNK_BRICK_RES * CHUNK_BRICK_RES);
+  float chunk_world = float(CHUNK_BRICK_RES * BRICK_SIZE) * voxel_size;
+  float chunk_half_diag = chunk_world * 0.866025f;
+  float3 chunk_base = float3(chunk.coord.xyz * CHUNK_BRICK_RES * BRICK_SIZE) * voxel_size;
+  float3 chunk_min = chunk_base - float3(brick_half_diag);
+  float3 chunk_max = chunk_base + float3(chunk_world + brick_half_diag);
 
-  for (int lz = 0; lz < CHUNK_BRICK_RES; lz++) {
-    int3 local_brick = int3(local_xy, lz);
-    int flat_index = local_brick.x + local_brick.y * CHUNK_BRICK_RES +
-                     local_brick.z * CHUNK_BRICK_RES * CHUNK_BRICK_RES;
-    int3 brick = chunk.coord.xyz * CHUNK_BRICK_RES + local_brick;
-    int previous_slot = chunk_bricks[chunk_offset + flat_index];
+  if (gl_LocalInvocationIndex == 0u) {
+    shared_num_candidates = 0;
+    shared_use_candidates = (bvh_node_count > 0 && object_count <= MAX_CHUNK_CANDIDATES) ? 1 : 0;
+    shared_skip_chunk = 0;
 
-    if (incremental_mode != 0 &&
-        (any(lessThan(brick, dirty_brick_min)) || any(greaterThanEqual(brick, dirty_brick_max))))
-    {
-      continue;
-    }
-
-    float3 brick_center =
-        (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
-
-    float expand = brick_half_diag;
-    float3 brick_min = brick_center - float3(expand);
-    float3 brick_max = brick_center + float3(expand);
-
-    #define MAX_MASK_WORDS 64
-    uint mask[MAX_MASK_WORDS];
     for (int i = 0; i < MAX_MASK_WORDS; i++) {
-      mask[i] = 0u;
+      shared_mask[i] = 0u;
     }
 
-    bool use_bvh = (bvh_node_count > 0 && object_count <= MAX_MASK_WORDS * 32);
-
-    if (use_bvh) {
+    if (shared_use_candidates != 0) {
       int stack[BVH_MAX_STACK];
       int sp = 0;
       stack[sp++] = 0;
@@ -77,7 +141,7 @@ void main()
         int node_idx = stack[--sp];
         BVHNodeGPU node = bvh_nodes[node_idx];
 
-        if (!aabb_overlap(brick_min, brick_max, node.min_and_left.xyz, node.max_and_right.xyz)) {
+        if (!aabb_overlap(chunk_min, chunk_max, node.min_and_left.xyz, node.max_and_right.xyz)) {
           continue;
         }
 
@@ -85,109 +149,62 @@ void main()
         int right = bvh_decode_int(node.max_and_right.w);
 
         if (left == -1) {
-          if (right < MAX_MASK_WORDS * 32) {
-            mask[right >> 5] |= (1u << (right & 31));
+          if (right < MAX_CHUNK_CANDIDATES) {
+            shared_mask[right >> 5] |= (1u << (right & 31));
           }
         }
-        else {
-          if (sp < BVH_MAX_STACK - 1) {
-            stack[sp++] = left;
-            stack[sp++] = right;
-          }
+        else if (sp < BVH_MAX_STACK - 1) {
+          stack[sp++] = left;
+          stack[sp++] = right;
         }
+      }
+
+      for (int i = 0; i < object_count; i++) {
+        SDFObjectGPU obj = objects[i];
+        bool in_mask = (shared_mask[i >> 5] & (1u << (i & 31))) != 0u;
+        if (!in_mask && obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+          continue;
+        }
+        shared_candidates[shared_num_candidates++] = i;
       }
     }
 
-    float acc_dist = 1e10f;
-    int prev_group = -2;
-    float grp_dist = 1e10f;
-
-    for (int i = 0; i < object_count; i++) {
-      SDFObjectGPU obj = objects[i];
-      bool has_mask = !use_bvh || ((mask[i >> 5] & (1u << (i & 31))) != 0u);
-
-      if (!has_mask && obj.csg_operation != SDF_CSG_OP_INTERSECT) {
-        continue;
-      }
-
-      if (obj.group_id != prev_group) {
-        if (prev_group >= 0 && grp_dist < 1e10f) {
-          SDFGroupGPU grp = groups[prev_group];
-          acc_dist = combineCSG(
-              acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
-        }
-        prev_group = obj.group_id;
-        if (prev_group >= 0) {
-          grp_dist = 1e10f;
-        }
-      }
-
-      if (obj.csg_operation != SDF_CSG_OP_INTERSECT &&
-          (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
-           any(lessThan(brick_max, obj.bbox_min.xyz))))
-      {
-        if (obj.group_id >= 0 && obj.group_first == 1) {
-          grp_dist = 1e10f;
-        }
-        continue;
-      }
-
-      float3 local_pos = (obj.inverse_matrix * float4(brick_center - obj.position.xyz, 1.0f)).xyz;
-      float dist = evalSDFPrimitive(local_pos, obj);
-
-      if (obj.group_id >= 0) {
-        if (obj.group_first == 1) {
-          grp_dist = dist;
-        }
-        else {
-          grp_dist = combineCSG(
-              grp_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
-        }
-      }
-      else {
-        acc_dist = combineCSG(
-            acc_dist, dist, obj.csg_operation, obj.blend_type, obj.blend, obj.shell_distance);
-      }
+    float3 chunk_center = chunk_base + float3(chunk_world * 0.5f);
+    float chunk_dist = evalSceneDistance(chunk_center, chunk_min, chunk_max, false);
+    if (abs(chunk_dist) > chunk_half_diag + brick_half_diag) {
+      shared_skip_chunk = 1;
     }
+  }
+  barrier();
 
-    if (prev_group >= 0 && grp_dist < 1e10f) {
-      SDFGroupGPU grp = groups[prev_group];
-      acc_dist = combineCSG(
-          acc_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.shell_distance);
-    }
+  if (shared_skip_chunk != 0) {
+    return;
+  }
+
+  for (int lz = 0; lz < CHUNK_BRICK_RES; lz++) {
+    int3 local_brick = int3(local_xy, lz);
+    int flat_index = local_brick.x + local_brick.y * CHUNK_BRICK_RES +
+                     local_brick.z * CHUNK_BRICK_RES * CHUNK_BRICK_RES;
+    int3 brick = chunk.coord.xyz * CHUNK_BRICK_RES + local_brick;
+
+    float3 brick_center =
+        (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
+
+    float expand = brick_half_diag;
+    float3 brick_min = brick_center - float3(expand);
+    float3 brick_max = brick_center + float3(expand);
+    float acc_dist = evalSceneDistance(brick_center, brick_min, brick_max, true);
 
     int out_slot = -1;
-    uint out_flags = ACTIVE_BRICK_FLAG_NONE;
     if (abs(acc_dist) <= brick_half_diag) {
-      int atlas_slot = previous_slot;
-      if (atlas_slot < 0) {
-        uint alloc_index = atomicAdd(brick_counter.next_slot, 1u);
-        if (alloc_index < uint(free_slot_count)) {
-          atlas_slot = free_slots[alloc_index];
-        }
-        else {
-          atlas_slot = next_slot_base + int(alloc_index) - free_slot_count;
-        }
-        out_flags |= ACTIVE_BRICK_FLAG_FULL_REBAKE;
-      }
-
-      if (atlas_slot < max_atlas_slots) {
-        uint active_idx = atomicAdd(brick_counter.count, 1u);
-        if (active_idx < uint(max_active_bricks)) {
-          out_slot = atlas_slot;
-          active_bricks[active_idx].coord = int4(brick, out_slot);
-          active_bricks[active_idx].meta = int4(int(out_flags), 0, 0, 0);
-        }
-        else {
-          atomicMax(brick_counter.overflow, 1u);
-        }
+      uint slot = atomicAdd(brick_counter.count, 1u);
+      if (slot < uint(max_active_bricks)) {
+        out_slot = int(slot);
+        active_bricks[slot].coord = int4(brick, out_slot);
       }
       else {
-        atomicMax(brick_counter.overflow, 1u);
+        atomicMax(brick_counter.next_slot, 1u);
       }
-    }
-    else if (acc_dist < -brick_half_diag) {
-      out_slot = -2;
     }
 
     chunk_bricks[chunk_offset + flat_index] = out_slot;

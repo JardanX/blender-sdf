@@ -101,6 +101,7 @@ class Outline : Overlay {
     if (sdf_box_batch_) {
       GPU_batch_discard(sdf_box_batch_);
     }
+    GPU_SHADER_FREE_SAFE(sdf_outline_sh_);
   }
 
   void begin_sync(Resources &res, const State &state) final
@@ -439,13 +440,27 @@ class Outline : Overlay {
      * so sdf_objects[] is in sorted order, not depsgraph order. */
     int mapping_count = 0;
     const int *depsgraph_to_sorted = sdf::sdf_depsgraph_to_sorted_get(&mapping_count);
+    Vector<int32_t> remapped_indices;
+    remapped_indices.reserve(sdf_selected_indices_.size());
     if (depsgraph_to_sorted && mapping_count > 0) {
-      for (int32_t &idx : sdf_selected_indices_) {
-        if (idx >= 0 && idx < mapping_count) {
-          idx = int32_t(depsgraph_to_sorted[idx]);
+      for (const int32_t idx : sdf_selected_indices_) {
+        if (idx < 0 || idx >= mapping_count) {
+          continue;
+        }
+        const int sorted_idx = depsgraph_to_sorted[idx];
+        if (sorted_idx >= 0 && sorted_idx < id_count) {
+          remapped_indices.append(int32_t(sorted_idx));
         }
       }
     }
+    else {
+      for (const int32_t idx : sdf_selected_indices_) {
+        if (idx >= 0 && idx < id_count) {
+          remapped_indices.append(idx);
+        }
+      }
+    }
+    sdf_selected_indices_ = std::move(remapped_indices);
 
     /* Upload selected indices SSBO (compact list for instancing). */
     const int sel_count = int(sdf_selected_indices_.size());
