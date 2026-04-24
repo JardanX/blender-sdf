@@ -50,17 +50,14 @@ static void sdf_copy_data(Main * /*bmain*/,
 
   sdf_dst->mat = static_cast<Material **>(MEM_dupallocN(sdf_src->mat));
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
+  sdf_dst->sdf_group = nullptr;
+  sdf_dst->group_order = 0;
   sdf_dst->runtime = new blender::bke::SDFRuntime();
 }
 
 static void sdf_free_data(ID *id)
 {
   SDF *sdf = (SDF *)id;
-
-  if (sdf->sdf_group) {
-    id_us_min(&sdf->sdf_group->id);
-    sdf->sdf_group = nullptr;
-  }
 
   BKE_animdata_free(&sdf->id, false);
   BLI_freelistN(&sdf->modifiers);

@@ -37,6 +37,8 @@ This auto-detects MSVC (2019/2022/2026), checks SVN library dependencies, runs C
 
 To rebuild after C++ changes, run `make.bat ninja` again — it's incremental. Ninja is faster than MSBuild for incremental builds.
 
+When launching Blender from this fork for testing, use the fork binary at `build/bin/blender.exe`.
+
 ### Linux/macOS
 
 ```bash
@@ -52,7 +54,7 @@ cmake .. && make -j$(nproc)
 ### Running the built Blender
 
 ```
-build/bin/Release/blender.exe
+build/bin/blender.exe
 ```
 
 ## Running Tests

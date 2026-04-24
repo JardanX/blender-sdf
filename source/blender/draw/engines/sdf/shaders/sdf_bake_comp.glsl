@@ -2,9 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* SDF bake: one workgroup per brick, 12x12 threads cover XY, loop Z.
- * Streaming evaluation: candidates processed in batches through shared memory.
- * No hard limit on candidate count — overflow falls back to linear scan. */
+/* SDF bake: one workgroup per active world-space brick, 12x12 threads cover XY,
+ * loop Z. Streaming evaluation: candidates processed in batches through shared
+ * memory. No hard limit on candidate count — overflow falls back to linear scan. */
 
 #include "infos/sdf_shader_infos.hh"
 
@@ -110,10 +110,9 @@ void main()
   /* Per-brick AABB for BVH culling. */
   float bhd = float(BRICK_SIZE) * voxel_size * 0.866025f;
   float candidate_expand = bhd;
-  float3 brick_min = atlas_origin + (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size -
-                      float3(candidate_expand);
-  float3 brick_max = atlas_origin + (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size +
-                      float3(candidate_expand);
+  float3 brick_min = (float3(brick * BRICK_SIZE) - 2.0f) * voxel_size - float3(candidate_expand);
+  float3 brick_max =
+      (float3(brick * BRICK_SIZE + BRICK_SIZE) + 2.0f) * voxel_size + float3(candidate_expand);
 
   uint tid = gl_LocalInvocationIndex;
 
@@ -176,8 +175,9 @@ void main()
       for (int i = 0; i < object_count; i++) {
         SDFObjectGPU obj = objects[i];
 
-        if (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
-            any(lessThan(brick_max, obj.bbox_min.xyz)))
+        if (obj.csg_operation != SDF_CSG_OP_INTERSECT &&
+            (any(greaterThan(brick_min, obj.bbox_max.xyz)) ||
+             any(lessThan(brick_max, obj.bbox_min.xyz))))
         {
           continue;
         }
@@ -191,21 +191,47 @@ void main()
       }
     }
 
-    /* Per-brick dirty check. */
-    shared_any_dirty = 0;
-    if (shared_overflow == 1) {
-      shared_any_dirty = 1;
-    }
-    else if (has_dirty_flags == 1) {
-      for (int c = 0; c < shared_num_candidates; c++) {
-        if (dirty_flags[shared_candidates[c]] != 0) {
-          shared_any_dirty = 1;
+    shared_any_dirty = 1;
+
+    if (shared_overflow == 0) {
+      for (int i = 0; i < object_count; i++) {
+        SDFObjectGPU obj = objects[i];
+        if (obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+          continue;
+        }
+
+        bool already_present = false;
+        for (int c = 0; c < shared_num_candidates; c++) {
+          if (shared_candidates[c] == i) {
+            already_present = true;
+            break;
+          }
+        }
+
+        if (already_present) {
+          continue;
+        }
+
+        if (shared_num_candidates < CANDIDATE_BUF_SIZE) {
+          shared_candidates[shared_num_candidates++] = i;
+        }
+        else {
+          shared_overflow = 1;
           break;
         }
       }
-    }
-    else {
-      shared_any_dirty = 1;
+
+      if (shared_overflow == 0) {
+        for (int i = 1; i < shared_num_candidates; i++) {
+          int key = shared_candidates[i];
+          int j = i - 1;
+          while (j >= 0 && shared_candidates[j] > key) {
+            shared_candidates[j + 1] = shared_candidates[j];
+            j--;
+          }
+          shared_candidates[j + 1] = key;
+        }
+      }
     }
   }
   barrier();
@@ -217,8 +243,7 @@ void main()
   /* Lipschitz pruning: cooperatively evaluate candidates at brick center,
    * then thread 0 prunes those provably outside blend influence. */
   if (shared_overflow == 0 && shared_num_candidates > 1) {
-    float3 brick_center = atlas_origin +
-                          (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
+    float3 brick_center = (float3(brick * BRICK_SIZE) + float(BRICK_SIZE) * 0.5f) * voxel_size;
     float two_R = 2.0f * float(BRICK_STORAGE) * voxel_size * 0.866025f;
 
     for (int c = int(tid); c < shared_num_candidates; c += 144) {
@@ -298,8 +323,7 @@ void main()
   /* Z-outer: each voxel layer is fully evaluated before the next. */
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
-    float3 world_pos = atlas_origin +
-                       float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
+    float3 world_pos = float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
     float acc_dist = 1e10f;
     float3 acc_color = float3(0.0f);

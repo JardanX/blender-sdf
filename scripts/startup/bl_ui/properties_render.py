@@ -105,9 +105,11 @@ class RENDER_PT_proximity_raymarcher(Panel):
         # Shading lives on View3D, not the Properties editor's space_data.
         # Find the first 3D viewport in the screen.
         shading = None
+        overlay = None
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 shading = area.spaces.active.shading
+                overlay = area.spaces.active.overlay
                 break
         if shading is None:
             layout.label(text="No 3D Viewport found.")
@@ -115,6 +117,8 @@ class RENDER_PT_proximity_raymarcher(Panel):
         layout.prop(shading, "sdf_resolution", text="Resolution")
         layout.prop(shading, "sdf_surface_margin", text="Surface Margin")
         layout.prop(shading, "sdf_debug_grid", text="Debug View")
+        if overlay is not None:
+            layout.prop(overlay, "show_sdf_perf", text="Performance Overlay")
 
 
 # ---------------------------------------------------------------------------

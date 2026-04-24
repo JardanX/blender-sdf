@@ -64,63 +64,17 @@ struct ActiveBrick {
   int4 coord; /* xyz = brick coord, w = atlas slot */
 };
 
+struct ChunkPageGPU {
+  int4 coord; /* xyz = chunk coord, w = unused */
+};
+
+struct ChunkHashEntryGPU {
+  int4 coord; /* xyz = chunk coord, w = chunk index (-1 = empty) */
+};
+
 /* BVH node: interior (left>=0) or leaf (left=-1, right=obj_idx) */
 struct BVHNodeGPU {
   float4 min_and_left;  /* xyz=AABB min, w=left_child or -1 */
   float4 max_and_right; /* xyz=AABB max, w=right_child or obj_idx */
 };
 
-/* Per-object shape descriptor for instanced mode */
-struct SDFShapeGPU {
-  float4 sdf_size;
-  float bevel;
-  int sdf_type;
-  int slot_offset;
-  float world_scale;
-  int4 grid_params;   /* xyz=grid_res, w=indirection offset */
-  float4 local_params; /* xyz=origin, w=voxel_size */
-  int4 atlas_params;   /* x=bricks_per_axis, y=active_bricks, z=object_id */
-};
-
-/* Per-instance data (transform + appearance) */
-struct SDFInstanceGPU {
-  float4x4 world_to_local;
-  float4x4 local_to_world;
-  float4 color;
-  float blend;
-  int shape_id;
-  int object_id;
-  int blend_type;
-  int csg_operation;
-  float shell_distance;
-  int group_id;
-  int group_order;
-};
-
-struct SDFClassifyParams {
-  float4 atlas_origin;
-  int4 grid_resolution;
-  float voxel_size;
-  int object_count;
-  float brick_half_diag;
-  int group_count;
-};
-
-struct SDFBakeParams {
-  float4 atlas_origin;
-  int4 grid_resolution;
-  float voxel_size;
-  int object_count;
-  int bricks_per_axis;
-  int group_count;
-};
-
-struct SDFMarchParams {
-  float4 atlas_origin;
-  float4 atlas_extent;
-  int4 grid_resolution;
-  float voxel_size;
-  int object_count;
-  int bricks_per_axis;
-  int group_count;
-};

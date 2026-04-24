@@ -4744,9 +4744,9 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
 
   /* SDF draw engine settings. */
   static const EnumPropertyItem sdf_resolution_items[] = {
-      {32, "RES_32", 0, "32", "32 voxel resolution (4 bricks per axis)"},
-      {64, "RES_64", 0, "64", "64 voxel resolution (8 bricks per axis)"},
-      {128, "RES_128", 0, "128", "128 voxel resolution (16 bricks per axis)"},
+      {32, "RES_32", 0, "32", "32 voxels per Blender unit"},
+      {64, "RES_64", 0, "64", "64 voxels per Blender unit"},
+      {128, "RES_128", 0, "128", "128 voxels per Blender unit"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -4755,7 +4755,7 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, sdf_resolution_items);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
-      prop, "SDF Resolution", "Total voxel resolution for the SDF brick atlas");
+      prop, "SDF Resolution", "Fixed world-space voxel density for the chunked SDF brickmap");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
   static const EnumPropertyItem sdf_debug_grid_items[] = {

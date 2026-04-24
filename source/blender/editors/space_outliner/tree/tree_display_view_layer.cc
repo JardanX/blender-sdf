@@ -174,12 +174,9 @@ void TreeDisplayViewLayer::add_view_layer(Scene &scene, ListBase &tree, TreeElem
   const bool show_children = (space_outliner_.filter & SO_FILTER_NO_CHILDREN) == 0;
 
   if (space_outliner_.filter & SO_FILTER_NO_COLLECTION) {
-    /* Show objects in the view layer (SDF objects are shown under SDF Groups instead). */
+    /* Show objects in the view layer. */
     BKE_view_layer_synced_ensure(&scene, view_layer_);
     for (Base *base : List<Base>(*BKE_view_layer_object_bases_get(view_layer_))) {
-      if (base->object->type == OB_SDF) {
-        continue;
-      }
       TreeElement *te_object = add_element(
           &tree, reinterpret_cast<ID *>(base->object), nullptr, parent, TSE_SOME_ID, 0);
       te_object->directdata = base;
@@ -246,11 +243,10 @@ void TreeDisplayViewLayer::add_layer_collection_objects(ListBase &tree,
 {
   BKE_view_layer_synced_ensure(scene_, view_layer_);
   for (CollectionObject *cob : List<CollectionObject>(lc.collection->gobject)) {
-    /* SDF objects are shown under their SDF Group, not in the collection tree. */
-    if (cob->ob->type == OB_SDF) {
+    Base *base = BKE_view_layer_base_find(view_layer_, cob->ob);
+    if (!base) {
       continue;
     }
-    Base *base = BKE_view_layer_base_find(view_layer_, cob->ob);
     TreeElement *te_object = add_element(
         &tree, reinterpret_cast<ID *>(base->object), nullptr, &ten, TSE_SOME_ID, 0);
     te_object->directdata = base;

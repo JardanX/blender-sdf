@@ -130,8 +130,36 @@ SDFGroup *BKE_sdf_group_add(Main *bmain, const char *name)
   return group;
 }
 
+static SDFGroupMember *sdf_group_find_member_by_object(SDFGroup *group, Object *ob)
+{
+  LISTBASE_FOREACH (SDFGroupMember *, member, &group->members) {
+    if (member->object == ob) {
+      return member;
+    }
+  }
+  return nullptr;
+}
+
 SDFGroupMember *BKE_sdf_group_member_add(SDFGroup *group, Object *ob)
 {
+  if (ob == nullptr) {
+    return nullptr;
+  }
+
+  if (SDFGroupMember *existing = sdf_group_find_member_by_object(group, ob)) {
+    return existing;
+  }
+
+  if (ob->type == OB_SDF && ob->data) {
+    SDF *sdf = static_cast<SDF *>(ob->data);
+    if (sdf->sdf_group && sdf->sdf_group != group) {
+      SDFGroupMember *old_member = sdf_group_find_member_by_object(sdf->sdf_group, ob);
+      if (old_member != nullptr) {
+        BKE_sdf_group_member_remove(sdf->sdf_group, old_member);
+      }
+    }
+  }
+
   SDFGroupMember *member = static_cast<SDFGroupMember *>(
       MEM_callocN(sizeof(SDFGroupMember), "SDFGroupMember"));
   member->object = ob;
@@ -141,9 +169,11 @@ SDFGroupMember *BKE_sdf_group_member_add(SDFGroup *group, Object *ob)
 
   if (ob && ob->type == OB_SDF && ob->data) {
     SDF *sdf = static_cast<SDF *>(ob->data);
+    if (sdf->sdf_group != group) {
+      id_us_plus(&group->id);
+    }
     sdf->sdf_group = group;
     sdf->group_order = member->order;
-    id_us_plus(&group->id);
   }
 
   return member;
@@ -154,7 +184,9 @@ void BKE_sdf_group_member_remove(SDFGroup *group, SDFGroupMember *member)
   if (member->object && member->object->type == OB_SDF && member->object->data) {
     SDF *sdf = static_cast<SDF *>(member->object->data);
     if (sdf->sdf_group == group) {
-      id_us_min(&group->id);
+      if (group->id.us > 0) {
+        id_us_min(&group->id);
+      }
       sdf->sdf_group = nullptr;
       sdf->group_order = 0;
     }
