@@ -28,6 +28,10 @@ save/load in .blend files, undo/redo, duplicate, Python API (`bpy.data.sdfs`).
 | `source/blender/draw/engines/sdf/shaders/sdf_hierarchy_build_comp.glsl` | New compute shader that derives conservative hierarchy levels from baked fine-cell minima for every active brick slot. |
 | `source/blender/draw/CMakeLists.txt` | Registered the new SDF hierarchy build shader source so Blender packages and compiles it with the draw shader set. |
 | `source/blender/draw/engines/sdf/sdf_shader_shared.hh` | Fixed the active-brick flag enum declaration so the shared SDF shader header builds cleanly through Blender’s GLSL preprocessing pipeline. |
+| `source/blender/makesdna/DNA_view3d_types.h` | Added a per-viewport SDF normal mode field so the draw engine can switch hit normal evaluation quality without rebaking. |
+| `source/blender/makesdna/DNA_view3d_defaults.h` | Set the new SDF normal mode default to the existing dual-voxel path. |
+| `source/blender/makesrna/intern/rna_space.cc` | Exposed the SDF normal mode enum in `View3DShading` RNA so the viewport can toggle between dual-voxel and single-cell normals. |
+| `scripts/startup/bl_ui/properties_render.py` | Added the SDF normal mode control to the render properties panel for quick performance/quality benchmarking. |
 
 ## Recent Cleanup (2026-04-24)
 
@@ -39,6 +43,8 @@ save/load in .blend files, undo/redo, duplicate, Python API (`bpy.data.sdfs`).
 | `source/blender/draw/engines/overlay/overlay_outline.hh` | Filtered invalid remapped selected indices and freed the cached outline shader. | Prevents outline draws from indexing past the exported SDF object array in mismatch states and closes a small GPU shader leak. |
 | `source/blender/draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed unused `groups` and `group_count` bindings from the selection shader create info. | Keeps the shader interface aligned with the actual fragment shader inputs. |
 | `source/blender/draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Removed unused shared variables from the bake shader. | Simplifies the shader and avoids carrying dead shared-memory state. |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | Added a per-viewport hit normal mode uniform and passed it into the march shader. | Lets the renderer benchmark the current dual-voxel normal path against a cheaper single-cell trilinear gradient without rebaking. |
+| `source/blender/draw/engines/sdf/shaders/sdf_march_frag.glsl` | Added a single-cell trilinear hit normal path alongside the existing dual-voxel blended normal path. | Provides a lower-fetch normal mode for direct shading cost comparisons on baked voxel brickmaps. |
 
 ### Modified Files (Python UI)
 
@@ -2516,8 +2522,13 @@ through a chunk hash instead of a single scene-sized indirection texture.
 | `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Restored the pre-incremental shader interfaces so the non-incremental bake path uses the older shader ABI again |
 | `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Moved candidate-object gathering from per-brick to per-chunk scope. Each classify workgroup now builds one shared candidate list for the whole chunk, does a cheap chunk-center surface-distance reject, and only then evaluates individual bricks. This makes classify much lighter in long sparse arrays where thousands of chunks used to repeat the same BVH walk 4096 times per chunk |
 | `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Removed the `-2` fully-interior brick tagging so the marcher no longer lands on coarse interior placeholders that showed up as gray voxel blocks on the surface |
-| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Kept the exact chunk/brick/voxel DDA path from the older baseline, added a short in-brick sphere-trace prepass using the sampled baked field to skip obvious empty space before voxel interpolation, and removed the gray interior-brick hit path |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Kept the exact chunk/brick/voxel DDA path from the older baseline, added a short in-brick sphere-trace prepass that skips clearly empty space, then backs up slightly and hands the final near-surface region to the exact DDA + trilinear path so close-up quality stays stable while most empty voxels are still skipped |
 | `draw/engines/sdf/sdf_engine.cc` | Added a dense active-chunk lookup upload for compact active layouts, and `draw/engines/sdf/shaders/sdf_march_frag.glsl` now uses that direct lookup mode instead of always paying hash/BVH chunk traversal overhead. Rendering the same voxel count across many chunks is now much closer to compacted layouts when the active chunk grid still fits a reasonable dense table |
+| `draw/engines/sdf/shaders/sdf_hierarchy_build_comp.glsl` | Reintroduced a conservative per-brick min-distance hierarchy build (2x2x2, 4x4x4, and whole-brick levels) so the render prepass can skip empty regions using safe lower bounds instead of relying on filtered field samples |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added the hierarchy-build compute shader and bound the hierarchy textures into the march shader interface |
+| `draw/engines/sdf/sdf_engine.cc` | Added hierarchy atlas allocation, build dispatch, and sampler binding around the march pass so render-time empty-space skipping has conservative data available every frame |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced the filtered-field sphere-trace prepass with a hierarchy-guided conservative skip. The marcher now uses correct level-dependent support radii for 2-cell, 4-cell, and whole-brick regions, which lets it skip harder while still handing the final surface to exact voxel DDA + trilinear interpolation |
+| `draw/CMakeLists.txt` | Restored `engines/sdf/shaders/sdf_hierarchy_build_comp.glsl` to the draw shader source list so the conservative hierarchy build is compiled into the engine again |
 | `draw/engines/sdf/sdf_shader_shared.hh` | Restored the simpler pre-incremental active-brick and brick-counter structs so the engine/shader ABI matches the non-incremental bake path again |
 | `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | Restored the older grid-augmentation allocator contract so dense grid bricks write only `ActiveBrick.coord` and use `brick_counter.next_slot` purely as the overflow signal again |
 | `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Restored the full-rebake bake shader so every active brick is rebaked every frame instead of mixing in partial dirty-voxel updates |

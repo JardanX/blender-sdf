@@ -19,10 +19,12 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 
 #define MAX_BRICK_STEPS 96
 #define MAX_VOXEL_STEPS 32
-#define MAX_PRETRACE_STEPS 12
+#define MAX_PRETRACE_STEPS 32
 #define CHUNK_MARCH_DIRECT 0
 #define CHUNK_MARCH_HASH 1
 #define CHUNK_MARCH_BVH 2
+#define SDF_NORMAL_DUAL_VOXEL 0
+#define SDF_NORMAL_SINGLE_CELL 1
 
 /* Atlas lookup */
 
@@ -56,6 +58,22 @@ float4 sampleCompactField(float3 grid_pos_in_brick, int slot, int bpa)
                      clamp(grid_pos_in_brick, float3(0.0f), float3(BRICK_SIZE)) + float3(2.0f);
   float3 atlas_uv = atlas_pos / float3(compact_size);
   return textureLod(compact_atlas, atlas_uv, 0.0f);
+}
+
+float conservativeHierarchySkip(int3 cell, int slot, int bpa)
+{
+  int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
+  float lower_bound = -1e20f;
+
+  int3 coarse4 = slot_block * 4 + clamp(cell >> 1, int3(0), int3(3));
+  lower_bound = max(lower_bound, texelFetch(hierarchy4_atlas, coarse4, 0).r - voxel_size * 1.732051f);
+
+  int3 coarse2 = slot_block * 2 + clamp(cell >> 2, int3(0), int3(1));
+  lower_bound = max(lower_bound, texelFetch(hierarchy2_atlas, coarse2, 0).r - voxel_size * 3.464102f);
+
+  lower_bound = max(lower_bound,
+                    texelFetch(hierarchy1_atlas, slot_block, 0).r - voxel_size * 6.928204f);
+  return lower_bound;
 }
 
 float3 normalizeVoxelGradient(float3 grad)
@@ -109,6 +127,14 @@ float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, in
 
   float l = length(blended);
   return l > 1e-8f ? blended / l : float3(0.0f, 0.0f, 1.0f);
+}
+
+float3 computeSingleCellNormal(float3 grid_pos_in_brick, int3 brick, int3 local_cell, int slot, int bpa)
+{
+  float s[8];
+  fetchCornersCompact(brick, local_cell, slot, bpa, s);
+  float3 local_p = clamp(grid_pos_in_brick - float3(local_cell), float3(0.0f), float3(1.0f));
+  return normalizeVoxelGradient(trilinearGradient(s, local_p));
 }
 
 /* Chunk lookup */
@@ -232,8 +258,9 @@ void march_chunk_local(float3 ray_origin,
                                VD.y != 0.0f ? abs(1.0f / VD.y) : 1e30f,
                                VD.z != 0.0f ? abs(1.0f / VD.z) : 1e30f);
 
-      float trace_min_step = voxel_size * 0.75f;
-      float trace_safety = 0.8f;
+      float trace_min_step = voxel_size * 0.5f;
+      float trace_stop_distance = voxel_size * 0.75f;
+      float trace_safety = 0.95f;
       for (int trace_i = 0; trace_i < MAX_PRETRACE_STEPS; trace_i++) {
         float trace_remaining = t_brick_exit - vt_current;
         if (trace_remaining <= 1e-8f) {
@@ -241,12 +268,13 @@ void march_chunk_local(float3 ray_origin,
         }
 
         float3 trace_pos = V + vt_current * VD;
-        float trace_dist = sampleCompactField(trace_pos, slot, bricks_per_axis).r;
-        if (trace_dist <= trace_min_step) {
+        int3 trace_cell = clamp(int3(floor(trace_pos)), int3(0), int3(BRICK_SIZE - 1));
+        float trace_dist = conservativeHierarchySkip(trace_cell, slot, bricks_per_axis);
+        if (trace_dist <= trace_stop_distance) {
           break;
         }
 
-        float trace_step = min(trace_dist * trace_safety, trace_remaining);
+        float trace_step = min((trace_dist - trace_stop_distance) * trace_safety, trace_remaining);
         if (trace_step <= trace_min_step) {
           break;
         }
@@ -751,7 +779,12 @@ void main()
   float3 local_pos = (hit_pos - brick_origin) / voxel_size;
 
   hit_color = sampleCompactField(local_pos, hit_slot, bricks_per_axis).gba;
-  hit_normal = computeDualVoxelNormal(local_pos, hit_brick, hit_slot, bricks_per_axis);
+  if (normal_mode == SDF_NORMAL_SINGLE_CELL) {
+    hit_normal = computeSingleCellNormal(local_pos, hit_brick, hit_local_cell, hit_slot, bricks_per_axis);
+  }
+  else {
+    hit_normal = computeDualVoxelNormal(local_pos, hit_brick, hit_slot, bricks_per_axis);
+  }
 
   float3 normal = hit_normal;
   float3 obj_color = hit_color;
