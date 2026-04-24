@@ -19,6 +19,10 @@ FRAGMENT_SHADER_CREATE_INFO(sdf_march)
 
 #define MAX_BRICK_STEPS 96
 #define MAX_VOXEL_STEPS 32
+#define MAX_PRETRACE_STEPS 12
+#define CHUNK_MARCH_DIRECT 0
+#define CHUNK_MARCH_HASH 1
+#define CHUNK_MARCH_BVH 2
 
 /* Atlas lookup */
 
@@ -43,6 +47,38 @@ void fetchCornersCompact(int3 brick, int3 local_cell, int slot, int bpa, out flo
 }
 
 /* Normal computation */
+
+float4 sampleCompactField(float3 grid_pos_in_brick, int slot, int bpa)
+{
+  int3 compact_size = int3(textureSize(compact_atlas, 0));
+  int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
+  float3 atlas_pos = float3(slot_block * BRICK_STORAGE) +
+                     clamp(grid_pos_in_brick, float3(0.0f), float3(BRICK_SIZE)) + float3(2.0f);
+  float3 atlas_uv = atlas_pos / float3(compact_size);
+  return textureLod(compact_atlas, atlas_uv, 0.0f);
+}
+
+float conservativeHierarchySkip(int3 cell, int slot, int bpa)
+{
+  int3 slot_block = int3(slot % bpa, (slot / bpa) % bpa, slot / (bpa * bpa));
+  float cell_half_diag = voxel_size * 0.866025f;
+  float lower_bound = -1e20f;
+
+  int3 coarse4 = slot_block * 4 + clamp(cell >> 1, int3(0), int3(3));
+  lower_bound = max(lower_bound, texelFetch(hierarchy4_atlas, coarse4, 0).r - cell_half_diag);
+
+  int3 coarse2 = slot_block * 2 + clamp(cell >> 2, int3(0), int3(1));
+  lower_bound = max(lower_bound, texelFetch(hierarchy2_atlas, coarse2, 0).r - cell_half_diag);
+
+  lower_bound = max(lower_bound, texelFetch(hierarchy1_atlas, slot_block, 0).r - cell_half_diag);
+  return lower_bound;
+}
+
+float3 normalizeVoxelGradient(float3 grad)
+{
+  float l = length(grad);
+  return l > 1e-8f ? grad / l : float3(0.0f, 0.0f, 1.0f);
+}
 
 float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, int bpa)
 {
@@ -76,9 +112,7 @@ float3 computeDualVoxelNormal(float3 grid_pos_in_brick, int3 brick, int slot, in
         s[7] = vals[(kk + 1) * 9 + (jj + 1) * 3 + (ii + 1)];
 
         float3 local_p = grid_pos_in_brick - float3(dc - int3(1) + int3(ii, jj, kk));
-        float3 grad = trilinearGradient(s, local_p);
-        float l = length(grad);
-        float3 n = l > 1e-8f ? grad / l : float3(0.0f, 0.0f, 1.0f);
+        float3 n = normalizeVoxelGradient(trilinearGradient(s, local_p));
 
         float wu = ii == 0 ? (1.0f - uvw.x) : uvw.x;
         float wv = jj == 0 ? (1.0f - uvw.y) : uvw.y;
@@ -122,6 +156,13 @@ int findChunkIndex(int3 coord)
   }
 
   return -1;
+}
+
+int findChunkIndexDirect(int3 cell)
+{
+  int flat_index = cell.x + cell.y * chunk_grid_resolution.x +
+                   cell.z * chunk_grid_resolution.x * chunk_grid_resolution.y;
+  return chunk_grid_lookup[flat_index];
 }
 
 int readChunkBrickSlot(int chunk_idx, int3 local_brick)
@@ -204,10 +245,7 @@ void march_chunk_local(float3 ray_origin,
       float3 brick_origin = float3(world_brick * BRICK_SIZE) * voxel_size;
       float3 V = (ray_origin - brick_origin) * inv_voxel;
       float3 VD = ray_dir * inv_voxel;
-      float3 V_enter = V + t_brick_current * VD;
-
-      int3 vcell = int3(floor(V_enter));
-      vcell = clamp(vcell, int3(0), int3(BRICK_SIZE - 1));
+      float vt_current = t_brick_current;
 
       int3 vstep;
       vstep.x = VD.x > 0.0f ? 1 : (VD.x < 0.0f ? -1 : 0);
@@ -218,58 +256,65 @@ void march_chunk_local(float3 ray_origin,
                                VD.y != 0.0f ? abs(1.0f / VD.y) : 1e30f,
                                VD.z != 0.0f ? abs(1.0f / VD.z) : 1e30f);
 
-      float3 vbound;
-      vbound.x = VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x);
-      vbound.y = VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y);
-      vbound.z = VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z);
-
-      float3 vtMax;
-      vtMax.x = VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f;
-      vtMax.y = VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f;
-      vtMax.z = VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f;
-
-      float vt_current = t_brick_current;
-      bool voxel_hit = false;
-
-      for (int vstep_i = 0; vstep_i < MAX_VOXEL_STEPS; vstep_i++) {
-        if (any(lessThan(vcell, int3(0))) || any(greaterThan(vcell, int3(BRICK_SIZE - 1)))) {
+      float trace_min_step = voxel_size * 0.75f;
+      float trace_safety = 0.8f;
+      for (int trace_i = 0; trace_i < MAX_PRETRACE_STEPS; trace_i++) {
+        float trace_remaining = t_brick_exit - vt_current;
+        if (trace_remaining <= 1e-8f) {
           break;
         }
 
-        float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
-        vt_cell_exit = min(vt_cell_exit, t_brick_exit);
+        float3 trace_pos = V + vt_current * VD;
+        int3 trace_cell = clamp(int3(floor(trace_pos)), int3(0), int3(BRICK_SIZE - 1));
+        float dist = conservativeHierarchySkip(trace_cell, slot, bricks_per_axis);
+        if (dist <= trace_min_step) {
+          break;
+        }
 
-        float s[8];
-        fetchCornersCompact(world_brick, vcell, slot, bricks_per_axis, s);
+        float trace_step = min(dist * trace_safety, trace_remaining);
+        if (trace_step <= trace_min_step) {
+          break;
+        }
 
-        float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
-                         min(min(s[4], s[5]), min(s[6], s[7])));
-        float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
-                         max(max(s[4], s[5]), max(s[6], s[7])));
+        vt_current += trace_step;
+      }
 
-        if (smin <= 0.0f) {
-          if (smax < 0.0f) {
-            out_hit_t = vt_current;
-            out_hit_brick = world_brick;
-            out_hit_cell = vcell;
-            out_hit_slot = slot;
-            voxel_hit = true;
+      if (vt_current < t_brick_exit) {
+        float3 V_enter = V + vt_current * VD;
+
+        int3 vcell = int3(floor(V_enter));
+        vcell = clamp(vcell, int3(0), int3(BRICK_SIZE - 1));
+
+        float3 vbound;
+        vbound.x = VD.x > 0.0f ? float(vcell.x + 1) : float(vcell.x);
+        vbound.y = VD.y > 0.0f ? float(vcell.y + 1) : float(vcell.y);
+        vbound.z = VD.z > 0.0f ? float(vcell.z + 1) : float(vcell.z);
+
+        float3 vtMax;
+        vtMax.x = VD.x != 0.0f ? (vbound.x - V.x) / VD.x : 1e30f;
+        vtMax.y = VD.y != 0.0f ? (vbound.y - V.y) / VD.y : 1e30f;
+        vtMax.z = VD.z != 0.0f ? (vbound.z - V.z) / VD.z : 1e30f;
+
+        bool voxel_hit = false;
+
+        for (int vstep_i = 0; vstep_i < MAX_VOXEL_STEPS; vstep_i++) {
+          if (any(lessThan(vcell, int3(0))) || any(greaterThan(vcell, int3(BRICK_SIZE - 1)))) {
             break;
           }
 
-          float T_max = vt_cell_exit - vt_current;
-          if (T_max > 1e-8f) {
-            float k[8];
-            computeTrilinearCoeffs(s, k);
+          float vt_cell_exit = min(min(vtMax.x, vtMax.y), vtMax.z);
+          vt_cell_exit = min(vt_cell_exit, t_brick_exit);
 
-            float3 o_local = V + vt_current * VD - float3(vcell);
-            o_local = clamp(o_local, float3(0.0f), float3(1.0f));
-            float3 d_scaled = VD * T_max;
+          float s[8];
+          fetchCornersCompact(world_brick, vcell, slot, bricks_per_axis, s);
 
-            float c[4];
-            computeCubicCoeffs(k, o_local, d_scaled, c);
+          float smin = min(min(min(s[0], s[1]), min(s[2], s[3])),
+                           min(min(s[4], s[5]), min(s[6], s[7])));
+          float smax = max(max(max(s[0], s[1]), max(s[2], s[3])),
+                           max(max(s[4], s[5]), max(s[6], s[7])));
 
-            if (c[0] <= 0.0f) {
+          if (smin <= 0.0f) {
+            if (smax < 0.0f) {
               out_hit_t = vt_current;
               out_hit_brick = world_brick;
               out_hit_cell = vcell;
@@ -278,50 +323,72 @@ void march_chunk_local(float3 ray_origin,
               break;
             }
 
-            float u_hit = solveCubicMarmittNR(c, 1.0f);
-            if (u_hit >= 0.0f) {
-              out_hit_t = vt_current + u_hit * T_max;
-              out_hit_brick = world_brick;
-              out_hit_cell = vcell;
-              out_hit_slot = slot;
-              voxel_hit = true;
-              break;
+            float T_max = vt_cell_exit - vt_current;
+            if (T_max > 1e-8f) {
+              float k[8];
+              computeTrilinearCoeffs(s, k);
+
+              float3 o_local = V + vt_current * VD - float3(vcell);
+              o_local = clamp(o_local, float3(0.0f), float3(1.0f));
+              float3 d_scaled = VD * T_max;
+
+              float c[4];
+              computeCubicCoeffs(k, o_local, d_scaled, c);
+
+              if (c[0] <= 0.0f) {
+                out_hit_t = vt_current;
+                out_hit_brick = world_brick;
+                out_hit_cell = vcell;
+                out_hit_slot = slot;
+                voxel_hit = true;
+                break;
+              }
+
+              float u_hit = solveCubicMarmittNR(c, 1.0f);
+              if (u_hit >= 0.0f) {
+                out_hit_t = vt_current + u_hit * T_max;
+                out_hit_brick = world_brick;
+                out_hit_cell = vcell;
+                out_hit_slot = slot;
+                voxel_hit = true;
+                break;
+              }
             }
           }
-        }
 
-        if (vtMax.x < vtMax.y) {
-          if (vtMax.x < vtMax.z) {
-            vt_current = vtMax.x;
-            vcell.x += vstep.x;
-            vtMax.x += vtDelta.x;
+          if (vtMax.x < vtMax.y) {
+            if (vtMax.x < vtMax.z) {
+              vt_current = vtMax.x;
+              vcell.x += vstep.x;
+              vtMax.x += vtDelta.x;
+            }
+            else {
+              vt_current = vtMax.z;
+              vcell.z += vstep.z;
+              vtMax.z += vtDelta.z;
+            }
           }
           else {
-            vt_current = vtMax.z;
-            vcell.z += vstep.z;
-            vtMax.z += vtDelta.z;
+            if (vtMax.y < vtMax.z) {
+              vt_current = vtMax.y;
+              vcell.y += vstep.y;
+              vtMax.y += vtDelta.y;
+            }
+            else {
+              vt_current = vtMax.z;
+              vcell.z += vstep.z;
+              vtMax.z += vtDelta.z;
+            }
           }
-        }
-        else {
-          if (vtMax.y < vtMax.z) {
-            vt_current = vtMax.y;
-            vcell.y += vstep.y;
-            vtMax.y += vtDelta.y;
-          }
-          else {
-            vt_current = vtMax.z;
-            vcell.z += vstep.z;
-            vtMax.z += vtDelta.z;
+
+          if (vt_current >= t_brick_exit) {
+            break;
           }
         }
 
-        if (vt_current >= t_brick_exit) {
-          break;
+        if (voxel_hit) {
+          return;
         }
-      }
-
-      if (voxel_hit) {
-        return;
       }
     }
 
@@ -409,7 +476,8 @@ void march_chunked_hash(float3 ray_origin,
     t_chunk_exit = min(t_chunk_exit, t_exit);
 
     int3 chunk_coord = atlas_chunk_min + chunk_cell;
-    int chunk_idx = findChunkIndex(chunk_coord);
+    int chunk_idx = (chunk_march_mode == CHUNK_MARCH_DIRECT) ? findChunkIndexDirect(chunk_cell) :
+                                                                findChunkIndex(chunk_coord);
     if (chunk_idx >= 0) {
       float hit_t;
       int3 hit_brick;
@@ -623,28 +691,12 @@ void march_world_exact(float3 ray_origin,
                        float3 ray_dir,
                        float t_enter,
                        float t_exit,
-                       int chunk_grid_span,
                        out float out_hit_t,
                        out int3 out_hit_brick,
                        out int3 out_hit_cell,
                        out int out_hit_slot)
 {
-  if (chunk_grid_span < 0) {
-    out_hit_t = -1.0f;
-    out_hit_slot = -1;
-    return;
-  }
-  if (chunk_grid_span <= 96) {
-    march_chunked_hash(ray_origin,
-                       ray_dir,
-                       t_enter,
-                       t_exit,
-                       out_hit_t,
-                       out_hit_brick,
-                       out_hit_cell,
-                       out_hit_slot);
-  }
-  else if (chunk_bvh_node_count > 0) {
+  if (chunk_march_mode == CHUNK_MARCH_BVH) {
     march_chunk_bvh(ray_origin,
                     ray_dir,
                     t_enter,
@@ -663,7 +715,7 @@ void march_world_exact(float3 ray_origin,
                        out_hit_brick,
                        out_hit_cell,
                        out_hit_slot);
-  }
+    }
 }
 
 /* Main */
@@ -709,11 +761,7 @@ void main()
   int3 hit_local_cell = int3(0);
   int hit_slot = -1;
 
-  float chunk_world_size = float(CHUNK_BRICK_RES * BRICK_SIZE) * voxel_size;
-  int3 chunk_grid_res = max(int3(round(atlas_extent / chunk_world_size)), int3(1));
-  int chunk_grid_span = chunk_grid_res.x + chunk_grid_res.y + chunk_grid_res.z;
-  march_world_exact(
-      ray_origin, ray_dir, t_enter, t_exit, chunk_grid_span, hit_t, hit_brick, hit_local_cell, hit_slot);
+  march_world_exact(ray_origin, ray_dir, t_enter, t_exit, hit_t, hit_brick, hit_local_cell, hit_slot);
 
   if (hit_t < 0.0f) {
     discard;
@@ -725,19 +773,18 @@ void main()
   float3 hit_normal = float3(0.0f, 0.0f, 1.0f);
 
   if (hit_slot == -2) {
-    hit_normal = -ray_dir;
+    if (lighting_type != 0) {
+      hit_normal = -ray_dir;
+    }
   }
   else {
     float3 brick_origin = float3(hit_brick * BRICK_SIZE) * voxel_size;
     float3 local_pos = (hit_pos - brick_origin) / voxel_size;
 
-    int bpa = bricks_per_axis;
-    int3 slot_block = int3(hit_slot % bpa, (hit_slot / bpa) % bpa, hit_slot / (bpa * bpa));
-    float3 atlas_pos = float3(slot_block * BRICK_STORAGE) + local_pos + float3(2.0f);
-    int3 compact_size = int3(textureSize(compact_atlas, 0));
-    float3 atlas_uv = atlas_pos / float3(compact_size);
-    hit_color = textureLod(compact_atlas, atlas_uv, 0.0f).gba;
-    hit_normal = computeDualVoxelNormal(local_pos, hit_brick, hit_slot, bricks_per_axis);
+    hit_color = sampleCompactField(local_pos, hit_slot, bricks_per_axis).gba;
+    if (lighting_type != 0) {
+      hit_normal = computeDualVoxelNormal(local_pos, hit_brick, hit_slot, bricks_per_axis);
+    }
   }
 
   float3 normal = hit_normal;
@@ -820,6 +867,14 @@ void main()
     float3 specular = textureLod(matcap_tx, float3(matcap_uv, 1.0f), 0.0f).rgb;
 
     shaded_color = diffuse * obj_color + specular * float(use_specular);
+  }
+
+  if (debug_grid_mode == 2 && dirty_brick_count > 0 &&
+      all(greaterThanEqual(hit_brick, dirty_brick_min)) && all(lessThan(hit_brick, dirty_brick_max)))
+  {
+    float3 debug_tint = (incremental_status != 0) ? float3(1.0f, 0.15f, 0.12f) :
+                                                  float3(1.0f, 0.65f, 0.12f);
+    shaded_color = mix(shaded_color, debug_tint, 0.75f);
   }
 
   out_color = float4(shaded_color, 1.0f);

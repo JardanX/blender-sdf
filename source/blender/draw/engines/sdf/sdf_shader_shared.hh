@@ -56,12 +56,18 @@ struct SDFModifierGPU {
 struct BrickCounter {
   uint count;
   uint next_slot;
-  uint _pad1;
-  uint _pad2;
+  uint overflow;
+  uint _pad;
+};
+
+enum eActiveBrickFlags : uint32_t {
+  ACTIVE_BRICK_FLAG_NONE = 0,
+  ACTIVE_BRICK_FLAG_FULL_REBAKE = 1,
 };
 
 struct ActiveBrick {
   int4 coord; /* xyz = brick coord, w = atlas slot */
+  int4 meta;  /* x = eActiveBrickFlags */
 };
 
 struct ChunkPageGPU {
