@@ -2413,3 +2413,66 @@ buffer, no BVH dependency, zero hard limits.
 | `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Complete rewrite: streaming batch evaluation (BATCH_SIZE=64), overflow fallback, single-pass group tracking, removed MAX_CANDIDATES/Lipschitz |
 | `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Rewrite: linear scan through sorted objects, no candidate buffer, single-pass group evaluation |
 | `draw/engines/sdf/sdf_engine.cc` | Asymmetric voxel deadband (0.9–1.25), proportional hysteresis padding, 50% contraction threshold |
+
+---
+
+## Chunk-Hashed World Brickmap
+
+Made `sdf_resolution` a fixed world-space voxel density instead of a scene-bounded
+atlas resolution. The renderer now builds a sparse chunk directory on the CPU,
+stores dense brick-slot tables per chunk on the GPU, and marches that structure
+through a chunk hash instead of a single scene-sized indirection texture.
+
+### Why
+
+1. **Scene-size independence** — `128` now means `1 / 128` Blender units per voxel everywhere.
+2. **Sparse world coverage** — distant objects no longer force one dense atlas AABB over the empty gap.
+3. **Remove dead instanced path** — the unused per-object brickmap march path was removed from the shader interfaces.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_private.hh` | Replaced the old global-grid constants with chunked world-brick constants: `SDF_CHUNK_BRICK_RES` and `SDF_CHUNK_BRICK_COUNT` |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `ChunkPageGPU` and `ChunkHashEntryGPU` for sparse world chunk lookup. Removed the unused per-object instancing structs from the march path |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Rewired shader bindings away from the scene `indirection_tx` texture and onto chunk page/hash/brick SSBOs. Removed unused instanced march bindings and dirty-flag bindings from the world path |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Rewritten to classify dense local bricks inside sparse world chunks, output global brick coordinates, and populate chunk-local brick-slot tables |
+| `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | Rewritten to mark chunk-local bricks overlapping dense grid-object bounds active without a 3D indirection texture |
+| `draw/engines/sdf/shaders/sdf_bake_comp.glsl` | Switched bake positions and brick AABBs from atlas-relative coordinates to global world brick coordinates. Intersection objects now bypass BVH/AABB culling instead of using infinite bounds |
+| `draw/engines/sdf/shaders/sdf_grid_blend_comp.glsl` | Switched grid blending to the same world brick coordinates as the new chunked bake path |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Removed the per-object instanced path and replaced world marching with chunk-hash lookup + chunk DDA + local brick DDA + voxel DDA |
+| `draw/engines/sdf/sdf_engine.cc` | Replaced the scene-bounded indirection texture pipeline with CPU-built sparse chunk pages, uploaded chunk hash/brick-slot buffers, active-brick SSBO readback for debug grid, fixed-density voxel sizing, and grid/object chunk coverage building |
+| `makesrna/intern/rna_space.cc` | Updated `sdf_resolution` UI text to describe fixed world-space voxel density instead of total atlas resolution |
+
+### Follow-up Fixes
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Restored `sdf_modifiers` SSBO bindings for `sdf_grid_blend` and `sdf_march` because `sdf_lib.glsl` still references the global modifier buffer |
+| `draw/engines/sdf/sdf_engine.cc` | Rebound `modifier_ssbo_` in the grid-blend and march dispatch paths to match the restored shader interfaces |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Renamed local `flat` index variable to `flat_index` to avoid GLSL keyword conflicts on OpenGL drivers |
+| `draw/engines/sdf/shaders/sdf_augment_grids_comp.glsl` | Renamed local `flat` index variable to `flat_index` to avoid GLSL keyword conflicts on OpenGL drivers |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Renamed local `flat` index variable to `flat_index` to avoid GLSL keyword conflicts on OpenGL drivers |
+| `draw/engines/sdf/sdf_engine.cc` | Fixed the CPU chunk hash to match the GLSL chunk hash used by `sdf_march_frag.glsl`. The previous mismatch caused march lookups to miss baked chunks, which manifested as partially rendered SDFs and disappearing pieces when objects moved |
+| `draw/engines/sdf/sdf_engine.cc` | Fixed the 3D voxel debug overlay to read back the full `active_bricks_` SSBO allocation instead of a smaller `active_brick_count_` vector. The old code could overwrite CPU memory whenever capacity exceeded active count, causing freezes/crashes in `tbbmalloc.dll` while moving or deleting SDFs with debug view enabled. Also added a safety cap so the CPU wireframe overlay is skipped for very large brick sets |
+| `blenkernel/intern/sdf.cc` | Fixed SDF group lifetime handling: duplicated SDF datablocks now clear copied `sdf_group` back-pointers and `group_order`, and `sdf_free_data()` no longer manually decrements the group ID user count. This avoids stale copied group links and removes a nonstandard free-time decrement that could desync group users |
+| `blenkernel/intern/sdf_group.cc` | Hardened group membership updates: `BKE_sdf_group_member_add()` now avoids duplicate entries and removes the object from its previous group before re-adding, while `BKE_sdf_group_member_remove()` only decrements group users when the count is actually positive. This fixes `ID user decrement error: SGSDF Group ... 0 <= 0` during delete/remap paths |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added chunk page + chunk BVH SSBO bindings to the march shader so traversal can work directly on occupied chunk nodes instead of only a hash table |
+| `draw/engines/sdf/sdf_engine.cc` | Added CPU-side chunk BVH construction/upload alongside the sparse chunk directory, then refined it to rebuild from the actual active surface-brick list after classify. The march pass no longer traverses every candidate chunk in object AABBs; it now traverses only chunks that contain active surface bricks, making baked rendering respond correctly to voxel density changes while reducing empty-space cost |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Replaced the top-level chunk DDA over the whole world AABB with exact per-chunk local DDA driven by an occupied-chunk BVH. This keeps the exact brick/voxel hit logic but reduces baked-render dependence on voxel density by traversing only active occupied chunks instead of every possible chunk cell along the ray |
+| `draw/engines/sdf/sdf_engine.cc` | Fixed bake-time slowness and incorrect voxel-density response by moving `build_chunk_pages()` until after the final blend-expanded object AABBs are computed, and by generating candidate chunk pages as a surface shell instead of the full object AABB volume. Adding an SDF no longer classifies entire solid interiors just to discover that only the boundary contains active surface bricks |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Added a compact-scene fallback path that uses direct chunk DDA through the chunk hash when the atlas chunk span is small, while keeping active-chunk BVH traversal for large sparse spans. This avoids the "single SDF freezes Blender" case where BVH traversal overhead dominated tiny scenes, while preserving the sparse-scene acceleration path |
+| `draw/engines/sdf/sdf_engine.cc` | Added console diagnostics for each bake frame: resolution, voxel size, object/grid counts, candidate chunk pages, active bricks, chosen march mode (hash vs BVH), chunk grid size, BVH node count, atlas dimensions, and total bake time. Also removed the extra global blend/shell padding from chunk-page generation, since chunk pages are now built after final blend-expanded AABBs and no longer need to be re-expanded by scene-global maxima |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Added and then reverted a conservative hybrid world-march prepass. Even with safety margins, using sampled baked distances for pre-advancement still introduced visible artifacts, so the shader now uses the exact hash/BVH DDA path again for correctness while a non-approximate acceleration is designed |
+| `draw/engines/sdf/sdf_engine.cc` | Fixed another SSBO readback overflow: `rebuild_render_chunk_bvh()` now allocates CPU storage for the full `active_bricks_` allocation before `GPU_storagebuf_read()`. The previous code only allocated `active_brick_count_` entries even though Blender reads the full SSBO allocation, which could corrupt CPU memory and crash in `tbbmalloc.dll` when interacting with SDFs |
+| `draw/engines/sdf/sdf_engine.cc` | Reverted chunk-page shell culling back to conservative full candidate coverage. The shell optimization was not conservative for rotated and blended shapes and could drop chunks that still contained real surface, causing obvious rendering artifacts. Candidate chunk generation now favors correctness again |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Increased exact DDA budgets (`MAX_BRICK_STEPS`, `MAX_VOXEL_STEPS`) to reduce residual misses on long diagonal traversals through chunks/bricks. This trades a bit of worst-case march cost for fewer visible artifacts along exact-path edge cases |
+| `draw/engines/sdf/shaders/sdf_classify_comp.glsl` | Fixed interior-brick classification to be conservative: chunks are now marked `-2` (fully interior) only when the center distance is more negative than the brick half-diagonal. Previously any negative center sample marked the brick interior, which could cause premature hits and severe artifacts on rotated surfaces or near blended boundaries |
+| `draw/engines/sdf/sdf_engine.cc` | Expanded the SDF perf overlay text with chunk count, chunk BVH node count, current march mode, chunk grid resolution, compact atlas dimension/estimated MB, and SSBO memory estimates. This makes it easier to see whether slow frames come from candidate chunk explosion, atlas growth, or march-path choice |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Disabled the compact-scene top-level hash traversal for correctness and now always prefers the occupied-chunk BVH path when chunk BVH data exists. The previous hash path reconstructed chunk coordinates from floating-point atlas bounds for small scenes, which could misaddress chunks and contribute to rendering artifacts |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `chunk_grid_resolution` and `atlas_chunk_min` push constants for the SDF march shader so compact-scene traversal can use exact integer chunk coordinates from the CPU |
+| `draw/engines/sdf/sdf_engine.cc` | Stored `atlas_chunk_min_` from chunk-page generation and passed both exact chunk-grid size and chunk-grid origin to the march shader |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Restored the compact-scene exact hash traversal, but now using integer `atlas_chunk_min` and `chunk_grid_resolution` from the CPU instead of reconstructing chunk origin/grid size from floats. This keeps the fast path for small scenes while avoiding the float-rounding chunk misaddressing that contributed to artifacts |
+| `draw/engines/sdf/shaders/sdf_march_frag.glsl` | Fixed occupied-chunk BVH traversal to keep searching for the nearest hit instead of returning on the first leaf hit. The old behavior caused rendering artifacts with multiple SDFs and rotated SDFs that spanned several chunks because an earlier-tested leaf could hide a closer actual hit in another intersected chunk |
+| `draw/engines/overlay/overlay_sdf.hh` | Remapped select IDs from depsgraph order into the SDF engine's sorted `sdf_objects[]` order before uploading the picking SSBO. This fixes broken SDF picking when the engine reorders objects for grouped CSG evaluation |
+| `editors/space_outliner/tree/tree_display_view_layer.cc` | Restored SDF objects to the normal view-layer and collection hierarchy in the native Outliner instead of filtering them out. SDFs now appear in the standard Blender object hierarchy while the separate SDF Group section remains available |

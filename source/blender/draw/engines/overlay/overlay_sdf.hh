@@ -140,21 +140,35 @@ class Sdfs : Overlay {
     select_info_buf_ = static_cast<gpu::UniformBuf *>(res.info_buf);
     select_output_buf_ = static_cast<gpu::StorageBuf *>(res.select_output_buf);
 
+    /* Remap from depsgraph order to sorted sdf_objects[] order. */
+    Vector<uint32_t> sorted_id_map = select_id_map_;
+    int mapping_count = 0;
+    const int *depsgraph_to_sorted = sdf::sdf_depsgraph_to_sorted_get(&mapping_count);
+    if (depsgraph_to_sorted && mapping_count == int(select_id_map_.size())) {
+      sorted_id_map.fill(0);
+      for (int depsgraph_idx = 0; depsgraph_idx < mapping_count; depsgraph_idx++) {
+        const int sorted_idx = depsgraph_to_sorted[depsgraph_idx];
+        if (sorted_idx >= 0 && sorted_idx < mapping_count) {
+          sorted_id_map[sorted_idx] = select_id_map_[depsgraph_idx];
+        }
+      }
+    }
+
     /* Create/update the select ID map SSBO (reuse when count matches). */
-    const int count = int(select_id_map_.size());
+    const int count = int(sorted_id_map.size());
     if (map_ssbo_ != nullptr && map_ssbo_count_ != count) {
       GPU_storagebuf_free(map_ssbo_);
       map_ssbo_ = nullptr;
     }
     if (map_ssbo_ == nullptr) {
       map_ssbo_ = GPU_storagebuf_create_ex(count * sizeof(uint32_t),
-                                           select_id_map_.data(),
+                                           sorted_id_map.data(),
                                            GPU_USAGE_DYNAMIC,
                                            "sdf_select_id_map");
       map_ssbo_count_ = count;
     }
     else {
-      GPU_storagebuf_update(map_ssbo_, select_id_map_.data());
+      GPU_storagebuf_update(map_ssbo_, sorted_id_map.data());
     }
   }
 

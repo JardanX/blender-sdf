@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "BLI_map.hh"
+#include "BLI_hash.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.h"
@@ -67,12 +68,40 @@
 #include "BLI_time.h"
 
 #include <cmath>
+#include <cstdint>
+#include <climits>
 #include <cstdio>
+#include <functional>
 #include <string>
 
 namespace blender::draw::sdf {
 
 using namespace draw;
+
+struct ChunkCoord {
+  int x;
+  int y;
+  int z;
+
+  bool operator==(const ChunkCoord &other) const
+  {
+    return x == other.x && y == other.y && z == other.z;
+  }
+};
+
+}  // namespace blender::draw::sdf
+
+template<> struct blender::DefaultHash<blender::draw::sdf::ChunkCoord> {
+  uint64_t operator()(const blender::draw::sdf::ChunkCoord &value) const
+  {
+    const uint32_t x = uint32_t(value.x);
+    const uint32_t y = uint32_t(value.y);
+    const uint32_t z = uint32_t(value.z);
+    return uint64_t((x * 73856093u) ^ (y * 19349663u) ^ (z * 83492791u));
+  }
+};
+
+namespace blender::draw::sdf {
 
 /* Global sparse brick atlas pipeline: classify → bake → march. */
 
@@ -85,6 +114,7 @@ static constexpr int PERF_PASS_GRID = 2;
 static constexpr int PERF_PASS_MARCH = 3;
 static constexpr int PERF_PASS_FXAA = 4;
 static constexpr int PERF_FPS_SAMPLES = 8;
+static constexpr int SDF_DEBUG_GRID_MAX_BRICKS = 32768;
 
 static char s_perf_text[SDF_PERF_BUF_SIZE] = "";
 static bool s_perf_active = false;
@@ -111,20 +141,32 @@ class Instance : public DrawEngine {
   Vector<SDFObjectGPU> objects_;
   Vector<SDFGroup *> object_group_ptrs_;
   Vector<Object *> object_ptrs_;
+  Vector<ChunkPageGPU> chunk_pages_;
+  Vector<ChunkHashEntryGPU> chunk_hash_entries_;
+  Vector<BVHNodeGPU> chunk_bvh_nodes_;
 
   float3 scene_min_ = float3(1e30f);
   float3 scene_max_ = float3(-1e30f);
 
-  gpu::Texture *indirection_tx_ = nullptr;
   gpu::Texture *compact_atlas_tx_ = nullptr;
   gpu::StorageBuf *brick_counter_ = nullptr;
   gpu::StorageBuf *active_bricks_ = nullptr;
+  gpu::StorageBuf *chunk_pages_ssbo_ = nullptr;
+  gpu::StorageBuf *chunk_hash_ssbo_ = nullptr;
+  gpu::StorageBuf *chunk_bricks_ssbo_ = nullptr;
+  gpu::StorageBuf *chunk_bvh_ssbo_ = nullptr;
   int active_bricks_capacity_ = 0;
+  int chunk_pages_ssbo_count_ = 0;
+  int chunk_hash_ssbo_count_ = 0;
+  int chunk_bricks_ssbo_count_ = 0;
+  int chunk_bvh_ssbo_count_ = 0;
 
   float3 atlas_origin_ = float3(0.0f);
   float3 atlas_extent_ = float3(1.0f);
   float voxel_size_ = 1.0f / 256.0f;
 
+  int3 atlas_chunk_min_ = int3(0);
+  int chunk_hash_mask_ = -1;
   int3 grid_res_ = int3(32);
   int sdf_resolution_ = 128;
   int active_brick_count_ = 0;
@@ -175,6 +217,8 @@ class Instance : public DrawEngine {
     int blend_type;                  /* Blend function type (eSDFBlendType) */
     int csg_operation;               /* CSG operation (eSDFCSGOperation) */
     float shell_distance;            /* Shell/extrusion thickness */
+    float3 world_min = float3(0.0f);
+    float3 world_max = float3(0.0f);
   };
   Vector<GridObject> grid_objects_;
 
@@ -334,6 +378,8 @@ class Instance : public DrawEngine {
 
   void begin_sync() final
   {
+    sync_sdf_settings();
+
     /* In depth mode, preserve all cached state so depth passes don't
      * invalidate the bake cache with a different object subset. */
     depth_mode_ = draw_ctx_->is_depth();
@@ -614,17 +660,11 @@ class Instance : public DrawEngine {
       world_max = math::max(world_max, world_corner);
     }
 
-    /* Intersection objects must be evaluated everywhere: outside the intersector
-     * the result should be "outside" (large positive), clipping the base geometry.
-     * Expand their AABB to cover the entire scene so they're always BVH candidates. */
-    if (sdf_data->csg_operation == SDF_CSG_INTERSECT) {
-      gpu_obj.bbox_min = float4(-1e10f, -1e10f, -1e10f, 0.0f);
-      gpu_obj.bbox_max = float4(1e10f, 1e10f, 1e10f, 0.0f);
-    }
-    else {
-      gpu_obj.bbox_min = float4(world_min, 0.0f);
-      gpu_obj.bbox_max = float4(world_max, 0.0f);
-    }
+    /* Keep a finite bbox for chunk coverage and BVH bounds.
+     * Intersection objects are handled specially in the shaders so they still
+     * participate even when the BVH mask doesn't overlap their local bounds. */
+    gpu_obj.bbox_min = float4(world_min, 0.0f);
+    gpu_obj.bbox_max = float4(world_max, 0.0f);
 
     /* Rotation-invariant scene extent: circumscribed sphere of local AABB.
      * radius = length(local_extent) is the tightest rotation-invariant bound.
@@ -640,6 +680,271 @@ class Instance : public DrawEngine {
     }
 
     objects_.append(gpu_obj);
+  }
+
+  static int next_power_of_two(int value)
+  {
+    int result = 1;
+    while (result < value) {
+      result <<= 1;
+    }
+    return result;
+  }
+
+  float chunk_world_size() const
+  {
+    return voxel_size_ * float(SDF_BRICK_SIZE * SDF_CHUNK_BRICK_RES);
+  }
+
+  static int floor_div_int(const int value, const int divisor)
+  {
+    if (value >= 0) {
+      return value / divisor;
+    }
+    return -(((-value) + divisor - 1) / divisor);
+  }
+
+  float3 chunk_world_min(const int chunk_idx) const
+  {
+    const int3 coord = int3(chunk_pages_[chunk_idx].coord);
+    return float3(coord) * chunk_world_size();
+  }
+
+  float3 chunk_world_max(const int chunk_idx) const
+  {
+    return chunk_world_min(chunk_idx) + float3(chunk_world_size());
+  }
+
+  void build_chunk_bvh_from_indices(const Span<int> chunk_indices)
+  {
+    chunk_bvh_nodes_.clear();
+    const int n = int(chunk_indices.size());
+    if (n == 0) {
+      return;
+    }
+
+    Vector<int> build_indices(n);
+    Vector<float3> centroids(n);
+    for (int i = 0; i < n; i++) {
+      build_indices[i] = i;
+      centroids[i] = (chunk_world_min(chunk_indices[i]) + chunk_world_max(chunk_indices[i])) * 0.5f;
+    }
+
+    chunk_bvh_nodes_.reserve(2 * n);
+
+    std::function<int(int *, int)> build_recursive = [&](int *build_indices, int count) -> int {
+      float3 node_min = float3(1e30f);
+      float3 node_max = float3(-1e30f);
+      float3 centroid_min = float3(1e30f);
+      float3 centroid_max = float3(-1e30f);
+
+      for (int i = 0; i < count; i++) {
+        const int chunk_idx = chunk_indices[build_indices[i]];
+        node_min = math::min(node_min, chunk_world_min(chunk_idx));
+        node_max = math::max(node_max, chunk_world_max(chunk_idx));
+        centroid_min = math::min(centroid_min, centroids[build_indices[i]]);
+        centroid_max = math::max(centroid_max, centroids[build_indices[i]]);
+      }
+
+      if (count == 1) {
+        int node_idx = int(chunk_bvh_nodes_.size());
+        BVHNodeGPU node = {};
+        node.min_and_left = float4(node_min, 0.0f);
+        node.max_and_right = float4(node_max, 0.0f);
+        reinterpret_cast<int &>(node.min_and_left.w) = -1;
+        reinterpret_cast<int &>(node.max_and_right.w) = chunk_indices[build_indices[0]];
+        chunk_bvh_nodes_.append(node);
+        return node_idx;
+      }
+
+      float3 centroid_extent = centroid_max - centroid_min;
+      int axis = 0;
+      if (centroid_extent.y > centroid_extent.x && centroid_extent.y >= centroid_extent.z) {
+        axis = 1;
+      }
+      else if (centroid_extent.z > centroid_extent.x && centroid_extent.z >= centroid_extent.y) {
+        axis = 2;
+      }
+
+      std::sort(build_indices, build_indices + count, [&](const int a, const int b) {
+        return centroids[a][axis] < centroids[b][axis];
+      });
+
+      int mid = count / 2;
+      if (mid <= 0) {
+        mid = 1;
+      }
+      if (mid >= count) {
+        mid = count - 1;
+      }
+
+      int node_idx = int(chunk_bvh_nodes_.size());
+      chunk_bvh_nodes_.append({});
+
+      const int left = build_recursive(build_indices, mid);
+      const int right = build_recursive(build_indices + mid, count - mid);
+
+      BVHNodeGPU &node = chunk_bvh_nodes_[node_idx];
+      node.min_and_left = float4(node_min, 0.0f);
+      node.max_and_right = float4(node_max, 0.0f);
+      reinterpret_cast<int &>(node.min_and_left.w) = left;
+      reinterpret_cast<int &>(node.max_and_right.w) = right;
+      return node_idx;
+    };
+
+    build_recursive(build_indices.data(), n);
+  }
+
+  void rebuild_render_chunk_bvh()
+  {
+    chunk_bvh_nodes_.clear();
+
+    if (!active_bricks_ || active_brick_count_ <= 0 || active_bricks_capacity_ <= 0) {
+      return;
+    }
+
+    const int safe_active_count = math::min(active_brick_count_, active_bricks_capacity_);
+    if (safe_active_count <= 0) {
+      return;
+    }
+
+    Vector<ActiveBrick> active_data(active_bricks_capacity_);
+    GPU_storagebuf_read(active_bricks_, active_data.data());
+
+    Map<ChunkCoord, int> chunk_lookup;
+    chunk_lookup.reserve(chunk_pages_.size());
+    for (int chunk_idx = 0; chunk_idx < int(chunk_pages_.size()); chunk_idx++) {
+      const int3 coord = int3(chunk_pages_[chunk_idx].coord);
+      chunk_lookup.add_new(ChunkCoord{coord.x, coord.y, coord.z}, chunk_idx);
+    }
+
+    Set<int> unique_chunk_indices;
+    unique_chunk_indices.reserve(safe_active_count);
+    for (int i = 0; i < safe_active_count; i++) {
+      const int3 brick = int3(active_data[i].coord.x, active_data[i].coord.y, active_data[i].coord.z);
+      const ChunkCoord coord = {floor_div_int(brick.x, SDF_CHUNK_BRICK_RES),
+                                floor_div_int(brick.y, SDF_CHUNK_BRICK_RES),
+                                floor_div_int(brick.z, SDF_CHUNK_BRICK_RES)};
+      const int *chunk_idx = chunk_lookup.lookup_ptr(coord);
+      if (chunk_idx != nullptr) {
+        unique_chunk_indices.add(*chunk_idx);
+      }
+    }
+
+    if (unique_chunk_indices.is_empty()) {
+      return;
+    }
+
+    Vector<int> render_chunk_indices;
+    render_chunk_indices.reserve(unique_chunk_indices.size());
+    for (const int chunk_idx : unique_chunk_indices) {
+      render_chunk_indices.append(chunk_idx);
+    }
+
+    build_chunk_bvh_from_indices(render_chunk_indices);
+  }
+
+  void build_chunk_pages()
+  {
+    chunk_pages_.clear();
+    chunk_hash_entries_.clear();
+    chunk_bvh_nodes_.clear();
+    chunk_hash_mask_ = -1;
+
+    if (objects_.is_empty() && grid_objects_.is_empty()) {
+      atlas_origin_ = float3(0.0f);
+      atlas_extent_ = float3(0.0f);
+      atlas_chunk_min_ = int3(0);
+      grid_res_ = int3(0);
+      return;
+    }
+
+    const float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
+    const float chunk_world = float(SDF_CHUNK_BRICK_RES) * brick_world;
+    const float brick_half_diag = brick_world * 0.866025f * surface_margin_;
+    const float pad = brick_half_diag + voxel_size_ * 2.0f;
+
+    Map<ChunkCoord, int> chunk_map;
+
+    auto add_bounds = [&](const float3 &bounds_min, const float3 &bounds_max) {
+      float3 expanded_min = bounds_min - float3(pad);
+      float3 expanded_max = bounds_max + float3(pad);
+
+      int3 chunk_min = int3(math::floor(expanded_min / chunk_world));
+      int3 chunk_max = int3(math::ceil(expanded_max / chunk_world));
+      chunk_max = math::max(chunk_max, chunk_min + int3(1));
+
+      for (int z = chunk_min.z; z < chunk_max.z; z++) {
+        for (int y = chunk_min.y; y < chunk_max.y; y++) {
+          for (int x = chunk_min.x; x < chunk_max.x; x++) {
+            chunk_map.add_overwrite(ChunkCoord{x, y, z}, 0);
+          }
+        }
+      }
+    };
+
+    for (const SDFObjectGPU &obj : objects_) {
+      add_bounds(float3(obj.bbox_min), float3(obj.bbox_max));
+    }
+    for (const GridObject &grid : grid_objects_) {
+      add_bounds(grid.world_min, grid.world_max);
+    }
+
+    if (chunk_map.is_empty()) {
+      atlas_origin_ = float3(0.0f);
+      atlas_extent_ = float3(0.0f);
+      atlas_chunk_min_ = int3(0);
+      grid_res_ = int3(0);
+      return;
+    }
+
+    Vector<ChunkCoord> coords;
+    coords.reserve(chunk_map.size());
+    for (const ChunkCoord &coord : chunk_map.keys()) {
+      coords.append(coord);
+    }
+    std::sort(coords.begin(), coords.end(), [](const ChunkCoord &a, const ChunkCoord &b) {
+      if (a.x != b.x) {
+        return a.x < b.x;
+      }
+      if (a.y != b.y) {
+        return a.y < b.y;
+      }
+      return a.z < b.z;
+    });
+
+    int3 chunk_min = int3(INT_MAX);
+    int3 chunk_max = int3(INT_MIN);
+    chunk_pages_.reserve(coords.size());
+    for (const ChunkCoord &coord : coords) {
+      chunk_pages_.append({int4(coord.x, coord.y, coord.z, 0)});
+      chunk_min = math::min(chunk_min, int3(coord.x, coord.y, coord.z));
+      chunk_max = math::max(chunk_max, int3(coord.x + 1, coord.y + 1, coord.z + 1));
+    }
+
+    atlas_origin_ = float3(chunk_min) * chunk_world;
+    atlas_extent_ = float3(chunk_max - chunk_min) * chunk_world;
+    atlas_chunk_min_ = chunk_min;
+    grid_res_ = chunk_max - chunk_min;
+
+    const int hash_capacity = next_power_of_two(math::max(int(chunk_pages_.size()) * 2, 1));
+    chunk_hash_entries_.resize(hash_capacity);
+    for (ChunkHashEntryGPU &entry : chunk_hash_entries_) {
+      entry.coord = int4(0, 0, 0, -1);
+    }
+
+    chunk_hash_mask_ = hash_capacity - 1;
+    for (int chunk_idx = 0; chunk_idx < int(chunk_pages_.size()); chunk_idx++) {
+      const int3 coord = int3(chunk_pages_[chunk_idx].coord);
+      uint slot = DefaultHash<ChunkCoord>{}(ChunkCoord{coord.x, coord.y, coord.z}) &
+                  uint(chunk_hash_mask_);
+
+      while (chunk_hash_entries_[slot].coord.w >= 0) {
+        slot = (slot + 1) & uint(chunk_hash_mask_);
+      }
+      chunk_hash_entries_[slot].coord = int4(coord, chunk_idx);
+    }
+
   }
 
   void end_sync() final
@@ -693,162 +998,19 @@ class Instance : public DrawEngine {
       }
     }
 
+    for (const GridObject &grid : grid_objects_) {
+      max_blend_ = math::max(max_blend_, grid.blend);
+      if (grid.csg_operation == SDF_CSG_SHELL) {
+        max_shell_distance_ = math::max(max_shell_distance_, fabsf(grid.shell_distance));
+      }
+    }
+
     if (objects_.is_empty() && grid_objects_.is_empty()) {
       needs_bake_ = false;
       return;
     }
 
-    /* Compute atlas parameters. Resolution = voxels per Blender unit (fixed density).
-     * voxel_size is constant for a given resolution setting. The grid adapts to
-     * scene size with per-axis brick counts, snapped to world-aligned chunks.
-     * Active-brick-only dispatch ensures bake cost is proportional to active bricks
-     * (~5% of grid volume), not total grid_res^3. */
-    float3 scene_size = scene_max_ - scene_min_;
-    float margin = math::max(math::reduce_max(scene_size) * 0.5f, 2.0f);
-
-    /* Fixed voxel density: resolution = voxels per BU.
-     * Smooth auto-coarsen: if the padded scene extent would exceed
-     * SDF_MAX_GRID_RES bricks, grow voxel_size by the exact amount needed.
-     * Using max(base, extent-based) gives a perfectly linear ramp —
-     * no snapping at all.  The -2 absorbs worst-case floor/ceil snap
-     * overhead (one extra brick per side), guaranteeing the grid fits. */
-    float base_voxel = 1.0f / float(sdf_resolution_);
-    float3 padded_min = scene_min_ - float3(margin);
-    float3 padded_max = scene_max_ + float3(margin);
-    float max_extent = math::reduce_max(padded_max - padded_min);
-    float min_voxel = max_extent / (float(SDF_BRICK_SIZE) * float(SDF_MAX_GRID_RES - 2));
-    voxel_size_ = math::max(base_voxel, min_voxel);
-
-    /* Surface-area cap: coarsen voxels so estimated active brick count
-     * stays within SDF_MAX_BRICKS. Without this, a 20 BU cube produces
-     * ~95k surface bricks at resolution 128 — the grid-volume cap (128^3)
-     * only limits total bricks, not the surface shell that actually gets baked. */
-    float3 sz = scene_max_ - scene_min_;
-    float est_surface = 2.0f * (sz.x * sz.y + sz.x * sz.z + sz.y * sz.z);
-    if (est_surface > 0.0f) {
-      float chunk = float(SDF_BRICK_SIZE) * voxel_size_;
-      float est_bricks = est_surface / (chunk * chunk);
-      if (est_bricks > float(SDF_MAX_BRICKS)) {
-        float needed_chunk = math::sqrt(est_surface / float(SDF_MAX_BRICKS));
-        voxel_size_ = math::max(voxel_size_, needed_chunk / float(SDF_BRICK_SIZE));
-      }
-    }
-
-    /* Asymmetric deadband: suppress small coarsening (< 25%) to avoid
-     * constant rebakes when the scene fluctuates, but allow refinement
-     * more readily (> 10% improvement passes through) so quality recovers
-     * when the scene shrinks back. */
-    if (prev_voxel_size_ > 0.0f) {
-      float ratio = voxel_size_ / prev_voxel_size_;
-      if (ratio > 0.9f && ratio < 1.25f) {
-        voxel_size_ = prev_voxel_size_;
-      }
-    }
-
-    float chunk_size = float(SDF_BRICK_SIZE) * voxel_size_;
-
-    /* Snap to world-aligned chunk boundaries. */
-    float3 grid_min = math::floor(padded_min / chunk_size) * chunk_size;
-    float3 grid_max = math::ceil(padded_max / chunk_size) * chunk_size;
-
-    /* Hysteresis: prevent frequent grid reallocations when moving objects.
-     * Expands with padding for movement room, contracts when scene is
-     * significantly smaller than the grid (recovers quality). */
-    if (prev_grid_res_.x > 0 && voxel_size_ == prev_voxel_size_) {
-      float3 prev_grid_min = prev_atlas_origin_;
-      float3 prev_grid_max = prev_atlas_origin_ + float3(prev_grid_res_) * chunk_size;
-
-      float padding = math::max(chunk_size * 8.0f,
-                                math::max(math::reduce_max(scene_size) * 0.25f, 1.0f));
-
-      /* Check if scene still fits inside previous grid. */
-      bool fits = (grid_min.x >= prev_grid_min.x && grid_min.y >= prev_grid_min.y &&
-                   grid_min.z >= prev_grid_min.z && grid_max.x <= prev_grid_max.x &&
-                   grid_max.y <= prev_grid_max.y && grid_max.z <= prev_grid_max.z);
-
-      if (fits) {
-        /* Scene fits: check if grid is massively oversized (>3x per axis).
-         * If so, contract to reclaim quality. Otherwise keep stable. */
-        float3 ideal_size = grid_max - grid_min;
-        float3 prev_size = prev_grid_max - prev_grid_min;
-        bool oversized = (ideal_size.x < prev_size.x * 0.5f ||
-                          ideal_size.y < prev_size.y * 0.5f ||
-                          ideal_size.z < prev_size.z * 0.5f);
-
-        if (oversized) {
-          /* Contract: use ideal bounds + padding. */
-          grid_min = math::floor((padded_min - float3(padding)) / chunk_size) * chunk_size;
-          grid_max = math::ceil((padded_max + float3(padding)) / chunk_size) * chunk_size;
-        }
-        else {
-          /* Stable: keep previous grid bounds. */
-          grid_min = prev_grid_min;
-          grid_max = prev_grid_max;
-        }
-      }
-      else {
-        /* Scene doesn't fit: expand with padding. */
-        float3 expanded_min = prev_grid_min;
-        float3 expanded_max = prev_grid_max;
-
-        if (grid_min.x < prev_grid_min.x) expanded_min.x = grid_min.x - padding;
-        if (grid_min.y < prev_grid_min.y) expanded_min.y = grid_min.y - padding;
-        if (grid_min.z < prev_grid_min.z) expanded_min.z = grid_min.z - padding;
-        if (grid_max.x > prev_grid_max.x) expanded_max.x = grid_max.x + padding;
-        if (grid_max.y > prev_grid_max.y) expanded_max.y = grid_max.y + padding;
-        if (grid_max.z > prev_grid_max.z) expanded_max.z = grid_max.z + padding;
-
-        expanded_min = math::round(expanded_min / chunk_size) * chunk_size;
-        expanded_max = math::round(expanded_max / chunk_size) * chunk_size;
-
-        int3 expanded_res = int3(math::round((expanded_max - expanded_min) / chunk_size));
-        if (expanded_res.x <= SDF_MAX_GRID_RES &&
-            expanded_res.y <= SDF_MAX_GRID_RES &&
-            expanded_res.z <= SDF_MAX_GRID_RES)
-        {
-          grid_min = expanded_min;
-          grid_max = expanded_max;
-        }
-      }
-    }
-
-    /* Per-axis grid resolution in bricks. */
-    int3 new_grid_res = int3(math::round((grid_max - grid_min) / chunk_size));
-    new_grid_res = math::clamp(new_grid_res, int3(1), int3(SDF_MAX_GRID_RES));
-
-    atlas_origin_ = grid_min;
-    atlas_extent_ = grid_max - grid_min;
-
-    /* Lazy reallocation: only free textures when the new grid EXCEEDS the
-     * allocated size. Shrinking reuses existing textures (larger than needed
-     * but avoids the lag spike from GPU texture reallocation). */
-    if (new_grid_res != grid_res_) {
-      bool needs_realloc = false;
-      if (indirection_tx_) {
-        if (new_grid_res.x > grid_res_.x || new_grid_res.y > grid_res_.y ||
-            new_grid_res.z > grid_res_.z)
-        {
-          needs_realloc = true;
-        }
-      }
-      else {
-        needs_realloc = true;
-      }
-
-      if (needs_realloc) {
-        if (indirection_tx_) {
-          GPU_texture_free(indirection_tx_);
-          indirection_tx_ = nullptr;
-        }
-        if (compact_atlas_tx_) {
-          GPU_texture_free(compact_atlas_tx_);
-          compact_atlas_tx_ = nullptr;
-        }
-      }
-      grid_res_ = new_grid_res;
-      atlas_capacity_ = 0;
-      prev_active_brick_count_ = 0;
-    }
+    voxel_size_ = 1.0f / float(sdf_resolution_);
 
     /* Build group GPU data from Main's sdf_groups list.
      * Also build maps to resolve per-object group_id and group_order values
@@ -888,6 +1050,10 @@ class Instance : public DrawEngine {
         gpu_grp.object_count = group->totmember;
         gpu_grp.color = float4(group->color[0], group->color[1], group->color[2], group->color[3]);
         groups_gpu_.append(gpu_grp);
+        max_blend_ = math::max(max_blend_, group->blend);
+        if (group->csg_operation == SDF_CSG_SHELL) {
+          max_shell_distance_ = math::max(max_shell_distance_, fabsf(group->shell_distance));
+        }
         group_index_map.add(group, g_idx);
 
         /* Record each member's (group_id, group_order) from the original list order. */
@@ -1102,6 +1268,8 @@ class Instance : public DrawEngine {
       objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
     }
 
+    build_chunk_pages();
+
     /* ---- Incremental rebake detection ----
      * Compute per-object hashes AFTER sorting and AABB expansion so that
      * any change (intrinsic property, group membership, expansion) is captured.
@@ -1136,7 +1304,7 @@ class Instance : public DrawEngine {
 
       /* Incremental is possible when the grid geometry and structure are stable
        * and only a subset of objects changed their intrinsic properties. */
-      if (prev_object_count_ == n &&                     /* Same object count. */
+      if (false && prev_object_count_ == n &&            /* Incremental disabled. */
           prev_atlas_origin_ == atlas_origin_ &&          /* Grid didn't shift. */
           prev_grid_res_ == grid_res_ &&                  /* Grid didn't resize. */
           prev_voxel_size_ == voxel_size_ &&              /* Voxel density unchanged. */
@@ -1145,7 +1313,6 @@ class Instance : public DrawEngine {
           grid_objects_.is_empty() &&                      /* No grid objects this frame. */
           !prev_had_grid_objects_ &&                       /* No grid objects last frame. */
           compact_atlas_tx_ != nullptr &&                  /* Atlas exists. */
-          indirection_tx_ != nullptr &&                    /* Indirection exists. */
           total_allocated_slots_ > 0)                      /* Had a previous bake. */
       {
         /* Find which objects changed. */
@@ -1253,6 +1420,7 @@ class Instance : public DrawEngine {
     }
     hash = hash * 6364136223846793005ULL + prev_group_structure_hash_;
     hash = hash * 6364136223846793005ULL + float_as_uint(surface_margin_);
+    hash = hash * 6364136223846793005ULL + float_as_uint(voxel_size_);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.x);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.y);
     hash = hash * 6364136223846793005ULL + float_as_uint(atlas_origin_.z);
@@ -1301,7 +1469,7 @@ class Instance : public DrawEngine {
 
     /* In depth mode, skip bake — only march with cached atlas for depth. */
     if (depth_mode_) {
-      if (compact_atlas_tx_ == nullptr) {
+      if (compact_atlas_tx_ == nullptr || chunk_pages_.is_empty()) {
         return; /* No atlas yet — nothing to march. */
       }
       sync_shading();
@@ -1336,16 +1504,31 @@ class Instance : public DrawEngine {
     }
     DRW_submission_start();
 
-    if (!objects_.is_empty() && needs_upload_) {
-      upload_objects();
-      if (needs_bvh_rebuild_) {
-        build_bvh();
+    if (needs_upload_) {
+      if (!objects_.is_empty()) {
+        upload_objects();
+        if (needs_bvh_rebuild_) {
+          build_bvh();
+        }
+        else if (!bvh_nodes_.is_empty()) {
+          update_bvh_aabbs();
+        }
+        upload_bvh();
       }
-      else if (!bvh_nodes_.is_empty()) {
-        update_bvh_aabbs();
-      }
-      upload_bvh();
+      upload_chunks();
       needs_upload_ = false;
+    }
+
+    if (chunk_pages_.is_empty()) {
+      DRW_submission_end();
+      s_compact_atlas = compact_atlas_tx_;
+      s_indirection = nullptr;
+      s_voxel_size = voxel_size_;
+      s_atlas_origin = atlas_origin_;
+      s_atlas_extent = atlas_extent_;
+      s_grid_resolution = grid_res_;
+      s_bricks_per_axis = bricks_per_axis_;
+      return;
     }
 
     if (perf_enabled_) {
@@ -1356,6 +1539,7 @@ class Instance : public DrawEngine {
     }
 
     if (needs_bake_) {
+      const double bake_start_time = BLI_time_now_seconds();
       if (grid_batch_) {
         GPU_batch_discard(grid_batch_);
         grid_batch_ = nullptr;
@@ -1365,108 +1549,113 @@ class Instance : public DrawEngine {
         bvh_batch_ = nullptr;
       }
 
-      if (incremental_bake_) {
-        /* Incremental pipeline. */
-        if (perf_enabled_) {
-          perf_begin_pass(PERF_PASS_CLASSIFY);
-        }
-        ensure_indirection();
-        if (!objects_.is_empty()) {
-          dispatch_classify();
-        }
-        if (perf_enabled_) {
-          perf_end_pass(PERF_PASS_CLASSIFY);
-        }
-
-        if (perf_enabled_) {
-          perf_begin_pass(PERF_PASS_BAKE);
-        }
-        if (!objects_.is_empty() && active_brick_count_ > 0) {
-          dispatch_bake();
-        }
-        if (perf_enabled_) {
-          perf_end_pass(PERF_PASS_BAKE);
-        }
-
-        if (perf_enabled_) {
-          perf_begin_pass(PERF_PASS_GRID);
-          perf_end_pass(PERF_PASS_GRID);
-        }
+      if (perf_enabled_) {
+        perf_begin_pass(PERF_PASS_CLASSIFY);
       }
-      else {
-        /* Full pipeline. */
-        if (perf_enabled_) {
-          perf_begin_pass(PERF_PASS_CLASSIFY);
-        }
-        ensure_indirection();
-        if (!objects_.is_empty()) {
-          int32_t clear_val = -1;
-          GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &clear_val);
-          dispatch_classify();
-        }
-        else {
-          clear_indirection();
-        }
-        if (perf_enabled_) {
-          perf_end_pass(PERF_PASS_CLASSIFY);
-        }
 
-        if (!grid_objects_.is_empty()) {
-          augment_indirection_for_grids();
+      int active_capacity = math::max(prev_active_brick_count_ + prev_active_brick_count_ / 2, 64);
+      bool overflow = false;
+      do {
+        ensure_active_brick_capacity(active_capacity);
+        clear_chunk_bricks();
+
+        overflow = false;
+        if (!objects_.is_empty()) {
+          overflow = dispatch_classify();
         }
-        {
-          int estimated = math::max(active_brick_count_, prev_active_brick_count_);
-          int capacity = math::max(estimated + estimated / 2, 64);
-          if (capacity > atlas_capacity_) {
-            atlas_capacity_ = capacity;
-          }
-          else if (atlas_capacity_ > capacity * 2) {
-            atlas_capacity_ = math::max(capacity, atlas_capacity_ / 2);
-          }
+        if (!overflow && !grid_objects_.is_empty()) {
+          overflow = augment_indirection_for_grids();
+        }
+        if (overflow) {
+          active_capacity = math::max(active_capacity * 2, active_brick_count_ * 2);
+        }
+      } while (overflow && active_capacity < int(chunk_pages_.size()) * SDF_CHUNK_BRICK_COUNT);
+
+      total_allocated_slots_ = active_brick_count_;
+      rebuild_render_chunk_bvh();
+      upload_chunks();
+
+      const float chunk_world = voxel_size_ * float(SDF_BRICK_SIZE * SDF_CHUNK_BRICK_RES);
+      const int3 chunk_grid_res = math::max(int3(math::round(atlas_extent_ / chunk_world)), int3(1));
+      const int chunk_grid_span = chunk_grid_res.x + chunk_grid_res.y + chunk_grid_res.z;
+      const bool use_hash_march = (chunk_grid_span <= 96);
+      printf("[SDF] bake classify: res=%d voxel=%.6f objs=%d grids=%d candidate_chunks=%d active_bricks=%d active_capacity=%d march=%s chunk_grid=(%d,%d,%d) chunk_bvh_nodes=%d\n",
+             sdf_resolution_,
+             voxel_size_,
+             int(objects_.size()),
+             int(grid_objects_.size()),
+             int(chunk_pages_.size()),
+             active_brick_count_,
+             active_bricks_capacity_,
+             use_hash_march ? "hash" : "bvh",
+             chunk_grid_res.x,
+             chunk_grid_res.y,
+             chunk_grid_res.z,
+             int(chunk_bvh_nodes_.size()));
+      fflush(stdout);
+
+      if (perf_enabled_) {
+        perf_end_pass(PERF_PASS_CLASSIFY);
+      }
+
+      {
+        int estimated = math::max(active_brick_count_, prev_active_brick_count_);
+        int capacity = math::max(estimated + estimated / 2, 64);
+        if (capacity > atlas_capacity_) {
+          atlas_capacity_ = capacity;
+        }
+        else if (atlas_capacity_ > capacity * 2) {
+          atlas_capacity_ = math::max(capacity, atlas_capacity_ / 2);
+        }
+        int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
+        if (new_bpa < 1) {
+          new_bpa = 1;
+        }
+        bricks_per_axis_ = new_bpa;
+      }
+
+      ensure_compact_atlas();
+      clear_compact_atlas();
+
+      if (perf_enabled_) {
+        perf_begin_pass(PERF_PASS_BAKE);
+      }
+      if (!objects_.is_empty() && active_brick_count_ > 0) {
+        dispatch_bake();
+
+        if (active_brick_count_ > atlas_capacity_) {
+          atlas_capacity_ = active_brick_count_ + active_brick_count_ / 2;
           int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
           if (new_bpa < 1) {
             new_bpa = 1;
           }
           bricks_per_axis_ = new_bpa;
-        }
-
-        ensure_compact_atlas();
-
-        clear_compact_atlas();
-
-        if (perf_enabled_) {
-          perf_begin_pass(PERF_PASS_BAKE);
-        }
-        if (!objects_.is_empty()) {
+          ensure_compact_atlas();
+          clear_compact_atlas();
           dispatch_bake();
-
-          if (active_brick_count_ > atlas_capacity_) {
-            atlas_capacity_ = active_brick_count_ + active_brick_count_ / 2;
-            int new_bpa = int(std::ceil(std::cbrt(double(atlas_capacity_))));
-            if (new_bpa < 1) {
-              new_bpa = 1;
-            }
-            bricks_per_axis_ = new_bpa;
-            ensure_compact_atlas();
-            clear_compact_atlas();
-            dispatch_bake();
-          }
-          prev_active_brick_count_ = active_brick_count_;
-        }
-        if (perf_enabled_) {
-          perf_end_pass(PERF_PASS_BAKE);
-        }
-
-        if (perf_enabled_) {
-          perf_begin_pass(PERF_PASS_GRID);
-        }
-        if (!grid_objects_.is_empty()) {
-          dispatch_grid_blends();
-        }
-        if (perf_enabled_) {
-          perf_end_pass(PERF_PASS_GRID);
         }
       }
+      if (perf_enabled_) {
+        perf_end_pass(PERF_PASS_BAKE);
+      }
+
+      if (perf_enabled_) {
+        perf_begin_pass(PERF_PASS_GRID);
+      }
+      if (!grid_objects_.is_empty() && active_brick_count_ > 0) {
+        dispatch_grid_blends();
+      }
+      if (perf_enabled_) {
+        perf_end_pass(PERF_PASS_GRID);
+      }
+
+      prev_active_brick_count_ = active_brick_count_;
+      printf("[SDF] bake done: atlas_bpa=%d atlas_slots=%d compact_dim=%d total_ms=%.2f\n",
+             bricks_per_axis_,
+             atlas_capacity_,
+             compact_atlas_tx_ ? GPU_texture_width(compact_atlas_tx_) : 0,
+             float((BLI_time_now_seconds() - bake_start_time) * 1000.0));
+      fflush(stdout);
     }
 
     if (perf_enabled_) {
@@ -1485,15 +1674,13 @@ class Instance : public DrawEngine {
       perf_end_pass(PERF_PASS_FXAA);
     }
 
-    if (!draw_ctx_->v3d || draw_ctx_->v3d->shading.type != OB_RENDER) {
-      draw_debug_grid();
-      draw_debug_bvh();
-    }
+    draw_debug_grid();
+    draw_debug_bvh();
 
     DRW_submission_end();
 
     s_compact_atlas = compact_atlas_tx_;
-    s_indirection = indirection_tx_;
+    s_indirection = nullptr;
     s_voxel_size = voxel_size_;
     s_atlas_origin = atlas_origin_;
     s_atlas_extent = atlas_extent_;
@@ -1788,20 +1975,120 @@ class Instance : public DrawEngine {
     shaders_compiled_ = true;
   }
 
-  void ensure_indirection()
+  void upload_chunks()
   {
-    if (indirection_tx_ != nullptr) {
+    const int page_count = math::max(int(chunk_pages_.size()), 1);
+    const size_t page_buf_size = page_count * sizeof(ChunkPageGPU);
+
+    ChunkPageGPU dummy_page = {};
+    const void *page_data = chunk_pages_.is_empty() ? static_cast<const void *>(&dummy_page) :
+                                                      static_cast<const void *>(chunk_pages_.data());
+
+    if (chunk_pages_ssbo_ != nullptr && chunk_pages_ssbo_count_ != page_count) {
+      GPU_storagebuf_free(chunk_pages_ssbo_);
+      chunk_pages_ssbo_ = nullptr;
+    }
+    if (chunk_pages_ssbo_ == nullptr) {
+      chunk_pages_ssbo_ = GPU_storagebuf_create_ex(
+          page_buf_size, page_data, GPU_USAGE_DYNAMIC, "sdf_chunk_pages_ssbo");
+      chunk_pages_ssbo_count_ = page_count;
+    }
+    else {
+      GPU_storagebuf_update(chunk_pages_ssbo_, page_data);
+    }
+
+    const int hash_count = math::max(int(chunk_hash_entries_.size()), 1);
+    const size_t hash_buf_size = hash_count * sizeof(ChunkHashEntryGPU);
+
+    ChunkHashEntryGPU dummy_hash = {};
+    dummy_hash.coord = int4(0, 0, 0, -1);
+    const void *hash_data = chunk_hash_entries_.is_empty() ? static_cast<const void *>(&dummy_hash) :
+                                                             static_cast<const void *>(chunk_hash_entries_.data());
+
+    if (chunk_hash_ssbo_ != nullptr && chunk_hash_ssbo_count_ != hash_count) {
+      GPU_storagebuf_free(chunk_hash_ssbo_);
+      chunk_hash_ssbo_ = nullptr;
+    }
+    if (chunk_hash_ssbo_ == nullptr) {
+      chunk_hash_ssbo_ = GPU_storagebuf_create_ex(
+          hash_buf_size, hash_data, GPU_USAGE_DYNAMIC, "sdf_chunk_hash_ssbo");
+      chunk_hash_ssbo_count_ = hash_count;
+    }
+    else {
+      GPU_storagebuf_update(chunk_hash_ssbo_, hash_data);
+    }
+
+    const int chunk_bvh_count = math::max(int(chunk_bvh_nodes_.size()), 1);
+    const size_t chunk_bvh_buf_size = chunk_bvh_count * sizeof(BVHNodeGPU);
+
+    BVHNodeGPU dummy_bvh = {};
+    reinterpret_cast<int &>(dummy_bvh.min_and_left.w) = -1;
+    reinterpret_cast<int &>(dummy_bvh.max_and_right.w) = 0;
+    const void *chunk_bvh_data = chunk_bvh_nodes_.is_empty() ? static_cast<const void *>(&dummy_bvh) :
+                                                             static_cast<const void *>(chunk_bvh_nodes_.data());
+
+    if (chunk_bvh_ssbo_ != nullptr && chunk_bvh_ssbo_count_ != chunk_bvh_count) {
+      GPU_storagebuf_free(chunk_bvh_ssbo_);
+      chunk_bvh_ssbo_ = nullptr;
+    }
+    if (chunk_bvh_ssbo_ == nullptr) {
+      chunk_bvh_ssbo_ = GPU_storagebuf_create_ex(
+          chunk_bvh_buf_size, chunk_bvh_data, GPU_USAGE_DYNAMIC, "sdf_chunk_bvh_ssbo");
+      chunk_bvh_ssbo_count_ = chunk_bvh_count;
+    }
+    else {
+      GPU_storagebuf_update(chunk_bvh_ssbo_, chunk_bvh_data);
+    }
+
+    const int brick_slot_count = math::max(int(chunk_pages_.size()) * SDF_CHUNK_BRICK_COUNT, 1);
+    if (chunk_bricks_ssbo_ != nullptr && chunk_bricks_ssbo_count_ != brick_slot_count) {
+      GPU_storagebuf_free(chunk_bricks_ssbo_);
+      chunk_bricks_ssbo_ = nullptr;
+    }
+    if (chunk_bricks_ssbo_ == nullptr) {
+      chunk_bricks_ssbo_ = GPU_storagebuf_create_ex(
+          brick_slot_count * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "sdf_chunk_bricks_ssbo");
+      chunk_bricks_ssbo_count_ = brick_slot_count;
+    }
+  }
+
+  void ensure_active_brick_capacity(const int capacity)
+  {
+    const int clamped_capacity = math::max(capacity, 1);
+    if (active_bricks_ != nullptr && active_bricks_capacity_ >= clamped_capacity) {
       return;
     }
-    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
-    indirection_tx_ = GPU_texture_create_3d("sdf_indirection",
-                                            grid_res_.x,
-                                            grid_res_.y,
-                                            grid_res_.z,
-                                            1,
-                                            gpu::TextureFormat::SINT_32,
-                                            usage,
-                                            nullptr);
+    if (active_bricks_) {
+      GPU_storagebuf_free(active_bricks_);
+    }
+    active_bricks_ = GPU_storagebuf_create_ex(
+        clamped_capacity * sizeof(ActiveBrick), nullptr, GPU_USAGE_DYNAMIC, "sdf_active_bricks");
+    active_bricks_capacity_ = clamped_capacity;
+  }
+
+  void reset_brick_counter()
+  {
+    BrickCounter counter = {};
+    counter.count = 0;
+    counter.next_slot = 0;
+
+    if (brick_counter_ == nullptr) {
+      brick_counter_ = GPU_storagebuf_create_ex(
+          sizeof(BrickCounter), &counter, GPU_USAGE_DYNAMIC, "sdf_brick_counter");
+    }
+    else {
+      GPU_storagebuf_update(brick_counter_, &counter);
+    }
+  }
+
+  void clear_chunk_bricks()
+  {
+    reset_brick_counter();
+    if (chunk_bricks_ssbo_) {
+      GPU_storagebuf_clear(chunk_bricks_ssbo_, 0xFFFFFFFFu);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+    }
+    active_brick_count_ = 0;
   }
 
   void ensure_compact_atlas()
@@ -2168,49 +2455,8 @@ class Instance : public DrawEngine {
     }
   }
 
-  void dispatch_classify()
+  bool dispatch_classify()
   {
-    const bool incremental = incremental_bake_;
-
-    BrickCounter init_counter = {};
-    init_counter.count = 0;
-    if (incremental) {
-      init_counter.next_slot = uint(total_allocated_slots_);
-    }
-    else {
-      init_counter.next_slot = 0;
-    }
-    init_counter._pad1 = 0;
-    init_counter._pad2 = 0;
-
-    if (brick_counter_ == nullptr) {
-      brick_counter_ = GPU_storagebuf_create_ex(
-          sizeof(BrickCounter), &init_counter, GPU_USAGE_DYNAMIC, "sdf_brick_counter");
-    }
-    else {
-      GPU_storagebuf_update(brick_counter_, &init_counter);
-    }
-
-    int max_bricks;
-    if (incremental) {
-      int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
-      max_bricks = math::max(dirty_size.x * dirty_size.y * dirty_size.z, 1);
-    }
-    else {
-      max_bricks = grid_res_.x * grid_res_.y * grid_res_.z;
-      if (max_bricks < 1) {
-        max_bricks = 1;
-      }
-    }
-    if (active_bricks_ == nullptr || active_bricks_capacity_ < max_bricks) {
-      if (active_bricks_) {
-        GPU_storagebuf_free(active_bricks_);
-      }
-      active_bricks_ = GPU_storagebuf_create_ex(
-          max_bricks * sizeof(ActiveBrick), nullptr, GPU_USAGE_DYNAMIC, "sdf_active_bricks");
-      active_bricks_capacity_ = max_bricks;
-    }
-
     GPU_shader_bind(classify_sh_);
 
     int obj_slot = GPU_shader_get_ssbo_binding(classify_sh_, "objects");
@@ -2237,17 +2483,18 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(group_ssbo_, grp_slot);
     }
 
-    if (dirty_flags_ssbo_) {
-      int df_slot = GPU_shader_get_ssbo_binding(classify_sh_, "dirty_flags");
-      GPU_storagebuf_bind(dirty_flags_ssbo_, df_slot);
+    if (chunk_pages_ssbo_) {
+      int chunk_slot = GPU_shader_get_ssbo_binding(classify_sh_, "chunk_pages");
+      GPU_storagebuf_bind(chunk_pages_ssbo_, chunk_slot);
     }
 
-    GPU_texture_image_bind(indirection_tx_, 0);
+    if (chunk_bricks_ssbo_) {
+      int chunk_bricks_slot = GPU_shader_get_ssbo_binding(classify_sh_, "chunk_bricks");
+      GPU_storagebuf_bind(chunk_bricks_ssbo_, chunk_bricks_slot);
+    }
 
     GPU_shader_uniform_1i(classify_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(classify_sh_, "voxel_size", voxel_size_);
-    GPU_shader_uniform_3fv(classify_sh_, "atlas_origin", atlas_origin_);
-    GPU_shader_uniform_3iv(classify_sh_, "grid_resolution", grid_res_);
 
     float brick_half_diag = float(SDF_BRICK_SIZE) * voxel_size_ * 0.866025f; /* sqrt(3)/2 */
     brick_half_diag *= surface_margin_;
@@ -2255,44 +2502,20 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(classify_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(classify_sh_, "group_count", int(groups_gpu_.size()));
 
-    GPU_shader_uniform_1i(classify_sh_, "incremental_mode", incremental ? 1 : 0);
-    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_min", dirty_brick_min_);
-    GPU_shader_uniform_3iv(classify_sh_, "dirty_brick_max", dirty_brick_max_);
-    GPU_shader_uniform_1i(
-        classify_sh_, "has_dirty_flags", (incremental && !dirty_flags_.is_empty()) ? 1 : 0);
-
-    if (incremental) {
-      int3 dirty_size = dirty_brick_max_ - dirty_brick_min_;
-      if (dirty_size.x > 0 && dirty_size.y > 0 && dirty_size.z > 0) {
-        GPU_compute_dispatch(classify_sh_,
-                             divide_ceil_u(dirty_size.x, 4),
-                             divide_ceil_u(dirty_size.y, 4),
-                             divide_ceil_u(dirty_size.z, 4));
-      }
-    }
-    else {
-      GPU_compute_dispatch(classify_sh_,
-                           divide_ceil_u(grid_res_.x, 4),
-                           divide_ceil_u(grid_res_.y, 4),
-                           divide_ceil_u(grid_res_.z, 4));
-    }
+    uint dispatch_x = uint(math::min(int(chunk_pages_.size()), 65535));
+    uint dispatch_y = uint(divide_ceil_u(int(chunk_pages_.size()), 65535));
+    GPU_shader_uniform_1i(classify_sh_, "chunk_count", int(chunk_pages_.size()));
+    GPU_shader_uniform_1i(classify_sh_, "dispatch_width", int(dispatch_x));
+    GPU_shader_uniform_1i(classify_sh_, "max_active_bricks", active_bricks_capacity_);
+    GPU_compute_dispatch(classify_sh_, dispatch_x, dispatch_y, 1);
 
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_STORAGE);
-    GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    {
-      BrickCounter readback = {};
-      GPU_storagebuf_read(brick_counter_, &readback);
-      active_brick_count_ = int(readback.count);
-
-      if (incremental) {
-        total_allocated_slots_ = int(readback.next_slot);
-      }
-      else {
-        total_allocated_slots_ = active_brick_count_;
-      }
-    }
+    BrickCounter readback = {};
+    GPU_storagebuf_read(brick_counter_, &readback);
+    active_brick_count_ = int(readback.count);
+    return readback.next_slot != 0;
   }
 
   void dispatch_bake()
@@ -2330,23 +2553,15 @@ class Instance : public DrawEngine {
       GPU_storagebuf_bind(group_ssbo_, grp_slot);
     }
 
-    if (dirty_flags_ssbo_) {
-      int df_slot = GPU_shader_get_ssbo_binding(bake_sh_, "dirty_flags");
-      GPU_storagebuf_bind(dirty_flags_ssbo_, df_slot);
-    }
-
     /* Bind atlas images. */
     GPU_texture_image_bind(compact_atlas_tx_, 0);
 
     /* Push constants. */
     GPU_shader_uniform_1i(bake_sh_, "object_count", int(objects_.size()));
     GPU_shader_uniform_1f(bake_sh_, "voxel_size", voxel_size_);
-    GPU_shader_uniform_3fv(bake_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_1i(bake_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1i(bake_sh_, "bvh_node_count", int(bvh_nodes_.size()));
     GPU_shader_uniform_1i(bake_sh_, "group_count", int(groups_gpu_.size()));
-    GPU_shader_uniform_1i(
-        bake_sh_, "has_dirty_flags", (incremental_bake_ && !dirty_flags_.is_empty()) ? 1 : 0);
 
     /* Over-dispatch: one workgroup per capacity slot. Surplus workgroups
      * early-exit after reading brick_counter.count from SSBO. */
@@ -2393,7 +2608,7 @@ class Instance : public DrawEngine {
     bool scissor_set = false;
     {
       float3 aabb_min = atlas_origin_;
-      float3 aabb_max = atlas_origin_ + float3(grid_res_ * SDF_BRICK_SIZE) * voxel_size_;
+      float3 aabb_max = atlas_origin_ + atlas_extent_;
 
       View &scissor_view = View::default_get();
       float4x4 vp_mat = scissor_view.winmat() * scissor_view.viewmat();
@@ -2444,43 +2659,39 @@ class Instance : public DrawEngine {
       GPU_texture_bind(compact_atlas_tx_, atlas_slot);
     }
 
-    /* Bind indirection as sampler. */
-    int indir_slot = GPU_shader_get_sampler_binding(march_sh_, "indirection_tx");
-    if (indirection_tx_) {
-      GPU_texture_bind(indirection_tx_, indir_slot);
+    if (chunk_hash_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "chunk_hash");
+      GPU_storagebuf_bind(chunk_hash_ssbo_, slot);
     }
-
-    if (bvh_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(march_sh_, "bvh_nodes");
-      GPU_storagebuf_bind(bvh_ssbo_, slot);
+    if (chunk_bricks_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "chunk_bricks");
+      GPU_storagebuf_bind(chunk_bricks_ssbo_, slot);
+    }
+    if (chunk_pages_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "chunk_pages");
+      GPU_storagebuf_bind(chunk_pages_ssbo_, slot);
+    }
+    if (chunk_bvh_ssbo_) {
+      int slot = GPU_shader_get_ssbo_binding(march_sh_, "chunk_bvh_nodes");
+      GPU_storagebuf_bind(chunk_bvh_ssbo_, slot);
     }
     if (modifier_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "sdf_modifiers");
       GPU_storagebuf_bind(modifier_ssbo_, slot);
-    }
-    if (object_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(march_sh_, "objects");
-      GPU_storagebuf_bind(object_ssbo_, slot);
-    }
-    if (group_ssbo_) {
-      int slot = GPU_shader_get_ssbo_binding(march_sh_, "groups");
-      GPU_storagebuf_bind(group_ssbo_, slot);
     }
 
     /* Push constants. */
     GPU_shader_uniform_1f(march_sh_, "voxel_size", voxel_size_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_3fv(march_sh_, "atlas_extent", atlas_extent_);
-    GPU_shader_uniform_3iv(march_sh_, "grid_resolution", grid_res_);
+    GPU_shader_uniform_3iv(march_sh_, "chunk_grid_resolution", grid_res_);
+    GPU_shader_uniform_3iv(march_sh_, "atlas_chunk_min", atlas_chunk_min_);
     GPU_shader_uniform_1i(march_sh_, "bricks_per_axis", bricks_per_axis_);
+    GPU_shader_uniform_1i(march_sh_, "chunk_hash_mask", chunk_hash_mask_);
+    GPU_shader_uniform_1i(march_sh_, "chunk_bvh_node_count", int(chunk_bvh_nodes_.size()));
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
-    GPU_shader_uniform_1i(march_sh_, "use_instanced", 0);
-    GPU_shader_uniform_1i(march_sh_, "instance_count", 0);
-    GPU_shader_uniform_1i(march_sh_, "bvh_node_count", int(bvh_nodes_.size()));
-    GPU_shader_uniform_1i(march_sh_, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1i(march_sh_, "group_count", int(groups_gpu_.size()));
 
     GPU_shader_uniform_4fv(march_sh_, "studio_light0", studio_light_dir_[0]);
     GPU_shader_uniform_4fv(march_sh_, "studio_light1", studio_light_dir_[1]);
@@ -2524,9 +2735,6 @@ class Instance : public DrawEngine {
 
     if (compact_atlas_tx_) {
       GPU_texture_unbind(compact_atlas_tx_);
-    }
-    if (indirection_tx_) {
-      GPU_texture_unbind(indirection_tx_);
     }
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
@@ -2656,76 +2864,55 @@ class Instance : public DrawEngine {
 
   void rebuild_grid_batch_active()
   {
-    if (!indirection_tx_) {
+    if (!active_bricks_ || active_brick_count_ <= 0 || active_bricks_capacity_ <= 0) {
       return;
     }
 
-    int32_t *data = static_cast<int32_t *>(GPU_texture_read(indirection_tx_, GPU_DATA_INT, 0));
-    if (!data) {
+    const int safe_active_count = math::min(active_brick_count_, active_bricks_capacity_);
+    if (safe_active_count <= 0) {
       return;
     }
 
-    int3 n = grid_res_;
+    Vector<ActiveBrick> data(active_bricks_capacity_);
+    GPU_storagebuf_read(active_bricks_, data.data());
+
     float brick_world = float(SDF_BRICK_SIZE) * voxel_size_;
 
-    int total = n.x * n.y * n.z;
-    int active_count = 0;
-    for (int i = 0; i < total; i++) {
-      if (data[i] >= 0) {
-        active_count++;
-      }
-    }
-
-    if (active_count == 0) {
-      MEM_freeN(data);
-      return;
-    }
-
-    Vector<float3> positions(active_count * 24);
+    Vector<float3> positions(safe_active_count * 24);
     int vi = 0;
 
-    for (int z = 0; z < n.z; z++) {
-      for (int y = 0; y < n.y; y++) {
-        for (int x = 0; x < n.x; x++) {
-          int idx = x + y * n.x + z * n.x * n.y;
-          if (data[idx] < 0) {
-            continue;
-          }
+    for (int i = 0; i < safe_active_count; i++) {
+      int3 brick = int3(data[i].coord.x, data[i].coord.y, data[i].coord.z);
+      float3 lo = float3(brick * SDF_BRICK_SIZE) * voxel_size_;
+      float3 hi = lo + float3(brick_world);
 
-          float3 lo = atlas_origin_ + float3(float(x), float(y), float(z)) * brick_world;
-          float3 hi = lo + float3(brick_world);
+      positions[vi++] = float3(lo.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, hi.y, lo.z);
+      positions[vi++] = float3(hi.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, lo.y, lo.z);
 
-          positions[vi++] = float3(lo.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, hi.y, lo.z);
-          positions[vi++] = float3(hi.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, lo.y, lo.z);
+      positions[vi++] = float3(lo.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, hi.y, hi.z);
+      positions[vi++] = float3(hi.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, lo.y, hi.z);
 
-          positions[vi++] = float3(lo.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, hi.y, hi.z);
-          positions[vi++] = float3(hi.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, lo.y, hi.z);
-
-          positions[vi++] = float3(lo.x, lo.y, lo.z);
-          positions[vi++] = float3(lo.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, lo.y, lo.z);
-          positions[vi++] = float3(hi.x, lo.y, hi.z);
-          positions[vi++] = float3(hi.x, hi.y, lo.z);
-          positions[vi++] = float3(hi.x, hi.y, hi.z);
-          positions[vi++] = float3(lo.x, hi.y, lo.z);
-          positions[vi++] = float3(lo.x, hi.y, hi.z);
-        }
-      }
+      positions[vi++] = float3(lo.x, lo.y, lo.z);
+      positions[vi++] = float3(lo.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, lo.y, lo.z);
+      positions[vi++] = float3(hi.x, lo.y, hi.z);
+      positions[vi++] = float3(hi.x, hi.y, lo.z);
+      positions[vi++] = float3(hi.x, hi.y, hi.z);
+      positions[vi++] = float3(lo.x, hi.y, lo.z);
+      positions[vi++] = float3(lo.x, hi.y, hi.z);
     }
-
-    MEM_freeN(data);
     grid_batch_ = create_line_batch(positions.data(), vi);
   }
 
@@ -2975,6 +3162,11 @@ class Instance : public DrawEngine {
       return;
     }
 
+    if (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER) {
+      DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
+      GPU_framebuffer_bind(dfbl->default_fb);
+    }
+
     /* Use builtin 3D uniform color shader. */
     gpu::Shader *shader = GPU_shader_get_builtin_shader(GPU_SHADER_3D_UNIFORM_COLOR);
     GPU_shader_bind(shader);
@@ -3024,6 +3216,11 @@ class Instance : public DrawEngine {
     }
     if (bvh_batch_ == nullptr) {
       return;
+    }
+
+    if (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER) {
+      DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
+      GPU_framebuffer_bind(dfbl->default_fb);
     }
 
     /* Use builtin flat-color shader (per-vertex color). */
@@ -3180,6 +3377,17 @@ class Instance : public DrawEngine {
       grid_obj.shell_distance = sdf_data->shell_distance;
     }
 
+    float3 world_min = float3(1e30f);
+    float3 world_max = float3(-1e30f);
+    for (int c = 0; c < 8; c++) {
+      float3 tc = float3((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
+      float3 wc = math::transform_point(tex_to_world, tc);
+      world_min = math::min(world_min, wc);
+      world_max = math::max(world_max, wc);
+    }
+    grid_obj.world_min = world_min;
+    grid_obj.world_max = world_max;
+
     grid_objects_.append(grid_obj);
   }
 
@@ -3193,24 +3401,13 @@ class Instance : public DrawEngine {
     grid_objects_.clear();
   }
 
-  void clear_indirection()
+  bool augment_indirection_for_grids()
   {
-    /* Initialize all bricks as outside (-1).
-     * Use GPU_texture_clear instead of allocating a CPU-side vector
-     * (which could be up to 8MB at grid_res 128^3). */
-    int neg_one = -1;
-    GPU_texture_clear(indirection_tx_, GPU_DATA_INT, &neg_one);
-    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    active_brick_count_ = 0;
-  }
-
-  void augment_indirection_for_grids()
-  {
-    if (augment_grids_sh_ == nullptr || indirection_tx_ == nullptr || active_bricks_ == nullptr) {
-      return;
+    if (augment_grids_sh_ == nullptr || active_bricks_ == nullptr || chunk_pages_.is_empty() ||
+        chunk_pages_ssbo_ == nullptr || chunk_bricks_ssbo_ == nullptr)
+    {
+      return false;
     }
-
-    float brick_world = voxel_size_ * float(SDF_BRICK_SIZE);
 
     GPU_shader_bind(augment_grids_sh_);
 
@@ -3220,51 +3417,34 @@ class Instance : public DrawEngine {
     int ab_slot = GPU_shader_get_ssbo_binding(augment_grids_sh_, "active_bricks");
     GPU_storagebuf_bind(active_bricks_, ab_slot);
 
-    GPU_texture_image_bind(indirection_tx_, 0);
+    int chunk_slot = GPU_shader_get_ssbo_binding(augment_grids_sh_, "chunk_pages");
+    GPU_storagebuf_bind(chunk_pages_ssbo_, chunk_slot);
 
-    GPU_shader_uniform_3iv(augment_grids_sh_, "grid_resolution", grid_res_);
+    int chunk_bricks_slot = GPU_shader_get_ssbo_binding(augment_grids_sh_, "chunk_bricks");
+    GPU_storagebuf_bind(chunk_bricks_ssbo_, chunk_bricks_slot);
+
+    GPU_shader_uniform_1f(augment_grids_sh_, "voxel_size", voxel_size_);
+    GPU_shader_uniform_1i(augment_grids_sh_, "chunk_count", int(chunk_pages_.size()));
+
+    uint dispatch_x = uint(math::min(int(chunk_pages_.size()), 65535));
+    uint dispatch_y = uint(divide_ceil_u(int(chunk_pages_.size()), 65535));
+    GPU_shader_uniform_1i(augment_grids_sh_, "dispatch_width", int(dispatch_x));
+    GPU_shader_uniform_1i(augment_grids_sh_, "max_active_bricks", active_bricks_capacity_);
 
     for (const GridObject &grid : grid_objects_) {
-      float4x4 tex_to_world = math::invert(grid.world_to_texture);
-      float3 gmin = float3(1e30f);
-      float3 gmax = float3(-1e30f);
-      for (int c = 0; c < 8; c++) {
-        float3 tc = float3(
-            (c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f, (c & 4) ? 1.0f : 0.0f);
-        float3 wc = math::transform_point(tex_to_world, tc);
-        gmin = math::min(gmin, wc);
-        gmax = math::max(gmax, wc);
-      }
+      GPU_shader_uniform_3fv(augment_grids_sh_, "grid_world_min", grid.world_min);
+      GPU_shader_uniform_3fv(augment_grids_sh_, "grid_world_max", grid.world_max);
+      GPU_compute_dispatch(augment_grids_sh_, dispatch_x, dispatch_y, 1);
 
-      int3 bmin = int3(math::floor((gmin - atlas_origin_) / brick_world));
-      int3 bmax = int3(math::ceil((gmax - atlas_origin_) / brick_world));
-      bmin = math::max(bmin, int3(0));
-      bmax = math::min(bmax, grid_res_);
-
-      int3 range = bmax - bmin;
-      if (range.x <= 0 || range.y <= 0 || range.z <= 0) {
-        continue;
-      }
-
-      GPU_shader_uniform_3iv(augment_grids_sh_, "grid_brick_min", bmin);
-      GPU_shader_uniform_3iv(augment_grids_sh_, "grid_brick_max", bmax);
-
-      GPU_compute_dispatch(augment_grids_sh_,
-                           divide_ceil_u(range.x, 4),
-                           divide_ceil_u(range.y, 4),
-                           divide_ceil_u(range.z, 4));
-
-      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_SHADER_STORAGE);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     }
 
-    GPU_texture_image_unbind(indirection_tx_);
     GPU_shader_unbind();
 
-    /* Read back only the 16-byte counter to get updated active_brick_count_. */
     BrickCounter readback = {};
     GPU_storagebuf_read(brick_counter_, &readback);
     active_brick_count_ = int(readback.count);
-    total_allocated_slots_ = active_brick_count_;
+    return readback.next_slot != 0;
   }
 
   void clear_compact_atlas()
@@ -3304,7 +3484,6 @@ class Instance : public DrawEngine {
 
     /* Invariant push constants. */
     GPU_shader_uniform_1f(grid_blend_sh_, "voxel_size", voxel_size_);
-    GPU_shader_uniform_3fv(grid_blend_sh_, "atlas_origin", atlas_origin_);
     GPU_shader_uniform_1i(grid_blend_sh_, "bricks_per_axis", bricks_per_axis_);
     GPU_shader_uniform_1i(grid_blend_sh_, "active_brick_count", active_brick_count_);
 
@@ -3419,6 +3598,27 @@ class Instance : public DrawEngine {
     float brick_pct = (total_bricks > 0) ?
                           100.0f * float(active_brick_count_) / float(total_bricks) :
                           0.0f;
+    const float chunk_world = voxel_size_ * float(SDF_BRICK_SIZE * SDF_CHUNK_BRICK_RES);
+    const int3 chunk_grid_res = math::max(int3(math::round(atlas_extent_ / chunk_world)), int3(1));
+    const int chunk_grid_span = chunk_grid_res.x + chunk_grid_res.y + chunk_grid_res.z;
+    const char *march_mode = (chunk_grid_span <= 96) ? "hash" : "bvh";
+    const int atlas_dim = compact_atlas_tx_ ? GPU_texture_width(compact_atlas_tx_) : 0;
+    const double atlas_mb = (atlas_dim > 0) ?
+                                (double(atlas_dim) * double(atlas_dim) * double(atlas_dim) * 8.0) /
+                                    (1024.0 * 1024.0) :
+                                0.0;
+    const double chunk_bricks_mb = (chunk_bricks_ssbo_count_ > 0) ?
+                                       (double(chunk_bricks_ssbo_count_) * sizeof(int)) /
+                                           (1024.0 * 1024.0) :
+                                       0.0;
+    const double active_bricks_mb = (active_bricks_capacity_ > 0) ?
+                                        (double(active_bricks_capacity_) * sizeof(ActiveBrick)) /
+                                            (1024.0 * 1024.0) :
+                                        0.0;
+    const double chunk_bvh_mb = (chunk_bvh_ssbo_count_ > 0) ?
+                                    (double(chunk_bvh_ssbo_count_) * sizeof(BVHNodeGPU)) /
+                                        (1024.0 * 1024.0) :
+                                    0.0;
 
     /* Display logic:
      * - perf_prev_baked_: previous frame's readback had bake data → show live timing.
@@ -3452,7 +3652,11 @@ class Instance : public DrawEngine {
                   "  grid blend: %s\n"
                   "  march: %.2f ms\n"
                   "  fxaa: %.2f ms\n"
-                  "  bricks: %d / %d (%.1f%%)",
+                  "  bricks: %d / %d (%.1f%%)\n"
+                  "  chunks: %d  bvh_nodes: %d  mode: %s\n"
+                  "  chunk grid: %d x %d x %d\n"
+                  "  atlas: %d^3  atlas_mb: %.1f\n"
+                  "  ssbo_mb: chunk=%.1f active=%.1f bvh=%.1f",
                   perf_fps_,
                   perf_frame_ms_,
                   classify_str,
@@ -3462,7 +3666,18 @@ class Instance : public DrawEngine {
                   perf_fxaa_ms_,
                   active_brick_count_,
                   total_bricks,
-                  brick_pct);
+                  brick_pct,
+                  int(chunk_pages_.size()),
+                  int(chunk_bvh_nodes_.size()),
+                  march_mode,
+                  chunk_grid_res.x,
+                  chunk_grid_res.y,
+                  chunk_grid_res.z,
+                  atlas_dim,
+                  atlas_mb,
+                  chunk_bricks_mb,
+                  active_bricks_mb,
+                  chunk_bvh_mb);
     s_perf_active = true;
   }
 
@@ -3504,9 +3719,6 @@ class Instance : public DrawEngine {
     if (march_fb_) {
       GPU_framebuffer_free(march_fb_);
     }
-    if (indirection_tx_) {
-      GPU_texture_free(indirection_tx_);
-    }
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
     }
@@ -3516,6 +3728,18 @@ class Instance : public DrawEngine {
     }
     if (active_bricks_) {
       GPU_storagebuf_free(active_bricks_);
+    }
+    if (chunk_pages_ssbo_) {
+      GPU_storagebuf_free(chunk_pages_ssbo_);
+    }
+    if (chunk_hash_ssbo_) {
+      GPU_storagebuf_free(chunk_hash_ssbo_);
+    }
+    if (chunk_bricks_ssbo_) {
+      GPU_storagebuf_free(chunk_bricks_ssbo_);
+    }
+    if (chunk_bvh_ssbo_) {
+      GPU_storagebuf_free(chunk_bvh_ssbo_);
     }
     if (matcap_tx_) {
       GPU_texture_free(matcap_tx_);

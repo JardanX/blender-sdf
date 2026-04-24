@@ -34,8 +34,7 @@ void main()
   for (int lz = 0; lz < BRICK_STORAGE; lz++) {
     int3 local_voxel = int3(local_xy, lz);
 
-    float3 world_pos = atlas_origin +
-                       float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
+     float3 world_pos = float3(brick * BRICK_SIZE + local_voxel - int3(2)) * voxel_size;
 
     float3 grid_uvw = (grid_world_to_texture * float4(world_pos, 1.0f)).xyz;
 
