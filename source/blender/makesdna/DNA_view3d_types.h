@@ -211,9 +211,12 @@ typedef struct View3DShading {
   short sdf_debug_grid;
   /** SDF draw engine: surface classify margin as percentage (0 or 100 = default 1.0x). */
   short sdf_surface_margin;
+  /** SDF draw engine: hit normal mode (0=Dual Voxel, 1=Single Cell Trilinear). */
+  int sdf_normal_mode;
+  int _pad2;
 
   struct IDProperty *prop;
-  void *_pad2;
+  void *_pad3;
 } View3DShading;
 
 /** 3D Viewport Overlay settings. */

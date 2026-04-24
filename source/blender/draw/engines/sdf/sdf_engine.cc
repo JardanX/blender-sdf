@@ -151,6 +151,9 @@ class Instance : public DrawEngine {
   float3 scene_max_ = float3(-1e30f);
 
   gpu::Texture *compact_atlas_tx_ = nullptr;
+  gpu::Texture *hierarchy4_tx_ = nullptr;
+  gpu::Texture *hierarchy2_tx_ = nullptr;
+  gpu::Texture *hierarchy1_tx_ = nullptr;
   gpu::StorageBuf *brick_counter_ = nullptr;
   gpu::StorageBuf *active_bricks_ = nullptr;
   gpu::StorageBuf *chunk_pages_ssbo_ = nullptr;
@@ -236,6 +239,7 @@ class Instance : public DrawEngine {
     SH_CLASSIFY = 0,
     SH_AUGMENT_GRIDS,
     SH_BAKE,
+    SH_BUILD_HIERARCHY,
     SH_MARCH,
     SH_GRID_BLEND,
     SH_FXAA,
@@ -246,6 +250,7 @@ class Instance : public DrawEngine {
       "sdf_classify",
       "sdf_augment_grids",
       "sdf_bake",
+      "sdf_build_hierarchy",
       "sdf_march",
       "sdf_grid_blend",
       "sdf_fxaa",
@@ -256,6 +261,7 @@ class Instance : public DrawEngine {
   gpu::Shader *&classify_sh_ = shaders_[SH_CLASSIFY];
   gpu::Shader *&augment_grids_sh_ = shaders_[SH_AUGMENT_GRIDS];
   gpu::Shader *&bake_sh_ = shaders_[SH_BAKE];
+  gpu::Shader *&build_hierarchy_sh_ = shaders_[SH_BUILD_HIERARCHY];
   gpu::Shader *&march_sh_ = shaders_[SH_MARCH];
   gpu::Shader *&grid_blend_sh_ = shaders_[SH_GRID_BLEND];
   gpu::Shader *&fxaa_sh_ = shaders_[SH_FXAA];
@@ -310,6 +316,7 @@ class Instance : public DrawEngine {
   gpu::Texture *matcap_tx_ = nullptr;
   std::string current_matcap_;
   int lighting_type_ = V3D_LIGHTING_STUDIO;
+  int normal_mode_ = 0;
   int use_specular_ = 0;
   int use_matcap_flip_ = 0;
 
@@ -1556,10 +1563,11 @@ class Instance : public DrawEngine {
     if (march_sh_ == nullptr) {
       return;
     }
-    if (!objects_.is_empty() && (classify_sh_ == nullptr || bake_sh_ == nullptr)) {
+    if (!objects_.is_empty() &&
+        (classify_sh_ == nullptr || bake_sh_ == nullptr || build_hierarchy_sh_ == nullptr)) {
       return;
     }
-    if (!grid_objects_.is_empty() && grid_blend_sh_ == nullptr) {
+    if (!grid_objects_.is_empty() && (grid_blend_sh_ == nullptr || build_hierarchy_sh_ == nullptr)) {
       return;
     }
     DRW_submission_start();
@@ -1706,6 +1714,11 @@ class Instance : public DrawEngine {
         perf_end_pass(PERF_PASS_GRID);
       }
 
+      if (active_brick_count_ > 0) {
+        ensure_distance_hierarchy_atlas();
+        dispatch_build_distance_hierarchy();
+      }
+
       prev_active_brick_count_ = active_brick_count_;
       printf("[SDF] bake done: atlas_bpa=%d atlas_slots=%d compact_dim=%d total_ms=%.2f\n",
              bricks_per_axis_,
@@ -1823,6 +1836,7 @@ class Instance : public DrawEngine {
   {
     const View3D *v3d = draw_ctx_->v3d;
     if (v3d == nullptr) {
+      normal_mode_ = 0;
       return;
     }
 
@@ -1847,6 +1861,7 @@ class Instance : public DrawEngine {
     }
 
     debug_grid_ = int(shading.sdf_debug_grid);
+    normal_mode_ = (shading.sdf_normal_mode == 1) ? 1 : 0;
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
       if (march_color_tx_) {
@@ -2199,6 +2214,34 @@ class Instance : public DrawEngine {
                                               usage,
                                               nullptr);
     GPU_texture_filter_mode(compact_atlas_tx_, true);
+  }
+
+  void ensure_hierarchy_texture(gpu::Texture *&texture, const char *name, const int dim)
+  {
+    const int safe_dim = math::max(dim, 1);
+
+    if (texture != nullptr) {
+      const bool matches = GPU_texture_width(texture) == safe_dim &&
+                           GPU_texture_height(texture) == safe_dim &&
+                           GPU_texture_depth(texture) == safe_dim;
+      if (matches) {
+        return;
+      }
+      GPU_texture_free(texture);
+      texture = nullptr;
+    }
+
+    const eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
+    texture = GPU_texture_create_3d(
+        name, safe_dim, safe_dim, safe_dim, 1, gpu::TextureFormat::SFLOAT_32, usage, nullptr);
+    GPU_texture_filter_mode(texture, false);
+  }
+
+  void ensure_distance_hierarchy_atlas()
+  {
+    ensure_hierarchy_texture(hierarchy4_tx_, "sdf_hierarchy4", bricks_per_axis_ * 4);
+    ensure_hierarchy_texture(hierarchy2_tx_, "sdf_hierarchy2", bricks_per_axis_ * 2);
+    ensure_hierarchy_texture(hierarchy1_tx_, "sdf_hierarchy1", bricks_per_axis_);
   }
 
   void upload_objects()
@@ -2658,6 +2701,42 @@ class Instance : public DrawEngine {
     /* active_brick_count_ was already set by dispatch_classify() readback. */
   }
 
+  void dispatch_build_distance_hierarchy()
+  {
+    if (active_brick_count_ <= 0 || compact_atlas_tx_ == nullptr || hierarchy4_tx_ == nullptr ||
+        hierarchy2_tx_ == nullptr || hierarchy1_tx_ == nullptr)
+    {
+      return;
+    }
+
+    GPU_shader_bind(build_hierarchy_sh_);
+
+    int active_slot = GPU_shader_get_ssbo_binding(build_hierarchy_sh_, "active_bricks");
+    GPU_storagebuf_bind(active_bricks_, active_slot);
+
+    int compact_slot = GPU_shader_get_sampler_binding(build_hierarchy_sh_, "compact_atlas");
+    GPU_texture_bind(compact_atlas_tx_, compact_slot);
+
+    GPU_texture_image_bind(hierarchy4_tx_, 0);
+    GPU_texture_image_bind(hierarchy2_tx_, 1);
+    GPU_texture_image_bind(hierarchy1_tx_, 2);
+
+    GPU_shader_uniform_1i(build_hierarchy_sh_, "active_brick_count", active_brick_count_);
+    GPU_shader_uniform_1i(build_hierarchy_sh_, "bricks_per_axis", bricks_per_axis_);
+
+    uint dispatch_x = uint(math::min(active_brick_count_, 65535));
+    uint dispatch_y = uint(divide_ceil_u(active_brick_count_, 65535));
+    GPU_shader_uniform_1i(build_hierarchy_sh_, "dispatch_width", int(dispatch_x));
+    GPU_compute_dispatch(build_hierarchy_sh_, dispatch_x, dispatch_y, 1);
+
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH | GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_texture_image_unbind(hierarchy4_tx_);
+    GPU_texture_image_unbind(hierarchy2_tx_);
+    GPU_texture_image_unbind(hierarchy1_tx_);
+    GPU_texture_unbind(compact_atlas_tx_);
+    GPU_shader_unbind();
+  }
+
   void draw_march()
   {
     DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
@@ -2740,6 +2819,18 @@ class Instance : public DrawEngine {
     if (compact_atlas_tx_) {
       GPU_texture_bind(compact_atlas_tx_, atlas_slot);
     }
+    if (hierarchy4_tx_) {
+      int slot = GPU_shader_get_sampler_binding(march_sh_, "hierarchy4_atlas");
+      GPU_texture_bind(hierarchy4_tx_, slot);
+    }
+    if (hierarchy2_tx_) {
+      int slot = GPU_shader_get_sampler_binding(march_sh_, "hierarchy2_atlas");
+      GPU_texture_bind(hierarchy2_tx_, slot);
+    }
+    if (hierarchy1_tx_) {
+      int slot = GPU_shader_get_sampler_binding(march_sh_, "hierarchy1_atlas");
+      GPU_texture_bind(hierarchy1_tx_, slot);
+    }
 
     if (chunk_hash_ssbo_) {
       int slot = GPU_shader_get_ssbo_binding(march_sh_, "chunk_hash");
@@ -2777,6 +2868,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1i(march_sh_, "chunk_hash_mask", chunk_hash_mask_);
     GPU_shader_uniform_1i(march_sh_, "chunk_bvh_node_count", int(chunk_bvh_nodes_.size()));
     GPU_shader_uniform_1i(march_sh_, "lighting_type", lighting_type_);
+    GPU_shader_uniform_1i(march_sh_, "normal_mode", normal_mode_);
     GPU_shader_uniform_1i(march_sh_, "use_specular", use_specular_);
     GPU_shader_uniform_1i(march_sh_, "use_matcap_flip", use_matcap_flip_);
 
@@ -2822,6 +2914,15 @@ class Instance : public DrawEngine {
 
     if (compact_atlas_tx_) {
       GPU_texture_unbind(compact_atlas_tx_);
+    }
+    if (hierarchy4_tx_) {
+      GPU_texture_unbind(hierarchy4_tx_);
+    }
+    if (hierarchy2_tx_) {
+      GPU_texture_unbind(hierarchy2_tx_);
+    }
+    if (hierarchy1_tx_) {
+      GPU_texture_unbind(hierarchy1_tx_);
     }
     if (matcap_tx_) {
       GPU_texture_unbind(matcap_tx_);
@@ -3806,6 +3907,15 @@ class Instance : public DrawEngine {
     }
     if (compact_atlas_tx_) {
       GPU_texture_free(compact_atlas_tx_);
+    }
+    if (hierarchy4_tx_) {
+      GPU_texture_free(hierarchy4_tx_);
+    }
+    if (hierarchy2_tx_) {
+      GPU_texture_free(hierarchy2_tx_);
+    }
+    if (hierarchy1_tx_) {
+      GPU_texture_free(hierarchy1_tx_);
     }
 
     if (brick_counter_) {

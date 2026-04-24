@@ -4769,6 +4769,20 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem sdf_normal_mode_items[] = {
+      {0,
+       "DUAL_VOXEL",
+       0,
+       "Dual Voxel",
+       "Blend eight neighboring trilinear gradients for smoother hit normals"},
+      {1,
+       "SINGLE_CELL",
+       0,
+       "Single Cell",
+       "Use one trilinear gradient from the hit cell for cheaper but blockier hit normals"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   prop = RNA_def_property(srna, "sdf_surface_margin", PROP_INT, PROP_PERCENTAGE);
   RNA_def_property_int_sdna(prop, nullptr, "sdf_surface_margin");
   RNA_def_property_range(prop, 50, 300);
@@ -4785,6 +4799,15 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
       prop, "SDF Debug Grid", "Debug visualization for the sparse brick grid");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_normal_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_normal_mode");
+  RNA_def_property_enum_items(prop, sdf_normal_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "SDF Normal Mode",
+                           "Hit normal quality/performance tradeoff for the sparse brick SDF renderer");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 }
 

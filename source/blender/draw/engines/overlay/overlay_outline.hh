@@ -191,7 +191,7 @@ class Outline : Overlay {
 
   void object_sync(Manager &manager,
                    const ObjectRef &ob_ref,
-                   Resources &res,
+                   Resources & /*res*/,
                    const State &state) final
   {
     if (!enabled_) {

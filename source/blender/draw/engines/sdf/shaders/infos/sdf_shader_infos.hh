@@ -89,6 +89,27 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Distance Hierarchy Build Compute Shader
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_build_hierarchy)
+DO_STATIC_COMPILATION()
+LOCAL_GROUP_SIZE(8, 8, 1)
+SAMPLER(0, sampler3D, compact_atlas)
+STORAGE_BUF(0, read, ActiveBrick, active_bricks[])
+IMAGE(0, SFLOAT_32, write, image3D, hierarchy4_atlas)
+IMAGE(1, SFLOAT_32, write, image3D, hierarchy2_atlas)
+IMAGE(2, SFLOAT_32, write, image3D, hierarchy1_atlas)
+PUSH_CONSTANT(int, active_brick_count)
+PUSH_CONSTANT(int, bricks_per_axis)
+PUSH_CONSTANT(int, dispatch_width)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_hierarchy_build_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Grid Blend Compute Shader
  * \{ */
 
@@ -123,6 +144,9 @@ GPU_SHADER_CREATE_INFO(sdf_march)
 DO_STATIC_COMPILATION()
 SAMPLER(0, sampler3D, compact_atlas)
 SAMPLER(1, sampler2DArray, matcap_tx)
+SAMPLER(2, sampler3D, hierarchy4_atlas)
+SAMPLER(3, sampler3D, hierarchy2_atlas)
+SAMPLER(4, sampler3D, hierarchy1_atlas)
 
 STORAGE_BUF(0, read, ChunkHashEntryGPU, chunk_hash[])
 STORAGE_BUF(1, read, int, chunk_bricks[])
@@ -140,6 +164,7 @@ PUSH_CONSTANT(int, chunk_march_mode)
 PUSH_CONSTANT(int, chunk_hash_mask)
 PUSH_CONSTANT(int, chunk_bvh_node_count)
 PUSH_CONSTANT(int, lighting_type)
+PUSH_CONSTANT(int, normal_mode)
 PUSH_CONSTANT(int, use_specular)
 PUSH_CONSTANT(int, use_matcap_flip)
 PUSH_CONSTANT(float4, studio_light0)
