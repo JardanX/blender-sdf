@@ -9,7 +9,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 
 #include "DNA_nurb_body_types.h"
@@ -54,8 +53,6 @@ class NurbBodies : Overlay {
     uint64_t geometry_key = 0;
     uint64_t selection_key = 0;
     uint64_t hover_key = 0;
-    uint64_t silhouette_key = 0;
-    gpu::Batch *silhouette_batch = nullptr;
     gpu::Batch *normal_batch = nullptr;
     gpu::Batch *hovered_batch = nullptr;
     gpu::Batch *selected_batch = nullptr;
@@ -141,33 +138,9 @@ class NurbBodies : Overlay {
     return std::clamp(overlay.nurb_body_line_thickness, 0.5f, 8.0f);
   }
 
-  static bool body_has_edge_selection(const NurbBody &body)
-  {
-    if (body.selected_edges != 0 || body.surface_selected_edges != 0) {
-      return true;
-    }
-    for (const NurbBodyBooleanOp *op = static_cast<const NurbBodyBooleanOp *>(
-             body.boolean_ops.first);
-         op;
-         op = op->next)
-    {
-      if (op->selected_edges != 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  static bool draw_silhouette_selected(const Object &object, const NurbBody &body)
-  {
-    return !body_has_edge_selection(body) && (object.base_flag & BASE_SELECTED) != 0;
-  }
-
   static bool polyline_is_surface(const NurbBodyEdgePolyline &polyline)
   {
-    return (polyline.flag & NURB_BODY_EDGE_POLYLINE_SURFACE) != 0 &&
-           (polyline.flag & NURB_BODY_EDGE_POLYLINE_SELECTABLE) != 0 &&
-           polyline.points.size() >= 2;
+    return (polyline.flag & NURB_BODY_EDGE_POLYLINE_SURFACE) != 0 && polyline.points.size() >= 2;
   }
 
   static bool polyline_is_selected(const NurbBody &body, const NurbBodyEdgePolyline &polyline)
@@ -219,14 +192,12 @@ class NurbBodies : Overlay {
 
   static void clear_draw_cache(DrawCache &cache)
   {
-    discard_batch(cache.silhouette_batch);
     discard_batch(cache.normal_batch);
     discard_batch(cache.hovered_batch);
     discard_batch(cache.selected_batch);
     cache.geometry_key = 0;
     cache.selection_key = 0;
     cache.hover_key = 0;
-    cache.silhouette_key = 0;
   }
 
   static gpu::Batch *create_line_batch_from_segments(const Span<float3> verts)
@@ -320,113 +291,6 @@ class NurbBodies : Overlay {
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
           return polyline_is_selected(body, polyline);
         });
-  }
-
-  static void hash_quantized_float(uint64_t &hash, const float value, const float scale)
-  {
-    const int64_t quantized = int64_t(std::llround(double(value) * double(scale)));
-    hash_value(hash, quantized);
-  }
-
-  static void hash_quantized_float3(uint64_t &hash, const float3 &value, const float scale)
-  {
-    hash_quantized_float(hash, value.x, scale);
-    hash_quantized_float(hash, value.y, scale);
-    hash_quantized_float(hash, value.z, scale);
-  }
-
-  static float3 view_direction_for_edge(const Object &object,
-                                        const View &view,
-                                        const float3 &edge_midpoint)
-  {
-    const float4x4 world_to_object = math::invert(object.object_to_world());
-    if (view.is_persp()) {
-      const float3 camera_local = math::transform_point(world_to_object, view.location());
-      return math::normalize(camera_local - edge_midpoint);
-    }
-    return math::normalize(math::transform_direction(world_to_object, view.forward()));
-  }
-
-  static uint64_t silhouette_view_key(const Object &object,
-                                      const View &view,
-                                      const uint64_t geometry_key)
-  {
-    uint64_t hash = geometry_key;
-    hash_value(hash, view.is_persp());
-    const float4x4 world_to_object = math::invert(object.object_to_world());
-    if (view.is_persp()) {
-      hash_quantized_float3(hash,
-                            math::transform_point(world_to_object, view.location()),
-                            4096.0f);
-    }
-    else {
-      hash_quantized_float3(hash,
-                            math::normalize(math::transform_direction(world_to_object,
-                                                                      view.forward())),
-                            65536.0f);
-    }
-    return hash;
-  }
-
-  static gpu::Batch *create_mesh_silhouette_batch(const Object &object, const View &view)
-  {
-    const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
-    const Span<float3> positions = mesh.vert_positions();
-    const Span<int2> edges = mesh.edges();
-    const OffsetIndices<int> faces = mesh.faces();
-    const Span<int> corner_edges = mesh.corner_edges();
-    const Span<float3> face_normals = mesh.face_normals();
-    if (positions.is_empty() || edges.is_empty() || faces.is_empty() || corner_edges.is_empty()) {
-      return nullptr;
-    }
-
-    Array<int2> edge_faces(edges.size(), int2(-1, -1));
-    for (const int face_index : faces.index_range()) {
-      for (const int corner : faces[face_index]) {
-        const int edge_index = corner_edges[corner];
-        if (edge_index < 0 || edge_index >= edge_faces.size()) {
-          continue;
-        }
-        int2 &linked_faces = edge_faces[edge_index];
-        if (linked_faces[0] == -1) {
-          linked_faces[0] = face_index;
-        }
-        else if (linked_faces[1] == -1 && linked_faces[0] != face_index) {
-          linked_faces[1] = face_index;
-        }
-      }
-    }
-
-    Vector<float3> verts;
-    for (const int edge_index : edges.index_range()) {
-      const int2 linked_faces = edge_faces[edge_index];
-      if (linked_faces[0] == -1 || linked_faces[1] == -1) {
-        continue;
-      }
-
-      const int2 edge = edges[edge_index];
-      if (edge[0] < 0 || edge[0] >= positions.size() || edge[1] < 0 ||
-          edge[1] >= positions.size())
-      {
-        continue;
-      }
-
-      const float adjacent_face_dot = math::dot(face_normals[linked_faces[0]],
-                                               face_normals[linked_faces[1]]);
-      if (adjacent_face_dot <= 0.75f) {
-        continue;
-      }
-
-      const float3 midpoint = (positions[edge[0]] + positions[edge[1]]) * 0.5f;
-      const float3 view_direction = view_direction_for_edge(object, view, midpoint);
-      const float facing_a = math::dot(face_normals[linked_faces[0]], view_direction);
-      const float facing_b = math::dot(face_normals[linked_faces[1]], view_direction);
-      if ((facing_a <= 0.0f && facing_b > 0.0f) || (facing_a > 0.0f && facing_b <= 0.0f)) {
-        verts.append(positions[edge[0]]);
-        verts.append(positions[edge[1]]);
-      }
-    }
-    return create_line_batch_from_segments(verts.as_span());
   }
 
  public:
@@ -533,23 +397,10 @@ class NurbBodies : Overlay {
         cache.hover_key = hover_key;
       }
 
-      const uint64_t silhouette_key = silhouette_view_key(
-          *entry.object, view, cache.geometry_key);
-      if (geometry_changed || cache.silhouette_key != silhouette_key) {
-        discard_batch(cache.silhouette_batch);
-        cache.silhouette_batch = create_mesh_silhouette_batch(*entry.object, view);
-        cache.silhouette_key = silhouette_key;
-      }
-
       GPU_matrix_push();
       GPU_matrix_mul(entry.object->object_to_world().ptr());
       GPU_polygon_offset(1.0f, 2.0f);
       draw_batch(cache.normal_batch, float4(0.0f, 0.0f, 0.0f, 0.9f), line_width_);
-      const bool selected_silhouette = draw_silhouette_selected(*entry.original_object, *body);
-      draw_batch(cache.silhouette_batch,
-                 selected_silhouette ? float4(1.0f, 0.62f, 0.0f, 1.0f) :
-                                       float4(0.0f, 0.0f, 0.0f, 0.9f),
-                 line_width_);
       draw_batch(cache.hovered_batch, float4(1.0f, 1.0f, 1.0f, 1.0f), line_width_);
       draw_batch(cache.selected_batch, float4(1.0f, 0.62f, 0.0f, 1.0f), line_width_);
       GPU_polygon_offset(0.0f, 0.0f);

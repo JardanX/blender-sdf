@@ -258,9 +258,9 @@ class Outline : Overlay {
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
       case OB_NURB_BODY: {
-        /* NURB Body silhouettes are drawn by overlay_nurb_body with the same retained polyline
-         * shader as sharp/hovered/selected NURB edges. Mixing this post-process outline with the
-         * NURB edge overlay gives different AA and depth coverage on the same rim. */
+        /* NURB Body outlines are represented by overlay_nurb_body edge polylines. Mixing this
+         * post-process outline with the NURB edge overlay gives different AA and depth coverage
+         * on the same rim. */
         break;
       }
       case OB_MESH:

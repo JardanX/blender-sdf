@@ -171,6 +171,7 @@ void OBJECT_OT_nurb_body_select_mode(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_edge_translate(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_bevel_selected(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_boolean_apply(wmOperatorType *ot);
+bool nurb_body_select_all_edges_from_context(bContext *C, int action, bool *r_handled);
 /**
  * Called by other space types too.
  */
