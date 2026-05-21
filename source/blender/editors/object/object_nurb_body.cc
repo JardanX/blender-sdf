@@ -108,6 +108,12 @@ static void nurb_body_preserve_existing_bevel_edges(NurbBody &body)
   if (body.bevel_radius > 0.0f && body.bevel_edges == 0 && body.selected_edges != 0) {
     body.bevel_edges = body.selected_edges;
     body.bevel_edge = nurb_body_first_selected_edge(body.bevel_edges);
+    if (body.bevel_type == NURB_BODY_BEVEL_CHAMFER) {
+      body.chamfer_edges |= body.bevel_edges;
+    }
+    else {
+      body.chamfer_edges &= ~body.bevel_edges;
+    }
   }
 
   for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body.boolean_ops.first); op;
@@ -116,6 +122,12 @@ static void nurb_body_preserve_existing_bevel_edges(NurbBody &body)
     if (op->bevel_radius > 0.0f && op->bevel_edges == 0 && op->selected_edges != 0) {
       op->bevel_edges = op->selected_edges;
       op->bevel_edge = nurb_body_first_selected_edge(op->bevel_edges);
+      if (op->bevel_type == NURB_BODY_BEVEL_CHAMFER) {
+        op->chamfer_edges |= op->bevel_edges;
+      }
+      else {
+        op->chamfer_edges &= ~op->bevel_edges;
+      }
     }
   }
 }
@@ -217,13 +229,23 @@ static int nurb_body_first_selected_edge(const uint64_t selected_edges)
 
 static uint64_t nurb_body_effective_bevel_edges(const float bevel_radius,
                                                 const uint64_t bevel_edges,
-                                                const int bevel_edge)
+                                                const int bevel_edge,
+                                                const float bevel_radii[64])
 {
+  if (bevel_edges != 0) {
+    if (bevel_radius > 0.0f) {
+      return bevel_edges;
+    }
+    uint64_t effective_edges = 0;
+    for (int i = 0; i < 64; i++) {
+      if ((bevel_edges & nurb_body_edge_mask_for_index(i)) != 0 && bevel_radii[i] > 0.0f) {
+        effective_edges |= nurb_body_edge_mask_for_index(i);
+      }
+    }
+    return effective_edges;
+  }
   if (bevel_radius <= 0.0f) {
     return 0;
-  }
-  if (bevel_edges != 0) {
-    return bevel_edges;
   }
   return nurb_body_edge_mask_for_index(bevel_edge);
 }
@@ -234,6 +256,11 @@ static void nurb_body_materialize_edge_bevel_radii(const uint64_t bevel_edges,
 {
   if (fallback_radius <= 0.0f) {
     return;
+  }
+  for (int i = 0; i < 64; i++) {
+    if ((bevel_edges & nurb_body_edge_mask_for_index(i)) != 0 && bevel_radii[i] > 0.0f) {
+      return;
+    }
   }
   for (int i = 0; i < 64; i++) {
     if ((bevel_edges & nurb_body_edge_mask_for_index(i)) != 0 && bevel_radii[i] <= 0.0f) {
@@ -261,7 +288,7 @@ static float nurb_body_edge_bevel_radius(const float fallback_radius,
 {
   const uint64_t edge_mask = nurb_body_edge_mask_for_index(edge_index);
   if (edge_mask != 0 && (bevel_edges & edge_mask) != 0) {
-    return bevel_radii[edge_index] > 0.0f ? bevel_radii[edge_index] : fallback_radius;
+    return bevel_radii[edge_index] > 0.0f ? bevel_radii[edge_index] : 0.0f;
   }
   if (bevel_edges == 0 && bevel_edge == edge_index) {
     return fallback_radius;
@@ -1340,6 +1367,8 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
                                                                active_edge.op->selected_edges;
   const uint64_t active_edges = active_edge.body_edge ? body->selected_edges :
                                                        active_edge.op->selected_edges;
+  const bool had_explicit_bevel_edges = active_edge.body_edge ? body->bevel_edges != 0 :
+                                                                active_edge.op->bevel_edges != 0;
   float start_bevel_radii[64];
   std::copy_n(active_edge.body_edge ? body->bevel_radii : active_edge.op->bevel_radii,
               64,
@@ -1347,16 +1376,21 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   const uint64_t existing_bevel_edges =
       active_edge.body_edge ?
           nurb_body_effective_bevel_edges(
-              body->bevel_radius, body->bevel_edges, body->bevel_edge) :
+              body->bevel_radius, body->bevel_edges, body->bevel_edge, body->bevel_radii) :
           nurb_body_effective_bevel_edges(active_edge.op->bevel_radius,
                                           active_edge.op->bevel_edges,
-                                          active_edge.op->bevel_edge);
+                                          active_edge.op->bevel_edge,
+                                          active_edge.op->bevel_radii);
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const int profile = RNA_enum_get(op->ptr, "profile");
 
   if (active_edge.body_edge) {
     nurb_body_materialize_edge_bevel_radii(
         existing_bevel_edges, body->bevel_radius, body->bevel_radii);
+    if (!had_explicit_bevel_edges) {
+      nurb_body_set_edge_chamfer_mask(
+          existing_bevel_edges, body->bevel_type == NURB_BODY_BEVEL_CHAMFER, body->chamfer_edges);
+    }
     body->bevel_edges = target_edges;
     body->bevel_edge = active_edge.edge_index;
     body->bevel_type = profile;
@@ -1368,6 +1402,11 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
     nurb_body_materialize_edge_bevel_radii(existing_bevel_edges,
                                            active_edge.op->bevel_radius,
                                            active_edge.op->bevel_radii);
+    if (!had_explicit_bevel_edges) {
+      nurb_body_set_edge_chamfer_mask(existing_bevel_edges,
+                                      active_edge.op->bevel_type == NURB_BODY_BEVEL_CHAMFER,
+                                      active_edge.op->chamfer_edges);
+    }
     active_edge.op->bevel_edges = target_edges;
     active_edge.op->bevel_edge = active_edge.edge_index;
     active_edge.op->bevel_type = profile;
@@ -1432,19 +1471,26 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
 
   const uint64_t active_edges = active_edge.body_edge ? body->selected_edges :
                                                        active_edge.op->selected_edges;
+  const bool had_explicit_bevel_edges = active_edge.body_edge ? body->bevel_edges != 0 :
+                                                                active_edge.op->bevel_edges != 0;
   const uint64_t existing_bevel_edges =
       active_edge.body_edge ?
           nurb_body_effective_bevel_edges(
-              body->bevel_radius, body->bevel_edges, body->bevel_edge) :
+              body->bevel_radius, body->bevel_edges, body->bevel_edge, body->bevel_radii) :
           nurb_body_effective_bevel_edges(active_edge.op->bevel_radius,
                                           active_edge.op->bevel_edges,
-                                          active_edge.op->bevel_edge);
+                                          active_edge.op->bevel_edge,
+                                          active_edge.op->bevel_radii);
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const float radius = std::max(0.0f, RNA_float_get(op->ptr, "radius"));
   const int profile = RNA_enum_get(op->ptr, "profile");
   if (active_edge.body_edge) {
     nurb_body_materialize_edge_bevel_radii(
         existing_bevel_edges, body->bevel_radius, body->bevel_radii);
+    if (!had_explicit_bevel_edges) {
+      nurb_body_set_edge_chamfer_mask(
+          existing_bevel_edges, body->bevel_type == NURB_BODY_BEVEL_CHAMFER, body->chamfer_edges);
+    }
     body->bevel_edges = target_edges;
     body->bevel_edge = active_edge.edge_index;
     body->bevel_type = profile;
@@ -1460,6 +1506,11 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
     nurb_body_materialize_edge_bevel_radii(existing_bevel_edges,
                                            active_edge.op->bevel_radius,
                                            active_edge.op->bevel_radii);
+    if (!had_explicit_bevel_edges) {
+      nurb_body_set_edge_chamfer_mask(existing_bevel_edges,
+                                      active_edge.op->bevel_type == NURB_BODY_BEVEL_CHAMFER,
+                                      active_edge.op->chamfer_edges);
+    }
     active_edge.op->bevel_edges = target_edges;
     active_edge.op->bevel_edge = active_edge.edge_index;
     active_edge.op->bevel_type = profile;

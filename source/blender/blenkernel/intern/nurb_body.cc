@@ -89,6 +89,25 @@ static uint64_t nurb_body_edge_mask_for_index(const int edge_index)
   return (edge_index >= 0 && edge_index < 64) ? (uint64_t(1) << uint(edge_index)) : uint64_t(0);
 }
 
+static void nurb_body_materialize_edge_bevel_radii(const uint64_t bevel_edges,
+                                                   const float fallback_radius,
+                                                   float bevel_radii[64])
+{
+  if (fallback_radius <= 0.0f) {
+    return;
+  }
+  for (int i = 0; i < 64; i++) {
+    if ((bevel_edges & nurb_body_edge_mask_for_index(i)) != 0 && bevel_radii[i] > 0.0f) {
+      return;
+    }
+  }
+  for (int i = 0; i < 64; i++) {
+    if ((bevel_edges & nurb_body_edge_mask_for_index(i)) != 0 && bevel_radii[i] <= 0.0f) {
+      bevel_radii[i] = fallback_radius;
+    }
+  }
+}
+
 static void nurb_body_init_data(ID *id)
 {
   NurbBody *body = id_cast<NurbBody *>(id);
@@ -159,6 +178,8 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
   {
     body->chamfer_edges = body->bevel_edges;
   }
+  nurb_body_materialize_edge_bevel_radii(
+      body->bevel_edges, body->bevel_radius, body->bevel_radii);
   body->chamfer_edges &= body->bevel_edges;
   if (!ELEM(body->select_mode,
             NURB_BODY_SELECT_MODE_EDGE,
@@ -166,6 +187,12 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
             NURB_BODY_SELECT_MODE_OBJECT))
   {
     body->select_mode = NURB_BODY_SELECT_MODE_EDGE;
+  }
+  if (!std::isfinite(body->line_thickness) || body->line_thickness <= 0.0f) {
+    body->line_thickness = 2.0f;
+  }
+  else {
+    body->line_thickness = std::clamp(body->line_thickness, 0.5f, 8.0f);
   }
   for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body->boolean_ops.first); op;
        op = op->next)
@@ -193,6 +220,8 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
     {
       op->chamfer_edges = op->bevel_edges;
     }
+    nurb_body_materialize_edge_bevel_radii(
+        op->bevel_edges, op->bevel_radius, op->bevel_radii);
     op->chamfer_edges &= op->bevel_edges;
   }
 }
@@ -592,9 +621,19 @@ static Vector<TopoDS_Edge> find_selectable_surface_edges(const TopoDS_Shape &sha
 }
 
 static float bevel_radius_for_edge(const float fallback_radius,
+                                   const uint64_t bevel_edges,
                                    const float *edge_radii,
                                    const int edge_index)
 {
+  const uint64_t edge_mask = nurb_body_edge_mask_for_index(edge_index);
+  if (edge_mask != 0 && bevel_edges != 0) {
+    if ((bevel_edges & edge_mask) == 0) {
+      return 0.0f;
+    }
+    return (edge_index < 64 && edge_radii != nullptr && edge_radii[edge_index] > 0.0f) ?
+               edge_radii[edge_index] :
+               0.0f;
+  }
   if (edge_index >= 0 && edge_index < 64 && edge_radii != nullptr && edge_radii[edge_index] > 0.0f)
   {
     return edge_radii[edge_index];
@@ -615,7 +654,8 @@ static void append_selectable_edge_refs(const Vector<TopoDS_Edge> &edges,
 {
   for (const int i : edges.index_range()) {
     const uint64_t edge_mask = nurb_body_edge_mask_for_index(i);
-    const float edge_blend_radius = bevel_radius_for_edge(blend_radius, blend_radii, i);
+    const float edge_blend_radius = bevel_radius_for_edge(
+        blend_radius, blended_edges, blend_radii, i);
     const bool edge_is_blended = edge_blend_radius > 0.0f && edge_mask != 0 &&
                                  (blended_edges & edge_mask) != 0;
     if (edge_is_blended) {
@@ -723,7 +763,8 @@ static TopoDS_Shape apply_edge_blend_type(const TopoDS_Shape &shape,
           bevel_type_for_edge(fallback_bevel_type, bevel_edges, chamfer_edges, bevel_edge, i) ==
               target_bevel_type)
       {
-        const double radius = std::min(double(bevel_radius_for_edge(bevel_radius, bevel_radii, i)),
+        const double radius = std::min(double(bevel_radius_for_edge(
+                                           bevel_radius, bevel_edges, bevel_radii, i)),
                                        double(std::max(radius_limit, 0.001f)) * 0.95);
         if (radius > 0.0) {
           chamfer.Add(radius, edges[i]);
@@ -750,7 +791,8 @@ static TopoDS_Shape apply_edge_blend_type(const TopoDS_Shape &shape,
         bevel_type_for_edge(fallback_bevel_type, bevel_edges, chamfer_edges, bevel_edge, i) ==
             target_bevel_type)
     {
-      const double radius = std::min(double(bevel_radius_for_edge(bevel_radius, bevel_radii, i)),
+      const double radius = std::min(double(bevel_radius_for_edge(
+                                         bevel_radius, bevel_edges, bevel_radii, i)),
                                      double(std::max(radius_limit, 0.001f)) * 0.95);
       if (radius > 0.0) {
         fillet.Add(radius, edges[i]);
