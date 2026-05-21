@@ -65,6 +65,7 @@ class NurbBodies : Overlay {
   Vector<Entry> entries_;
   Vector<DrawCache> draw_caches_;
   float line_width_ = 2.0f;
+  bool xray_flag_enabled_ = false;
   bool needs_depth_prepass_ = false;
 
   static bool edge_index_in_mask(const uint64_t mask, const int edge_index)
@@ -496,18 +497,19 @@ class NurbBodies : Overlay {
         }
       }
       else {
-        const float adjacent_face_dot = math::dot(face_normals[linked_faces[0]],
-                                                 face_normals[linked_faces[1]]);
-        if (adjacent_face_dot > 0.75f) {
-          continue;
-        }
-
         const float3 midpoint = (positions[edge[0]] + positions[edge[1]]) * 0.5f;
         const float3 view_direction = view_direction_for_edge(object, view, midpoint);
         const float facing_a = math::dot(face_normals[linked_faces[0]], view_direction);
         const float facing_b = math::dot(face_normals[linked_faces[1]], view_direction);
-        is_silhouette = (facing_a <= 0.0f && facing_b > 0.0f) ||
-                        (facing_a > 0.0f && facing_b <= 0.0f);
+        const bool crosses_view = (facing_a <= 0.0f && facing_b > 0.0f) ||
+                                  (facing_a > 0.0f && facing_b <= 0.0f);
+        const float adjacent_face_dot = math::dot(face_normals[linked_faces[0]],
+                                                 face_normals[linked_faces[1]]);
+        constexpr float near_silhouette_epsilon = 0.015f;
+        const bool near_silhouette = adjacent_face_dot < 0.999f &&
+                                     (std::abs(facing_a) <= near_silhouette_epsilon ||
+                                      std::abs(facing_b) <= near_silhouette_epsilon);
+        is_silhouette = crosses_view || near_silhouette;
       }
 
       if (is_silhouette) {
@@ -531,6 +533,7 @@ class NurbBodies : Overlay {
     enabled_ = state.is_space_v3d() && !state.hide_overlays;
     entries_.clear();
     line_width_ = line_thickness_for_overlay(state.overlay);
+    xray_flag_enabled_ = state.xray_flag_enabled;
     needs_depth_prepass_ = enabled_ && state.xray_enabled;
     depth_ps_.init();
     depth_mesh_ps_ = nullptr;
@@ -589,7 +592,7 @@ class NurbBodies : Overlay {
     }
 
     GPU_framebuffer_bind(framebuffer);
-    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_test(xray_flag_enabled_ ? GPU_DEPTH_NONE : GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(false);
     GPU_blend(GPU_BLEND_ALPHA);
     GPU_line_smooth(true);
