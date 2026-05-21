@@ -2549,6 +2549,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       return ICON_OUTLINER_DATA_VOLUME;
     case ID_SF:
       return ICON_SDF_DATA;
+    case ID_NB:
+      return ICON_MESH_CYLINDER;
     case ID_LI:
       if (id->tag & ID_TAG_MISSING) {
         return ICON_LIBRARY_DATA_BROKEN;

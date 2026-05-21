@@ -50,6 +50,7 @@ struct Object;
 struct Mesh;
 struct Curve;
 struct MetaBall;
+struct NurbBody;
 struct SDF;
 struct Material;
 struct Tex;
@@ -103,6 +104,7 @@ struct Material;
 struct Mesh;
 struct MetaBall;
 struct MovieClip;
+struct NurbBody;
 struct Object;
 struct PaintCurve;
 struct Palette;
@@ -411,6 +413,7 @@ struct Main : NonCopyable, NonMovable {
   ListBaseT<PointCloud> pointclouds = {};
   ListBaseT<Volume> volumes = {};
   ListBaseT<SDF> sdfs = {};
+  ListBaseT<NurbBody> nurb_bodies = {};
 
   /**
    * Must be generated, used and freed by same code - never assume this is valid data unless you

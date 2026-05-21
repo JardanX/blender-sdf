@@ -161,6 +161,16 @@ void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot);
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_shell_distance_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_profile_frame(wmOperatorType *ot);
+
+/* `object_nurb_body.cc` */
+
+void OBJECT_OT_nurb_body_add(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_hover(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_select_cut_edge(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_select_mode(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_edge_translate(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_bevel_selected(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_boolean_apply(wmOperatorType *ot);
 /**
  * Called by other space types too.
  */

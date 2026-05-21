@@ -19,6 +19,8 @@ All changes are tracked in `SDF_CHANGES.md` at the repo root — consult it befo
 
 ## Building
 
+**Agent instruction:** Do not run local builds or rebuild commands in this repo. The user rebuilds Blender manually after code changes.
+
 ### Windows (primary platform)
 
 ```batch

@@ -200,6 +200,10 @@ class Outline : Overlay {
       // case OB_GREASE_PENCIL:
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
+      case OB_NURB_BODY:
+        /* NURB body object silhouettes are drawn by overlay_nurb_body.hh so their selected
+         * object state can match CAD-style black/orange surface outlines. */
+        break;
       case OB_MESH:
         if (state.xray_enabled_and_not_wire) {
           geom = DRW_cache_mesh_edge_detection_get(ob_ref.object, nullptr);

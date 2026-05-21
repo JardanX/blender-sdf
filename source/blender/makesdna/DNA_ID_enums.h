@@ -153,6 +153,7 @@ typedef enum ID_Type {
   ID_VO = MAKE_ID2('V', 'O'),        /* Volume */
   ID_GP = MAKE_ID2('G', 'P'),        /* Grease Pencil */
   ID_SF = MAKE_ID2('S', 'F'),        /* SDF (Signed Distance Field) */
+  ID_NB = MAKE_ID2('N', 'B'),        /* NURB Body */
 } ID_Type;
 
 /* Only used as 'placeholder' in .blend files for directly linked data-blocks. */

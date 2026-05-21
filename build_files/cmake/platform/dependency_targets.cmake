@@ -42,6 +42,18 @@ if(WITH_MANIFOLD)
 endif()
 
 # -----------------------------------------------------------------------------
+# Configure OpenCASCADE
+
+add_library(bf_deps_optional_opencascade INTERFACE)
+add_library(bf::dependencies::optional::opencascade ALIAS bf_deps_optional_opencascade)
+
+if(WITH_OPENCASCADE AND OPENCASCADE_FOUND)
+  target_compile_definitions(bf_deps_optional_opencascade INTERFACE WITH_OPENCASCADE)
+  target_include_directories(bf_deps_optional_opencascade SYSTEM INTERFACE ${OPENCASCADE_INCLUDE_DIRS})
+  target_link_libraries(bf_deps_optional_opencascade INTERFACE ${OPENCASCADE_LIBRARIES})
+endif()
+
+# -----------------------------------------------------------------------------
 # Configure OpenVDB
 
 add_library(bf_deps_optional_openvdb INTERFACE)

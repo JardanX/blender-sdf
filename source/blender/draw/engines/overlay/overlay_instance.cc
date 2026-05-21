@@ -477,6 +477,7 @@ void Instance::begin_sync()
     layer.mesh_uvs.begin_sync(resources, state);
     layer.mode_transfer.begin_sync(resources, state);
     layer.names.begin_sync(resources, state);
+    layer.nurb_bodies.begin_sync(resources, state);
     layer.paints.begin_sync(resources, state);
     layer.particles.begin_sync(resources, state);
     layer.pointclouds.begin_sync(resources, state);
@@ -510,6 +511,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
 
   layer.mode_transfer.object_sync(manager, ob_ref, resources, state);
   layer.sdfs.object_sync(manager, ob_ref, resources, state);
+  layer.nurb_bodies.object_sync(manager, ob_ref, resources, state);
 
   if (needs_prepass) {
     layer.prepass.object_sync(manager, ob_ref, resources, state);
@@ -945,12 +947,14 @@ void Instance::draw_v3d(Manager &manager, View &view)
     if (!state.is_depth_only_drawing) {
       grid.draw_line(resources.overlay_line_fb, manager, view);
     }
+    regular.nurb_bodies.draw_line(resources.overlay_line_fb, manager, view);
 
     /* Here because of custom order of regular.facing. */
     infront.facing.draw(resources.overlay_fb, manager, view);
 
     draw(infront, resources.overlay_in_front_fb);
     draw_line(infront, resources.overlay_line_in_front_fb);
+    infront.nurb_bodies.draw_line(resources.overlay_line_in_front_fb, manager, view);
 
   }
   {

@@ -633,6 +633,7 @@ void DepsgraphNodeBuilder::build_id(ID *id, const bool force_be_visible)
     case ID_VO:
     case ID_GP:
     case ID_SF:
+    case ID_NB:
       build_object_data_geometry_datablock(id);
       break;
     case ID_SPK:
@@ -1000,6 +1001,7 @@ void DepsgraphNodeBuilder::build_object_data(Object *object)
     case OB_POINTCLOUD:
     case OB_VOLUME:
     case OB_SDF:
+    case OB_NURB_BODY:
       build_object_data_geometry(object);
       break;
     case OB_GREASE_PENCIL:
@@ -1865,6 +1867,11 @@ void DepsgraphNodeBuilder::build_object_data_geometry_datablock(ID *obdata)
     }
     case ID_SF: {
       /* SDF data-block: no geometry eval needed, just register the node. */
+      op_node = add_operation_node(obdata, NodeType::GEOMETRY, OperationCode::GEOMETRY_EVAL);
+      op_node->set_as_entry();
+      break;
+    }
+    case ID_NB: {
       op_node = add_operation_node(obdata, NodeType::GEOMETRY, OperationCode::GEOMETRY_EVAL);
       op_node->set_as_entry();
       break;

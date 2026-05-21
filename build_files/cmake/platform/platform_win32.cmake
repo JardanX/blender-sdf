@@ -721,6 +721,40 @@ if(WITH_MANIFOLD)
   endif()
 endif()
 
+if(WITH_OPENCASCADE)
+  set(OPENCASCADE ${LIBDIR}/opencascade/opencascade-8.0.0-vc14-64)
+  if(EXISTS ${OPENCASCADE})
+    set(OPENCASCADE_INCLUDE_DIRS ${OPENCASCADE}/inc)
+    set(OPENCASCADE_LIBPATH ${OPENCASCADE}/win64/vc14/lib)
+    set(OPENCASCADE_BINPATH ${OPENCASCADE}/win64/vc14/bin)
+    set(OPENCASCADE_LIBRARY_NAMES
+      TKernel
+      TKMath
+      TKG2d
+      TKG3d
+      TKGeomBase
+      TKBRep
+      TKGeomAlgo
+      TKTopAlgo
+      TKPrim
+      TKBO
+      TKBool
+      TKFillet
+      TKMesh
+      TKShHealing
+    )
+    set(OPENCASCADE_LIBRARIES)
+    foreach(_opencascade_lib ${OPENCASCADE_LIBRARY_NAMES})
+      list(APPEND OPENCASCADE_LIBRARIES ${OPENCASCADE_LIBPATH}/${_opencascade_lib}.lib)
+      list(APPEND PLATFORM_BUNDLED_LIBRARIES RELEASE ${OPENCASCADE_BINPATH}/${_opencascade_lib}.dll)
+    endforeach()
+    set(OPENCASCADE_FOUND ON)
+  else()
+    set(WITH_OPENCASCADE OFF)
+    message(STATUS "OpenCASCADE not found, disabling WITH_OPENCASCADE")
+  endif()
+endif()
+
 if(WITH_ALEMBIC)
   set(ALEMBIC ${LIBDIR}/alembic)
   set(ALEMBIC_INCLUDE_DIR ${ALEMBIC}/include)

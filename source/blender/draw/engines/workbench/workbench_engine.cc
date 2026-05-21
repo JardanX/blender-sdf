@@ -194,7 +194,7 @@ class Instance : public DrawEngine {
         this->sculpt_sync(ob_ref, handle, object_state);
         emitter_handle = handle;
       }
-      else if (ob->type == OB_MESH) {
+      else if (ELEM(ob->type, OB_MESH, OB_NURB_BODY)) {
         ResourceHandleRange handle = manager.unique_handle(ob_ref);
         this->mesh_sync(ob_ref, handle, object_state);
         emitter_handle = handle;
