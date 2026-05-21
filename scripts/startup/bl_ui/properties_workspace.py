@@ -167,6 +167,28 @@ class WORKSPACE_UL_addons_items(UIList):
         ).owner_id = addon.module
 
 
+class WORKSPACE_PT_nurb_body_viewport(WorkSpaceButtonsPanel, Panel):
+    bl_label = "NURB Body Viewport"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob and ob.type == 'NURB_BODY'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        tool_settings = context.tool_settings
+        layout.prop(tool_settings, "nurb_body_tessellation_topology", text="Topology", expand=True)
+        layout.prop(tool_settings, "nurb_body_tessellation_density", text="Quality")
+        layout.prop(tool_settings, "nurb_body_tessellation_deflection", text="Plane Tolerance")
+        layout.prop(tool_settings, "nurb_body_tessellation_angle", text="Angle Tolerance")
+        layout.prop(tool_settings, "use_nurb_body_smooth_shading")
+
+
 class WORKSPACE_PT_custom_props(WorkSpaceButtonsPanel, PropertyPanel, Panel):
     bl_parent_id = "WORKSPACE_PT_main"
 
@@ -179,6 +201,7 @@ classes = (
 
     WORKSPACE_PT_main,
     WORKSPACE_PT_addons,
+    WORKSPACE_PT_nurb_body_viewport,
     WORKSPACE_PT_custom_props,
 )
 

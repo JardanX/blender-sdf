@@ -10,6 +10,7 @@
 #include "DNA_lattice_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
+#include "DNA_nurb_body_types.h"
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase.h"
@@ -28,6 +29,7 @@
 #include "BKE_lattice.hh"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
+#include "BKE_nurb_body.hh"
 #include "BKE_object.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcache.h"
@@ -180,6 +182,9 @@ void BKE_object_handle_data_update(Depsgraph *depsgraph, Scene *scene, Object *o
     case OB_SDF:
       BKE_sdf_data_update(depsgraph, scene, ob);
       break;
+    case OB_NURB_BODY:
+      BKE_nurb_body_data_update(depsgraph, scene, ob);
+      break;
   }
 
   /* particles */
@@ -303,6 +308,11 @@ void BKE_object_batch_cache_dirty_tag(Object *ob)
       break;
     case OB_SDF:
       /* SDF objects have no batch cache (rendered by custom draw engine). */
+      break;
+    case OB_NURB_BODY:
+      if (Mesh *mesh = BKE_object_get_evaluated_mesh_no_subsurf_unchecked(ob)) {
+        BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_ALL);
+      }
       break;
     default:
       break;

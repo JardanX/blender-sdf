@@ -165,6 +165,11 @@ class Wireframe : Overlay {
         }
         break;
       }
+      case OB_NURB_BODY: {
+        /* NURB Body edges are drawn by overlay_nurb_body. Drawing the evaluated mesh wire here
+         * makes object selection recolor retained NURB edge lines in XRay. */
+        break;
+      }
       case OB_MESH: {
         /* Force display in edit mode when overlay is off in wireframe mode (see #78484). */
         const bool wireframe_no_overlay = state.hide_overlays && state.is_wireframe_mode;
@@ -179,7 +184,9 @@ class Wireframe : Overlay {
         const bool bypass_mode_check = wireframe_no_overlay || !edit_wires_overlap_all;
 
         if (show_surface_wire) {
-          if (BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d)) {
+          if (ob_ref.object->type == OB_MESH &&
+              BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d))
+          {
             ResourceHandleRange handle = manager.unique_handle(ob_ref);
 
             for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_WIREFRAME)) {

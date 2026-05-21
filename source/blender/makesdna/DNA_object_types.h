@@ -108,6 +108,7 @@ enum ObjectType {
   OB_LIGHTPROBE = 13,
 
   OB_LATTICE = 22,
+  OB_NURB_BODY = 24,
 
   OB_ARMATURE = 25,
 
@@ -699,7 +700,8 @@ struct ObHook {
 /* check if the object type supports materials */
 #define OB_TYPE_SUPPORT_MATERIAL(_type) \
   (((_type) >= OB_MESH && (_type) <= OB_MBALL) || \
-   ((_type) >= OB_CURVES && (_type) <= OB_GREASE_PENCIL) || ((_type) == OB_SDF))
+   ((_type) >= OB_CURVES && (_type) <= OB_GREASE_PENCIL) || ((_type) == OB_SDF) || \
+   ((_type) == OB_NURB_BODY))
 
 /**
  * Does the object have some render-able geometry (unlike empties, cameras, etc.). True for
@@ -715,7 +717,8 @@ struct ObHook {
         OB_CURVES, \
         OB_POINTCLOUD, \
         OB_VOLUME, \
-        OB_GREASE_PENCIL))
+        OB_GREASE_PENCIL, \
+        OB_NURB_BODY))
 
 #define OB_TYPE_SUPPORT_VGROUP(_type) (ELEM(_type, OB_MESH, OB_LATTICE, OB_GREASE_PENCIL))
 
@@ -756,7 +759,8 @@ struct ObHook {
         ID_PT, \
         ID_VO, \
         ID_GP, \
-        ID_SF))
+        ID_SF, \
+        ID_NB))
 
 #define OB_DATA_SUPPORT_ID_CASE \
   ID_ME: \
@@ -773,6 +777,7 @@ struct ObHook {
   case ID_PT: \
   case ID_VO: \
   case ID_GP: \
-  case ID_SF
+  case ID_SF: \
+  case ID_NB
 
 }  // namespace blender

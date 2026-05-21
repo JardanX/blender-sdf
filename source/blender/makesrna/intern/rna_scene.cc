@@ -6,10 +6,12 @@
  * \ingroup RNA
  */
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "DNA_curve_types.h"
 #include "DNA_layer_types.h"
+#include "DNA_nurb_body_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
@@ -140,6 +142,28 @@ const EnumPropertyItem rna_enum_mesh_select_mode_uv_items[] = {
     {UV_SELECT_VERT, "VERTEX", ICON_UV_VERTEXSEL, "Vertex", "Vertex selection mode"},
     {UV_SELECT_EDGE, "EDGE", ICON_UV_EDGESEL, "Edge", "Edge selection mode"},
     {UV_SELECT_FACE, "FACE", ICON_UV_FACESEL, "Face", "Face selection mode"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_nurb_body_select_mode_items[] = {
+    {NURB_BODY_SELECT_MODE_EDGE, "EDGE", ICON_EDGESEL, "Edge", "Select generated edges"},
+    {NURB_BODY_SELECT_MODE_FACE, "FACE", ICON_FACESEL, "Face", "Select generated faces"},
+    {NURB_BODY_SELECT_MODE_OBJECT, "OBJECT", ICON_OBJECT_DATAMODE, "Object", "Select objects"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_nurb_body_tessellation_topology_items[] = {
+    {NURB_BODY_TESSELLATION_TRIS, "TRIS", 0, "Tris", "Keep raw triangle tessellation"},
+    {NURB_BODY_TESSELLATION_QUADS,
+     "QUADS",
+     0,
+     "Quads",
+     "Pair neighboring triangles into quads where possible"},
+    {NURB_BODY_TESSELLATION_NGONS,
+     "NGONS",
+     0,
+     "Ngons",
+     "Create true n-gons on simple planar faces and pair remaining triangles"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2178,6 +2202,123 @@ static void rna_Scene_editmesh_select_mode_update(bContext *C, PointerRNA * /*pt
     DEG_id_tag_update(&mesh->id, ID_RECALC_SELECT);
     WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
   }
+}
+
+static void rna_Scene_nurb_body_select_mode_update(bContext *C, PointerRNA *ptr)
+{
+  ToolSettings *ts = static_cast<ToolSettings *>(ptr->data);
+  if (!ELEM(ts->nurb_body_select_mode,
+            NURB_BODY_SELECT_MODE_EDGE,
+            NURB_BODY_SELECT_MODE_FACE,
+            NURB_BODY_SELECT_MODE_OBJECT))
+  {
+    ts->nurb_body_select_mode = NURB_BODY_SELECT_MODE_EDGE;
+  }
+
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return;
+  }
+
+  for (NurbBody &body : bmain->nurb_bodies) {
+    body.select_mode = ts->nurb_body_select_mode;
+    body.hovered_edge = -1;
+    body.surface_hovered_edge = -1;
+    body.hovered_face = -1;
+    body.hovered_face_key = 0;
+    if (body.select_mode != NURB_BODY_SELECT_MODE_EDGE) {
+      body.selected_edges = 0;
+      body.selected_edge = -1;
+      body.surface_selected_edges = 0;
+      body.surface_selected_edge = -1;
+    }
+    if (body.select_mode != NURB_BODY_SELECT_MODE_FACE) {
+      body.selected_faces = 0;
+      body.selected_face = -1;
+      std::fill_n(body.face_keys, 64, 0);
+    }
+    for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body.boolean_ops.first); op;
+         op = op->next)
+    {
+      op->hovered_edge = -1;
+      op->flag &= ~NURB_BODY_BOOLEAN_OP_HOVERED;
+      if (body.select_mode != NURB_BODY_SELECT_MODE_EDGE) {
+        op->selected_edges = 0;
+        op->selected_edge = -1;
+        op->flag &= ~NURB_BODY_BOOLEAN_OP_SELECTED;
+      }
+    }
+    DEG_id_tag_update(&body.id, ID_RECALC_SELECT);
+  }
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
+static void rna_Scene_nurb_body_viewport_update(bContext *C, PointerRNA *ptr)
+{
+  ToolSettings *ts = static_cast<ToolSettings *>(ptr->data);
+  ts->nurb_body_tessellation_deflection = std::max(ts->nurb_body_tessellation_deflection,
+                                                   0.0001f);
+  ts->nurb_body_tessellation_angle = std::clamp(ts->nurb_body_tessellation_angle,
+                                                0.01f,
+                                                3.14159f);
+  ts->nurb_body_tessellation_density = std::clamp(ts->nurb_body_tessellation_density,
+                                                  0.0f,
+                                                  1.0f);
+  const float face_deflection =
+      std::max(ts->nurb_body_tessellation_face_deflection > 0.0f ?
+                   ts->nurb_body_tessellation_face_deflection :
+                   ts->nurb_body_tessellation_deflection * 3.0f,
+               ts->nurb_body_tessellation_deflection);
+  const float face_angle =
+      std::clamp(ts->nurb_body_tessellation_face_angle > 0.0f ?
+                     ts->nurb_body_tessellation_face_angle :
+                     ts->nurb_body_tessellation_angle * 2.0f,
+                 ts->nurb_body_tessellation_angle,
+                 3.14159f);
+  const float min_width = std::max(ts->nurb_body_tessellation_min_width, 0.0f);
+  const float plane_angle =
+      std::clamp(ts->nurb_body_tessellation_plane_angle > 0.0f ?
+                     ts->nurb_body_tessellation_plane_angle :
+                     0.523599f,
+                 0.01f,
+                 3.14159f);
+  if (!ELEM(ts->nurb_body_tessellation_topology,
+            NURB_BODY_TESSELLATION_TRIS,
+            NURB_BODY_TESSELLATION_QUADS,
+            NURB_BODY_TESSELLATION_NGONS))
+  {
+    ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
+  }
+  if ((ts->nurb_body_viewport_flag & NURB_BODY_TRIANGULATE_MESH) != 0) {
+    ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
+    ts->nurb_body_viewport_flag &= ~NURB_BODY_TRIANGULATE_MESH;
+  }
+
+  const int viewport_flags = ts->nurb_body_viewport_flag &
+                             NURB_BODY_SMOOTH_SHADING;
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return;
+  }
+
+  for (NurbBody &body : bmain->nurb_bodies) {
+    body.tessellation_deflection = ts->nurb_body_tessellation_deflection;
+    body.tessellation_angle = ts->nurb_body_tessellation_angle;
+    body.tessellation_face_deflection = face_deflection;
+    body.tessellation_face_angle = face_angle;
+    body.tessellation_density = ts->nurb_body_tessellation_density;
+    body.tessellation_min_width = min_width;
+    body.tessellation_plane_angle = plane_angle;
+    body.tessellation_topology = ts->nurb_body_tessellation_topology;
+    body.flag &= ~(NURB_BODY_TRIANGULATE_MESH | NURB_BODY_SMOOTH_SHADING);
+    body.flag |= viewport_flags;
+    DEG_id_tag_update(&body.id, ID_RECALC_GEOMETRY);
+  }
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
 static void rna_Scene_uv_select_mode_update(bContext *C, PointerRNA * /*ptr*/)
@@ -4331,6 +4472,117 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mesh Selection Mode", "Which mesh elements selection works on");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_Scene_editmesh_select_mode_update");
+
+  prop = RNA_def_property(srna, "nurb_body_select_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "nurb_body_select_mode");
+  RNA_def_property_enum_items(prop, rna_enum_nurb_body_select_mode_items);
+  RNA_def_property_ui_text(
+      prop, "NURB Body Selection Mode", "Object Mode NURB Body selection target");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_select_mode_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_topology", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "nurb_body_tessellation_topology");
+  RNA_def_property_enum_items(prop, rna_enum_nurb_body_tessellation_topology_items);
+  RNA_def_property_ui_text(
+      prop, "Topology", "Preferred NURB Body viewport tessellation topology");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_density", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_density");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop, "Quality", "Global quality multiplier for NURB Body tessellation");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_deflection", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_deflection");
+  RNA_def_property_range(prop, 0.0001f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0005f, 1.0f, 0.1f, 4);
+  RNA_def_property_ui_text(
+      prop, "Plane Tolerance", "Linear deflection for NURB Body tessellation");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna,
+                          "nurb_body_tessellation_face_deflection",
+                          PROP_FLOAT,
+                          PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_face_deflection");
+  RNA_def_property_range(prop, 0.0001f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0001f, 1.0f, 0.1f, 4);
+  RNA_def_property_ui_text(prop,
+                           "Face Plane Tolerance",
+                           "Linear deflection for tessellating NURB Body face interiors");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_angle");
+  RNA_def_property_range(prop, 0.01f, 3.14159f);
+  RNA_def_property_ui_range(prop, 0.03f, 1.0f, 0.1f, 4);
+  RNA_def_property_ui_text(
+      prop, "Angle Tolerance", "Angular deflection for NURB Body tessellation");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_face_angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_face_angle");
+  RNA_def_property_range(prop, 0.01f, 3.14159f);
+  RNA_def_property_ui_range(prop, 0.01f, 1.0f, 1.0f, 4);
+  RNA_def_property_ui_text(prop,
+                           "Face Angle Tolerance",
+                           "Angular deflection for tessellating NURB Body face interiors");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_min_width", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_min_width");
+  RNA_def_property_range(prop, 0.0f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.1f, 4);
+  RNA_def_property_ui_text(prop,
+                           "Min Width",
+                           "Minimum generated tessellation edge length; zero lets OCCT choose");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_plane_angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_plane_angle");
+  RNA_def_property_range(prop, 0.01f, 3.14159f);
+  RNA_def_property_ui_range(prop, 0.01f, 1.0f, 1.0f, 4);
+  RNA_def_property_ui_text(
+      prop, "Plane Angle", "Maximum angle for fast triangle pairing into larger faces");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "use_nurb_body_triangulate_mesh", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "nurb_body_viewport_flag", NURB_BODY_TRIANGULATE_MESH);
+  RNA_def_property_ui_text(
+      prop, "Triangulate Mesh", "Keep NURB Body viewport tessellation as triangles");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "use_nurb_body_smooth_shading", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "nurb_body_viewport_flag", NURB_BODY_SMOOTH_SHADING);
+  RNA_def_property_ui_text(prop, "Smooth Shading", "Use smooth shading on NURB Body viewport meshes");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
 
   prop = RNA_def_property(srna, "vertex_group_weight", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "vgroup_weight");

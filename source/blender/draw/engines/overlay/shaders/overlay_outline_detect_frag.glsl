@@ -26,6 +26,7 @@ FRAGMENT_SHADER_CREATE_INFO(overlay_outline_detect)
 #define APEX_XNEG (ALL & (~XNEG))
 #define APEX_YPOS (ALL & (~YPOS))
 #define APEX_YNEG (ALL & (~YNEG))
+#define STRICT_DEPTH_OUTLINE_ID_FLAG (1u << 13u)
 
 bool has_edge(uint id, float2 uv, uint ref, uint &ref_col, float2 &depth_uv)
 {
@@ -37,18 +38,48 @@ bool has_edge(uint id, float2 uv, uint ref, uint &ref_col, float2 &depth_uv)
   return (id != ref);
 }
 
+bool strict_depth_outline_occluded(uint id, float2 uv)
+{
+  if ((id & STRICT_DEPTH_OUTLINE_ID_FLAG) == 0u) {
+    return false;
+  }
+
+  float outline_depth = textureLod(outline_depth_tx, uv, 0.0f).r;
+  float scene_depth = textureLod(scene_depth_tx, uv, 0.0f).r;
+
+  /* Keep this in sync with the strict-depth occlusion test in main(). */
+  constexpr float epsilon = 3.0f / 8388608.0f;
+  float occlusion_epsilon = max(epsilon * 24.0f, scene_depth * 2.0e-6f);
+  return scene_depth > 0.0f && scene_depth < 1.0f &&
+         outline_depth > scene_depth + occlusion_epsilon;
+}
+
+uint visible_outline_id(uint id, float2 uv)
+{
+  return strict_depth_outline_occluded(id, uv) ? 0u : id;
+}
+
 /* A gather4 + check against ref. */
 bool4 gather_edges(float2 uv, uint ref)
 {
   uint4 ids;
 #ifdef GPU_ARB_texture_gather
   ids = textureGather(outline_id_tx, uv);
+  float3 ofs = float3(0.5f, 0.5f, -0.5f) * uniform_buf.size_viewport_inv.xyy;
+  ids.x = visible_outline_id(ids.x, uv - ofs.xz);
+  ids.y = visible_outline_id(ids.y, uv + ofs.xy);
+  ids.z = visible_outline_id(ids.z, uv + ofs.xz);
+  ids.w = visible_outline_id(ids.w, uv - ofs.xy);
 #else
   float3 ofs = float3(0.5f, 0.5f, -0.5f) * uniform_buf.size_viewport_inv.xyy;
   ids.x = textureLod(outline_id_tx, uv - ofs.xz, 0.0f).r;
   ids.y = textureLod(outline_id_tx, uv + ofs.xy, 0.0f).r;
   ids.z = textureLod(outline_id_tx, uv + ofs.xz, 0.0f).r;
   ids.w = textureLod(outline_id_tx, uv - ofs.xy, 0.0f).r;
+  ids.x = visible_outline_id(ids.x, uv - ofs.xz);
+  ids.y = visible_outline_id(ids.y, uv + ofs.xy);
+  ids.z = visible_outline_id(ids.z, uv + ofs.xz);
+  ids.w = visible_outline_id(ids.w, uv - ofs.xy);
 #endif
 
   return notEqual(ids, uint4(ref));
@@ -166,12 +197,13 @@ void diag_dir(bool4 edges1, bool4 edges2, float2 &line_start, float2 &line_end)
 
 void main()
 {
-  float2 screen_uv = gl_FragCoord.xy / float2(textureSize(outline_id_tx, 0).xy);
-  uint ref = textureLod(outline_id_tx, screen_uv, 0.0f).r;
-  uint ref_col = ref;
-
   float2 uvs = gl_FragCoord.xy * uniform_buf.size_viewport_inv;
   float3 ofs = float3(uniform_buf.size_viewport_inv, 0.0f);
+
+  float2 screen_uv = gl_FragCoord.xy / float2(textureSize(outline_id_tx, 0).xy);
+  uint ref = textureLod(outline_id_tx, screen_uv, 0.0f).r;
+  ref = visible_outline_id(ref, uvs);
+  uint ref_col = ref;
 
   float2 depth_uv = uvs;
 
@@ -199,6 +231,10 @@ void main()
   ids.z = textureLod(outline_id_tx, uvs + ofs.zy, 0.0f).r;
   ids.w = textureLod(outline_id_tx, uvs - ofs.zy, 0.0f).r;
 #endif
+  ids.x = visible_outline_id(ids.x, uvs + ofs.xz);
+  ids.y = visible_outline_id(ids.y, uvs - ofs.xz);
+  ids.z = visible_outline_id(ids.z, uvs + ofs.zy);
+  ids.w = visible_outline_id(ids.w, uvs - ofs.zy);
 
   bool has_edge_pos_x = has_edge(ids.x, uvs + ofs.xz, ref, ref_col, depth_uv);
   bool has_edge_neg_x = has_edge(ids.y, uvs - ofs.xz, ref, ref_col, depth_uv);
@@ -218,6 +254,10 @@ void main()
       ids.z = textureLod(outline_id_tx, uvs + 2.0f * ofs.zy, 0.0f).r;
       ids.w = textureLod(outline_id_tx, uvs - 2.0f * ofs.zy, 0.0f).r;
 #endif
+      ids.x = visible_outline_id(ids.x, uvs + 2.0f * ofs.xz);
+      ids.y = visible_outline_id(ids.y, uvs - 2.0f * ofs.xz);
+      ids.z = visible_outline_id(ids.z, uvs + 2.0f * ofs.zy);
+      ids.w = visible_outline_id(ids.w, uvs - 2.0f * ofs.zy);
 
       has_edge_pos_x = has_edge(ids.x, uvs + 2.0f * ofs.xz, ref, ref_col, depth_uv);
       has_edge_neg_x = has_edge(ids.y, uvs - 2.0f * ofs.xz, ref, ref_col, depth_uv);
@@ -232,6 +272,7 @@ void main()
   }
 
   /* WATCH: Keep in sync with outline_id_tx of the pre-pass. */
+  bool is_strict_depth_outline = (ref_col & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u;
   uint color_id = ref_col >> 14u;
   if (ref_col == 0u) {
     frag_color = float4(0.0f);
@@ -252,12 +293,23 @@ void main()
   float ref_depth = textureLod(outline_depth_tx, depth_uv, 0.0f).r;
   float scene_depth = textureLod(scene_depth_tx, depth_uv, 0.0f).r;
 
-  /* Avoid bad cases of Z-fighting for occlusion only. */
+  /* Avoid bad cases of Z-fighting for occlusion only. Strict-depth outlines discard when
+   * occluded, so they need a wider tolerance to avoid self-hiding parts of the silhouette. */
   constexpr float epsilon = 3.0f / 8388608.0f;
-  bool occluded = (ref_depth > scene_depth + epsilon);
+  float occlusion_epsilon = is_strict_depth_outline ? max(epsilon * 24.0f,
+                                                          scene_depth * 2.0e-6f) :
+                                                      epsilon;
+  bool occluded = (scene_depth > 0.0f && scene_depth < 1.0f &&
+                   ref_depth > scene_depth + occlusion_epsilon);
+  if (is_strict_depth_outline && occluded) {
+    gpu_discard_fragment();
+    return;
+  }
+
+  float occlusion_alpha = is_strict_depth_outline ? 0.0f : alpha_occlu;
 
   /* NOTE: We never set alpha to 1.0 to avoid Anti-aliasing destroying the line. */
-  frag_color *= (occluded ? alpha_occlu : 1.0f) * (254.0f / 255.0f);
+  frag_color *= (occluded ? occlusion_alpha : 1.0f) * (254.0f / 255.0f);
 
   /* Write outline depth so grid cannot overdraw outline pixels. */
   gl_FragDepth = ref_depth;

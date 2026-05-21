@@ -18,6 +18,8 @@ struct bContext;
 struct ModifierData;
 struct Object;
 struct StructRNA;
+struct wmKeyConfig;
+struct wmKeyMap;
 struct wmOperator;
 struct wmOperatorType;
 
@@ -161,6 +163,20 @@ void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot);
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_shell_distance_adjust(wmOperatorType *ot);
 void OBJECT_OT_sdf_profile_frame(wmOperatorType *ot);
+
+/* `object_nurb_body.cc` */
+
+void OBJECT_OT_nurb_body_add(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_hover(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_select_cut_edge(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_select_mode(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_edge_translate(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_face_extrude(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_face_inset(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_bevel_selected(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_boolean_apply(wmOperatorType *ot);
+wmKeyMap *nurb_body_bevel_modal_keymap(wmKeyConfig *keyconf);
+bool nurb_body_select_all_edges_from_context(bContext *C, int action, bool *r_handled);
 /**
  * Called by other space types too.
  */

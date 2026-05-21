@@ -61,6 +61,8 @@ class Curves : Overlay {
     }
 
     offset_data_ = state.offset_data_get();
+    const DRWState edit_curve_depth_state = state.xray_flag_enabled ? DRW_STATE_DEPTH_ALWAYS :
+                                                                      DRW_STATE_DEPTH_LESS_EQUAL;
 
     {
       auto &pass = edit_curves_ps_;
@@ -69,7 +71,7 @@ class Curves : Overlay {
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
       {
         auto &sub = pass.sub("Lines");
-        sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_BLEND_ALPHA |
+        sub.state_set(DRW_STATE_WRITE_COLOR | edit_curve_depth_state | DRW_STATE_BLEND_ALPHA |
                           DRW_STATE_WRITE_DEPTH,
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->curve_edit_line.get());
@@ -118,7 +120,7 @@ class Curves : Overlay {
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
       {
         auto &sub = pass.sub("Wires");
-        sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_WRITE_DEPTH,
+        sub.state_set(DRW_STATE_WRITE_COLOR | edit_curve_depth_state | DRW_STATE_WRITE_DEPTH,
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->legacy_curve_edit_wires.get());
         sub.push_constant("normal_size", 0.0f);
@@ -126,7 +128,7 @@ class Curves : Overlay {
       }
       if (show_normals) {
         auto &sub = pass.sub("Normals");
-        sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_WRITE_DEPTH,
+        sub.state_set(DRW_STATE_WRITE_COLOR | edit_curve_depth_state | DRW_STATE_WRITE_DEPTH,
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->legacy_curve_edit_normals.get());
         sub.push_constant("normal_size", state.overlay.normals_length);

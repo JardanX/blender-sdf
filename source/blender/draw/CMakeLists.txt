@@ -211,6 +211,7 @@ set(SRC
   engines/overlay/overlay_mode_transfer.hh
   engines/overlay/overlay_motion_path.hh
   engines/overlay/overlay_name.hh
+  engines/overlay/overlay_nurb_body.hh
   engines/overlay/overlay_origin.hh
   engines/overlay/overlay_outline.hh
   engines/overlay/overlay_paint.hh

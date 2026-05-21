@@ -5,7 +5,101 @@
 
 ---
 
-## Native SDF Modifier System
+## NURB Body Object Type (OCCT-backed CAD Modeling)
+
+Added `OB_NURB_BODY = 24` / `ID_NB = 'NB'` as a native Blender object type backed by OpenCASCADE (OCCT 8.0.0). This is the foundation for NURBS/CAD-style analytic solid modeling directly in the viewport — cylinder primitives, boolean operations, edge bevel/fillet/chamfer — targeting a Plasticity-like workflow.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `makesdna/DNA_nurb_body_types.h` | DNA struct: `NurbBody` with shape params (radius, depth), boolean op linked list (`NurbBodyBooleanOp`), 64-bit edge selection masks, bevel/fillet/chamfer data, generated face provenance keys, tessellation quality, selection mode |
+| `blenkernel/BKE_nurb_body.hh` | BKE API: `BKE_nurb_body_add()`, `BKE_nurb_body_to_mesh()`, edge polyline sampling, data update callback. Defines `NurbBodyEdgePolyline` struct for viewport overlay |
+| `blenkernel/intern/nurb_body.cc` | BKE implementation (~1755 lines OCCT): `IDType_ID_NB` registration, shape evaluation via OCCT BRep primitives, boolean operations (cut/fuse/common), edge bevel/fillet/chamfer (via `BRepFilletAPI_MakeFillet`/`MakeChamfer`), tessellation with `BRepMesh_IncrementalMesh`, mesh extraction with quad optimization, topological workflow and auto-crease, edge polyline sampling for overlay |
+| `editors/object/object_nurb_body.cc` | Operators (~1500 lines): add (cylinder), boolean apply (multi-operand with hide/boundbox toggle), edge select/hover in Object Mode, edge translate (modal with X/Y/Z axis constraint, operator grab), interactive bevel (modal radius drag, C key chamfer toggle, F key fillet reset, undo on escape) |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Viewport overlay: silhouette edge lines from mesh, boolean edge polylines with select/hover/body color coding, line smoothing, depth testing |
+| `makesrna/intern/rna_nurb_body.cc` | Python API: shape properties (primitive, radius, depth), tessellation controls (deflection, angle), shading flags (merge vertices, smooth shading, triangulate, auto-crease), selection mode, materials |
+| `scripts/startup/bl_ui/properties_data_nurb_body.py` | Properties panel UI: Shape (primitive, selection mode, radius, depth), Viewport Tessellation (deflection, angle, triangulate, merge, smooth, auto-crease) |
+
+### Modified Files — Wiring Points
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_ID.h` | Added `ID_NB` to `FILTER_ID_ALL` macro |
+| `makesdna/DNA_ID_enums.h` | Added `ID_NB = MAKE_ID2('N', 'B')` |
+| `makesdna/DNA_object_types.h` | Added `OB_NURB_BODY = 24`; updated `OB_TYPE_SUPPORT_MATERIAL`, `OB_TYPE_IS_GEOMETRY`, `OB_DATA_SUPPORT_ID_CASE` |
+| `makesdna/DNA_userdef_enums.h` | Added `USER_DUP_NURB_BODY` duplicate flag |
+| `makesdna/DNA_userdef_types.h` | Added `ud->dupflag` bit for NURB body |
+| `blenkernel/BKE_idtype.hh` | Added `FILTER_ID_NB` |
+| `blenkernel/BKE_main.hh` | Added `ListBase nurb_bodies` to `Main` struct |
+| `blenkernel/intern/idtype.cc` | `INIT_TYPE()` + `CASE_IDINDEX()` for `ID_NB` |
+| `blenkernel/intern/main.cc` | Mapped `INDEX_ID_NB` to `bmain.nurb_bodies` |
+| `blenkernel/intern/object.cc` | Object data name/add/type mapping, modifier support, duplicate, boundbox |
+| `blenkernel/intern/object_update.cc` | Added `OB_NURB_BODY` to `BKE_object_data_update()` |
+| `blenkernel/intern/material.cc` | Material array access for `ID_NB` |
+| `blenloader/intern/versioning_userdef.cc` | Set `USER_DUP_NURB_BODY` default |
+| `depsgraph/intern/builder/deg_builder_nodes.cc` | Build evaluation nodes for `ID_NB`/`OB_NURB_BODY` |
+| `depsgraph/intern/builder/deg_builder_relations.cc` | Build dependency relations |
+| `depsgraph/intern/depsgraph_tag.cc` | Tag NURB body data for update |
+| `makesrna/intern/makesrna.cc` | RNA registration for `rna_nurb_body` |
+| `makesrna/intern/rna_ID.cc` | `case ID_NB: return &RNA_NurbBody` in `ID_code_to_RNA_type()` |
+| `makesrna/intern/rna_internal.hh` | `RNA_def_nurb_body()` declaration |
+| `makesrna/intern/rna_main.cc` | `bpy.data.nurb_bodies` collection |
+| `makesrna/intern/rna_main_api.cc` | `.new()` / `.remove()` / `.tag()` API methods |
+| `makesrna/intern/rna_object.cc` | `OB_NURB_BODY` RNA enum for object type |
+| `makesrna/intern/rna_space_api.cc` | Space API notification for NURB body |
+| `draw/engines/overlay/overlay_instance.cc/.hh` | NURB body overlay instance registration |
+| `draw/engines/overlay/overlay_outline.hh` | Outline rendering for `OB_NURB_BODY` |
+| `draw/engines/overlay/overlay_prepass.hh` | Prepass for `OB_NURB_BODY` |
+| `draw/engines/overlay/overlay_wireframe.hh` | Wireframe mode for `OB_NURB_BODY` |
+| `draw/engines/select/select_engine.cc` | Selection engine support |
+| `draw/engines/workbench/workbench_engine.cc` | Workbench engine bypass (no batch cache) |
+| `draw/intern/DRW_render.hh` | Draw type enum for NURB body |
+| `draw/intern/draw_cache.cc` | Batch cache exclusion (`case OB_NURB_BODY: break`) |
+| `editors/interface/interface_icons.cc` | Icon for NURB body type |
+| `editors/interface/templates/interface_template_id.cc` | ID template support |
+| `editors/object/object_ops.cc` | Add operator registration |
+| `editors/render/render_opengl.cc` | OpenGL render support |
+| `editors/space_buttons/buttons_context.cc` | Properties context: `context.nurb_body` |
+| `editors/space_outliner/outliner_draw.cc` | Outliner icon/display |
+| `editors/space_outliner/outliner_select.cc` | Outliner selection |
+| `editors/space_outliner/outliner_tools.cc` | Outliner tools (delete, etc.) |
+| `editors/space_outliner/tree/tree_element_id.cc` | Tree element for `ID_NB` |
+| `editors/space_view3d/view3d_buttons.cc` | View3D object type selector |
+| `scripts/presets/keyconfig/keymap_data/blender_default.py` | Default keymap: add NURB body, select edge, hover, bevel, translate |
+| `scripts/presets/keyconfig/keymap_data/industry_compatible_data.py` | Industry keymap: same operators |
+| `scripts/startup/bl_ui/__init__.py` | Import properties_data_nurb_body |
+| `scripts/startup/bl_ui/properties_workspace.py` | Workspace panel ordering |
+| `scripts/startup/bl_ui/space_view3d.py` | View3D Add menu: "NURB Cylinder" entry |
+| `CMakeLists.txt` (root) | `WITH_OPENCASCADE` option |
+| `build_files/cmake/platform/dependency_targets.cmake` | `bf_deps_optional_opencascade` target |
+| `build_files/cmake/platform/platform_win32.cmake` | OCCT 8.0.0 library discovery (14 modules) |
+| `source/blender/CMakeLists.txt` | Added `DNA_nurb_body_types.h` to `SRC_DNA_INC` |
+| `source/blender/blenkernel/CMakeLists.txt` | Added `nurb_body.cc` |
+| `source/blender/draw/CMakeLists.txt` | Added overlay_nurb_body include |
+| `source/blender/editors/object/CMakeLists.txt` | Added `object_nurb_body.cc` |
+| `source/blender/makesrna/intern/CMakeLists.txt` | Added `rna_nurb_body.cc` |
+| `CLAUDE.md` | Added agent instruction: do not run local builds |
+
+### Feature Details
+
+**Shape evaluation**: `evaluate_shape()` in `nurb_body.cc` builds the OCCT shape tree — base primitive cylinder → body edge blend → boolean operations (with per-op edge blends). Each boolean op stores a snapshot of the operand's world-to-target transform, so operands can be moved/deleted after application.
+
+**Boolean operations**: `NurbBodyBooleanOp` linked list. Three operations — difference (cut), union (fuse), intersect (common). Operands are other selected NURB body objects; the result is stored on the active body. Operands can be hidden or shown as bounding boxes.
+
+**Edge selection**: 64-bit masks (`selected_edges`, `bevel_edges`, `chamfer_edges`) with per-edge data (`bevel_radii[64]`). Selection is per-boolean-op, not global. Hover state tracked independently from selection. The `SELECT_MODE_EDGE`/`FACE`/`OBJECT` toggle controls whether mouse interaction targets edges or uses standard object selection.
+
+**Bevel/Fillet/Chamfer**: Interactive modal operator. Drag mouse horizontally to change radius. Press C to toggle chamfer, F for fillet. Escape reverts. Per-edge bevel radii stored in `bevel_radii[64]`. Both body edges and boolean op cut edges are bevelable independently.
+
+**NURB Body undo**: Confirmed boolean, edge move, bevel, fillet, and chamfer commits push explicit full-barrier undo checkpoints after the NurbBody/Object IDs are tagged. Edge hover and edge selection changes stay out of the geometry undo stream so Ctrl+Z only rolls back the last confirmed modeling operation. Runtime NURB body OCCT/evaluated-shape caches are cleared on undo restore and committed modeling changes so Ctrl+Z cannot display a stale combined bevel/chamfer state. Undo/file restore preserves exact committed surface/output fillet edge keys so rolling back the latest chamfer does not also drop earlier fillet stages.
+
+**Edge translation**: Modal operator for moving boolean op edge positions. X/Y/Z keys constrain to axis. Drag mouse to translate the operand position relative to the target body.
+
+**Viewport rendering**: The overlay engine renders silhouette lines detected from the tessellated mesh (boundary edges + edges between front/back-facing faces). Boolean edge polylines are sampled from OCCT curves and rendered with color coding: black = normal, white = hovered, orange = selected.
+
+**Mesh export**: `BKE_nurb_body_to_mesh()` extracts a Blender mesh from the OCCT shape with quad optimization (merging adjacent triangle pairs into quads), smooth/sharp edge detection via topological continuity analysis, and auto-crease for G0/G1 discontinuity edges.
+
+---
 
 Moved SDF modifiers from custom system (on SDF data block) to Blender's native modifier system (on Object). SDF objects now have a standard Modifier Properties tab (wrench icon). Each SDF modifier is a native `eModifierType` with `eModifierTypeFlag_AcceptsSDF` — SDF modifiers only appear on SDF objects, mesh modifiers only on meshes.
 
@@ -56,7 +150,10 @@ Extracted the monolithic trace shader into a 3-pass pipeline: tile cull → cone
 | `draw/engines/sdf/shaders/sdf_cone_march_comp.glsl` | Complete rewrite: real SDF evaluation using tile prim list SSBOs, Lipschitz-safe `t_safe` output, (8,8) workgroup for GPU occupancy, configurable steps/aperture |
 | `draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Tile culling code replaced with cooperative SSBO→shared memory load. Cone skip as first-step hint (no tile-boundary artifacts). `step_factor` moved to CPU push constant. Early `t > t_exit` check |
 | `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Added `sdf_tile_cull_comp` CREATE_INFO. Updated `sdf_cone_march_comp` with SDF eval SSBOs + cone parameters. Added tile prim SSBO slots (5,6) to `sdf_trace_tile_comp`. Added `sdf_step_factor` push constant to both trace infos |
-| `draw/engines/sdf/sdf_engine.cc` | Added `SH_TILE_CULL_COMP` shader + `tile_prim_counts/lists` SSBOs. New `draw_tile_cull()` + `ensure_tile_ssbos()`. Cone march dispatch at (8,8) workgroup. `step_factor` computed on CPU. Draw flow: tile_cull → barrier → cone_march → barrier → trace → barrier → shade → blit |
+| `draw/engines/sdf/sdf_engine.cc` | Added `SH_TILE_CULL_COMP` shader + `tile_prim_counts/lists` SSBOs. New `draw_tile_cull()` + `ensure_tile_ssbos()`. Cone march dispatch at (8,8) workgroup. `step_factor` computed on CPU. Draw flow: tile_cull → barrier → cone_march → barrier → trace → barrier → shade → blit. Removed SDF group debug prints and always binds trace profiling SSBOs so Vulkan descriptor slots 11/12 are valid outside profiling runs |
+| `draw/engines/overlay/overlay_sdf.hh` | Marks SDF outline IDs as strict-depth so hidden SDF silhouettes are discarded instead of faded through meshes |
+| `draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Treats strict-depth outline IDs (NURB Body and SDF) as fully occluded by nearer scene depth while keeping Blender's standard outline anti-aliasing path |
+| `draw/engines/sdf/shaders/sdf_outline_prepass_frag.glsl` | Tightened SDF outline prepass depth epsilon so mesh occluders reject hidden SDF pixels correctly |
 | `draw/CMakeLists.txt` | Registered `sdf_tile_cull_comp.glsl` |
 | `makesdna/DNA_view3d_types.h` | Added `sdf_cone_aperture` (float) and `sdf_cone_steps` (int) to `View3DShading` |
 | `makesrna/intern/rna_space.cc` | Added RNA properties for cone aperture (0.5–8.0) and cone steps (4–128) |
@@ -2566,3 +2663,84 @@ Fixed selection bugs where wrong SDF gets highlighted, overlays not clearing on 
 | `draw/engines/sdf/sdf_engine.cc` | After sorting objects, force first ungrouped object and first object in each group to `SDF_CSG_UNION` — prevents subtract-from-nothing |
 | `draw/engines/overlay/overlay_sdf.hh` | Set `outline_packed_id = 0` for unselected objects (was `(2 << 14) \| resource_id`); fix `sel_id` bounds check to use unsigned comparison |
 | `scripts/startup/bl_ui/properties_data_sdf.py` | Show Operation panel for first group member and first scene SDF, but with CSG buttons disabled and "First in stack — forced to Union" info label |
+
+---
+
+## Fix NURB Body Viewport: Silhouette Outline + Edge Lines (2026-05-23)
+
+Superseded later on 2026-05-23 by the topology-line fix below.
+
+### Outline: Blender Outline System with Black Override
+NURB body silhouette drawn via standard Blender outline pipeline (smooth anti-aliased silhouette, not mesh edge detection). Single subpass with `outline_color_override=2` — all NURB bodies get black outline unconditionally. The outline prepass draws tessellated mesh surface to ID texture; resolve shader detects object boundaries.
+
+### Edge Lines: Fixed Minimal Polygon Offset
+Face overlays keep camera-dependent offset `(dist, 2.0f)`. Edge lines use `GPU_polygon_offset(0.0f, -1.0f)` — pulls one depth unit forward, camera-independent.
+
+### X-Ray Mode: Depth-Aware Two-Pass
+- Pass 1: `GPU_DEPTH_GREATER` @ 25% alpha — occluded portions
+- Pass 2: `GPU_DEPTH_LESS_EQUAL` @ 100% alpha — visible portions
+Hovered/selected edges full opacity.
+
+### Outline Depth Push
+Strict-depth outlines pushed `epsilon*4` behind surface in resolve shader.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/overlay/overlay_outline.hh` | Added `prepass_nurb_body_ps_` subpass with `outline_color_override=2` (black); NURB body draws tessellated mesh surface to outline prepass |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Edge offset `(0.0f, -1.0f)`; xray two-pass `DEPTH_GREATER`+`DEPTH_LESS_EQUAL` for depth-aware occlusion |
+| `draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Strict-depth outlines write `gl_FragDepth = ref_depth + epsilon*4` |
+
+---
+
+## Fix NURB Body Topology Lines and Grid Interaction (2026-05-23)
+
+Removed the custom NURB Body screen-space silhouette pass. NURB Body now uses Blender's regular selected-object outline path and the NURB-specific overlay only draws NURB edge topology lines. The edge overlay still reconstructs lines from cached NURB Body edge polylines, but emitted segments must now be actual evaluated mesh edges between snapped vertices so the visible path follows mesh topology instead of connecting nearby projected vertices through a wavy shortcut.
+
+The visible edge layer now reconstructs each cached NURB Body edge polyline from evaluated mesh vertices instead of drawing free analytic curve samples, mesh `corner_tris()` topology, or independently classified mesh edges. Mesh vertices near a NURB-derived edge are projected onto that edge, sorted by edge distance, de-duplicated by projection, and connected only in that NURB edge order. This keeps the existing NURB edge classification while making the drawn path follow the viewport mesh vertices, so bevel-band triangle diagonals are no longer eligible as line segments and coplanar topology such as inset edges can still draw. Hovered and selected edge batches are rebuilt with the same snapped-vertex path reconstruction and draw on top in NURB edge colors. A positive view-dependent depth bias keeps visible feature lines on top of their own shaded surface while normal depth testing still lets mesh surfaces occlude them. In X-Ray/Alt-Z, NURB Body edges first draw with depth ignored at 25% opacity, then draw a normal visible-depth pass on top so occluded selectable edges remain available without fighting the surface lines.
+
+The generated preview mesh now stores the source NURB/OCCT face index on each mesh face. The overlay uses that face provenance to reject evaluated mesh edges whose adjacent faces both come from the same source face, so internal triangulation diagonals near a bevel or inset curve are not classified as NURB edge lines.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `blenkernel/intern/nurb_body.cc` | Writes hidden per-face `.nurb_body_source_face_index` provenance onto generated NURB Body meshes |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Removed the custom NURB Body silhouette pass; edge overlay now emits only real evaluated mesh edge segments between snapped NURB-edge vertices, with no projection-order fallback |
+| `draw/engines/overlay/overlay_outline.hh` / `overlay_outline_detect_frag.glsl` / `overlay_outline_infos.hh` / `overlay_outline_prepass_vert.glsl` | Removed the NURB-specific silhouette tuning from the shared outline shader path; NURB Body participates in the normal Blender outline path like mesh objects |
+| `draw/engines/overlay/overlay_instance.cc` | Removed the custom NURB Body silhouette draw call so only Blender outline and NURB edge overlay remain |
+
+---
+
+## NURB Body Face-Mode Bevel Readjust Entry (2026-05-23)
+
+Allows `Ctrl+B` in NURB Body face mode when result/bevel faces are selected. Surface bevel commits store generated face provenance, but face-mode `Ctrl+B` now follows Plasticity's selected-face refillet model: it appends a face refillet/chamfer stage at the end of the stack instead of mutating old edge history, preventing later extrudes/chamfers from being invalidated by topology changes below them.
+
+### Modified Files (Editor)
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_nurb_body_types.h` | Added `NurbBodyBooleanOp.generated_face_keys` to persist all generated bevel/chamfer face provenance keys for a surface bevel stage |
+| `makesdna/DNA_nurb_body_types.h` | Added `NURB_BODY_BOOLEAN_FACE_REFILLET_STAGE` for Plasticity-style selected-face refillet/chamfer modification |
+| `blenkernel/intern/nurb_body.cc` | Included generated face provenance keys in NURB Body hashing so cache keys update when provenance is assigned; added face refillet stage evaluator that defeatures the selected face and applies a new fillet/chamfer to nearby restored edges |
+| `editors/object/object_nurb_body.cc` | Surface bevel commits now store generated bevel face provenance using whole-face distance to the source edge polyline while excluding pre-existing faces; generated face keys are stored as a set; face-mode `Ctrl+B` now follows Plasticity-style refillet behavior by appending a selected-face refillet stage instead of mutating old edge history; `C`/`F` switch chamfer/fillet during the refillet drag; face-stage modal clears NURB Body runtime caches and reselects the best current result face during live edits so lines and face selection track topology changes; removed blind latest-stage readjust, boundary-edge fallback, and unprovenanced lazy matching so wrong edge fillets are not created; existing edge-stage resize still refuses when later stages depend on that bevel; edit-stage confirm restores original state if no solved preview exists |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Draw NURB Body visible edge overlay from evaluated mesh vertices snapped to cached NURB Body edge polylines, with analytic polyline fallback when live refillet topology has no matching mesh edges; disable silhouette overlay to avoid Vulkan indirect draw crashes from mesh surface batches |
+
+---
+
+## Fix NURB Body Bevel Preview Blocking and Fillet Instability (2026-05-23)
+
+Removed conservative preview behavior that made fillets clamp early, reject confirmation before a solved preview arrived, or reuse a stale lower-radius/last-good shape. Fast preview now asks OCCT for the requested radius directly without timeout cancellation, last-good substitution, or reduced-radius fallback, so switching Chamfer -> Fillet is no longer needed to clear bad fillet preview state.
+
+### Modified Files (BKE)
+
+| File | Change |
+|------|--------|
+| `blenkernel/intern/nurb_body.cc` | Removed fast bevel build timeout, preview failure radius clamp, last-good single/group blend reuse, and reduced-radius preview fallback |
+
+### Modified Files (Editor)
+
+| File | Change |
+|------|--------|
+| `editors/object/object_nurb_body.cc` | Confirmation no longer blocks when preview has not yet recorded a solved radius; timeout-budget warning removed |

@@ -45,6 +45,7 @@
 #  include "BKE_mesh.hh"
 #  include "BKE_movieclip.hh"
 #  include "BKE_node.hh"
+#  include "BKE_nurb_body.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_particle.h"
@@ -80,6 +81,7 @@
 #  include "DNA_meta_types.h"
 #  include "DNA_movieclip_types.h"
 #  include "DNA_node_types.h"
+#  include "DNA_nurb_body_types.h"
 #  include "DNA_particle_types.h"
 #  include "DNA_pointcloud_types.h"
 #  include "DNA_sdf_types.h"
@@ -369,6 +371,19 @@ static Mesh *rna_Main_meshes_new(Main *bmain, const char *name)
   WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
 
   return mesh;
+}
+
+static NurbBody *rna_Main_nurb_bodies_new(Main *bmain, const char *name)
+{
+  char safe_name[MAX_ID_NAME - 2];
+  rna_idname_validate(name, safe_name);
+
+  NurbBody *body = BKE_nurb_body_add(bmain, safe_name);
+  id_us_min(&body->id);
+
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+
+  return body;
 }
 
 /* copied from Mesh_getFromObject and adapted to RNA interface */
@@ -874,6 +889,7 @@ RNA_MAIN_ID_TAG_FUNCS_DEF(objects, objects, ID_OB)
 RNA_MAIN_ID_TAG_FUNCS_DEF(materials, materials, ID_MA)
 RNA_MAIN_ID_TAG_FUNCS_DEF(node_groups, nodetrees, ID_NT)
 RNA_MAIN_ID_TAG_FUNCS_DEF(meshes, meshes, ID_ME)
+RNA_MAIN_ID_TAG_FUNCS_DEF(nurb_bodies, nurb_bodies, ID_NB)
 RNA_MAIN_ID_TAG_FUNCS_DEF(lights, lights, ID_LA)
 RNA_MAIN_ID_TAG_FUNCS_DEF(libraries, libraries, ID_LI)
 RNA_MAIN_ID_TAG_FUNCS_DEF(screens, screens, ID_SCR)
@@ -2505,6 +2521,49 @@ void RNA_def_main_sdfs(BlenderRNA *brna, PropertyRNA *cprop)
       func, "do_ui_user", true, "", "Make sure interface does not reference this SDF data");
 
   func = RNA_def_function(srna, "tag", "rna_Main_sdfs_tag");
+  parm = RNA_def_boolean(func, "value", false, "Value", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
+
+void RNA_def_main_nurb_bodies(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "BlendDataNurbBodies");
+  srna = RNA_def_struct(brna, "BlendDataNurbBodies", nullptr);
+  RNA_def_struct_sdna(srna, "Main");
+  RNA_def_struct_ui_text(srna, "Main NURB Bodies", "Collection of NURB Body data-blocks");
+
+  func = RNA_def_function(srna, "new", "rna_Main_nurb_bodies_new");
+  RNA_def_function_ui_description(func, "Add a new NURB Body to the main database");
+  parm = RNA_def_string(func, "name", "NURB Body", 0, "", "New name for the data-block");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "nurb_body", "NurbBody", "", "New NURB Body data-block");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_Main_ID_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a NURB Body from the current blendfile");
+  parm = RNA_def_pointer(func, "nurb_body", "NurbBody", "", "NURB Body to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_boolean(func,
+                  "do_unlink",
+                  true,
+                  "",
+                  "Unlink all usages of this NURB Body before deleting it "
+                  "(WARNING: will also delete objects instancing that NURB Body data)");
+  RNA_def_boolean(func,
+                  "do_id_user",
+                  true,
+                  "",
+                  "Decrement user counter of all data-blocks used by this NURB Body data");
+  RNA_def_boolean(
+      func, "do_ui_user", true, "", "Make sure interface does not reference this NURB Body data");
+
+  func = RNA_def_function(srna, "tag", "rna_Main_nurb_bodies_tag");
   parm = RNA_def_boolean(func, "value", false, "Value", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 }

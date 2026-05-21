@@ -167,6 +167,7 @@ RNA_MAIN_LISTBASE_FUNCS_DEF(linestyles)
 RNA_MAIN_LISTBASE_FUNCS_DEF(masks)
 RNA_MAIN_LISTBASE_FUNCS_DEF(materials)
 RNA_MAIN_LISTBASE_FUNCS_DEF(meshes)
+RNA_MAIN_LISTBASE_FUNCS_DEF(nurb_bodies)
 
 RNA_MAIN_LISTBASE_FUNCS_DEF(movieclips)
 RNA_MAIN_LISTBASE_FUNCS_DEF(nodetrees)
@@ -316,6 +317,12 @@ void RNA_def_main(BlenderRNA *brna)
        "Meshes",
        "Mesh data-blocks",
        RNA_def_main_meshes},
+      {"nurb_bodies",
+       "NurbBody",
+       "rna_Main_nurb_bodies_begin",
+       "NURB Bodies",
+       "NURB Body data-blocks",
+       RNA_def_main_nurb_bodies},
       {"lights",
        "Light",
        "rna_Main_lights_begin",

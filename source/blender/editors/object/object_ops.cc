@@ -107,6 +107,15 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_sdf_blend_adjust);
   WM_operatortype_append(OBJECT_OT_sdf_shell_distance_adjust);
   WM_operatortype_append(OBJECT_OT_sdf_profile_frame);
+  WM_operatortype_append(OBJECT_OT_nurb_body_add);
+  WM_operatortype_append(OBJECT_OT_nurb_body_hover);
+  WM_operatortype_append(OBJECT_OT_nurb_body_select_cut_edge);
+  WM_operatortype_append(OBJECT_OT_nurb_body_select_mode);
+  WM_operatortype_append(OBJECT_OT_nurb_body_edge_translate);
+  WM_operatortype_append(OBJECT_OT_nurb_body_face_extrude);
+  WM_operatortype_append(OBJECT_OT_nurb_body_face_inset);
+  WM_operatortype_append(OBJECT_OT_nurb_body_bevel_selected);
+  WM_operatortype_append(OBJECT_OT_nurb_body_boolean_apply);
   WM_operatortype_append(OBJECT_OT_add);
   WM_operatortype_append(OBJECT_OT_lattice_add_to_selected);
   WM_operatortype_append(OBJECT_OT_add_named);
@@ -340,6 +349,8 @@ static bool object_mode_poll(bContext *C)
 void keymap_object(wmKeyConfig *keyconf)
 {
   wmKeyMap *keymap;
+
+  nurb_body_bevel_modal_keymap(keyconf);
 
   /* Objects, Regardless of Mode -------------------------------------------------- */
   keymap = WM_keymap_ensure(keyconf, "Object Non-modal", SPACE_EMPTY, RGN_TYPE_WINDOW);

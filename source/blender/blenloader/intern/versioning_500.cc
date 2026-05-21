@@ -26,6 +26,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_types.h"
+#include "DNA_nurb_body_types.h"
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -4618,6 +4619,216 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
             v3d->overlay.sdf_outline_opacity = 1.0f;
           }
         }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 32)) {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      ToolSettings *ts = scene.toolsettings;
+      if (ts->nurb_body_tessellation_deflection <= 0.0f &&
+          ts->nurb_body_tessellation_angle <= 0.0f && ts->nurb_body_viewport_flag == 0)
+      {
+        ts->nurb_body_viewport_flag = (1 << 1) | (1 << 2);
+        ts->nurb_body_tessellation_deflection = 0.01f;
+        ts->nurb_body_tessellation_angle = 0.558505f;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 33)) {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      ToolSettings *ts = scene.toolsettings;
+      ts->nurb_body_viewport_flag &= ~NURB_BODY_TRIANGULATE_MESH;
+      ts->nurb_body_viewport_flag |= NURB_BODY_SMOOTH_SHADING;
+      ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_NGONS;
+      if (ts->nurb_body_tessellation_deflection <= 0.0f) {
+        ts->nurb_body_tessellation_deflection = 0.005f;
+      }
+      if (ts->nurb_body_tessellation_angle <= 0.0f ||
+          ts->nurb_body_tessellation_angle > 0.3f)
+      {
+        ts->nurb_body_tessellation_angle = 0.174533f;
+      }
+      ts->nurb_body_tessellation_face_deflection = ts->nurb_body_tessellation_deflection;
+      ts->nurb_body_tessellation_face_angle = ts->nurb_body_tessellation_angle;
+      ts->nurb_body_tessellation_density = 0.8f;
+      ts->nurb_body_tessellation_min_width = 0.0f;
+      ts->nurb_body_tessellation_plane_angle = 0.785398f;
+    }
+
+    for (NurbBody &body : bmain->nurb_bodies) {
+      body.flag &= ~NURB_BODY_TRIANGULATE_MESH;
+      body.flag |= NURB_BODY_SMOOTH_SHADING;
+      body.tessellation_topology = NURB_BODY_TESSELLATION_NGONS;
+      if (body.tessellation_deflection <= 0.0f) {
+        body.tessellation_deflection = 0.005f;
+      }
+      if (body.tessellation_angle <= 0.0f || body.tessellation_angle > 0.3f) {
+        body.tessellation_angle = 0.174533f;
+      }
+      body.tessellation_face_deflection = body.tessellation_deflection;
+      body.tessellation_face_angle = body.tessellation_angle;
+      body.tessellation_density = 0.8f;
+      body.tessellation_min_width = 0.0f;
+      body.tessellation_plane_angle = 0.785398f;
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 34)) {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      ToolSettings *ts = scene.toolsettings;
+      if (ts->nurb_body_tessellation_deflection <= 0.0f) {
+        ts->nurb_body_tessellation_deflection = 0.004f;
+      }
+      if (ts->nurb_body_tessellation_angle <= 0.0f) {
+        ts->nurb_body_tessellation_angle = 0.10472f;
+      }
+      if (ts->nurb_body_tessellation_face_deflection <= 0.0f ||
+          ts->nurb_body_tessellation_face_deflection <=
+              ts->nurb_body_tessellation_deflection * 1.01f)
+      {
+        ts->nurb_body_tessellation_face_deflection =
+            ts->nurb_body_tessellation_deflection * 3.0f;
+      }
+      if (ts->nurb_body_tessellation_face_angle <= 0.0f ||
+          ts->nurb_body_tessellation_face_angle <= ts->nurb_body_tessellation_angle * 1.01f)
+      {
+        ts->nurb_body_tessellation_face_angle = ts->nurb_body_tessellation_angle * 2.0f;
+      }
+      if (ts->nurb_body_tessellation_density < 0.0f) {
+        ts->nurb_body_tessellation_density = 0.75f;
+      }
+      ts->nurb_body_tessellation_min_width = 0.0f;
+      if (ts->nurb_body_tessellation_plane_angle <= 0.0f) {
+        ts->nurb_body_tessellation_plane_angle = 0.523599f;
+      }
+    }
+
+    for (NurbBody &body : bmain->nurb_bodies) {
+      if (body.tessellation_deflection <= 0.0f) {
+        body.tessellation_deflection = 0.004f;
+      }
+      if (body.tessellation_angle <= 0.0f) {
+        body.tessellation_angle = 0.10472f;
+      }
+      if (body.tessellation_face_deflection <= 0.0f ||
+          body.tessellation_face_deflection <= body.tessellation_deflection * 1.01f)
+      {
+        body.tessellation_face_deflection = body.tessellation_deflection * 3.0f;
+      }
+      if (body.tessellation_face_angle <= 0.0f ||
+          body.tessellation_face_angle <= body.tessellation_angle * 1.01f)
+      {
+        body.tessellation_face_angle = body.tessellation_angle * 2.0f;
+      }
+      if (body.tessellation_density < 0.0f) {
+        body.tessellation_density = 0.75f;
+      }
+      body.tessellation_min_width = 0.0f;
+      if (body.tessellation_plane_angle <= 0.0f) {
+        body.tessellation_plane_angle = 0.523599f;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 35)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          View3DShading &s = v3d->shading;
+          const bool old_default_sdf_profile =
+              (s.sdf_resolution_scale == 0.0f || s.sdf_resolution_scale == 100.0f) &&
+              (s.sdf_max_steps == 0 || s.sdf_max_steps == 100 || s.sdf_max_steps == 256) &&
+              (s.sdf_ray_epsilon == 0.0f || s.sdf_ray_epsilon == 0.001f ||
+               s.sdf_ray_epsilon == 0.0001f) &&
+              (s.sdf_over_relaxation == 0.0f || s.sdf_over_relaxation == 1.2f ||
+               s.sdf_over_relaxation == 1.3f || s.sdf_over_relaxation == 1.5f) &&
+              (s.sdf_cone_aperture == 0.0f || s.sdf_cone_aperture == 0.5f ||
+               s.sdf_cone_aperture == 1.25f) &&
+              (s.sdf_cone_steps == 0 || s.sdf_cone_steps == 16 || s.sdf_cone_steps == 32 ||
+               s.sdf_cone_steps == 64);
+          if (old_default_sdf_profile) {
+            s.sdf_resolution_scale = 100.0f;
+            s.sdf_adaptive_resolution = 0;
+            s.sdf_frustum_cull = 1;
+            s.sdf_max_steps = 128;
+            s.sdf_ray_epsilon = 0.005f;
+            s.sdf_over_relaxation = 1.5f;
+            s.sdf_use_cone_trace = 1;
+            s.sdf_cone_aperture = 0.5f;
+            s.sdf_cone_steps = 32;
+            s.sdf_bvh_debug_view = 0;
+            s.sdf_fd_normals = 0;
+          }
+        }
+      }
+    }
+
+    auto old_default_nurb_body_viewport_profile = [](const int topology,
+                                                     const float deflection,
+                                                     const float angle,
+                                                     const float density) {
+      return topology == NURB_BODY_TESSELLATION_NGONS &&
+             (deflection == 0.0f || deflection == 0.004f || deflection == 0.005f ||
+              deflection == 0.01f) &&
+             (angle == 0.0f || angle == 0.10472f || angle == 0.174533f ||
+              angle == 0.558505f) &&
+             (density == 0.0f || density == 0.75f || density == 0.8f);
+    };
+
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      ToolSettings *ts = scene.toolsettings;
+      if (old_default_nurb_body_viewport_profile(ts->nurb_body_tessellation_topology,
+                                                 ts->nurb_body_tessellation_deflection,
+                                                 ts->nurb_body_tessellation_angle,
+                                                 ts->nurb_body_tessellation_density))
+      {
+        ts->nurb_body_viewport_flag &= ~NURB_BODY_TRIANGULATE_MESH;
+        ts->nurb_body_viewport_flag |= NURB_BODY_SMOOTH_SHADING;
+        ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
+        ts->nurb_body_tessellation_deflection = 1.0f;
+        ts->nurb_body_tessellation_angle = 0.558505f;
+        ts->nurb_body_tessellation_face_deflection = 3.0f;
+        ts->nurb_body_tessellation_face_angle = 1.11701f;
+        ts->nurb_body_tessellation_density = 1.0f;
+        ts->nurb_body_tessellation_min_width = 0.0f;
+        ts->nurb_body_tessellation_plane_angle = 0.523599f;
+      }
+    }
+
+    for (NurbBody &body : bmain->nurb_bodies) {
+      if (old_default_nurb_body_viewport_profile(body.tessellation_topology,
+                                                 body.tessellation_deflection,
+                                                 body.tessellation_angle,
+                                                 body.tessellation_density))
+      {
+        body.flag &= ~NURB_BODY_TRIANGULATE_MESH;
+        body.flag |= NURB_BODY_SMOOTH_SHADING;
+        body.tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
+        body.tessellation_deflection = 1.0f;
+        body.tessellation_angle = 0.558505f;
+        body.tessellation_face_deflection = 3.0f;
+        body.tessellation_face_angle = 1.11701f;
+        body.tessellation_density = 1.0f;
+        body.tessellation_min_width = 0.0f;
+        body.tessellation_plane_angle = 0.523599f;
       }
     }
   }

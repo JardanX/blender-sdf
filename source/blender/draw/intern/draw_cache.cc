@@ -92,6 +92,7 @@ gpu::Batch *DRW_cache_object_all_edges_get(Object *ob)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       return DRW_cache_mesh_all_edges_get(ob);
     /* TODO: should match #DRW_cache_object_surface_get. */
     default:
@@ -103,6 +104,7 @@ gpu::Batch *DRW_cache_object_edge_detection_get(Object *ob, bool *r_is_manifold)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       return DRW_cache_mesh_edge_detection_get(ob, r_is_manifold);
     default:
       return nullptr;
@@ -113,6 +115,7 @@ gpu::Batch *DRW_cache_object_face_wireframe_get(const Scene *scene, Object *ob)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       return DRW_cache_mesh_face_wireframe_get(ob);
     case OB_POINTCLOUD:
       return DRW_pointcloud_batch_cache_get_dots(ob);
@@ -129,6 +132,7 @@ gpu::Batch *DRW_cache_object_loose_edges_get(Object *ob)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       return DRW_cache_mesh_loose_edges_get(ob);
     default:
       return nullptr;
@@ -139,6 +143,7 @@ gpu::Batch *DRW_cache_object_surface_get(Object *ob)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       return DRW_cache_mesh_surface_get(ob);
     default:
       return nullptr;
@@ -150,6 +155,7 @@ Span<gpu::Batch *> DRW_cache_object_surface_material_get(Object *ob,
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       return DRW_cache_mesh_surface_shaded_get(ob, materials);
     default:
       return {};
@@ -164,104 +170,104 @@ Span<gpu::Batch *> DRW_cache_object_surface_material_get(Object *ob,
 
 gpu::Batch *DRW_cache_mesh_all_verts_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_all_verts(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_paint_overlay_verts_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_paint_overlay_verts(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_all_edges_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_all_edges(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_loose_edges_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_loose_edges(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_edge_detection_get(Object *ob, bool *r_is_manifold)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_edge_detection(DRW_object_get_data_for_drawing<Mesh>(*ob),
                                                  r_is_manifold);
 }
 
 gpu::Batch *DRW_cache_mesh_surface_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_paint_overlay_surface_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_paint_overlay_surface(
       DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_paint_overlay_edges_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_paint_overlay_edges(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 Span<gpu::Batch *> DRW_cache_mesh_surface_shaded_get(Object *ob,
                                                      const Span<const GPUMaterial *> materials)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface_shaded(
       *ob, DRW_object_get_data_for_drawing<Mesh>(*ob), materials);
 }
 
 Span<gpu::Batch *> DRW_cache_mesh_surface_texpaint_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface_texpaint(*ob,
                                                    DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_surface_texpaint_single_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface_texpaint_single(
       *ob, DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_surface_vertpaint_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface_vertpaint(*ob,
                                                     DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_surface_sculptcolors_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface_sculpt(*ob, DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_surface_weights_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_surface_weights(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_face_wireframe_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_wireframes_face(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_surface_mesh_analysis_get(Object *ob)
 {
-  BLI_assert(ob->type == OB_MESH);
+  BLI_assert(ELEM(ob->type, OB_MESH, OB_NURB_BODY));
   return DRW_mesh_batch_cache_get_edit_mesh_analysis(DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
@@ -460,6 +466,7 @@ void drw_batch_cache_validate(Object *ob)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       DRW_mesh_batch_cache_validate(DRW_object_get_data_for_drawing<Mesh>(*ob));
       break;
     case OB_CURVES_LEGACY:
@@ -506,6 +513,7 @@ void drw_batch_cache_generate_requested(Object *ob, TaskGraph &task_graph)
 
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       DRW_mesh_batch_cache_create_requested(task_graph,
                                             *ob,
                                             DRW_object_get_data_for_drawing<Mesh>(*ob),
@@ -569,6 +577,7 @@ void DRW_batch_cache_free_old(Object *ob, int ctime)
 {
   switch (ob->type) {
     case OB_MESH:
+    case OB_NURB_BODY:
       DRW_mesh_batch_cache_free_old(&DRW_object_get_data_for_drawing<Mesh>(*ob), ctime);
       break;
     case OB_CURVES:

@@ -2113,6 +2113,8 @@ int icon_from_idcode(const int idcode)
       return ICON_POINTCLOUD_DATA;
     case ID_VO:
       return ICON_VOLUME_DATA;
+    case ID_NB:
+      return ICON_NURB_BODY_DATA;
     case ID_WO:
       return ICON_WORLD_DATA;
     case ID_WS:
@@ -2196,6 +2198,8 @@ int icon_from_object_type(const Object *object)
       return ICON_OUTLINER_OB_VOLUME;
     case OB_SDF:
       return ICON_OUTLINER_OB_SDF;
+    case OB_NURB_BODY:
+      return ICON_OUTLINER_OB_NURB_BODY;
     case OB_EMPTY:
       if (object->instance_collection && (object->transflag & OB_DUPLICOLLECTION)) {
         return ICON_OUTLINER_OB_GROUP_INSTANCE;
