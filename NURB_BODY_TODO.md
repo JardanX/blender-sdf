@@ -17,7 +17,8 @@ Persistent tracker for NURB Body bevel, boolean, selection, and viewport issues.
 - [x] Chamfer/fillet-created sharp edges reselected the previous bevel instead of becoming independent targets: already-blended body/boolean/final refs are no longer reused as hit targets, so generated sharp edges fall through to final-edge selection.
 - [x] Final sharp edges after body chamfers or boolean cuts could not receive a separate chamfer/fillet pass: final surface edges now have independent selection, hover, radius, chamfer, and bevel-order state.
 - [x] Object/face selection modes still allowed edge picking: visible NURB Body edge hit-testing now requires the active NURB Body to be in Edge select mode.
-- [x] Beveling an edge with a radius past OCCT's stable limit could make the evaluated mesh disappear: single-edge blends now validate the result and binary-search down to the largest preview-valid radius before falling back to the previous shape.
+- [x] Beveling an edge with a radius past OCCT's stable limit could make the evaluated mesh disappear or snap visually back to zero: single-edge blends now validate the returned shape with a coarse triangulation check and search down to the largest buildable radius before falling back to the previous shape.
+- [x] Bevel radius clamping stopped too early on edges that OCCT could still blend: modal and kernel pre-limits no longer clamp to selected-edge length, boolean-output blends can try the larger body/tool primitive limit, and actual safety is left to the validated radius search.
 - [x] Boolean creation could appear to bevel an edge even when the user did nothing: the legacy "radius with no explicit edge means edge 0" fallback is disabled.
 - [x] Final-edge chamfers/fillets could be forgotten when adding later booleans because surface edge indices came from unstable OCCT map order: final surface edge slots now derive from quantized edge geometry instead.
 - [x] Clicking one of several close bevel-ring outlines could assign the line to the first nearby selectable edge and bevel a different edge: line-to-edge reference matching now chooses the nearest candidate inside tolerance.
@@ -55,9 +56,11 @@ Persistent tracker for NURB Body bevel, boolean, selection, and viewport issues.
 - [x] Mesh and overlay lines could still diverge when the mesh path cleaned/retriangulated a shape after the line cache had already triangulated it: evaluated shape caching now includes tessellation settings and reuses an already-current triangulated shape for mesh conversion.
 - [x] NURB silhouettes and NURB edges used different render paths, AA, and depth coverage: NURB Body silhouettes now draw as mesh-derived retained polylines in the NURB edge overlay, and NURB bodies no longer submit to Blender's post-process outline pass.
 - [x] Mesh-derived silhouettes could pick a smooth cylinder seam strip as an interior line because OCCT split the closed face boundary: silhouette extraction now groups mesh segments by endpoint position and only draws duplicated sharp border groups, skipping smooth seam/open triangulation borders.
+- [x] Complex bodies got slower to bevel/chamfer after each added edge because kernel stage cache keys included transient selected/active-edge fields even when explicit bevel masks already defined the shape: stage and evaluated-shape keys now ignore selection-only state, modal preview replays cached stable bevel bases with the fast solver, and exact evaluation reuses stable bases when the edited edge is the last ordered bevel step.
 
 ## Needs Manual Rebuild Verification
 
+- [ ] Stress test a complex NURB Body with several booleans plus confirmed chamfers/fillets; selecting a new edge, dragging Ctrl+B, and confirming should reuse stable kernel stages instead of replaying the full stack on every preview/final rebuild.
 - [ ] Rebuild Blender after the line-overlay span fix and verify `bf_blenkernel`, `bf_draw`, and `bf_editor_object` compile.
 - [ ] With line overlay enabled, pan/orbit a scene with several booleans and fillets; confirm redraw no longer spikes from CPU-side line rebuilding.
 - [ ] Confirm retained GPU lines match the previous smooth visual quality while staying responsive during pan/orbit.

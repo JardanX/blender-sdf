@@ -963,6 +963,14 @@ if(WITH_BLENDER)
       sdf_ngon
       sdf_polygon
       sdf_group
+      nurb_body_data
+      outliner_ob_nurb_body
+      nurb_body_box
+      nurb_body_sphere
+      nurb_body_cylinder
+      nurb_body_cone
+      nurb_body_torus
+      nurb_body_wedge
       volume_data
       vpaint_hlt
       warning_large

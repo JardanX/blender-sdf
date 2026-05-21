@@ -16,7 +16,28 @@
 namespace blender {
 
 static const EnumPropertyItem rna_enum_nurb_body_primitive_items[] = {
-    {NURB_BODY_PRIMITIVE_CYLINDER, "CYLINDER", ICON_MESH_CYLINDER, "Cylinder", ""},
+    {NURB_BODY_PRIMITIVE_BOX, "BOX", ICON_NURB_BODY_BOX, "Box", "OCCT box primitive"},
+    {NURB_BODY_PRIMITIVE_SPHERE,
+     "SPHERE",
+     ICON_NURB_BODY_SPHERE,
+     "Sphere",
+     "OCCT sphere primitive"},
+    {NURB_BODY_PRIMITIVE_CYLINDER,
+     "CYLINDER",
+     ICON_NURB_BODY_CYLINDER,
+     "Cylinder",
+     "OCCT cylinder primitive"},
+    {NURB_BODY_PRIMITIVE_CONE, "CONE", ICON_NURB_BODY_CONE, "Cone", "OCCT cone primitive"},
+    {NURB_BODY_PRIMITIVE_TORUS,
+     "TORUS",
+     ICON_NURB_BODY_TORUS,
+     "Torus",
+     "OCCT torus primitive"},
+    {NURB_BODY_PRIMITIVE_WEDGE,
+     "WEDGE",
+     ICON_NURB_BODY_WEDGE,
+     "Wedge",
+     "OCCT wedge primitive"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -89,7 +110,7 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
   srna = RNA_def_struct(brna, "NurbBody", "ID");
   RNA_def_struct_sdna(srna, "NurbBody");
   RNA_def_struct_ui_text(srna, "NURB Body", "OCCT-backed NURB body data-block");
-  RNA_def_struct_ui_icon(srna, ICON_MESH_CYLINDER);
+  RNA_def_struct_ui_icon(srna, ICON_NURB_BODY_DATA);
 
   prop = RNA_def_property(srna, "primitive", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "primitive");
@@ -107,14 +128,29 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "radius");
   RNA_def_property_range(prop, 0.001f, 100000.0f);
   RNA_def_property_ui_range(prop, 0.001f, 100.0f, 1.0f, 4);
-  RNA_def_property_ui_text(prop, "Radius", "Main cylinder radius");
+  RNA_def_property_ui_text(prop, "Radius", "Primitive radius");
   RNA_def_property_update(prop, 0, "rna_NurbBody_update");
 
   prop = RNA_def_property(srna, "depth", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "depth");
   RNA_def_property_range(prop, 0.001f, 100000.0f);
   RNA_def_property_ui_range(prop, 0.001f, 100.0f, 1.0f, 4);
-  RNA_def_property_ui_text(prop, "Depth", "Main cylinder length");
+  RNA_def_property_ui_text(prop, "Depth", "Primitive height along the local Z axis");
+  RNA_def_property_update(prop, 0, "rna_NurbBody_update");
+
+  prop = RNA_def_property(srna, "dimensions", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "dimensions");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.001f, 100000.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 100.0f, 1.0f, 4);
+  RNA_def_property_ui_text(prop, "Dimensions", "Box or wedge size along local X, Y, and Z");
+  RNA_def_property_update(prop, 0, "rna_NurbBody_update");
+
+  prop = RNA_def_property(srna, "minor_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "minor_radius");
+  RNA_def_property_range(prop, 0.001f, 100000.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 100.0f, 1.0f, 4);
+  RNA_def_property_ui_text(prop, "Minor Radius", "Torus tube radius");
   RNA_def_property_update(prop, 0, "rna_NurbBody_update");
 
   prop = RNA_def_property(srna, "use_merge_vertices", PROP_BOOLEAN, PROP_NONE);

@@ -2557,7 +2557,12 @@ class VIEW3D_MT_nurb_body_add(Menu):
     def draw(self, _context):
         layout = self.layout
         layout.operator_context = 'EXEC_REGION_WIN'
-        layout.operator("object.nurb_body_add", text="NURB Cylinder", icon='MESH_CYLINDER')
+        layout.operator("object.nurb_body_add", text="NURB Box", icon='NURB_BODY_BOX').type = 'BOX'
+        layout.operator("object.nurb_body_add", text="NURB Sphere", icon='NURB_BODY_SPHERE').type = 'SPHERE'
+        layout.operator("object.nurb_body_add", text="NURB Cylinder", icon='NURB_BODY_CYLINDER').type = 'CYLINDER'
+        layout.operator("object.nurb_body_add", text="NURB Cone", icon='NURB_BODY_CONE').type = 'CONE'
+        layout.operator("object.nurb_body_add", text="NURB Torus", icon='NURB_BODY_TORUS').type = 'TORUS'
+        layout.operator("object.nurb_body_add", text="NURB Wedge", icon='NURB_BODY_WEDGE').type = 'WEDGE'
 
 
 class VIEW3D_MT_volume_add(Menu):
@@ -2649,7 +2654,7 @@ class VIEW3D_MT_add(Menu):
         layout.operator_context = 'EXEC_REGION_WIN'
 
         layout.menu("VIEW3D_MT_sdf_add", icon='OUTLINER_OB_SDF')
-        layout.menu("VIEW3D_MT_nurb_body_add", icon='MESH_CYLINDER')
+        layout.menu("VIEW3D_MT_nurb_body_add", icon='OUTLINER_OB_NURB_BODY')
 
         layout.separator()
 

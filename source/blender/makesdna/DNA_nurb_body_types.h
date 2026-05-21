@@ -20,6 +20,11 @@ struct Material;
 
 typedef enum eNurbBodyPrimitive {
   NURB_BODY_PRIMITIVE_CYLINDER = 0,
+  NURB_BODY_PRIMITIVE_BOX = 1,
+  NURB_BODY_PRIMITIVE_SPHERE = 2,
+  NURB_BODY_PRIMITIVE_CONE = 3,
+  NURB_BODY_PRIMITIVE_TORUS = 4,
+  NURB_BODY_PRIMITIVE_WEDGE = 5,
 } eNurbBodyPrimitive;
 
 typedef enum eNurbBodyBooleanOperation {
@@ -73,7 +78,9 @@ typedef struct NurbBodyBooleanOp {
   float bevel_radius;
   float operand_radius;
   float operand_depth;
-  float _pad1;
+  float operand_minor_radius;
+  float operand_dimensions[3];
+  float _pad0;
 
   float operand_to_target[4][4];
 
@@ -101,7 +108,7 @@ typedef struct NurbBodyBooleanOp {
   float operand_bevel_radius;
   float operand_surface_bevel_radius;
   float operand_scale[3];
-  float _pad2;
+  float _pad1;
 } NurbBodyBooleanOp;
 
 typedef struct NurbBody {
@@ -117,7 +124,9 @@ typedef struct NurbBody {
   int flag = NURB_BODY_SMOOTH_SHADING | NURB_BODY_TRIANGULATE_MESH;
 
   float radius = 1.0f;
-  float depth = 4.0f;
+  float depth = 2.0f;
+  float dimensions[3] = {2.0f, 2.0f, 2.0f};
+  float minor_radius = 0.25f;
 
   float cutter_radius = 0.35f;
   float cutter_depth = 3.0f;

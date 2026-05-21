@@ -39,8 +39,18 @@ class DATA_PT_nurb_body_shape(DataButtonsPanel, Panel):
         body = context.object.data
         layout.prop(body, "primitive")
         layout.prop(context.tool_settings, "nurb_body_select_mode", text="Selection", expand=True)
-        layout.prop(body, "radius")
-        layout.prop(body, "depth")
+
+        primitive = body.primitive
+        if primitive in {'BOX', 'WEDGE'}:
+            layout.prop(body, "dimensions")
+        elif primitive == 'SPHERE':
+            layout.prop(body, "radius")
+        elif primitive == 'TORUS':
+            layout.prop(body, "radius", text="Major Radius")
+            layout.prop(body, "minor_radius")
+        else:
+            layout.prop(body, "radius")
+            layout.prop(body, "depth")
 
 
 classes = (
