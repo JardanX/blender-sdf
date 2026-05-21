@@ -691,6 +691,10 @@ struct View3DOverlay {
 
   /** SDF edge outline opacity (always-on black outlines). */
   float sdf_outline_opacity = 1.0f;
+
+  /** NURB body outline and selectable edge line thickness, in pixels. */
+  float nurb_body_line_thickness = 2.0f;
+  char _pad_nurb_body[4] = {};
 };
 
 struct View3D_Runtime {

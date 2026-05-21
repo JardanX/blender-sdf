@@ -185,9 +185,7 @@ class WORKSPACE_PT_nurb_body_viewport(WorkSpaceButtonsPanel, Panel):
         layout.prop(body, "tessellation_deflection", text="Deflection")
         layout.prop(body, "tessellation_angle", text="Angle")
         layout.prop(body, "use_triangulate_mesh")
-        layout.prop(body, "use_merge_vertices")
         layout.prop(body, "use_smooth_shading")
-        layout.prop(body, "use_auto_crease_sharp_edges")
 
 
 class WORKSPACE_PT_custom_props(WorkSpaceButtonsPanel, PropertyPanel, Panel):

@@ -7077,6 +7077,24 @@ class VIEW3D_PT_overlay_sdf(Panel):
         col.prop(overlay, "sdf_outline_opacity", text="Line Opacity")
 
 
+class VIEW3D_PT_overlay_nurb_body(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_parent_id = "VIEW3D_PT_overlay"
+    bl_label = "NURB Body"
+
+    def draw(self, context):
+        layout = self.layout
+        view = context.space_data
+        overlay = view.overlay
+        display_all = overlay.show_overlays
+
+        col = layout.column()
+        col.active = display_all
+
+        col.prop(overlay, "nurb_body_line_thickness", text="Line Thickness")
+
+
 class VIEW3D_PT_overlay_viewer_node(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -9304,6 +9322,7 @@ classes = (
     VIEW3D_PT_overlay_object,
     VIEW3D_PT_overlay_geometry,
     VIEW3D_PT_overlay_sdf,
+    VIEW3D_PT_overlay_nurb_body,
     VIEW3D_PT_overlay_viewer_node,
     VIEW3D_PT_overlay_motion_tracking,
     VIEW3D_PT_overlay_edit_mesh,

@@ -37,6 +37,7 @@ GPU_SHADER_NAMED_INTERFACE_END(interp)
 GPU_SHADER_CREATE_INFO(overlay_outline_prepass)
 TYPEDEF_SOURCE("overlay_shader_shared.hh")
 PUSH_CONSTANT(bool, is_transform)
+PUSH_CONSTANT(int, outline_color_override)
 VERTEX_OUT(overlay_outline_prepass_iface)
 /* Using uint because 16bit uint can contain more ids than int. */
 FRAGMENT_OUT(0, uint, out_object_id)

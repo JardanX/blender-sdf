@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 namespace blender {
@@ -33,6 +36,7 @@ enum NurbBodyEdgePolylineFlag {
   NURB_BODY_EDGE_POLYLINE_SELECTABLE = (1 << 0),
   NURB_BODY_EDGE_POLYLINE_SURFACE = (1 << 1),
   NURB_BODY_EDGE_POLYLINE_BODY = (1 << 2),
+  NURB_BODY_EDGE_POLYLINE_FINAL = (1 << 3),
 };
 
 NurbBody *BKE_nurb_body_add(Main *bmain, const char *name);
@@ -40,6 +44,10 @@ Mesh *BKE_nurb_body_to_mesh(const NurbBody *body, const Object *object);
 void BKE_nurb_body_boolean_edge_polylines(const Object *object,
                                           Vector<NurbBodyEdgePolyline> &r_polylines,
                                           int samples_per_edge = 96);
+Span<NurbBodyEdgePolyline> BKE_nurb_body_boolean_edge_polylines_cached(const Object *object,
+                                                                       int samples_per_edge = 96);
+uint64_t BKE_nurb_body_boolean_edge_polylines_cache_key(const Object *object,
+                                                        int samples_per_edge = 96);
 void BKE_nurb_body_data_update(Depsgraph *depsgraph, Scene *scene, Object *ob);
 
 }  // namespace blender

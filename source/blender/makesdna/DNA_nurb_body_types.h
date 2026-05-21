@@ -58,6 +58,7 @@ typedef struct NurbBodyBooleanOp {
   uint64_t bevel_edges;
   uint64_t chamfer_edges;
   float bevel_radii[64];
+  int bevel_order[64];
 
   int operation; /* eNurbBodyBooleanOperation */
   int flag;
@@ -66,11 +67,11 @@ typedef struct NurbBodyBooleanOp {
   int hovered_edge;
   int bevel_edge;
   int bevel_type; /* eNurbBodyBevelType */
+  int bevel_order_next;
 
   float bevel_radius;
   float operand_radius;
   float operand_depth;
-  float _pad0;
   float _pad1;
 
   float operand_to_target[4][4];
@@ -86,8 +87,7 @@ typedef struct NurbBody {
   struct AnimData *adt = nullptr;
 
   int primitive = NURB_BODY_PRIMITIVE_CYLINDER;
-  int flag = NURB_BODY_MERGE_VERTICES | NURB_BODY_SMOOTH_SHADING | NURB_BODY_TRIANGULATE_MESH |
-             NURB_BODY_AUTO_CREASE_SHARP_EDGES;
+  int flag = NURB_BODY_SMOOTH_SHADING | NURB_BODY_TRIANGULATE_MESH;
 
   float radius = 1.0f;
   float depth = 4.0f;
@@ -100,26 +100,39 @@ typedef struct NurbBody {
   uint64_t selected_edges = 0;
   uint64_t bevel_edges = 0;
   uint64_t chamfer_edges = 0;
+  uint64_t surface_selected_edges = 0;
+  uint64_t surface_bevel_edges = 0;
+  uint64_t surface_chamfer_edges = 0;
   float bevel_radii[64] = {};
+  float surface_bevel_radii[64] = {};
+  int bevel_order[64] = {};
+  int surface_bevel_order[64] = {};
 
   int boolean_operation = NURB_BODY_BOOLEAN_DIFFERENCE;
   int selected_edge = -1;
   int hovered_edge = -1;
   int bevel_edge = -1;
   int bevel_type = NURB_BODY_BEVEL_FILLET;
+  int bevel_order_next = 1;
+  int surface_selected_edge = -1;
+  int surface_hovered_edge = -1;
+  int surface_bevel_edge = -1;
+  int surface_bevel_type = NURB_BODY_BEVEL_FILLET;
+  int surface_bevel_order_next = 1;
   float bevel_radius = 0.0f;
-  float tessellation_deflection = 0.006f;
-  float tessellation_angle = 0.2f;
+  float surface_bevel_radius = 0.0f;
+  float tessellation_deflection = 0.01f;
+  float tessellation_angle = 0.279253f;
   float auto_crease_angle = 0.523599f;
   int select_mode = NURB_BODY_SELECT_MODE_EDGE;
+  int _pad0 = 0;
   void *_pad1 = nullptr;
 
   ListBase boolean_ops = {}; /* NurbBodyBooleanOp */
 
   struct Material **mat = nullptr;
   short totcol = 0;
-  char _pad[2] = {};
-  float line_thickness = 2.0f;
+  char _pad[6] = {};
 } NurbBody;
 
 }  // namespace blender

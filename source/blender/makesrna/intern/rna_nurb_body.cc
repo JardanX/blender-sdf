@@ -46,20 +46,17 @@ static void rna_NurbBody_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA 
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
-static void rna_NurbBody_draw_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA * /*ptr*/)
-{
-  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
-  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-}
-
 static void rna_NurbBody_select_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   NurbBody *body = static_cast<NurbBody *>(ptr->data);
   if (body->select_mode != NURB_BODY_SELECT_MODE_EDGE) {
     body->selected_edges = 0;
     body->selected_edge = -1;
+    body->surface_selected_edges = 0;
+    body->surface_selected_edge = -1;
   }
   body->hovered_edge = -1;
+  body->surface_hovered_edge = -1;
   for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body->boolean_ops.first); op;
        op = op->next)
   {
@@ -106,14 +103,6 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Selection Mode", "Object Mode NURB Body selection target");
   RNA_def_property_update(prop, 0, "rna_NurbBody_select_update");
 
-  prop = RNA_def_property(srna, "line_thickness", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "line_thickness");
-  RNA_def_property_range(prop, 0.5f, 8.0f);
-  RNA_def_property_ui_range(prop, 0.5f, 6.0f, 0.1f, 2);
-  RNA_def_property_ui_text(
-      prop, "Line Thickness", "Thickness of NURB body silhouette and edge overlay lines");
-  RNA_def_property_update(prop, 0, "rna_NurbBody_draw_update");
-
   prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "radius");
   RNA_def_property_range(prop, 0.001f, 100000.0f);
@@ -130,7 +119,10 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "use_merge_vertices", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", NURB_BODY_MERGE_VERTICES);
-  RNA_def_property_ui_text(prop, "Merge Vertices", "Merge coincident tessellation vertices");
+  RNA_def_property_ui_text(
+      prop,
+      "Merge Vertices",
+      "Legacy option kept for compatibility; NURB body previews do not merge vertices");
   RNA_def_property_update(prop, 0, "rna_NurbBody_update");
 
   prop = RNA_def_property(srna, "use_smooth_shading", PROP_BOOLEAN, PROP_NONE);
@@ -149,8 +141,7 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "Auto Crease Sharp Edges",
-      "Mark topologically sharp NURB body edges as sharp and creased for cleaner CAD preview "
-      "shading");
+      "Legacy option kept for compatibility; NURB body shading uses NURB-derived custom normals");
   RNA_def_property_update(prop, 0, "rna_NurbBody_update");
 
   prop = RNA_def_property(srna, "tessellation_deflection", PROP_FLOAT, PROP_DISTANCE);
