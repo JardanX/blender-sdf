@@ -26,6 +26,7 @@ FRAGMENT_SHADER_CREATE_INFO(overlay_outline_detect)
 #define APEX_XNEG (ALL & (~XNEG))
 #define APEX_YPOS (ALL & (~YPOS))
 #define APEX_YNEG (ALL & (~YNEG))
+#define NURB_BODY_OUTLINE_ID_FLAG (1u << 13u)
 
 bool has_edge(uint id, float2 uv, uint ref, uint &ref_col, float2 &depth_uv)
 {
@@ -232,6 +233,7 @@ void main()
   }
 
   /* WATCH: Keep in sync with outline_id_tx of the pre-pass. */
+  bool is_nurb_body_outline = (ref_col & NURB_BODY_OUTLINE_ID_FLAG) != 0u;
   uint color_id = ref_col >> 14u;
   if (ref_col == 0u) {
     frag_color = float4(0.0f);
@@ -255,9 +257,10 @@ void main()
   /* Avoid bad cases of Z-fighting for occlusion only. */
   constexpr float epsilon = 3.0f / 8388608.0f;
   bool occluded = (ref_depth > scene_depth + epsilon);
+  float occlusion_alpha = is_nurb_body_outline ? 0.0f : alpha_occlu;
 
   /* NOTE: We never set alpha to 1.0 to avoid Anti-aliasing destroying the line. */
-  frag_color *= (occluded ? alpha_occlu : 1.0f) * (254.0f / 255.0f);
+  frag_color *= (occluded ? occlusion_alpha : 1.0f) * (254.0f / 255.0f);
 
   /* Write outline depth so grid cannot overdraw outline pixels. */
   gl_FragDepth = ref_depth;

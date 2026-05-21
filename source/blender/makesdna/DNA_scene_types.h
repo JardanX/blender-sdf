@@ -2169,6 +2169,8 @@ struct ToolSettings {
 
   /** Selection Mode for Mesh. */
   char selectmode = SCE_SELECT_VERTEX;
+  /** Selection target for NURB Body object-mode tools. */
+  char nurb_body_select_mode = 0;
 
   /* UV Calculation. */
 
@@ -2178,6 +2180,7 @@ struct ToolSettings {
   char uv_flag = UV_FLAG_SELECT_SYNC;
   char uv_selectmode = UV_SELECT_VERT;
   char uv_sticky = 0;
+  char _pad_nurb_body_select_mode[7] = {};
 
   rctf uv_custom_region = {};
 

@@ -23,6 +23,8 @@
 
 #include "BKE_nurb_body.hh"
 
+#include "DEG_depsgraph_query.hh"
+
 #include "GPU_batch.hh"
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
@@ -33,8 +35,12 @@ namespace blender::draw::overlay {
 
 class NurbBodies : Overlay {
  private:
+  PassMain depth_ps_ = {"NurbBodyDepth"};
+  PassMain::Sub *depth_mesh_ps_ = nullptr;
+
   struct Entry {
     const Object *object;
+    const Object *original_object;
   };
 
   struct DrawCache {
@@ -49,6 +55,7 @@ class NurbBodies : Overlay {
   Vector<Entry> entries_;
   Vector<DrawCache> draw_caches_;
   float line_width_ = 2.0f;
+  bool needs_depth_prepass_ = false;
 
   static bool edge_index_in_mask(const uint64_t mask, const int edge_index)
   {
@@ -262,14 +269,28 @@ class NurbBodies : Overlay {
     }
   }
 
-  void begin_sync(Resources & /*res*/, const State &state) final
+  void begin_sync(Resources &res, const State &state) final
   {
     enabled_ = state.is_space_v3d() && !state.hide_overlays;
     entries_.clear();
     line_width_ = line_thickness_for_overlay(state.overlay);
+    needs_depth_prepass_ = enabled_ && state.xray_enabled;
+    depth_ps_.init();
+    depth_mesh_ps_ = nullptr;
+
+    if (needs_depth_prepass_) {
+      depth_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      depth_ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+      depth_ps_.state_set(DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL,
+                          state.clipping_plane_count);
+
+      auto &sub = depth_ps_.sub("Mesh");
+      sub.shader_set(res.shaders->depth_mesh.get());
+      depth_mesh_ps_ = &sub;
+    }
   }
 
-  void object_sync(Manager & /*manager*/,
+  void object_sync(Manager &manager,
                    const ObjectRef &ob_ref,
                    Resources & /*res*/,
                    const State & /*state*/) final
@@ -278,7 +299,30 @@ class NurbBodies : Overlay {
       return;
     }
 
-    entries_.append({ob_ref.object});
+    const Object *original_object = DEG_get_original(ob_ref.object);
+    if (original_object == nullptr || original_object->type != OB_NURB_BODY ||
+        original_object->data == nullptr)
+    {
+      return;
+    }
+
+    entries_.append({ob_ref.object, original_object});
+
+    if (depth_mesh_ps_ != nullptr) {
+      if (gpu::Batch *geom = DRW_cache_mesh_surface_get(ob_ref.object)) {
+        depth_mesh_ps_->draw(geom, manager.unique_handle(ob_ref));
+      }
+    }
+  }
+
+  void draw_depth_prepass(Framebuffer &framebuffer, Manager &manager, View &view)
+  {
+    if (!enabled_ || !needs_depth_prepass_ || entries_.is_empty()) {
+      return;
+    }
+
+    GPU_framebuffer_bind(framebuffer);
+    manager.submit(depth_ps_, view);
   }
 
   void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View & /*view*/) final
@@ -296,17 +340,17 @@ class NurbBodies : Overlay {
     GPU_polygon_offset(1.0f, 2.0f);
 
     for (const Entry &entry : entries_) {
-      const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.object->data);
-      const uint64_t geometry_key = BKE_nurb_body_boolean_edge_polylines_cache_key(entry.object,
-                                                                                   64);
+      const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.original_object->data);
+      const uint64_t geometry_key = BKE_nurb_body_boolean_edge_polylines_cache_key(
+          entry.original_object, 64);
       if (geometry_key == 0) {
         continue;
       }
 
-      DrawCache &cache = cache_for_object(entry.object);
+      DrawCache &cache = cache_for_object(entry.original_object);
       if (cache.geometry_key != geometry_key) {
         const Span<NurbBodyEdgePolyline> polylines =
-            BKE_nurb_body_boolean_edge_polylines_cached(entry.object, 64);
+            BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
         rebuild_geometry_batch(cache, polylines);
         cache.geometry_key = geometry_key;
       }
@@ -314,7 +358,7 @@ class NurbBodies : Overlay {
       const uint64_t state_key = line_state_key(*body);
       if (cache.state_key != state_key) {
         const Span<NurbBodyEdgePolyline> polylines =
-            BKE_nurb_body_boolean_edge_polylines_cached(entry.object, 64);
+            BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
         rebuild_state_batches(cache, *body, polylines);
         cache.state_key = state_key;
       }

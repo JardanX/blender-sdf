@@ -38,7 +38,7 @@ class DATA_PT_nurb_body_shape(DataButtonsPanel, Panel):
 
         body = context.object.data
         layout.prop(body, "primitive")
-        layout.prop(body, "select_mode", text="Selection", expand=True)
+        layout.prop(context.tool_settings, "nurb_body_select_mode", text="Selection", expand=True)
         layout.prop(body, "radius")
         layout.prop(body, "depth")
 

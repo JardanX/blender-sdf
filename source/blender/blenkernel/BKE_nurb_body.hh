@@ -28,6 +28,7 @@ struct NurbBodyEdgePolyline {
   const NurbBodyBooleanOp *op = nullptr;
   int edge_index = -1;
   int flag = 0;
+  uint64_t edge_key = 0;
   /* Points are in the NurbBody object's local space. */
   Vector<float3> points;
 };

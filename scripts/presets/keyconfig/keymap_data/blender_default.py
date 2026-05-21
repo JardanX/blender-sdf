@@ -1779,6 +1779,11 @@ def km_view3d(params):
             {"type": 'NDOF_BUTTON_' + axis_type, "value": 'PRESS', "shift": True},
             {"properties": [("type", axis_type), ("align_active", True)]},
         ) for axis_type in ('FRONT', 'RIGHT', 'TOP')),
+        ("object.nurb_body_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value_fallback}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value_fallback, "shift": True}, None),
         # Selection.
         *_template_view3d_select(
             type=params.select_mouse,
@@ -4476,11 +4481,6 @@ def km_object_mode(params):
     )
 
     items.extend([
-        ("object.nurb_body_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
-        ("object.nurb_body_select_cut_edge",
-         {"type": params.select_mouse, "value": params.select_mouse_value}, None),
-        ("object.nurb_body_select_cut_edge",
-         {"type": params.select_mouse, "value": params.select_mouse_value, "shift": True}, None),
         ("object.nurb_body_edge_translate", {"type": 'G', "value": 'PRESS'}, None),
         ("object.nurb_body_bevel_selected", {"type": 'B', "value": 'PRESS', "ctrl": True}, None),
         ("object.nurb_body_boolean_apply", {"type": 'MINUS', "value": 'PRESS', "ctrl": True},

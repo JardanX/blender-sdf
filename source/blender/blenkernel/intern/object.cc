@@ -2512,6 +2512,9 @@ Object *BKE_object_duplicate(Main *bmain,
   if (dupflag == 0) {
     return obn;
   }
+  if (obn->type == OB_NURB_BODY) {
+    dupflag |= USER_DUP_NURB_BODY;
+  }
 
   if (dupflag & USER_DUP_MAT) {
     for (int i = 0; i < obn->totcol; i++) {
