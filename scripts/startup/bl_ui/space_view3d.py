@@ -851,25 +851,25 @@ class VIEW3D_HT_header(Header):
                     depress=(domain == 'CURVE'),
                 ).domain = 'CURVE'
             elif object_mode == 'OBJECT' and obj.type == 'NURB_BODY':
-                body = obj.data
+                select_mode = context.tool_settings.nurb_body_select_mode
                 row = layout.row(align=True)
                 row.operator(
                     "object.nurb_body_select_mode",
                     text="",
                     icon='EDGESEL',
-                    depress=(body.select_mode == 'EDGE'),
+                    depress=(select_mode == 'EDGE'),
                 ).mode = 'EDGE'
                 row.operator(
                     "object.nurb_body_select_mode",
                     text="",
                     icon='FACESEL',
-                    depress=(body.select_mode == 'FACE'),
+                    depress=(select_mode == 'FACE'),
                 ).mode = 'FACE'
                 row.operator(
                     "object.nurb_body_select_mode",
                     text="",
                     icon='OBJECT_DATAMODE',
-                    depress=(body.select_mode == 'OBJECT'),
+                    depress=(select_mode == 'OBJECT'),
                 ).mode = 'OBJECT'
 
         # Grease Pencil

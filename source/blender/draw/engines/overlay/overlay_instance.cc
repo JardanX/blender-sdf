@@ -944,6 +944,8 @@ void Instance::draw_v3d(Manager &manager, View &view)
     draw(regular, resources.overlay_fb);
     draw_line(regular, resources.overlay_line_fb);
 
+    regular.nurb_bodies.draw_depth_prepass(resources.overlay_line_fb, manager, view);
+
     /* Here as it does depth+blending, and should draw after most overlay line passes.. */
     if (!state.is_depth_only_drawing) {
       grid.draw_line(resources.overlay_line_fb, manager, view);
@@ -954,6 +956,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     infront.facing.draw(resources.overlay_fb, manager, view);
 
     draw(infront, resources.overlay_in_front_fb);
+    infront.nurb_bodies.draw_depth_prepass(resources.overlay_line_in_front_fb, manager, view);
     draw_line(infront, resources.overlay_line_in_front_fb);
     infront.nurb_bodies.draw_line(resources.overlay_line_in_front_fb, manager, view);
 

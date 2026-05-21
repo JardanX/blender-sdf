@@ -26,6 +26,8 @@
 #include "DNA_object_types.h"
 #include "DNA_userdef_types.h"
 
+#include "DEG_depsgraph_query.hh"
+
 #include "GPU_batch.hh"
 #include "GPU_shader.hh"
 #include "GPU_state.hh"
@@ -79,9 +81,11 @@ class Outline : Overlay {
 
   PassMain outline_prepass_flat_ps_ = {"PrepassFlat"};
 
-  static bool nurb_body_has_edge_selection(const NurbBody &body)
+  static bool nurb_body_has_edge_interaction(const NurbBody &body)
   {
-    if (body.selected_edges != 0 || body.surface_selected_edges != 0) {
+    if (body.selected_edges != 0 || body.surface_selected_edges != 0 || body.hovered_edge >= 0 ||
+        body.surface_hovered_edge >= 0)
+    {
       return true;
     }
     for (const NurbBodyBooleanOp *op = static_cast<const NurbBodyBooleanOp *>(
@@ -89,7 +93,9 @@ class Outline : Overlay {
          op;
          op = op->next)
     {
-      if (op->selected_edges != 0) {
+      if (op->selected_edges != 0 || op->hovered_edge >= 0 ||
+          (op->flag & NURB_BODY_BOOLEAN_OP_HOVERED) != 0)
+      {
         return true;
       }
     }
@@ -98,11 +104,18 @@ class Outline : Overlay {
 
   static bool nurb_body_draw_as_object_selected(const Object &object)
   {
-    const NurbBody *body = reinterpret_cast<const NurbBody *>(object.data);
-    if (body != nullptr && nurb_body_has_edge_selection(*body)) {
+    const Object *original_object = DEG_get_original(&object);
+    if (original_object == nullptr || original_object->type != OB_NURB_BODY ||
+        original_object->data == nullptr)
+    {
+      return (object.base_flag & BASE_SELECTED) != 0;
+    }
+
+    const NurbBody *body = reinterpret_cast<const NurbBody *>(original_object->data);
+    if (body != nullptr && nurb_body_has_edge_interaction(*body)) {
       return false;
     }
-    return (object.base_flag & BASE_SELECTED) != 0;
+    return (original_object->base_flag & BASE_SELECTED) != 0;
   }
 
 
@@ -248,12 +261,22 @@ class Outline : Overlay {
       // case OB_GREASE_PENCIL:
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
-      case OB_NURB_BODY:
+      case OB_NURB_BODY: {
+        const Object *original_object = DEG_get_original(ob_ref.object);
+        const NurbBody *body = (original_object != nullptr &&
+                                original_object->type == OB_NURB_BODY &&
+                                original_object->data != nullptr) ?
+                                   reinterpret_cast<const NurbBody *>(original_object->data) :
+                                   nullptr;
+        if (body != nullptr && nurb_body_has_edge_interaction(*body)) {
+          break;
+        }
         geom = DRW_cache_mesh_surface_get(ob_ref.object);
         (nurb_body_draw_as_object_selected(*ob_ref.object) ? prepass_nurb_body_selected_ps_ :
                                                              prepass_nurb_body_black_ps_)
             ->draw(geom, manager.unique_handle(ob_ref));
         break;
+      }
       case OB_MESH:
         if (state.xray_enabled_and_not_wire) {
           geom = DRW_cache_mesh_edge_detection_get(ob_ref.object, nullptr);

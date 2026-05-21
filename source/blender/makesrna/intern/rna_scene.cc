@@ -10,6 +10,7 @@
 
 #include "DNA_curve_types.h"
 #include "DNA_layer_types.h"
+#include "DNA_nurb_body_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
@@ -140,6 +141,13 @@ const EnumPropertyItem rna_enum_mesh_select_mode_uv_items[] = {
     {UV_SELECT_VERT, "VERTEX", ICON_UV_VERTEXSEL, "Vertex", "Vertex selection mode"},
     {UV_SELECT_EDGE, "EDGE", ICON_UV_EDGESEL, "Edge", "Edge selection mode"},
     {UV_SELECT_FACE, "FACE", ICON_UV_FACESEL, "Face", "Face selection mode"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_nurb_body_select_mode_items[] = {
+    {NURB_BODY_SELECT_MODE_EDGE, "EDGE", ICON_EDGESEL, "Edge", "Select generated edges"},
+    {NURB_BODY_SELECT_MODE_FACE, "FACE", ICON_FACESEL, "Face", "Reserve face selection"},
+    {NURB_BODY_SELECT_MODE_OBJECT, "OBJECT", ICON_OBJECT_DATAMODE, "Object", "Select objects"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2178,6 +2186,50 @@ static void rna_Scene_editmesh_select_mode_update(bContext *C, PointerRNA * /*pt
     DEG_id_tag_update(&mesh->id, ID_RECALC_SELECT);
     WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
   }
+}
+
+static void rna_Scene_nurb_body_select_mode_update(bContext *C, PointerRNA *ptr)
+{
+  ToolSettings *ts = static_cast<ToolSettings *>(ptr->data);
+  if (!ELEM(ts->nurb_body_select_mode,
+            NURB_BODY_SELECT_MODE_EDGE,
+            NURB_BODY_SELECT_MODE_FACE,
+            NURB_BODY_SELECT_MODE_OBJECT))
+  {
+    ts->nurb_body_select_mode = NURB_BODY_SELECT_MODE_EDGE;
+  }
+
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return;
+  }
+
+  for (NurbBody &body : bmain->nurb_bodies) {
+    body.select_mode = ts->nurb_body_select_mode;
+    body.hovered_edge = -1;
+    body.surface_hovered_edge = -1;
+    if (body.select_mode != NURB_BODY_SELECT_MODE_EDGE) {
+      body.selected_edges = 0;
+      body.selected_edge = -1;
+      body.surface_selected_edges = 0;
+      body.surface_selected_edge = -1;
+    }
+    for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body.boolean_ops.first); op;
+         op = op->next)
+    {
+      op->hovered_edge = -1;
+      op->flag &= ~NURB_BODY_BOOLEAN_OP_HOVERED;
+      if (body.select_mode != NURB_BODY_SELECT_MODE_EDGE) {
+        op->selected_edges = 0;
+        op->selected_edge = -1;
+        op->flag &= ~NURB_BODY_BOOLEAN_OP_SELECTED;
+      }
+    }
+    DEG_id_tag_update(&body.id, ID_RECALC_SELECT);
+  }
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
 static void rna_Scene_uv_select_mode_update(bContext *C, PointerRNA * /*ptr*/)
@@ -4331,6 +4383,15 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mesh Selection Mode", "Which mesh elements selection works on");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_Scene_editmesh_select_mode_update");
+
+  prop = RNA_def_property(srna, "nurb_body_select_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "nurb_body_select_mode");
+  RNA_def_property_enum_items(prop, rna_enum_nurb_body_select_mode_items);
+  RNA_def_property_ui_text(
+      prop, "NURB Body Selection Mode", "Object Mode NURB Body selection target");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_select_mode_update");
 
   prop = RNA_def_property(srna, "vertex_group_weight", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "vgroup_weight");

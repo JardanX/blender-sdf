@@ -44,6 +44,7 @@ enum {
   NURB_BODY_SMOOTH_SHADING = (1 << 1),
   NURB_BODY_TRIANGULATE_MESH = (1 << 2),
   NURB_BODY_AUTO_CREASE_SHARP_EDGES = (1 << 3),
+  NURB_BODY_FAST_BEVEL_PREVIEW = (1 << 4),
 };
 
 enum {
@@ -107,6 +108,7 @@ typedef struct NurbBody {
   float surface_bevel_radii[64] = {};
   int bevel_order[64] = {};
   int surface_bevel_order[64] = {};
+  uint64_t surface_edge_keys[64] = {};
 
   int boolean_operation = NURB_BODY_BOOLEAN_DIFFERENCE;
   int selected_edge = -1;

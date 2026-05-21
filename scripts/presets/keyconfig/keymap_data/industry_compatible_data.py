@@ -764,6 +764,11 @@ def km_view3d(params):
          {"properties": [("type", 'RIGHT'), ("align_active", True)]}),
         ("view3d.view_axis", {"type": 'NDOF_BUTTON_TOP', "value": 'PRESS', "shift": True},
          {"properties": [("type", 'TOP'), ("align_active", True)]}),
+        ("object.nurb_body_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value, "shift": True}, None),
         # Selection.
         *((operator,
            {"type": 'LEFTMOUSE', "value": 'CLICK', **{m: True for m in mods}},
@@ -2517,11 +2522,6 @@ def km_object_mode(params):
     )
 
     items.extend([
-        ("object.nurb_body_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
-        ("object.nurb_body_select_cut_edge",
-         {"type": params.select_mouse, "value": params.select_mouse_value}, None),
-        ("object.nurb_body_select_cut_edge",
-         {"type": params.select_mouse, "value": params.select_mouse_value, "shift": True}, None),
         ("object.nurb_body_edge_translate", {"type": 'G', "value": 'PRESS'}, None),
         ("object.nurb_body_bevel_selected", {"type": 'B', "value": 'PRESS', "ctrl": True}, None),
         ("object.nurb_body_boolean_apply", {"type": 'MINUS', "value": 'PRESS', "ctrl": True},
@@ -2597,18 +2597,18 @@ def km_object_mode(params):
         *_template_items_basic_tools(),
 
         # Selection Modes
-        ("object.mode_set_with_submode", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'VERT'})]}),
-        ("object.mode_set_with_submode", {"type": 'TWO', "value": 'PRESS'},
-         {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'EDGE'})]}),
-        ("object.mode_set_with_submode", {"type": 'THREE', "value": 'PRESS'},
-         {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'FACE'})]}),
         ("object.nurb_body_select_mode", {"type": 'ONE', "value": 'PRESS'},
          {"properties": [("mode", 'EDGE')]}),
         ("object.nurb_body_select_mode", {"type": 'TWO', "value": 'PRESS'},
          {"properties": [("mode", 'FACE')]}),
         ("object.nurb_body_select_mode", {"type": 'THREE', "value": 'PRESS'},
          {"properties": [("mode", 'OBJECT')]}),
+        ("object.mode_set_with_submode", {"type": 'ONE', "value": 'PRESS'},
+         {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'VERT'})]}),
+        ("object.mode_set_with_submode", {"type": 'TWO', "value": 'PRESS'},
+         {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'EDGE'})]}),
+        ("object.mode_set_with_submode", {"type": 'THREE', "value": 'PRESS'},
+         {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'FACE'})]}),
     ])
 
     return keymap
