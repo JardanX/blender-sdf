@@ -45,6 +45,8 @@ namespace workbench {
 
 using namespace draw;
 
+constexpr uint workbench_disable_object_outline_id = 1u << 30u;
+
 class Instance : public DrawEngine {
  private:
   View view_ = {"DefaultView"};
@@ -268,14 +270,18 @@ class Instance : public DrawEngine {
                  bool show_missing_texture = false)
   {
     resources_.material_buf.append(material);
-    int material_index = resources_.material_buf.size() - 1;
+    uint material_index = uint(resources_.material_buf.size() - 1);
+    uint custom_id = material_index;
+    if (ob_ref.object->type == OB_NURB_BODY && scene_state_.draw_outline) {
+      custom_id |= workbench_disable_object_outline_id;
+    }
 
     if (show_missing_texture && (!texture || !texture->gpu.texture)) {
       texture = &resources_.missing_texture;
     }
 
     this->draw_to_mesh_pass(ob_ref, material.is_transparent(), [&](MeshPass &mesh_pass) {
-      mesh_pass.get_subpass(eGeometryType::MESH, texture).draw(batch, handle, material_index);
+      mesh_pass.get_subpass(eGeometryType::MESH, texture).draw(batch, handle, custom_id);
     });
   }
 

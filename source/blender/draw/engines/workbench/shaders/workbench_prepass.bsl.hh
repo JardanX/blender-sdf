@@ -23,6 +23,8 @@ VERTEX_SHADER_CREATE_INFO(draw_modelmat_with_custom_id)
 
 namespace workbench::prepass {
 
+#define WORKBENCH_DISABLE_OBJECT_OUTLINE_ID 0x40000000u
+
 /* TODO(fclem): Move to workbench. */
 #define WORKBENCH_LIGHTING_STUDIO 0
 #define WORKBENCH_LIGHTING_MATCAP 1
@@ -140,9 +142,13 @@ struct Mesh {
 
   v_out.normal = normalize(drw_normal_object_to_view(v_in.nor));
 
-  v_out.object_id = int(drw_resource_id() & 0xFFFFu) + 1;
+  uint custom_id = drw_custom_id();
+  const bool disable_object_outline = (custom_id & WORKBENCH_DISABLE_OBJECT_OUTLINE_ID) != 0u;
+  const int material_id = int(custom_id & ~WORKBENCH_DISABLE_OBJECT_OUTLINE_ID);
 
-  materials.material_data_get(int(drw_custom_id()),
+  v_out.object_id = disable_object_outline ? 0 : int(drw_resource_id() & 0xFFFFu) + 1;
+
+  materials.material_data_get(material_id,
                               v_in.ac.rgb,
                               v_out.color,
                               v_out.alpha,
