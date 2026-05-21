@@ -118,7 +118,8 @@ typedef struct NurbBody {
 
   struct Material **mat = nullptr;
   short totcol = 0;
-  char _pad[6] = {};
+  char _pad[2] = {};
+  float line_thickness = 2.0f;
 } NurbBody;
 
 }  // namespace blender

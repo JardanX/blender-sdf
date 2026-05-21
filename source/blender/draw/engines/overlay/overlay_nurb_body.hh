@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 #include "DNA_mesh_types.h"
 #include "DNA_nurb_body_types.h"
@@ -43,6 +44,12 @@ class NurbBodies : Overlay {
     bool selected;
   };
 
+  struct TopLineBatch {
+    Vector<float3> lines;
+    float4 color;
+    float width;
+  };
+
   Vector<Entry> entries_;
 
   static bool edge_index_in_mask(const uint64_t mask, const int edge_index)
@@ -67,6 +74,30 @@ class NurbBodies : Overlay {
     }
     immEnd();
     immUnbindProgram();
+  }
+
+  static float line_thickness_for_body(const NurbBody &body)
+  {
+    if (!std::isfinite(body.line_thickness)) {
+      return 2.0f;
+    }
+    return std::clamp(body.line_thickness, 0.5f, 8.0f);
+  }
+
+  static void append_top_lines(Vector<TopLineBatch> &batches,
+                               Vector<float3> &&lines,
+                               const float4 &color,
+                               const float width)
+  {
+    if (lines.is_empty()) {
+      return;
+    }
+
+    TopLineBatch batch;
+    batch.lines = std::move(lines);
+    batch.color = color;
+    batch.width = width;
+    batches.append(std::move(batch));
   }
 
   static void append_mesh_silhouette_lines(const Object &object,
@@ -164,29 +195,23 @@ class NurbBodies : Overlay {
     GPU_matrix_push_projection();
     GPU_polygon_offset(1.0f, 2.0f);
 
-    Vector<float3> silhouette_lines;
-    Vector<float3> selected_silhouette_lines;
-    Vector<float3> top_hovered_lines;
-    Vector<float3> top_selected_lines;
+    Vector<TopLineBatch> top_line_batches;
 
     for (const Entry &entry : entries_) {
       const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.object->data);
+      const float line_width = line_thickness_for_body(*body);
       Vector<NurbBodyEdgePolyline> polylines;
       Vector<float3> object_silhouette_lines;
       Vector<float3> normal_lines;
       Vector<float3> hovered_lines;
       Vector<float3> selected_lines;
+      Vector<float3> top_hovered_lines;
+      Vector<float3> top_selected_lines;
 
       if (entry.object_mode) {
         if (const Mesh *mesh = BKE_object_get_evaluated_mesh_no_subsurf_unchecked(entry.object)) {
           append_mesh_silhouette_lines(
               *entry.object, *mesh, view.forward(), object_silhouette_lines);
-          if (entry.selected) {
-            selected_silhouette_lines.extend(object_silhouette_lines);
-          }
-          else {
-            silhouette_lines.extend(object_silhouette_lines);
-          }
         }
       }
 
@@ -235,7 +260,6 @@ class NurbBodies : Overlay {
         }
       }
 
-      const float line_width = 1.65f;
       draw_lines(normal_lines, float4(0.0f, 0.0f, 0.0f, 0.9f), line_width);
       if (!hovered_lines.is_empty()) {
         draw_lines(hovered_lines, float4(1.0f, 1.0f, 1.0f, 1.0f), line_width);
@@ -243,14 +267,26 @@ class NurbBodies : Overlay {
       if (!selected_lines.is_empty()) {
         draw_lines(selected_lines, float4(1.0f, 0.62f, 0.0f, 1.0f), line_width);
       }
+      append_top_lines(top_line_batches,
+                       std::move(object_silhouette_lines),
+                       entry.selected ? float4(1.0f, 0.62f, 0.0f, 1.0f) :
+                                        float4(0.0f, 0.0f, 0.0f, 1.0f),
+                       line_width);
+      append_top_lines(top_line_batches,
+                       std::move(top_hovered_lines),
+                       float4(1.0f, 1.0f, 1.0f, 1.0f),
+                       line_width);
+      append_top_lines(top_line_batches,
+                       std::move(top_selected_lines),
+                       float4(1.0f, 0.62f, 0.0f, 1.0f),
+                       line_width);
     }
 
     GPU_matrix_pop_projection();
     GPU_depth_test(GPU_DEPTH_NONE);
-    draw_lines(silhouette_lines, float4(0.0f, 0.0f, 0.0f, 1.0f), 2.35f);
-    draw_lines(selected_silhouette_lines, float4(1.0f, 0.62f, 0.0f, 1.0f), 2.35f);
-    draw_lines(top_hovered_lines, float4(1.0f, 1.0f, 1.0f, 1.0f), 1.65f);
-    draw_lines(top_selected_lines, float4(1.0f, 0.62f, 0.0f, 1.0f), 1.65f);
+    for (const TopLineBatch &batch : top_line_batches) {
+      draw_lines(batch.lines, batch.color, batch.width);
+    }
     GPU_line_smooth(false);
     GPU_blend(GPU_BLEND_NONE);
     GPU_depth_mask(true);

@@ -46,6 +46,12 @@ static void rna_NurbBody_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA 
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
+static void rna_NurbBody_draw_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA * /*ptr*/)
+{
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+}
+
 static void rna_NurbBody_select_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   NurbBody *body = static_cast<NurbBody *>(ptr->data);
@@ -99,6 +105,14 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_nurb_body_select_mode_items);
   RNA_def_property_ui_text(prop, "Selection Mode", "Object Mode NURB Body selection target");
   RNA_def_property_update(prop, 0, "rna_NurbBody_select_update");
+
+  prop = RNA_def_property(srna, "line_thickness", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "line_thickness");
+  RNA_def_property_range(prop, 0.5f, 8.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 6.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop, "Line Thickness", "Thickness of NURB body silhouette and edge overlay lines");
+  RNA_def_property_update(prop, 0, "rna_NurbBody_draw_update");
 
   prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "radius");

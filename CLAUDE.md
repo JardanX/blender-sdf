@@ -17,6 +17,8 @@ Key modifications from upstream Blender:
 
 All changes are tracked in `SDF_CHANGES.md` at the repo root — consult it before modifying any SDF-related code.
 
+NURB Body bevel/boolean work has a task tracker in `NURB_BODY_TODO.md` -- update it when fixing or verifying NURB Body edge selection, bevel, chamfer, or viewport performance issues.
+
 ## Building
 
 **Agent instruction:** Do not run local builds or rebuild commands in this repo. The user rebuilds Blender manually after code changes.

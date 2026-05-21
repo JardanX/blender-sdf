@@ -53,6 +53,7 @@ class DATA_PT_nurb_body_viewport(DataButtonsPanel, Panel):
         body = context.object.data
         layout.prop(body, "tessellation_deflection", text="Deflection")
         layout.prop(body, "tessellation_angle", text="Angle")
+        layout.prop(body, "line_thickness")
         layout.prop(body, "use_triangulate_mesh")
         layout.prop(body, "use_merge_vertices")
         layout.prop(body, "use_smooth_shading")
