@@ -60,12 +60,16 @@
 #  include <BRepLib.hxx>
 #  include <BRepLib_ToolTriangulatedShape.hxx>
 #  include <BRepMesh_IncrementalMesh.hxx>
+#  include <BRepPrimAPI_MakeBox.hxx>
+#  include <BRepPrimAPI_MakeCone.hxx>
 #  include <BRepPrimAPI_MakeCylinder.hxx>
+#  include <BRepPrimAPI_MakeSphere.hxx>
+#  include <BRepPrimAPI_MakeTorus.hxx>
+#  include <BRepPrimAPI_MakeWedge.hxx>
 #  include <BRepTools.hxx>
 #  include <ChFi3d_FilletShape.hxx>
 #  include <Geom_Circle.hxx>
 #  include <Geom_Curve.hxx>
-#  include <Geom_CylindricalSurface.hxx>
 #  include <Geom_Line.hxx>
 #  include <Geom_Surface.hxx>
 #  include <Poly_PolygonOnTriangulation.hxx>
@@ -97,6 +101,26 @@ namespace blender {
 static uint64_t nurb_body_edge_mask_for_index(const int edge_index)
 {
   return (edge_index >= 0 && edge_index < 64) ? (uint64_t(1) << uint(edge_index)) : uint64_t(0);
+}
+
+static bool nurb_body_primitive_is_valid(const int primitive)
+{
+  return ELEM(primitive,
+              NURB_BODY_PRIMITIVE_BOX,
+              NURB_BODY_PRIMITIVE_SPHERE,
+              NURB_BODY_PRIMITIVE_CYLINDER,
+              NURB_BODY_PRIMITIVE_CONE,
+              NURB_BODY_PRIMITIVE_TORUS,
+              NURB_BODY_PRIMITIVE_WEDGE);
+}
+
+static void nurb_body_sanitize_dimensions(float dimensions[3])
+{
+  for (int i = 0; i < 3; i++) {
+    if (dimensions[i] <= 0.0f) {
+      dimensions[i] = 2.0f;
+    }
+  }
 }
 
 static void nurb_body_materialize_edge_bevel_radii(const uint64_t bevel_edges,
@@ -223,6 +247,13 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_struct_list(reader, NurbBodyBooleanOp, &body->boolean_ops);
   body->flag &= ~(NURB_BODY_MERGE_VERTICES | NURB_BODY_AUTO_CREASE_SHARP_EDGES |
                   NURB_BODY_FAST_BEVEL_PREVIEW);
+  if (!nurb_body_primitive_is_valid(body->primitive)) {
+    body->primitive = NURB_BODY_PRIMITIVE_CYLINDER;
+  }
+  if (body->minor_radius <= 0.0f) {
+    body->minor_radius = 0.25f;
+  }
+  nurb_body_sanitize_dimensions(body->dimensions);
   body->hovered_edge = -1;
   body->surface_hovered_edge = -1;
   if (body->selected_edges == 0 && body->selected_edge >= 0) {
@@ -286,6 +317,13 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
        op = op->next)
   {
     op->hovered_edge = -1;
+    if (!nurb_body_primitive_is_valid(op->primitive)) {
+      op->primitive = NURB_BODY_PRIMITIVE_CYLINDER;
+    }
+    if (op->operand_minor_radius <= 0.0f) {
+      op->operand_minor_radius = 0.25f;
+    }
+    nurb_body_sanitize_dimensions(op->operand_dimensions);
     if (op->operand_scale[0] == 0.0f && op->operand_scale[1] == 0.0f &&
         op->operand_scale[2] == 0.0f)
     {
@@ -425,23 +463,129 @@ NurbBody *BKE_nurb_body_add(Main *bmain, const char *name)
 
 #ifdef WITH_OPENCASCADE
 
-static TopoDS_Shape make_centered_cylinder(const gp_Dir &axis,
-                                           const float radius,
+static float nurb_body_safe_dimension(const float value)
+{
+  return std::max(std::abs(value), 0.001f);
+}
+
+static float nurb_body_safe_radius(const float value)
+{
+  return std::max(value, 0.001f);
+}
+
+static float3 nurb_body_safe_dimensions(const float dimensions[3])
+{
+  float3 result(nurb_body_safe_dimension(dimensions[0]),
+                nurb_body_safe_dimension(dimensions[1]),
+                nurb_body_safe_dimension(dimensions[2]));
+  if (result.x == 0.001f && result.y == 0.001f && result.z == 0.001f) {
+    result = float3(2.0f);
+  }
+  return result;
+}
+
+static gp_Pnt nurb_body_gp_point(const float3 center)
+{
+  return gp_Pnt(center.x, center.y, center.z);
+}
+
+static gp_Ax2 nurb_body_blender_z_axis(const float3 center)
+{
+  return gp_Ax2(nurb_body_gp_point(center), gp_Dir(0.0, 0.0, 1.0));
+}
+
+static TopoDS_Shape make_centered_box(const float dimensions[3], const float3 center)
+{
+  const float3 size = nurb_body_safe_dimensions(dimensions);
+  const gp_Pnt corner(center.x - size.x * 0.5f,
+                      center.y - size.y * 0.5f,
+                      center.z - size.z * 0.5f);
+  return BRepPrimAPI_MakeBox(corner, size.x, size.y, size.z).Shape();
+}
+
+static TopoDS_Shape make_centered_sphere(const float radius, const float3 center)
+{
+  return BRepPrimAPI_MakeSphere(nurb_body_gp_point(center), nurb_body_safe_radius(radius)).Shape();
+}
+
+static TopoDS_Shape make_centered_cylinder(const float radius,
                                            const float depth,
                                            const float3 center)
 {
-  gp_Pnt base(center.x, center.y, center.z);
-  const double half_depth = double(depth) * 0.5;
-  base.Translate(gp_Vec(-axis.X() * half_depth, -axis.Y() * half_depth, -axis.Z() * half_depth));
-  return BRepPrimAPI_MakeCylinder(gp_Ax2(base, axis), radius, depth).Shape();
+  const float safe_depth = nurb_body_safe_dimension(depth);
+  const gp_Pnt base(center.x, center.y, center.z - safe_depth * 0.5f);
+  return BRepPrimAPI_MakeCylinder(gp_Ax2(base, gp_Dir(0.0, 0.0, 1.0)),
+                                  nurb_body_safe_radius(radius),
+                                  safe_depth)
+      .Shape();
+}
+
+static TopoDS_Shape make_centered_cone(const float radius, const float depth, const float3 center)
+{
+  const float safe_depth = nurb_body_safe_dimension(depth);
+  const gp_Pnt base(center.x, center.y, center.z - safe_depth * 0.5f);
+  return BRepPrimAPI_MakeCone(
+             gp_Ax2(base, gp_Dir(0.0, 0.0, 1.0)), nurb_body_safe_radius(radius), 0.0, safe_depth)
+      .Shape();
+}
+
+static TopoDS_Shape make_centered_torus(const float major_radius,
+                                        const float minor_radius,
+                                        const float3 center)
+{
+  const float safe_minor_radius = nurb_body_safe_radius(minor_radius);
+  const float safe_major_radius = std::max(major_radius, safe_minor_radius + 0.001f);
+  return BRepPrimAPI_MakeTorus(
+             nurb_body_blender_z_axis(center), safe_major_radius, safe_minor_radius)
+      .Shape();
+}
+
+static TopoDS_Shape make_centered_wedge(const float dimensions[3], const float3 center)
+{
+  const float3 size = nurb_body_safe_dimensions(dimensions);
+  const gp_Pnt corner(center.x - size.x * 0.5f,
+                      center.y - size.y * 0.5f,
+                      center.z - size.z * 0.5f);
+  return BRepPrimAPI_MakeWedge(gp_Ax2(corner, gp_Dir(0.0, 0.0, 1.0)),
+                               size.x,
+                               size.y,
+                               size.z,
+                               size.x * 0.5f)
+      .Shape();
+}
+
+static TopoDS_Shape make_primitive_shape(const int primitive,
+                                         const float radius,
+                                         const float depth,
+                                         const float minor_radius,
+                                         const float dimensions[3],
+                                         const float3 center)
+{
+  switch (primitive) {
+    case NURB_BODY_PRIMITIVE_BOX:
+      return make_centered_box(dimensions, center);
+    case NURB_BODY_PRIMITIVE_SPHERE:
+      return make_centered_sphere(radius, center);
+    case NURB_BODY_PRIMITIVE_CONE:
+      return make_centered_cone(radius, depth, center);
+    case NURB_BODY_PRIMITIVE_TORUS:
+      return make_centered_torus(radius, minor_radius, center);
+    case NURB_BODY_PRIMITIVE_WEDGE:
+      return make_centered_wedge(dimensions, center);
+    case NURB_BODY_PRIMITIVE_CYLINDER:
+    default:
+      return make_centered_cylinder(radius, depth, center);
+  }
 }
 
 static TopoDS_Shape make_body_primitive_shape(const NurbBody &body)
 {
-  return make_centered_cylinder(gp_Dir(1.0, 0.0, 0.0),
-                                std::max(body.radius, 0.001f),
-                                std::max(body.depth, 0.001f),
-                                float3(0.0f));
+  return make_primitive_shape(body.primitive,
+                              body.radius,
+                              body.depth,
+                              body.minor_radius,
+                              body.dimensions,
+                              float3(0.0f));
 }
 
 static TopoDS_Shape transform_shape(const TopoDS_Shape &shape, const float mat[4][4])
@@ -485,10 +629,12 @@ static TopoDS_Shape transform_shape(const TopoDS_Shape &shape, const float mat[4
 
 static TopoDS_Shape make_boolean_op_primitive_shape(const NurbBodyBooleanOp &op)
 {
-  return make_centered_cylinder(gp_Dir(1.0, 0.0, 0.0),
-                                std::max(op.operand_radius, 0.001f),
-                                std::max(op.operand_depth, 0.001f),
-                                float3(0.0f));
+  return make_primitive_shape(op.primitive,
+                              op.operand_radius,
+                              op.operand_depth,
+                              op.operand_minor_radius,
+                              op.operand_dimensions,
+                              float3(0.0f));
 }
 
 static float nurb_body_safe_scale_axis(const float scale)
@@ -506,19 +652,19 @@ static float nurb_body_signed_scale_axis(const float scale)
 
 static float nurb_body_boolean_op_axis_scale(const NurbBodyBooleanOp &op)
 {
-  return nurb_body_safe_scale_axis(op.operand_scale[0] == 0.0f ? 1.0f :
-                                                               op.operand_scale[0]);
+  return nurb_body_safe_scale_axis(op.operand_scale[2] == 0.0f ? 1.0f :
+                                                               op.operand_scale[2]);
 }
 
 static float nurb_body_boolean_op_radial_scale(const NurbBodyBooleanOp &op)
 {
+  const float x_scale = nurb_body_safe_scale_axis(op.operand_scale[0] == 0.0f ?
+                                                     1.0f :
+                                                     op.operand_scale[0]);
   const float y_scale = nurb_body_safe_scale_axis(op.operand_scale[1] == 0.0f ?
                                                      1.0f :
                                                      op.operand_scale[1]);
-  const float z_scale = nurb_body_safe_scale_axis(op.operand_scale[2] == 0.0f ?
-                                                     1.0f :
-                                                     op.operand_scale[2]);
-  return (y_scale + z_scale) * 0.5f;
+  return (x_scale + y_scale) * 0.5f;
 }
 
 static bool nurb_body_boolean_op_has_non_unit_scale(const NurbBodyBooleanOp &op)
@@ -537,6 +683,45 @@ static float nurb_body_boolean_op_scaled_depth(const NurbBodyBooleanOp &op)
   return std::max(op.operand_depth * nurb_body_boolean_op_axis_scale(op), 0.001f);
 }
 
+static float nurb_body_primitive_blend_radius_limit(const int primitive,
+                                                    const float radius,
+                                                    const float depth,
+                                                    const float minor_radius,
+                                                    const float dimensions[3])
+{
+  const float safe_radius = std::max(radius, 0.001f);
+  const float safe_depth = std::max(depth, 0.001f);
+  const float safe_minor_radius = std::max(minor_radius, 0.001f);
+  const float safe_dimensions[3] = {
+      std::max(dimensions[0], 0.001f),
+      std::max(dimensions[1], 0.001f),
+      std::max(dimensions[2], 0.001f),
+  };
+
+  switch (primitive) {
+    case NURB_BODY_PRIMITIVE_BOX:
+    case NURB_BODY_PRIMITIVE_WEDGE: {
+      const float min_dimension = std::min(std::min(safe_dimensions[0], safe_dimensions[1]),
+                                           safe_dimensions[2]);
+      return std::max(min_dimension * 0.5f, 0.001f);
+    }
+    case NURB_BODY_PRIMITIVE_TORUS:
+      return safe_minor_radius;
+    case NURB_BODY_PRIMITIVE_CYLINDER:
+    case NURB_BODY_PRIMITIVE_CONE:
+      return std::max(std::min(safe_radius, safe_depth * 0.5f), 0.001f);
+    case NURB_BODY_PRIMITIVE_SPHERE:
+    default:
+      return safe_radius;
+  }
+}
+
+static float nurb_body_blend_radius_limit(const NurbBody &body)
+{
+  return nurb_body_primitive_blend_radius_limit(
+      body.primitive, body.radius, body.depth, body.minor_radius, body.dimensions);
+}
+
 static void scaled_edge_radii(const float src[64], const float scale, float dst[64])
 {
   for (int i = 0; i < 64; i++) {
@@ -544,9 +729,58 @@ static void scaled_edge_radii(const float src[64], const float scale, float dst[
   }
 }
 
+static void scaled_primitive_dimensions(const NurbBodyBooleanOp &op, float r_dimensions[3])
+{
+  r_dimensions[0] = nurb_body_safe_dimension(
+      op.operand_dimensions[0] * nurb_body_safe_scale_axis(op.operand_scale[0] == 0.0f ?
+                                                               1.0f :
+                                                               op.operand_scale[0]));
+  r_dimensions[1] = nurb_body_safe_dimension(
+      op.operand_dimensions[1] * nurb_body_safe_scale_axis(op.operand_scale[1] == 0.0f ?
+                                                               1.0f :
+                                                               op.operand_scale[1]));
+  r_dimensions[2] = nurb_body_safe_dimension(
+      op.operand_dimensions[2] * nurb_body_safe_scale_axis(op.operand_scale[2] == 0.0f ?
+                                                               1.0f :
+                                                               op.operand_scale[2]));
+}
+
+static float nurb_body_boolean_op_scaled_blend_radius_limit(const NurbBodyBooleanOp &op)
+{
+  float operand_dimensions[3];
+  scaled_primitive_dimensions(op, operand_dimensions);
+  return nurb_body_primitive_blend_radius_limit(op.primitive,
+                                                nurb_body_boolean_op_scaled_radius(op),
+                                                nurb_body_boolean_op_scaled_depth(op),
+                                                op.operand_minor_radius *
+                                                    nurb_body_boolean_op_radial_scale(op),
+                                                operand_dimensions);
+}
+
 static void nurb_body_boolean_op_transform_matrix(const NurbBodyBooleanOp &op, float r_mat[4][4])
 {
   copy_m4_m4(r_mat, op.operand_to_target);
+
+  if (ELEM(op.primitive, NURB_BODY_PRIMITIVE_BOX, NURB_BODY_PRIMITIVE_WEDGE)) {
+    const float residual_scale[3] = {
+        nurb_body_signed_scale_axis(op.operand_scale[0] == 0.0f ? 1.0f : op.operand_scale[0]) <
+                0.0f ?
+            -1.0f :
+            1.0f,
+        nurb_body_signed_scale_axis(op.operand_scale[1] == 0.0f ? 1.0f : op.operand_scale[1]) <
+                0.0f ?
+            -1.0f :
+            1.0f,
+        nurb_body_signed_scale_axis(op.operand_scale[2] == 0.0f ? 1.0f : op.operand_scale[2]) <
+                0.0f ?
+            -1.0f :
+            1.0f,
+    };
+    mul_v3_fl(r_mat[0], residual_scale[0]);
+    mul_v3_fl(r_mat[1], residual_scale[1]);
+    mul_v3_fl(r_mat[2], residual_scale[2]);
+    return;
+  }
 
   const float axis_scale = nurb_body_boolean_op_axis_scale(op);
   const float radial_scale = nurb_body_boolean_op_radial_scale(op);
@@ -554,27 +788,16 @@ static void nurb_body_boolean_op_transform_matrix(const NurbBodyBooleanOp &op, f
    * existing bookkeeping, then apply the leftover anisotropic object scale to the final tool. */
   const float residual_scale[3] = {
       nurb_body_signed_scale_axis(op.operand_scale[0] == 0.0f ? 1.0f : op.operand_scale[0]) /
-          axis_scale,
+          radial_scale,
       nurb_body_signed_scale_axis(op.operand_scale[1] == 0.0f ? 1.0f : op.operand_scale[1]) /
           radial_scale,
       nurb_body_signed_scale_axis(op.operand_scale[2] == 0.0f ? 1.0f : op.operand_scale[2]) /
-          radial_scale,
+          axis_scale,
   };
 
   mul_v3_fl(r_mat[0], residual_scale[0]);
   mul_v3_fl(r_mat[1], residual_scale[1]);
   mul_v3_fl(r_mat[2], residual_scale[2]);
-}
-
-static bool cylindrical_face_radius(const TopoDS_Face &face, double &r_radius)
-{
-  Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
-  Handle(Geom_CylindricalSurface) cylinder = Handle(Geom_CylindricalSurface)::DownCast(surface);
-  if (cylinder.IsNull()) {
-    return false;
-  }
-  r_radius = cylinder->Radius();
-  return true;
 }
 
 static bool topological_edge_is_visible_outline(
@@ -625,52 +848,6 @@ static void triangulate_shape_for_preview(const TopoDS_Shape &shape,
                              std::min(angular_deflection, retry_angle),
                              true);
   }
-}
-
-static Vector<TopoDS_Edge> find_cut_edges(
-    const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces,
-    const float body_radius,
-    const float cutter_radius)
-{
-  Vector<TopoDS_Edge> intersection_edges;
-  Vector<TopoDS_Edge> cutter_rim_edges;
-
-  const double body_tol = std::max(0.001, double(body_radius) * 0.002);
-  const double cutter_tol = std::max(0.001, double(cutter_radius) * 0.002);
-
-  for (int i = 1; i <= edge_faces.Extent(); i++) {
-    bool touches_body = false;
-    bool touches_cutter = false;
-    const TopTools_ListOfShape &faces = edge_faces.FindFromIndex(i);
-    for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
-      double radius = 0.0;
-      if (!cylindrical_face_radius(TopoDS::Face(it.Value()), radius)) {
-        continue;
-      }
-      touches_body |= std::abs(radius - double(body_radius)) <= body_tol;
-      touches_cutter |= std::abs(radius - double(cutter_radius)) <= cutter_tol;
-    }
-    if (touches_body && touches_cutter) {
-      intersection_edges.append(TopoDS::Edge(edge_faces.FindKey(i)));
-    }
-    else if (touches_cutter) {
-      const TopoDS_Edge edge = TopoDS::Edge(edge_faces.FindKey(i));
-      if (topological_edge_is_visible_outline(edge, edge_faces)) {
-        cutter_rim_edges.append(edge);
-      }
-    }
-  }
-  intersection_edges.extend(cutter_rim_edges);
-  return intersection_edges;
-}
-
-static Vector<TopoDS_Edge> find_cut_edges(const TopoDS_Shape &shape,
-                                          const float body_radius,
-                                          const float cutter_radius)
-{
-  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
-  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
-  return find_cut_edges(edge_faces, body_radius, cutter_radius);
 }
 
 static bool append_edge_polyline_local(const TopoDS_Edge &edge,
@@ -957,6 +1134,88 @@ static bool topological_edge_is_visible_outline(
   }
 
   return unique_faces.size() > 1;
+}
+
+static uint64_t edge_geometry_key(
+    const TopoDS_Edge &edge,
+    const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces)
+{
+  Vector<float3> points;
+  if (!(append_edge_polyline_local(edge, 32, points) ||
+        append_tessellated_edge_polyline_local(edge, edge_faces, points)))
+  {
+    return 0;
+  }
+  return surface_edge_geometry_key_for_points(points.as_span());
+}
+
+static bool edge_geometry_key_in_span(const Span<uint64_t> edge_keys, const uint64_t edge_key)
+{
+  if (edge_key == 0) {
+    return false;
+  }
+  for (const uint64_t existing_key : edge_keys) {
+    if (existing_key == edge_key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static Vector<uint64_t> selectable_edge_geometry_keys(const TopoDS_Shape &shape)
+{
+  Vector<uint64_t> edge_keys;
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  for (int i = 1; i <= edge_faces.Extent(); i++) {
+    if (unique_edge_face_count(edge_faces.FindFromIndex(i)) < 2) {
+      continue;
+    }
+    const TopoDS_Edge edge = TopoDS::Edge(edge_faces.FindKey(i));
+    if (!topological_edge_is_visible_outline(edge, edge_faces)) {
+      continue;
+    }
+    const uint64_t edge_key = edge_geometry_key(edge, edge_faces);
+    if (edge_key != 0 && !edge_geometry_key_in_span(edge_keys.as_span(), edge_key)) {
+      edge_keys.append(edge_key);
+    }
+  }
+  return edge_keys;
+}
+
+static Vector<TopoDS_Edge> find_boolean_output_edges(
+    const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces,
+    const Span<uint64_t> pre_boolean_edge_keys)
+{
+  Vector<TopoDS_Edge> edges;
+  Vector<uint64_t> emitted_edge_keys;
+  for (int i = 1; i <= edge_faces.Extent() && edges.size() < 64; i++) {
+    if (unique_edge_face_count(edge_faces.FindFromIndex(i)) < 2) {
+      continue;
+    }
+    const TopoDS_Edge edge = TopoDS::Edge(edge_faces.FindKey(i));
+    if (!topological_edge_is_visible_outline(edge, edge_faces)) {
+      continue;
+    }
+    const uint64_t edge_key = edge_geometry_key(edge, edge_faces);
+    if (edge_key == 0 || edge_geometry_key_in_span(pre_boolean_edge_keys, edge_key) ||
+        edge_geometry_key_in_span(emitted_edge_keys.as_span(), edge_key))
+    {
+      continue;
+    }
+    emitted_edge_keys.append(edge_key);
+    edges.append(edge);
+  }
+  return edges;
+}
+
+static Vector<TopoDS_Edge> find_boolean_output_edges(
+    const TopoDS_Shape &shape,
+    const Span<uint64_t> pre_boolean_edge_keys)
+{
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  return find_boolean_output_edges(edge_faces, pre_boolean_edge_keys);
 }
 
 static Vector<NurbBodySurfaceEdgeEntry> find_selectable_surface_edge_catalog(
@@ -1427,6 +1686,26 @@ static bool blend_settings_may_change_shape(const float bevel_radius,
   return bevel_radius > 0.0f || edge_radii_contains_positive(bevel_radii, active_edge_mask);
 }
 
+static bool blend_selection_affects_shape(const float bevel_radius,
+                                          const float *bevel_radii,
+                                          const uint64_t bevel_edges,
+                                          const uint64_t selected_edges,
+                                          const int bevel_edge,
+                                          const int selected_edge)
+{
+  if (bevel_edges != 0) {
+    return false;
+  }
+  if (selected_edges != 0) {
+    return bevel_radius > 0.0f || edge_radii_contains_positive(bevel_radii, selected_edges);
+  }
+  if (bevel_edge >= 0 || selected_edge < 0) {
+    return false;
+  }
+  return bevel_radius > 0.0f ||
+         edge_radii_contains_positive(bevel_radii, nurb_body_edge_mask_for_index(selected_edge));
+}
+
 static Vector<NurbBodyBlendStep> sorted_blend_steps(const float bevel_radius,
                                                     const float *bevel_radii,
                                                     const int fallback_bevel_type,
@@ -1568,18 +1847,10 @@ static int find_current_edge_by_reference(const Span<NurbBodyEdgeReference> edge
   return -1;
 }
 
-static double safe_blend_radius_limit(const float radius_limit, const double edge_length)
+static double safe_blend_radius_limit(const float radius_limit)
 {
-  const double base_limit = double(std::max(radius_limit, 0.001f));
-  if (std::isfinite(edge_length) && edge_length > 0.0) {
-    return std::max(std::min(base_limit, edge_length * 0.33), 1.0e-6);
-  }
+  const double base_limit = double(std::max(radius_limit, 0.001f)) * 0.995;
   return std::max(base_limit, 1.0e-6);
-}
-
-static double safe_blend_radius_limit(const float radius_limit, const TopoDS_Edge &edge)
-{
-  return safe_blend_radius_limit(radius_limit, double(edge_reference_for_blend(edge).length));
 }
 
 static bool shape_can_be_previewed(const TopoDS_Shape &shape)
@@ -1589,7 +1860,23 @@ static bool shape_can_be_previewed(const TopoDS_Shape &shape)
   }
 
   TopExp_Explorer face_explorer(shape, TopAbs_FACE);
-  return face_explorer.More();
+  if (!face_explorer.More()) {
+    return false;
+  }
+
+  try {
+    BRepTools::Clean(shape);
+    BRepMesh_IncrementalMesh(shape, 0.05, false, 0.5, true);
+    if (shape_has_unmeshed_faces(shape)) {
+      BRepTools::Clean(shape);
+      BRepMesh_IncrementalMesh(shape, 0.005, false, 0.05235987755982989, true);
+    }
+  }
+  catch (Standard_Failure const &) {
+    return false;
+  }
+
+  return !shape_has_unmeshed_faces(shape);
 }
 
 static void prepare_edge_for_blend(const TopoDS_Edge &edge)
@@ -2018,7 +2305,7 @@ static TopoDS_Shape apply_single_edge_blend(const TopoDS_Shape &shape,
   if (radius <= 0.0) {
     return shape;
   }
-  const bool strict_validate_shape = validate_shape && radius >= hard_limit * 0.85;
+  const bool validate_blended_shape = validate_shape;
   const ChFi3d_FilletShape fillet_shape = fast_preview ? ChFi3d_Polynomial : ChFi3d_Rational;
 
   Vector<TopoDS_Edge> connected_edges;
@@ -2029,22 +2316,19 @@ static TopoDS_Shape apply_single_edge_blend(const TopoDS_Shape &shape,
                               bevel_type,
                               edge,
                               source_index,
-                              strict_validate_shape,
+                              validate_blended_shape,
                               false,
                               fillet_shape,
                               r_shape))
     {
       return true;
     }
-    if (fast_preview) {
-      return false;
-    }
     if (try_single_edge_blend(shape,
                               test_radius,
                               bevel_type,
                               edge,
                               source_index,
-                              strict_validate_shape,
+                              validate_blended_shape,
                               true,
                               fillet_shape,
                               r_shape))
@@ -2060,7 +2344,7 @@ static TopoDS_Shape apply_single_edge_blend(const TopoDS_Shape &shape,
                               test_radius,
                               bevel_type,
                               connected_edges.as_span(),
-                              strict_validate_shape,
+                              validate_blended_shape,
                               true,
                               fillet_shape,
                               r_shape);
@@ -2071,7 +2355,51 @@ static TopoDS_Shape apply_single_edge_blend(const TopoDS_Shape &shape,
     r_applied = true;
     return blended_shape;
   }
-  return shape;
+
+  const double min_radius = std::max(std::min(radius, hard_limit) * 1.0e-4, 1.0e-6);
+  const int bracket_steps = fast_preview ? 6 : 8;
+  const int refine_steps = fast_preview ? 7 : 10;
+  double low_radius = 0.0;
+  double high_radius = radius;
+  TopoDS_Shape best_shape;
+  bool found_valid_radius = false;
+
+  for (int i = 0; i < bracket_steps; i++) {
+    const double test_radius = high_radius * 0.5;
+    if (test_radius <= min_radius) {
+      break;
+    }
+    TopoDS_Shape test_shape;
+    if (try_blend_radius(test_radius, test_shape)) {
+      low_radius = test_radius;
+      best_shape = test_shape;
+      found_valid_radius = true;
+      break;
+    }
+    high_radius = test_radius;
+  }
+
+  if (!found_valid_radius) {
+    return shape;
+  }
+
+  for (int i = 0; i < refine_steps; i++) {
+    if (high_radius - low_radius <= min_radius) {
+      break;
+    }
+    const double test_radius = (low_radius + high_radius) * 0.5;
+    TopoDS_Shape test_shape;
+    if (try_blend_radius(test_radius, test_shape)) {
+      low_radius = test_radius;
+      best_shape = test_shape;
+    }
+    else {
+      high_radius = test_radius;
+    }
+  }
+
+  r_applied = true;
+  return best_shape;
 }
 
 template<typename EdgeRefinder>
@@ -2130,11 +2458,6 @@ static TopoDS_Shape apply_edge_blend_steps(const TopoDS_Shape &shape,
       all_current_edge_references_ready = true;
     }
   };
-  auto current_edge_length = [&](const int edge_index) {
-    return edge_index >= 0 && edge_index < current_edges.size() ?
-               double(current_edge_reference(edge_index).length) :
-               0.0;
-  };
   auto current_edge_for_step = [&](const NurbBodyBlendStep &step) {
     if (current_edges_match_input && step.edge_index >= 0 && step.edge_index < current_edges.size())
     {
@@ -2176,8 +2499,7 @@ static TopoDS_Shape apply_edge_blend_steps(const TopoDS_Shape &shape,
       if (candidate_edge.IsNull() || edge_already_listed(batch_edges.as_span(), candidate_edge)) {
         break;
       }
-      const double hard_limit = safe_blend_radius_limit(radius_limit,
-                                                        current_edge_length(candidate_current_edge));
+      const double hard_limit = safe_blend_radius_limit(radius_limit);
       if (batch_edges.is_empty()) {
         single_hard_limit = hard_limit;
       }
@@ -2239,8 +2561,7 @@ static TopoDS_Shape apply_edge_blend_steps(const TopoDS_Shape &shape,
         validate_shape,
         fast_preview,
         single_hard_limit > 0.0 ? single_hard_limit :
-                                  safe_blend_radius_limit(radius_limit,
-                                                          current_edge_length(current_edge)),
+                                  safe_blend_radius_limit(radius_limit),
         applied);
     if (applied) {
       if (step_i + 1 < steps.size()) {
@@ -2352,8 +2673,7 @@ static TopoDS_Shape apply_stable_surface_edge_blend_steps(
       if (candidate_edge.IsNull() || edge_already_listed(batch_edges.as_span(), candidate_edge)) {
         break;
       }
-      const double hard_limit = safe_blend_radius_limit(radius_limit,
-                                                        double(candidate_entry.length));
+      const double hard_limit = safe_blend_radius_limit(radius_limit);
       if (batch_edges.is_empty()) {
         single_hard_limit = hard_limit;
       }
@@ -2411,8 +2731,7 @@ static TopoDS_Shape apply_stable_surface_edge_blend_steps(
                                      fast_preview,
                                      single_hard_limit > 0.0 ?
                                          single_hard_limit :
-                                         safe_blend_radius_limit(
-                                             radius_limit, double(current_edges[current_edge].length)),
+                                         safe_blend_radius_limit(radius_limit),
                                      applied);
     if (applied) {
       if (r_applied_edges != nullptr) {
@@ -2471,16 +2790,21 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
 {
   const float operand_radius = nurb_body_boolean_op_scaled_radius(op);
   const float radial_scale = nurb_body_boolean_op_radial_scale(op);
+  const float operand_blend_radius_limit = nurb_body_boolean_op_scaled_blend_radius_limit(op);
 
   float operand_bevel_radii[64];
   float operand_surface_bevel_radii[64];
+  float operand_dimensions[3];
   scaled_edge_radii(op.operand_bevel_radii, radial_scale, operand_bevel_radii);
   scaled_edge_radii(op.operand_surface_bevel_radii, radial_scale, operand_surface_bevel_radii);
+  scaled_primitive_dimensions(op, operand_dimensions);
 
-  TopoDS_Shape shape = make_centered_cylinder(gp_Dir(1.0, 0.0, 0.0),
-                                              operand_radius,
-                                              nurb_body_boolean_op_scaled_depth(op),
-                                              float3(0.0f));
+  TopoDS_Shape shape = make_primitive_shape(op.primitive,
+                                            operand_radius,
+                                            nurb_body_boolean_op_scaled_depth(op),
+                                            op.operand_minor_radius * radial_scale,
+                                            operand_dimensions,
+                                            float3(0.0f));
 
   const float operand_bevel_radius = op.operand_bevel_radius * radial_scale;
   if (blend_settings_may_change_shape(operand_bevel_radius,
@@ -2492,7 +2816,7 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
   {
     const Vector<TopoDS_Edge> body_edges = find_selectable_surface_edges(shape);
     shape = apply_edge_blend(shape,
-                             operand_radius,
+                             operand_blend_radius_limit,
                              operand_bevel_radius,
                              operand_bevel_radii,
                              op.operand_bevel_type,
@@ -2532,7 +2856,12 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
         const Vector<TopoDS_Edge> unscaled_body_edges = find_selectable_surface_edges(
             unscaled_shape);
         unscaled_shape = apply_edge_blend(unscaled_shape,
-                                          std::max(op.operand_radius, 0.001f),
+                                          nurb_body_primitive_blend_radius_limit(
+                                              op.primitive,
+                                              op.operand_radius,
+                                              op.operand_depth,
+                                              op.operand_minor_radius,
+                                              op.operand_dimensions),
                                           op.operand_bevel_radius,
                                           op.operand_bevel_radii,
                                           op.operand_bevel_type,
@@ -2569,7 +2898,7 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
     }
 
     shape = apply_stable_surface_edge_blend(shape,
-                                            operand_radius,
+                                            operand_blend_radius_limit,
                                             operand_surface_bevel_radius,
                                             operand_surface_bevel_radii,
                                             op.operand_surface_bevel_type,
@@ -2612,31 +2941,53 @@ static void nurb_body_stage_hash_body_base(uint64_t &hash,
   nurb_body_stage_hash_value(hash, body.primitive);
   nurb_body_stage_hash_value(hash, body.radius);
   nurb_body_stage_hash_value(hash, body.depth);
+  nurb_body_stage_hash_value(hash, body.minor_radius);
+  nurb_body_stage_hash_bytes(hash, body.dimensions, sizeof(body.dimensions));
   nurb_body_stage_hash_value(hash, body.flag & NURB_BODY_FAST_BEVEL_PREVIEW);
-  nurb_body_stage_hash_value(hash, body.bevel_edge);
   nurb_body_stage_hash_value(hash, body.bevel_edges);
+  if (body.bevel_edges == 0) {
+    nurb_body_stage_hash_value(hash, body.bevel_edge);
+  }
   nurb_body_stage_hash_value(hash, body.chamfer_edges);
   nurb_body_stage_hash_value(hash, body.bevel_type);
   nurb_body_stage_hash_value(hash, body.bevel_radius);
   nurb_body_stage_hash_bytes(hash, body.bevel_radii, sizeof(body.bevel_radii));
   nurb_body_stage_hash_bytes(hash, body.bevel_order, sizeof(body.bevel_order));
-  nurb_body_stage_hash_value(hash, body.selected_edges);
-  nurb_body_stage_hash_value(hash, body.selected_edge);
+  if (blend_selection_affects_shape(body.bevel_radius,
+                                    body.bevel_radii,
+                                    body.bevel_edges,
+                                    body.selected_edges,
+                                    body.bevel_edge,
+                                    body.selected_edge))
+  {
+    nurb_body_stage_hash_value(hash, body.selected_edges);
+    nurb_body_stage_hash_value(hash, body.selected_edge);
+  }
 
   if (!include_surface_blend) {
     return;
   }
 
-  nurb_body_stage_hash_value(hash, body.surface_bevel_edge);
   nurb_body_stage_hash_value(hash, body.surface_bevel_edges);
+  if (body.surface_bevel_edges == 0) {
+    nurb_body_stage_hash_value(hash, body.surface_bevel_edge);
+  }
   nurb_body_stage_hash_value(hash, body.surface_chamfer_edges);
   nurb_body_stage_hash_value(hash, body.surface_bevel_type);
   nurb_body_stage_hash_value(hash, body.surface_bevel_radius);
   nurb_body_stage_hash_bytes(hash, body.surface_bevel_radii, sizeof(body.surface_bevel_radii));
   nurb_body_stage_hash_bytes(hash, body.surface_bevel_order, sizeof(body.surface_bevel_order));
   nurb_body_stage_hash_bytes(hash, body.surface_edge_keys, sizeof(body.surface_edge_keys));
-  nurb_body_stage_hash_value(hash, body.surface_selected_edges);
-  nurb_body_stage_hash_value(hash, body.surface_selected_edge);
+  if (blend_selection_affects_shape(body.surface_bevel_radius,
+                                    body.surface_bevel_radii,
+                                    body.surface_bevel_edges,
+                                    body.surface_selected_edges,
+                                    body.surface_bevel_edge,
+                                    body.surface_selected_edge))
+  {
+    nurb_body_stage_hash_value(hash, body.surface_selected_edges);
+    nurb_body_stage_hash_value(hash, body.surface_selected_edge);
+  }
 }
 
 static void nurb_body_stage_hash_boolean_tool(uint64_t &hash, const NurbBodyBooleanOp &op)
@@ -2645,20 +2996,22 @@ static void nurb_body_stage_hash_boolean_tool(uint64_t &hash, const NurbBodyBool
   nurb_body_stage_hash_value(hash, op.primitive);
   nurb_body_stage_hash_value(hash, op.operand_radius);
   nurb_body_stage_hash_value(hash, op.operand_depth);
+  nurb_body_stage_hash_value(hash, op.operand_minor_radius);
+  nurb_body_stage_hash_bytes(hash, op.operand_dimensions, sizeof(op.operand_dimensions));
   nurb_body_stage_hash_bytes(hash, op.operand_to_target, sizeof(op.operand_to_target));
   nurb_body_stage_hash_bytes(hash, op.operand_scale, sizeof(op.operand_scale));
 
-  nurb_body_stage_hash_value(hash, op.operand_selected_edges);
   nurb_body_stage_hash_value(hash, op.operand_bevel_edges);
   nurb_body_stage_hash_value(hash, op.operand_chamfer_edges);
-  nurb_body_stage_hash_value(hash, op.operand_surface_selected_edges);
   nurb_body_stage_hash_value(hash, op.operand_surface_bevel_edges);
   nurb_body_stage_hash_value(hash, op.operand_surface_chamfer_edges);
-  nurb_body_stage_hash_value(hash, op.operand_selected_edge);
-  nurb_body_stage_hash_value(hash, op.operand_bevel_edge);
+  if (op.operand_bevel_edges == 0) {
+    nurb_body_stage_hash_value(hash, op.operand_bevel_edge);
+  }
   nurb_body_stage_hash_value(hash, op.operand_bevel_type);
-  nurb_body_stage_hash_value(hash, op.operand_surface_selected_edge);
-  nurb_body_stage_hash_value(hash, op.operand_surface_bevel_edge);
+  if (op.operand_surface_bevel_edges == 0) {
+    nurb_body_stage_hash_value(hash, op.operand_surface_bevel_edge);
+  }
   nurb_body_stage_hash_value(hash, op.operand_surface_bevel_type);
   nurb_body_stage_hash_value(hash, op.operand_bevel_radius);
   nurb_body_stage_hash_value(hash, op.operand_surface_bevel_radius);
@@ -2670,20 +3023,51 @@ static void nurb_body_stage_hash_boolean_tool(uint64_t &hash, const NurbBodyBool
       hash, op.operand_surface_bevel_order, sizeof(op.operand_surface_bevel_order));
   nurb_body_stage_hash_bytes(
       hash, op.operand_surface_edge_keys, sizeof(op.operand_surface_edge_keys));
+
+  if (blend_selection_affects_shape(op.operand_bevel_radius,
+                                    op.operand_bevel_radii,
+                                    op.operand_bevel_edges,
+                                    op.operand_selected_edges,
+                                    op.operand_bevel_edge,
+                                    op.operand_selected_edge))
+  {
+    nurb_body_stage_hash_value(hash, op.operand_selected_edges);
+    nurb_body_stage_hash_value(hash, op.operand_selected_edge);
+  }
+  if (blend_selection_affects_shape(op.operand_surface_bevel_radius,
+                                    op.operand_surface_bevel_radii,
+                                    op.operand_surface_bevel_edges,
+                                    op.operand_surface_selected_edges,
+                                    op.operand_surface_bevel_edge,
+                                    op.operand_surface_selected_edge))
+  {
+    nurb_body_stage_hash_value(hash, op.operand_surface_selected_edges);
+    nurb_body_stage_hash_value(hash, op.operand_surface_selected_edge);
+  }
 }
 
 static void nurb_body_stage_hash_boolean_output_blend(uint64_t &hash,
                                                       const NurbBodyBooleanOp &op)
 {
-  nurb_body_stage_hash_value(hash, op.selected_edges);
   nurb_body_stage_hash_value(hash, op.bevel_edges);
   nurb_body_stage_hash_value(hash, op.chamfer_edges);
-  nurb_body_stage_hash_value(hash, op.selected_edge);
-  nurb_body_stage_hash_value(hash, op.bevel_edge);
+  if (op.bevel_edges == 0) {
+    nurb_body_stage_hash_value(hash, op.bevel_edge);
+  }
   nurb_body_stage_hash_value(hash, op.bevel_type);
   nurb_body_stage_hash_value(hash, op.bevel_radius);
   nurb_body_stage_hash_bytes(hash, op.bevel_radii, sizeof(op.bevel_radii));
   nurb_body_stage_hash_bytes(hash, op.bevel_order, sizeof(op.bevel_order));
+  if (blend_selection_affects_shape(op.bevel_radius,
+                                    op.bevel_radii,
+                                    op.bevel_edges,
+                                    op.selected_edges,
+                                    op.bevel_edge,
+                                    op.selected_edge))
+  {
+    nurb_body_stage_hash_value(hash, op.selected_edges);
+    nurb_body_stage_hash_value(hash, op.selected_edge);
+  }
 }
 
 static bool nurb_body_stage_hash_edge_blend_without_active(uint64_t &hash,
@@ -2714,7 +3098,6 @@ static bool nurb_body_stage_hash_edge_blend_without_active(uint64_t &hash,
     return false;
   }
 
-  nurb_body_stage_hash_value(hash, active_edge);
   const Vector<NurbBodyBlendStep> stable_steps = stable_blend_steps_without_active(
       steps.as_span(), active_pos);
   nurb_body_stage_hash_value(hash, stable_steps.size());
@@ -2727,14 +3110,17 @@ static bool nurb_body_stage_hash_edge_blend_without_active(uint64_t &hash,
   return true;
 }
 
-static uint64_t nurb_body_body_edge_blend_preview_base_cache_key(const NurbBody &body)
+static uint64_t nurb_body_body_edge_blend_base_cache_key(const NurbBody &body,
+                                                         const bool fast_preview)
 {
   uint64_t hash = 1469598103934665603ull;
-  constexpr uint64_t domain = 0x72ad211a5d037a91ull;
+  const uint64_t domain = fast_preview ? 0x72ad211a5d037a91ull : 0x366a820fe9e37f4dull;
   nurb_body_stage_hash_value(hash, domain);
   nurb_body_stage_hash_value(hash, body.primitive);
   nurb_body_stage_hash_value(hash, body.radius);
   nurb_body_stage_hash_value(hash, body.depth);
+  nurb_body_stage_hash_value(hash, body.minor_radius);
+  nurb_body_stage_hash_bytes(hash, body.dimensions, sizeof(body.dimensions));
   if (!nurb_body_stage_hash_edge_blend_without_active(hash,
                                                       body.bevel_radius,
                                                       body.bevel_radii,
@@ -2755,15 +3141,16 @@ static uint64_t nurb_body_body_edge_blend_preview_base_cache_key(const NurbBody 
 static uint64_t nurb_body_pre_boolean_output_blend_cache_key(
     const NurbBody &body, const NurbBodyBooleanOp *target_op);
 
-static uint64_t nurb_body_boolean_output_blend_preview_base_cache_key(
-    const NurbBody &body, const NurbBodyBooleanOp &op)
+static uint64_t nurb_body_boolean_output_blend_base_cache_key(const NurbBody &body,
+                                                              const NurbBodyBooleanOp &op,
+                                                              const bool fast_preview)
 {
   const uint64_t pre_output_key = nurb_body_pre_boolean_output_blend_cache_key(body, &op);
   if (pre_output_key == 0) {
     return 0;
   }
   uint64_t hash = 1469598103934665603ull;
-  constexpr uint64_t domain = 0x43b4f98e12b7df23ull;
+  const uint64_t domain = fast_preview ? 0x43b4f98e12b7df23ull : 0x6ef38dd64bc93423ull;
   nurb_body_stage_hash_value(hash, domain);
   nurb_body_stage_hash_value(hash, pre_output_key);
   if (!nurb_body_stage_hash_edge_blend_without_active(hash,
@@ -2827,14 +3214,15 @@ static uint64_t nurb_body_pre_surface_blend_cache_key(const NurbBody &body)
   return hash;
 }
 
-static uint64_t nurb_body_surface_edge_blend_preview_base_cache_key(const NurbBody &body)
+static uint64_t nurb_body_surface_edge_blend_base_cache_key(const NurbBody &body,
+                                                            const bool fast_preview)
 {
   const uint64_t pre_surface_key = nurb_body_pre_surface_blend_cache_key(body);
   if (pre_surface_key == 0) {
     return 0;
   }
   uint64_t hash = 1469598103934665603ull;
-  constexpr uint64_t domain = 0xbd76169c080d2b51ull;
+  const uint64_t domain = fast_preview ? 0xbd76169c080d2b51ull : 0xaf38bc449d2d8d17ull;
   nurb_body_stage_hash_value(hash, domain);
   nurb_body_stage_hash_value(hash, pre_surface_key);
   if (!nurb_body_stage_hash_edge_blend_without_active(hash,
@@ -2910,7 +3298,9 @@ static TopoDS_Shape apply_edge_blend_local_preview(const TopoDS_Shape &shape,
                                                        edges.size());
   const int active_edge = active_blend_edge_index(bevel_edge, selected_edge);
   const int active_pos = active_blend_step_position(steps.as_span(), active_edge);
-  if (!fast_preview || object == nullptr || preview_base_key == 0 || active_pos == -1) {
+  const bool active_is_last_step = active_pos != -1 && active_pos + 1 == int(steps.size());
+  const bool can_cache_stable_base = fast_preview || active_is_last_step;
+  if (active_pos == -1 || !can_cache_stable_base || object == nullptr || preview_base_key == 0) {
     return apply_edge_blend_steps(shape,
                                   radius_limit,
                                   steps.as_span(),
@@ -2949,7 +3339,7 @@ static TopoDS_Shape apply_edge_blend_local_preview(const TopoDS_Shape &shape,
                                              edges,
                                              true,
                                              validate_shape,
-                                             false,
+                                             true,
                                              refind_edges);
       }
       current_edges = refind_edges(active_base);
@@ -3004,7 +3394,9 @@ static TopoDS_Shape apply_stable_surface_edge_blend_local_preview(
                                                        64);
   const int active_edge = active_blend_edge_index(bevel_edge, selected_edge);
   const int active_pos = active_blend_step_position(steps.as_span(), active_edge);
-  if (!fast_preview || object == nullptr || preview_base_key == 0 || active_pos == -1) {
+  const bool active_is_last_step = active_pos != -1 && active_pos + 1 == int(steps.size());
+  const bool can_cache_stable_base = fast_preview || active_is_last_step;
+  if (active_pos == -1 || !can_cache_stable_base || object == nullptr || preview_base_key == 0) {
     return apply_stable_surface_edge_blend_steps(shape,
                                                  radius_limit,
                                                  steps.as_span(),
@@ -3046,7 +3438,7 @@ static TopoDS_Shape apply_stable_surface_edge_blend_local_preview(
                                                             edge_keys,
                                                             samples_per_edge,
                                                             validate_shape,
-                                                            false,
+                                                            true,
                                                             nullptr,
                                                             nullptr);
       }
@@ -3087,13 +3479,12 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
                                       body.selected_edge))
   {
     const Vector<TopoDS_Edge> body_edges = find_selectable_surface_edges(result);
-    const uint64_t preview_base_key = fast_preview ?
-                                          nurb_body_body_edge_blend_preview_base_cache_key(body) :
-                                          0;
+    const uint64_t preview_base_key = nurb_body_body_edge_blend_base_cache_key(body,
+                                                                               fast_preview);
     result = apply_edge_blend_local_preview(result,
                                             object,
                                             preview_base_key,
-                                            body.radius,
+                                            nurb_body_blend_radius_limit(body),
                                             body.bevel_radius,
                                             body.bevel_radii,
                                             body.bevel_type,
@@ -3120,6 +3511,13 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
       if (op->operand_radius <= 0.0f || op->operand_depth <= 0.0f) {
         continue;
       }
+      const TopoDS_Shape pre_boolean_shape = result;
+      const bool output_blend_requested = blend_settings_may_change_shape(op->bevel_radius,
+                                                                          op->bevel_radii,
+                                                                          op->bevel_edges,
+                                                                          op->selected_edges,
+                                                                          op->bevel_edge,
+                                                                          op->selected_edge);
 
       const uint64_t pre_output_blend_key = nurb_body_pre_boolean_output_blend_cache_key(body,
                                                                                         op);
@@ -3133,21 +3531,20 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
         result = apply_boolean_operation(result, tool, op->operation);
         nurb_body_stage_shape_cache_store(object, pre_output_blend_key, result);
       }
-      if (blend_settings_may_change_shape(op->bevel_radius,
-                                          op->bevel_radii,
-                                          op->bevel_edges,
-                                          op->selected_edges,
-                                          op->bevel_edge,
-                                          op->selected_edge))
-      {
-        const float operand_radius = nurb_body_boolean_op_scaled_radius(*op);
-        const Vector<TopoDS_Edge> cut_edges = find_cut_edges(result, body.radius, operand_radius);
-        const uint64_t preview_base_key =
-            fast_preview ? nurb_body_boolean_output_blend_preview_base_cache_key(body, *op) : 0;
+      if (output_blend_requested) {
+        const Vector<uint64_t> pre_boolean_edge_keys = selectable_edge_geometry_keys(
+            pre_boolean_shape);
+        const float output_blend_radius_limit = std::max(
+            nurb_body_blend_radius_limit(body),
+            nurb_body_boolean_op_scaled_blend_radius_limit(*op));
+        const Vector<TopoDS_Edge> cut_edges = find_boolean_output_edges(
+            result, pre_boolean_edge_keys.as_span());
+        const uint64_t preview_base_key = nurb_body_boolean_output_blend_base_cache_key(
+            body, *op, fast_preview);
         result = apply_edge_blend_local_preview(result,
                                                 object,
                                                 preview_base_key,
-                                                operand_radius,
+                                                output_blend_radius_limit,
                                                 op->bevel_radius,
                                                 op->bevel_radii,
                                                 op->bevel_type,
@@ -3161,8 +3558,8 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
                                                 true,
                                                 fast_preview,
                                                 [&](const TopoDS_Shape &shape) {
-                                                  return find_cut_edges(
-                                                      shape, body.radius, operand_radius);
+                                                  return find_boolean_output_edges(
+                                                      shape, pre_boolean_edge_keys.as_span());
                                                 });
       }
     }
@@ -3185,12 +3582,12 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
         nurb_body_stage_shape_cache_store(object, pre_surface_key, result);
       }
     }
-    const uint64_t preview_base_key =
-        fast_preview ? nurb_body_surface_edge_blend_preview_base_cache_key(body) : 0;
+    const uint64_t preview_base_key = nurb_body_surface_edge_blend_base_cache_key(body,
+                                                                                  fast_preview);
     result = apply_stable_surface_edge_blend_local_preview(result,
                                                            object,
                                                            preview_base_key,
-                                                           std::max(body.radius, 0.001f),
+                                                           nurb_body_blend_radius_limit(body),
                                                            body.surface_bevel_radius,
                                                            body.surface_bevel_radii,
                                                            body.surface_bevel_type,
@@ -3245,12 +3642,12 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                               body.bevel_radius,
                               body.bevel_radii,
                               selectable_refs);
-  const uint64_t body_preview_base_key =
-      fast_preview ? nurb_body_body_edge_blend_preview_base_cache_key(body) : 0;
+  const uint64_t body_preview_base_key = nurb_body_body_edge_blend_base_cache_key(body,
+                                                                                  fast_preview);
   result = apply_edge_blend_local_preview(result,
                                           object,
                                           body_preview_base_key,
-                                          body.radius,
+                                          nurb_body_blend_radius_limit(body),
                                           body.bevel_radius,
                                           body.bevel_radii,
                                           body.bevel_type,
@@ -3274,6 +3671,11 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
     if (op->operand_radius <= 0.0f || op->operand_depth <= 0.0f) {
       continue;
     }
+    const TopoDS_Shape pre_boolean_shape = result;
+    const Vector<uint64_t> pre_boolean_edge_keys = selectable_edge_geometry_keys(
+        pre_boolean_shape);
+    const float output_blend_radius_limit = std::max(
+        nurb_body_blend_radius_limit(body), nurb_body_boolean_op_scaled_blend_radius_limit(*op));
 
     const uint64_t pre_output_blend_key = object != nullptr ?
                                               nurb_body_pre_boolean_output_blend_cache_key(body,
@@ -3289,10 +3691,10 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
       nurb_body_stage_shape_cache_store(object, pre_output_blend_key, result);
     }
 
-    const float operand_radius = nurb_body_boolean_op_scaled_radius(*op);
     TopTools_IndexedDataMapOfShapeListOfShape op_edge_faces;
     TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, op_edge_faces);
-    const Vector<TopoDS_Edge> cut_edges = find_cut_edges(op_edge_faces, body.radius, operand_radius);
+    const Vector<TopoDS_Edge> cut_edges = find_boolean_output_edges(
+        op_edge_faces, pre_boolean_edge_keys.as_span());
     const uint64_t op_blended_edges = op->bevel_edges != 0 ?
                                           op->bevel_edges :
                                           nurb_body_edge_mask_for_index(op->bevel_edge);
@@ -3308,12 +3710,13 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                                 op->bevel_radii,
                                 selectable_refs);
 
-    const uint64_t preview_base_key =
-        fast_preview ? nurb_body_boolean_output_blend_preview_base_cache_key(body, *op) : 0;
+    const uint64_t preview_base_key = nurb_body_boolean_output_blend_base_cache_key(body,
+                                                                                   *op,
+                                                                                   fast_preview);
     result = apply_edge_blend_local_preview(result,
                                             object,
                                             preview_base_key,
-                                            operand_radius,
+                                            output_blend_radius_limit,
                                             op->bevel_radius,
                                             op->bevel_radii,
                                             op->bevel_type,
@@ -3327,8 +3730,8 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                                             true,
                                             fast_preview,
                                             [&](const TopoDS_Shape &shape) {
-                                              return find_cut_edges(
-                                                  shape, body.radius, operand_radius);
+                                              return find_boolean_output_edges(
+                                                  shape, pre_boolean_edge_keys.as_span());
                                             });
   }
 
@@ -3360,12 +3763,12 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
     TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, surface_edge_faces);
     const Vector<TopoDS_Edge> surface_edges = find_selectable_surface_edges_indexed(
         surface_edge_faces, samples_per_edge, body);
-    const uint64_t preview_base_key =
-        fast_preview ? nurb_body_surface_edge_blend_preview_base_cache_key(body) : 0;
+    const uint64_t preview_base_key = nurb_body_surface_edge_blend_base_cache_key(body,
+                                                                                  fast_preview);
     result = apply_stable_surface_edge_blend_local_preview(result,
                                                            object,
                                                            preview_base_key,
-                                                           std::max(body.radius, 0.001f),
+                                                           nurb_body_blend_radius_limit(body),
                                                            body.surface_bevel_radius,
                                                            body.surface_bevel_radii,
                                                            body.surface_bevel_type,
@@ -3931,16 +4334,22 @@ static uint64_t nurb_body_geometry_cache_key(const NurbBody &body,
   nurb_body_hash_value(hash, body.primitive);
   nurb_body_hash_value(hash, body.radius);
   nurb_body_hash_value(hash, body.depth);
+  nurb_body_hash_value(hash, body.minor_radius);
+  nurb_body_hash_bytes(hash, body.dimensions, sizeof(body.dimensions));
   nurb_body_hash_value(hash, body.flag & NURB_BODY_FAST_BEVEL_PREVIEW);
   if (include_viewport_mesh_settings) {
     nurb_body_hash_value(hash, body.tessellation_deflection);
     nurb_body_hash_value(hash, body.tessellation_angle);
   }
-  nurb_body_hash_value(hash, body.bevel_edge);
   nurb_body_hash_value(hash, body.bevel_edges);
+  if (body.bevel_edges == 0) {
+    nurb_body_hash_value(hash, body.bevel_edge);
+  }
   nurb_body_hash_value(hash, body.chamfer_edges);
-  nurb_body_hash_value(hash, body.surface_bevel_edge);
   nurb_body_hash_value(hash, body.surface_bevel_edges);
+  if (body.surface_bevel_edges == 0) {
+    nurb_body_hash_value(hash, body.surface_bevel_edge);
+  }
   nurb_body_hash_value(hash, body.surface_chamfer_edges);
   nurb_body_hash_value(hash, body.bevel_type);
   nurb_body_hash_value(hash, body.surface_bevel_type);
@@ -3951,12 +4360,22 @@ static uint64_t nurb_body_geometry_cache_key(const NurbBody &body,
   nurb_body_hash_bytes(hash, body.bevel_order, sizeof(body.bevel_order));
   nurb_body_hash_bytes(hash, body.surface_bevel_order, sizeof(body.surface_bevel_order));
   nurb_body_hash_bytes(hash, body.surface_edge_keys, sizeof(body.surface_edge_keys));
-  if (body.bevel_radius > 0.0f && body.bevel_edges == 0 && body.bevel_edge < 0) {
+  if (blend_selection_affects_shape(body.bevel_radius,
+                                    body.bevel_radii,
+                                    body.bevel_edges,
+                                    body.selected_edges,
+                                    body.bevel_edge,
+                                    body.selected_edge))
+  {
     nurb_body_hash_value(hash, body.selected_edges);
     nurb_body_hash_value(hash, body.selected_edge);
   }
-  if (body.surface_bevel_radius > 0.0f && body.surface_bevel_edges == 0 &&
-      body.surface_bevel_edge < 0)
+  if (blend_selection_affects_shape(body.surface_bevel_radius,
+                                    body.surface_bevel_radii,
+                                    body.surface_bevel_edges,
+                                    body.surface_selected_edges,
+                                    body.surface_bevel_edge,
+                                    body.surface_selected_edge))
   {
     nurb_body_hash_value(hash, body.surface_selected_edges);
     nurb_body_hash_value(hash, body.surface_selected_edge);
@@ -3970,32 +4389,42 @@ static uint64_t nurb_body_geometry_cache_key(const NurbBody &body,
     op_count++;
     nurb_body_hash_value(hash, op->operation);
     nurb_body_hash_value(hash, op->primitive);
-    nurb_body_hash_value(hash, op->bevel_edge);
     nurb_body_hash_value(hash, op->bevel_edges);
+    if (op->bevel_edges == 0) {
+      nurb_body_hash_value(hash, op->bevel_edge);
+    }
     nurb_body_hash_value(hash, op->chamfer_edges);
     nurb_body_hash_value(hash, op->bevel_type);
     nurb_body_hash_value(hash, op->bevel_radius);
     nurb_body_hash_bytes(hash, op->bevel_radii, sizeof(op->bevel_radii));
     nurb_body_hash_bytes(hash, op->bevel_order, sizeof(op->bevel_order));
-    if (op->bevel_radius > 0.0f && op->bevel_edges == 0 && op->bevel_edge < 0) {
+    if (blend_selection_affects_shape(op->bevel_radius,
+                                      op->bevel_radii,
+                                      op->bevel_edges,
+                                      op->selected_edges,
+                                      op->bevel_edge,
+                                      op->selected_edge))
+    {
       nurb_body_hash_value(hash, op->selected_edges);
       nurb_body_hash_value(hash, op->selected_edge);
     }
     nurb_body_hash_value(hash, op->operand_radius);
     nurb_body_hash_value(hash, op->operand_depth);
+    nurb_body_hash_value(hash, op->operand_minor_radius);
+    nurb_body_hash_bytes(hash, op->operand_dimensions, sizeof(op->operand_dimensions));
     nurb_body_hash_bytes(hash, op->operand_to_target, sizeof(op->operand_to_target));
     nurb_body_hash_bytes(hash, op->operand_scale, sizeof(op->operand_scale));
-    nurb_body_hash_value(hash, op->operand_selected_edges);
     nurb_body_hash_value(hash, op->operand_bevel_edges);
     nurb_body_hash_value(hash, op->operand_chamfer_edges);
-    nurb_body_hash_value(hash, op->operand_surface_selected_edges);
     nurb_body_hash_value(hash, op->operand_surface_bevel_edges);
     nurb_body_hash_value(hash, op->operand_surface_chamfer_edges);
-    nurb_body_hash_value(hash, op->operand_selected_edge);
-    nurb_body_hash_value(hash, op->operand_bevel_edge);
+    if (op->operand_bevel_edges == 0) {
+      nurb_body_hash_value(hash, op->operand_bevel_edge);
+    }
     nurb_body_hash_value(hash, op->operand_bevel_type);
-    nurb_body_hash_value(hash, op->operand_surface_selected_edge);
-    nurb_body_hash_value(hash, op->operand_surface_bevel_edge);
+    if (op->operand_surface_bevel_edges == 0) {
+      nurb_body_hash_value(hash, op->operand_surface_bevel_edge);
+    }
     nurb_body_hash_value(hash, op->operand_surface_bevel_type);
     nurb_body_hash_value(hash, op->operand_bevel_radius);
     nurb_body_hash_value(hash, op->operand_surface_bevel_radius);
@@ -4010,6 +4439,26 @@ static uint64_t nurb_body_geometry_cache_key(const NurbBody &body,
     nurb_body_hash_bytes(hash,
                          op->operand_surface_edge_keys,
                          sizeof(op->operand_surface_edge_keys));
+    if (blend_selection_affects_shape(op->operand_bevel_radius,
+                                      op->operand_bevel_radii,
+                                      op->operand_bevel_edges,
+                                      op->operand_selected_edges,
+                                      op->operand_bevel_edge,
+                                      op->operand_selected_edge))
+    {
+      nurb_body_hash_value(hash, op->operand_selected_edges);
+      nurb_body_hash_value(hash, op->operand_selected_edge);
+    }
+    if (blend_selection_affects_shape(op->operand_surface_bevel_radius,
+                                      op->operand_surface_bevel_radii,
+                                      op->operand_surface_bevel_edges,
+                                      op->operand_surface_selected_edges,
+                                      op->operand_surface_bevel_edge,
+                                      op->operand_surface_selected_edge))
+    {
+      nurb_body_hash_value(hash, op->operand_surface_selected_edges);
+      nurb_body_hash_value(hash, op->operand_surface_selected_edge);
+    }
   }
   nurb_body_hash_value(hash, op_count);
   return hash;

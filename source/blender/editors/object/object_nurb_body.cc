@@ -49,6 +49,8 @@
 #include "ED_util.hh"
 #include "ED_view3d.hh"
 
+#include "UI_resources.hh"
+
 #include "object_intern.hh"
 
 namespace blender::ed::object {
@@ -111,11 +113,56 @@ static const EnumPropertyItem nurb_body_select_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem nurb_body_primitive_items[] = {
+    {NURB_BODY_PRIMITIVE_BOX, "BOX", ICON_NURB_BODY_BOX, "Box", "Add an OCCT box"},
+    {NURB_BODY_PRIMITIVE_SPHERE,
+     "SPHERE",
+     ICON_NURB_BODY_SPHERE,
+     "Sphere",
+     "Add an OCCT sphere"},
+    {NURB_BODY_PRIMITIVE_CYLINDER,
+     "CYLINDER",
+     ICON_NURB_BODY_CYLINDER,
+     "Cylinder",
+     "Add an OCCT cylinder"},
+    {NURB_BODY_PRIMITIVE_CONE, "CONE", ICON_NURB_BODY_CONE, "Cone", "Add an OCCT cone"},
+    {NURB_BODY_PRIMITIVE_TORUS,
+     "TORUS",
+     ICON_NURB_BODY_TORUS,
+     "Torus",
+     "Add an OCCT torus"},
+    {NURB_BODY_PRIMITIVE_WEDGE,
+     "WEDGE",
+     ICON_NURB_BODY_WEDGE,
+     "Wedge",
+     "Add an OCCT wedge"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static uint64_t nurb_body_edge_mask_for_index(int edge_index);
 static int nurb_body_first_selected_edge(uint64_t selected_edges);
 static void nurb_body_assign_edge_bevel_orders(uint64_t edges,
                                                int bevel_order[64],
                                                int &bevel_order_next);
+
+static const char *nurb_body_primitive_name(const int primitive)
+{
+  switch (primitive) {
+    case NURB_BODY_PRIMITIVE_BOX:
+      return "NURB Box";
+    case NURB_BODY_PRIMITIVE_SPHERE:
+      return "NURB Sphere";
+    case NURB_BODY_PRIMITIVE_CONE:
+      return "NURB Cone";
+    case NURB_BODY_PRIMITIVE_TORUS:
+      return "NURB Torus";
+    case NURB_BODY_PRIMITIVE_WEDGE:
+      return "NURB Wedge";
+    case NURB_BODY_PRIMITIVE_CYLINDER:
+    default:
+      return "NURB Cylinder";
+  }
+}
 
 static bool nurb_body_edge_radii_has_positive(const float edge_radii[64],
                                               const uint64_t edges)
@@ -268,6 +315,8 @@ static void nurb_body_boolean_op_snapshot_from_object(NurbBodyBooleanOp &op,
   op.primitive = operand_body->primitive;
   op.operand_radius = operand_body->radius;
   op.operand_depth = operand_body->depth;
+  op.operand_minor_radius = operand_body->minor_radius;
+  std::copy_n(operand_body->dimensions, 3, op.operand_dimensions);
   op.operand_selected_edges = operand_body->selected_edges;
   op.operand_bevel_edges = operand_body->bevel_edges;
   op.operand_chamfer_edges = operand_body->chamfer_edges;
@@ -305,9 +354,66 @@ static void nurb_body_boolean_op_snapshot_from_object(NurbBodyBooleanOp &op,
 
 static float nurb_body_boolean_op_scaled_radius(const NurbBodyBooleanOp &op)
 {
+  const float x_scale = op.operand_scale[0] == 0.0f ? 1.0f : std::abs(op.operand_scale[0]);
+  const float y_scale = op.operand_scale[1] == 0.0f ? 1.0f : std::abs(op.operand_scale[1]);
+  return std::max(op.operand_radius * (x_scale + y_scale) * 0.5f, 0.001f);
+}
+
+static float nurb_body_primitive_bevel_radius_limit(const int primitive,
+                                                    const float radius,
+                                                    const float depth,
+                                                    const float minor_radius,
+                                                    const float dimensions[3])
+{
+  const float safe_radius = std::max(radius, 0.001f);
+  const float safe_depth = std::max(depth, 0.001f);
+  const float safe_minor_radius = std::max(minor_radius, 0.001f);
+  const float safe_dimensions[3] = {
+      std::max(dimensions[0], 0.001f),
+      std::max(dimensions[1], 0.001f),
+      std::max(dimensions[2], 0.001f),
+  };
+
+  switch (primitive) {
+    case NURB_BODY_PRIMITIVE_BOX:
+    case NURB_BODY_PRIMITIVE_WEDGE: {
+      const float min_dimension = std::min(std::min(safe_dimensions[0], safe_dimensions[1]),
+                                           safe_dimensions[2]);
+      return std::max(min_dimension * 0.5f, 0.001f);
+    }
+    case NURB_BODY_PRIMITIVE_TORUS:
+      return safe_minor_radius;
+    case NURB_BODY_PRIMITIVE_CYLINDER:
+    case NURB_BODY_PRIMITIVE_CONE:
+      return std::max(std::min(safe_radius, safe_depth * 0.5f), 0.001f);
+    case NURB_BODY_PRIMITIVE_SPHERE:
+    default:
+      return safe_radius;
+  }
+}
+
+static float nurb_body_bevel_radius_limit(const NurbBody &body)
+{
+  return nurb_body_primitive_bevel_radius_limit(
+      body.primitive, body.radius, body.depth, body.minor_radius, body.dimensions);
+}
+
+static float nurb_body_boolean_op_scaled_bevel_radius_limit(const NurbBodyBooleanOp &op)
+{
+  const float x_scale = op.operand_scale[0] == 0.0f ? 1.0f : std::abs(op.operand_scale[0]);
   const float y_scale = op.operand_scale[1] == 0.0f ? 1.0f : std::abs(op.operand_scale[1]);
   const float z_scale = op.operand_scale[2] == 0.0f ? 1.0f : std::abs(op.operand_scale[2]);
-  return std::max(op.operand_radius * (y_scale + z_scale) * 0.5f, 0.001f);
+  const float radial_scale = (x_scale + y_scale) * 0.5f;
+  const float dimensions[3] = {
+      op.operand_dimensions[0] * x_scale,
+      op.operand_dimensions[1] * y_scale,
+      op.operand_dimensions[2] * z_scale,
+  };
+  return nurb_body_primitive_bevel_radius_limit(op.primitive,
+                                                nurb_body_boolean_op_scaled_radius(op),
+                                                op.operand_depth * z_scale,
+                                                op.operand_minor_radius * radial_scale,
+                                                dimensions);
 }
 
 static Object *object_nurb_body_add(bContext *C, wmOperator *op)
@@ -317,15 +423,22 @@ static Object *object_nurb_body_add(bContext *C, wmOperator *op)
 
   add_generic_get_opts(C, op, 'Z', loc, rot, nullptr, nullptr, &local_view_bits, nullptr);
 
-  Object *ob = add_type(C, OB_NURB_BODY, "NURB Cylinder", loc, rot, false, local_view_bits);
+  const int primitive = RNA_enum_get(op->ptr, "type");
+  Object *ob = add_type(
+      C, OB_NURB_BODY, nurb_body_primitive_name(primitive), loc, rot, false, local_view_bits);
   if (!ob || !ob->data) {
     return nullptr;
   }
 
   NurbBody *body = id_cast<NurbBody *>(ob->data);
-  body->primitive = NURB_BODY_PRIMITIVE_CYLINDER;
+  body->primitive = primitive;
   body->radius = RNA_float_get(op->ptr, "radius");
   body->depth = RNA_float_get(op->ptr, "depth");
+  body->minor_radius = RNA_float_get(op->ptr, "minor_radius");
+  const float size = RNA_float_get(op->ptr, "size");
+  body->dimensions[0] = size;
+  body->dimensions[1] = size;
+  body->dimensions[2] = size;
   body->flag = NURB_BODY_SMOOTH_SHADING | NURB_BODY_TRIANGULATE_MESH;
   body->boolean_operation = NURB_BODY_BOOLEAN_DIFFERENCE;
   body->select_mode = nurb_body_global_select_mode(C);
@@ -365,7 +478,7 @@ static wmOperatorStatus object_nurb_body_add_exec(bContext *C, wmOperator *op)
 void OBJECT_OT_nurb_body_add(wmOperatorType *ot)
 {
   ot->name = "Add NURB Body";
-  ot->description = "Add an OCCT-backed NURB cylinder body";
+  ot->description = "Add an OCCT-backed NURB body primitive";
   ot->idname = "OBJECT_OT_nurb_body_add";
   ot->exec = object_nurb_body_add_exec;
   ot->poll = ED_operator_objectmode;
@@ -373,8 +486,17 @@ void OBJECT_OT_nurb_body_add(wmOperatorType *ot)
 
   add_generic_props(ot, false);
 
+  RNA_def_enum(ot->srna,
+               "type",
+               nurb_body_primitive_items,
+               NURB_BODY_PRIMITIVE_CYLINDER,
+               "Type",
+               "OCCT primitive type");
+  RNA_def_float(ot->srna, "size", 2.0f, 0.001f, 100000.0f, "Size", "", 0.001f, 100.0f);
   RNA_def_float(ot->srna, "radius", 1.0f, 0.001f, 100000.0f, "Radius", "", 0.001f, 100.0f);
-  RNA_def_float(ot->srna, "depth", 4.0f, 0.001f, 100000.0f, "Depth", "", 0.001f, 100.0f);
+  RNA_def_float(ot->srna, "depth", 2.0f, 0.001f, 100000.0f, "Depth", "", 0.001f, 100.0f);
+  RNA_def_float(
+      ot->srna, "minor_radius", 0.25f, 0.001f, 100000.0f, "Minor Radius", "", 0.001f, 100.0f);
 }
 
 struct NurbBodyEdgeHit {
@@ -1716,34 +1838,6 @@ static NurbBodyEdgeHit nurb_body_selected_or_hovered_edge(bContext *C, NurbBody 
   return selected_edge;
 }
 
-static float nurb_body_polyline_length(const Span<float3> points)
-{
-  float length = 0.0f;
-  for (int i = 1; i < points.size(); i++) {
-    const float3 delta = points[i] - points[i - 1];
-    length += std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-  }
-  return length;
-}
-
-static bool nurb_body_edge_matches_polyline(const NurbBodyEdgeHit &edge,
-                                            const NurbBodyEdgePolyline &polyline)
-{
-  if (polyline.edge_index != edge.edge_index ||
-      (polyline.flag & NURB_BODY_EDGE_POLYLINE_SELECTABLE) == 0 || polyline.points.size() < 2)
-  {
-    return false;
-  }
-  if (edge.body_edge) {
-    return polyline.op == nullptr && (polyline.flag & NURB_BODY_EDGE_POLYLINE_BODY) != 0;
-  }
-  if (edge.surface_edge) {
-    return polyline.op == nullptr && (polyline.flag & NURB_BODY_EDGE_POLYLINE_FINAL) != 0 &&
-           (edge.edge_key == 0 || polyline.edge_key == edge.edge_key);
-  }
-  return polyline.op == edge.op;
-}
-
 static bool nurb_body_boolean_op_anchor_world(const Object &ob,
                                               const NurbBodyBooleanOp &op,
                                               const int edge_index,
@@ -1774,27 +1868,11 @@ static bool nurb_body_boolean_op_anchor_world(const Object &ob,
   return true;
 }
 
-static float nurb_body_modal_bevel_radius_limit(const Object &ob,
-                                                const NurbBodyEdgeHit &edge,
+static float nurb_body_modal_bevel_radius_limit(const Object & /*ob*/,
+                                                const NurbBodyEdgeHit & /*edge*/,
                                                 const float radius_limit)
 {
-  float limit = std::max(radius_limit * 0.95f, 0.001f);
-  float edge_length_limit = FLT_MAX;
-  const Span<NurbBodyEdgePolyline> polylines = BKE_nurb_body_boolean_edge_polylines_cached(&ob,
-                                                                                           64);
-  for (const NurbBodyEdgePolyline &polyline : polylines) {
-    if (!nurb_body_edge_matches_polyline(edge, polyline)) {
-      continue;
-    }
-    const float length = nurb_body_polyline_length(polyline.points.as_span());
-    if (length > 0.0f) {
-      edge_length_limit = std::min(edge_length_limit, length * 0.33f);
-    }
-  }
-  if (edge_length_limit != FLT_MAX) {
-    limit = std::min(limit, edge_length_limit);
-  }
-  return std::max(limit, 0.001f);
+  return std::max(radius_limit * 0.995f, 0.001f);
 }
 
 static void nurb_body_tag_geometry_changed(bContext *C, Object &ob, NurbBody &body)
@@ -2204,8 +2282,10 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const int profile = RNA_enum_get(op->ptr, "profile");
   const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
-                                 body->radius :
-                                 nurb_body_boolean_op_scaled_radius(*active_edge.op);
+                                 nurb_body_bevel_radius_limit(*body) :
+                                 std::max(nurb_body_bevel_radius_limit(*body),
+                                          nurb_body_boolean_op_scaled_bevel_radius_limit(
+                                              *active_edge.op));
   const float max_preview_radius = nurb_body_modal_bevel_radius_limit(*ob,
                                                                       active_edge,
                                                                       radius_limit);
@@ -2302,8 +2382,10 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
                                                                        target.bevel_radii);
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
-                                 body->radius :
-                                 nurb_body_boolean_op_scaled_radius(*active_edge.op);
+                                 nurb_body_bevel_radius_limit(*body) :
+                                 std::max(nurb_body_bevel_radius_limit(*body),
+                                          nurb_body_boolean_op_scaled_bevel_radius_limit(
+                                              *active_edge.op));
   const float radius = std::min(std::max(0.0f, RNA_float_get(op->ptr, "radius")),
                                 nurb_body_modal_bevel_radius_limit(*ob,
                                                                    active_edge,

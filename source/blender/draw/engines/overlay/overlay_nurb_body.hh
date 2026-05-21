@@ -9,11 +9,13 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include "DNA_nurb_body_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_math_matrix.h"
@@ -61,6 +63,8 @@ class NurbBodies : Overlay {
   Vector<Entry> entries_;
   Vector<DrawCache> draw_caches_;
   float line_width_ = 2.0f;
+  int select_mode_ = NURB_BODY_SELECT_MODE_EDGE;
+  bool edge_overlay_enabled_ = false;
   bool xray_flag_enabled_ = false;
   bool needs_depth_prepass_ = false;
 
@@ -83,9 +87,20 @@ class NurbBodies : Overlay {
     hash_bytes(hash, &value, sizeof(T));
   }
 
-  static uint64_t line_selection_key(const NurbBody &body)
+  static bool select_mode_is_valid(const int select_mode)
+  {
+    return select_mode == NURB_BODY_SELECT_MODE_EDGE ||
+           select_mode == NURB_BODY_SELECT_MODE_FACE ||
+           select_mode == NURB_BODY_SELECT_MODE_OBJECT;
+  }
+
+  static uint64_t line_selection_key(const NurbBody &body,
+                                     const int select_mode,
+                                     const bool object_selected)
   {
     uint64_t hash = 1469598103934665603ull;
+    hash_value(hash, select_mode);
+    hash_value(hash, object_selected);
     hash_value(hash, body.selected_edges);
     hash_value(hash, body.selected_edge);
     hash_value(hash, body.surface_selected_edges);
@@ -107,9 +122,14 @@ class NurbBodies : Overlay {
     return hash;
   }
 
-  static uint64_t line_hover_key(const Object *object, const NurbBody &body)
+  static uint64_t line_hover_key(const Object *object,
+                                 const NurbBody &body,
+                                 const int select_mode,
+                                 const bool object_selected)
   {
     uint64_t hash = 1469598103934665603ull;
+    hash_value(hash, select_mode);
+    hash_value(hash, object_selected);
     hash_value(hash, BKE_nurb_body_hovered_edge_key_get(object));
     hash_value(hash, body.hovered_edge);
     hash_value(hash, body.surface_hovered_edge);
@@ -138,13 +158,25 @@ class NurbBodies : Overlay {
     return std::clamp(overlay.nurb_body_line_thickness, 0.5f, 8.0f);
   }
 
+  static bool edge_selection_mode_enabled(const int select_mode, const bool object_selected)
+  {
+    return select_mode == NURB_BODY_SELECT_MODE_EDGE && !object_selected;
+  }
+
   static bool polyline_is_surface(const NurbBodyEdgePolyline &polyline)
   {
     return (polyline.flag & NURB_BODY_EDGE_POLYLINE_SURFACE) != 0 && polyline.points.size() >= 2;
   }
 
-  static bool polyline_is_selected(const NurbBody &body, const NurbBodyEdgePolyline &polyline)
+  static bool polyline_is_selected(const NurbBody &body,
+                                   const NurbBodyEdgePolyline &polyline,
+                                   const int select_mode,
+                                   const bool object_selected)
   {
+    if (!edge_selection_mode_enabled(select_mode, object_selected)) {
+      return false;
+    }
+
     const NurbBodyBooleanOp *op = polyline.op;
     const bool body_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_BODY) != 0;
     const bool surface_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_FINAL) != 0;
@@ -163,8 +195,14 @@ class NurbBodies : Overlay {
 
   static bool polyline_is_hovered(const Object *object,
                                   const NurbBody &body,
-                                  const NurbBodyEdgePolyline &polyline)
+                                  const NurbBodyEdgePolyline &polyline,
+                                  const int select_mode,
+                                  const bool object_selected)
   {
+    if (!edge_selection_mode_enabled(select_mode, object_selected)) {
+      return false;
+    }
+
     const NurbBodyBooleanOp *op = polyline.op;
     const bool body_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_BODY) != 0;
     const bool surface_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_FINAL) != 0;
@@ -272,24 +310,26 @@ class NurbBodies : Overlay {
   static void rebuild_line_batches(DrawCache &cache,
                                    const Object *object,
                                    const NurbBody &body,
-                                   const Span<NurbBodyEdgePolyline> polylines)
+                                   const Span<NurbBodyEdgePolyline> polylines,
+                                   const int select_mode,
+                                   const bool object_selected)
   {
     discard_batch(cache.normal_batch);
     discard_batch(cache.hovered_batch);
     discard_batch(cache.selected_batch);
     cache.normal_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
-          return !polyline_is_selected(body, polyline) &&
-                 !polyline_is_hovered(object, body, polyline);
+          return !polyline_is_selected(body, polyline, select_mode, object_selected) &&
+                 !polyline_is_hovered(object, body, polyline, select_mode, object_selected);
         });
     cache.hovered_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
-          return polyline_is_hovered(object, body, polyline) &&
-                 !polyline_is_selected(body, polyline);
+          return polyline_is_hovered(object, body, polyline, select_mode, object_selected) &&
+                 !polyline_is_selected(body, polyline, select_mode, object_selected);
         });
     cache.selected_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
-          return polyline_is_selected(body, polyline);
+          return polyline_is_selected(body, polyline, select_mode, object_selected);
         });
   }
 
@@ -306,8 +346,15 @@ class NurbBodies : Overlay {
     enabled_ = state.is_space_v3d() && !state.hide_overlays;
     entries_.clear();
     line_width_ = line_thickness_for_overlay(state.overlay);
+    select_mode_ = NURB_BODY_SELECT_MODE_EDGE;
+    if (state.scene != nullptr && state.scene->toolsettings != nullptr &&
+        select_mode_is_valid(state.scene->toolsettings->nurb_body_select_mode))
+    {
+      select_mode_ = state.scene->toolsettings->nurb_body_select_mode;
+    }
+    edge_overlay_enabled_ = enabled_;
     xray_flag_enabled_ = state.xray_flag_enabled;
-    needs_depth_prepass_ = enabled_ && state.xray_enabled;
+    needs_depth_prepass_ = edge_overlay_enabled_ && state.xray_enabled;
     depth_ps_.init();
     depth_mesh_ps_ = nullptr;
 
@@ -328,7 +375,9 @@ class NurbBodies : Overlay {
                    Resources & /*res*/,
                    const State & /*state*/) final
   {
-    if (!enabled_ || ob_ref.object->type != OB_NURB_BODY || ob_ref.object->data == nullptr) {
+    if (!edge_overlay_enabled_ || ob_ref.object->type != OB_NURB_BODY ||
+        ob_ref.object->data == nullptr)
+    {
       return;
     }
 
@@ -360,7 +409,7 @@ class NurbBodies : Overlay {
 
   void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
   {
-    if (!enabled_ || entries_.is_empty()) {
+    if (!edge_overlay_enabled_ || entries_.is_empty()) {
       return;
     }
 
@@ -385,14 +434,19 @@ class NurbBodies : Overlay {
         cache.geometry_key = geometry_key;
       }
 
-      const uint64_t selection_key = line_selection_key(*body);
-      const uint64_t hover_key = line_hover_key(entry.original_object, *body);
+      const bool object_selected = ((entry.original_object->base_flag | entry.object->base_flag) &
+                                    BASE_SELECTED) != 0;
+
+      const uint64_t selection_key = line_selection_key(*body, select_mode_, object_selected);
+      const uint64_t hover_key = line_hover_key(
+          entry.original_object, *body, select_mode_, object_selected);
       if (geometry_changed || cache.selection_key != selection_key ||
           cache.hover_key != hover_key)
       {
         const Span<NurbBodyEdgePolyline> polylines =
             BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
-        rebuild_line_batches(cache, entry.original_object, *body, polylines);
+        rebuild_line_batches(
+            cache, entry.original_object, *body, polylines, select_mode_, object_selected);
         cache.selection_key = selection_key;
         cache.hover_key = hover_key;
       }

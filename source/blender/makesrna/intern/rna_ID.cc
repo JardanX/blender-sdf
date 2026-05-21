@@ -50,7 +50,7 @@ const EnumPropertyItem rna_enum_id_type_items[] = {
     {ID_MSK, "MASK", ICON_MOD_MASK, "Mask", ""},
     {ID_MA, "MATERIAL", ICON_MATERIAL_DATA, "Material", ""},
     {ID_ME, "MESH", ICON_MESH_DATA, "Mesh", ""},
-    {ID_NB, "NURB_BODY", ICON_MESH_CYLINDER, "NURB Body", ""},
+    {ID_NB, "NURB_BODY", ICON_NURB_BODY_DATA, "NURB Body", ""},
 
     {ID_MC, "MOVIECLIP", ICON_TRACKER, "Movie Clip", ""},
     {ID_NT, "NODETREE", ICON_NODETREE, "Node Tree", ""},
@@ -173,7 +173,7 @@ const IDFilterEnumPropertyItem rna_enum_id_type_filter_items[] = {
     {FILTER_ID_MSK, "filter_mask", ICON_MOD_MASK, "Masks", "Show Mask data-blocks"},
     {FILTER_ID_NB,
      "filter_nurb_body",
-     ICON_MESH_CYLINDER,
+     ICON_NURB_BODY_DATA,
      "NURB Bodies",
      "Show NURB Body data-blocks"},
     {FILTER_ID_NT, "filter_node_tree", ICON_NODETREE, "Node Trees", "Show Node Tree data-blocks"},
