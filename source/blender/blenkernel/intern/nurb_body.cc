@@ -46,6 +46,7 @@
 
 #ifdef WITH_OPENCASCADE
 #  include <BOPAlgo_Operation.hxx>
+#  include <BRepBuilderAPI_GTransform.hxx>
 #  include <BRepBuilderAPI_Transform.hxx>
 #  include <BRep_Tool.hxx>
 #  include <BRepAlgoAPI_Common.hxx>
@@ -82,6 +83,7 @@
 #  include <TopoDS_Vertex.hxx>
 #  include <gp_Ax2.hxx>
 #  include <gp_Dir.hxx>
+#  include <gp_GTrsf.hxx>
 #  include <gp_Pnt.hxx>
 #  include <gp_Trsf.hxx>
 #  include <gp_Vec.hxx>
@@ -440,6 +442,27 @@ static TopoDS_Shape make_body_primitive_shape(const NurbBody &body)
 
 static TopoDS_Shape transform_shape(const TopoDS_Shape &shape, const float mat[4][4])
 {
+  float size[3];
+  mat4_to_size(size, mat);
+  const bool needs_general_transform = std::abs(size[0] - size[1]) > 1.0e-5f ||
+                                       std::abs(size[0] - size[2]) > 1.0e-5f;
+  if (needs_general_transform) {
+    gp_GTrsf transform;
+    transform.SetValue(1, 1, mat[0][0]);
+    transform.SetValue(1, 2, mat[1][0]);
+    transform.SetValue(1, 3, mat[2][0]);
+    transform.SetValue(1, 4, mat[3][0]);
+    transform.SetValue(2, 1, mat[0][1]);
+    transform.SetValue(2, 2, mat[1][1]);
+    transform.SetValue(2, 3, mat[2][1]);
+    transform.SetValue(2, 4, mat[3][1]);
+    transform.SetValue(3, 1, mat[0][2]);
+    transform.SetValue(3, 2, mat[1][2]);
+    transform.SetValue(3, 3, mat[2][2]);
+    transform.SetValue(3, 4, mat[3][2]);
+    return BRepBuilderAPI_GTransform(shape, transform, true).Shape();
+  }
+
   gp_Trsf transform;
   transform.SetValues(mat[0][0],
                       mat[1][0],
@@ -467,6 +490,14 @@ static TopoDS_Shape make_boolean_op_primitive_shape(const NurbBodyBooleanOp &op)
 static float nurb_body_safe_scale_axis(const float scale)
 {
   return std::max(std::abs(scale), 0.001f);
+}
+
+static float nurb_body_signed_scale_axis(const float scale)
+{
+  if (std::abs(scale) >= 0.001f) {
+    return scale;
+  }
+  return scale < 0.0f ? -0.001f : 0.001f;
 }
 
 static float nurb_body_boolean_op_axis_scale(const NurbBodyBooleanOp &op)
@@ -507,6 +538,28 @@ static void scaled_edge_radii(const float src[64], const float scale, float dst[
   for (int i = 0; i < 64; i++) {
     dst[i] = src[i] * scale;
   }
+}
+
+static void nurb_body_boolean_op_transform_matrix(const NurbBodyBooleanOp &op, float r_mat[4][4])
+{
+  copy_m4_m4(r_mat, op.operand_to_target);
+
+  const float axis_scale = nurb_body_boolean_op_axis_scale(op);
+  const float radial_scale = nurb_body_boolean_op_radial_scale(op);
+  /* Radius/depth and operand bevel radii are already baked with axis/radial scale. Keep that
+   * existing bookkeeping, then apply the leftover anisotropic object scale to the final tool. */
+  const float residual_scale[3] = {
+      nurb_body_signed_scale_axis(op.operand_scale[0] == 0.0f ? 1.0f : op.operand_scale[0]) /
+          axis_scale,
+      nurb_body_signed_scale_axis(op.operand_scale[1] == 0.0f ? 1.0f : op.operand_scale[1]) /
+          radial_scale,
+      nurb_body_signed_scale_axis(op.operand_scale[2] == 0.0f ? 1.0f : op.operand_scale[2]) /
+          radial_scale,
+  };
+
+  mul_v3_fl(r_mat[0], residual_scale[0]);
+  mul_v3_fl(r_mat[1], residual_scale[1]);
+  mul_v3_fl(r_mat[2], residual_scale[2]);
 }
 
 static bool cylindrical_face_radius(const TopoDS_Face &face, double &r_radius)
@@ -2020,7 +2073,9 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
                                             nullptr);
   }
 
-  return transform_shape(shape, op.operand_to_target);
+  float operand_transform[4][4];
+  nurb_body_boolean_op_transform_matrix(op, operand_transform);
+  return transform_shape(shape, operand_transform);
 }
 
 static void nurb_body_stage_hash_bytes(uint64_t &hash, const void *data, const size_t size)
