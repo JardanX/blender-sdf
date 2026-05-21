@@ -652,7 +652,8 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
     motion_paths.object_sync(manager, ob_ref, resources, state);
     origins.object_sync(manager, ob_ref, resources, state);
 
-    if (object_is_selected(ob_ref) && !in_edit_paint_mode) {
+    const bool outline_object = object_is_selected(ob_ref) || ob_ref.object->type == OB_NURB_BODY;
+    if (outline_object && !in_edit_paint_mode) {
       outline.object_sync(manager, ob_ref, resources, state);
     }
 

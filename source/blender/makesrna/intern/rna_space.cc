@@ -5143,6 +5143,14 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "nurb_body_line_thickness", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.nurb_body_line_thickness");
+  RNA_def_property_ui_text(
+      prop, "NURB Body Line Thickness", "Thickness of NURB body outline and edge overlay lines");
+  RNA_def_property_range(prop, 0.5f, 8.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 6.0f, 0.1f, 2);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "show_performance", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_PERFORMANCE);
   RNA_def_property_ui_text(prop,

@@ -22,6 +22,7 @@
 #include "draw_common.hh"
 #include "draw_view.hh"
 
+#include "DNA_nurb_body_types.h"
 #include "DNA_object_types.h"
 #include "DNA_userdef_types.h"
 
@@ -51,6 +52,8 @@ class Outline : Overlay {
   /* MATHOPS: Removed — Grease Pencil */
   // PassMain::Sub *prepass_gpencil_ps_ = nullptr;
   PassMain::Sub *prepass_mesh_ps_ = nullptr;
+  PassMain::Sub *prepass_nurb_body_black_ps_ = nullptr;
+  PassMain::Sub *prepass_nurb_body_selected_ps_ = nullptr;
   PassMain::Sub *prepass_volume_ps_ = nullptr;
   PassMain::Sub *prepass_wire_ps_ = nullptr;
   /* Detect edges inside the ID pass and output color for each of them. */
@@ -75,6 +78,32 @@ class Outline : Overlay {
   Vector<FlatObjectRef> flat_objects_;
 
   PassMain outline_prepass_flat_ps_ = {"PrepassFlat"};
+
+  static bool nurb_body_has_edge_selection(const NurbBody &body)
+  {
+    if (body.selected_edges != 0 || body.surface_selected_edges != 0) {
+      return true;
+    }
+    for (const NurbBodyBooleanOp *op = static_cast<const NurbBodyBooleanOp *>(
+             body.boolean_ops.first);
+         op;
+         op = op->next)
+    {
+      if (op->selected_edges != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool nurb_body_draw_as_object_selected(const Object &object)
+  {
+    const NurbBody *body = reinterpret_cast<const NurbBody *>(object.data);
+    if (body != nullptr && nurb_body_has_edge_selection(*body)) {
+      return false;
+    }
+    return (object.base_flag & BASE_SELECTED) != 0;
+  }
 
 
 
@@ -114,12 +143,14 @@ class Outline : Overlay {
         auto &sub = pass.sub("Curves");
         sub.shader_set(res.shaders->outline_prepass_curves.get());
         sub.push_constant("is_transform", is_transform);
+        sub.push_constant("outline_color_override", -1);
         prepass_curves_ps_ = &sub;
       }
       {
         auto &sub = pass.sub("PointCloud");
         sub.shader_set(res.shaders->outline_prepass_pointcloud.get());
         sub.push_constant("is_transform", is_transform);
+        sub.push_constant("outline_color_override", -1);
         prepass_pointcloud_ps_ = &sub;
       }
       /* MATHOPS: Removed — Grease Pencil overlay */
@@ -133,18 +164,35 @@ class Outline : Overlay {
         auto &sub = pass.sub("Mesh");
         sub.shader_set(res.shaders->outline_prepass_mesh.get());
         sub.push_constant("is_transform", is_transform);
+        sub.push_constant("outline_color_override", -1);
         prepass_mesh_ps_ = &sub;
+      }
+      {
+        auto &sub = pass.sub("NurbBodyBlack");
+        sub.shader_set(res.shaders->outline_prepass_mesh.get());
+        sub.push_constant("is_transform", false);
+        sub.push_constant("outline_color_override", 2);
+        prepass_nurb_body_black_ps_ = &sub;
+      }
+      {
+        auto &sub = pass.sub("NurbBodySelected");
+        sub.shader_set(res.shaders->outline_prepass_mesh.get());
+        sub.push_constant("is_transform", false);
+        sub.push_constant("outline_color_override", 3);
+        prepass_nurb_body_selected_ps_ = &sub;
       }
       {
         auto &sub = pass.sub("Volume");
         sub.shader_set(res.shaders->outline_prepass_mesh.get());
         sub.push_constant("is_transform", is_transform);
+        sub.push_constant("outline_color_override", -1);
         prepass_volume_ps_ = &sub;
       }
       {
         auto &sub = pass.sub("Wire");
         sub.shader_set(res.shaders->outline_prepass_wire.get());
         sub.push_constant("is_transform", is_transform);
+        sub.push_constant("outline_color_override", -1);
         prepass_wire_ps_ = &sub;
       }
     }
@@ -201,8 +249,10 @@ class Outline : Overlay {
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
       case OB_NURB_BODY:
-        /* NURB body object silhouettes are drawn by overlay_nurb_body.hh so their selected
-         * object state can match CAD-style black/orange surface outlines. */
+        geom = DRW_cache_mesh_surface_get(ob_ref.object);
+        (nurb_body_draw_as_object_selected(*ob_ref.object) ? prepass_nurb_body_selected_ps_ :
+                                                             prepass_nurb_body_black_ps_)
+            ->draw(geom, manager.unique_handle(ob_ref));
         break;
       case OB_MESH:
         if (state.xray_enabled_and_not_wire) {
@@ -266,6 +316,7 @@ class Outline : Overlay {
                      state.clipping_plane_count);
       pass.shader_set(res.shaders->outline_prepass_wire.get());
       pass.push_constant("is_transform", is_transform);
+      pass.push_constant("outline_color_override", -1);
 
       for (FlatObjectRef flag_ob_ref : flat_objects_) {
         flag_ob_ref.if_flat_axis_orthogonal_to_view(

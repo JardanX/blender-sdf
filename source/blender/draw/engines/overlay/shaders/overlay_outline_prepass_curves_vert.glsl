@@ -15,6 +15,10 @@ VERTEX_SHADER_CREATE_INFO(overlay_outline_prepass_curves)
 
 uint outline_colorid_get()
 {
+  if (outline_color_override >= 0) {
+    return uint(outline_color_override);
+  }
+
   eObjectInfoFlag ob_flag = drw_object_infos().flag;
   bool is_active = flag_test(ob_flag, OBJECT_ACTIVE);
 
