@@ -17,7 +17,6 @@
 #include "DNA_object_types.h"
 
 #include "BLI_array.hh"
-#include "BLI_map.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.hh"
@@ -167,6 +166,7 @@ class NurbBodies : Overlay {
   static bool polyline_is_surface(const NurbBodyEdgePolyline &polyline)
   {
     return (polyline.flag & NURB_BODY_EDGE_POLYLINE_SURFACE) != 0 &&
+           (polyline.flag & NURB_BODY_EDGE_POLYLINE_SELECTABLE) != 0 &&
            polyline.points.size() >= 2;
   }
 
@@ -368,53 +368,6 @@ class NurbBodies : Overlay {
     return hash;
   }
 
-  struct SilhouetteSegmentGroup {
-    int first_edge_index = -1;
-    int edge_count = 0;
-    int normals_num = 0;
-    float3 normals[4] = {};
-    bool has_sharp_pair = false;
-  };
-
-  static uint64_t quantized_position_key(const float3 &position)
-  {
-    uint64_t hash = 1469598103934665603ull;
-    hash_quantized_float(hash, position.x, 100000.0f);
-    hash_quantized_float(hash, position.y, 100000.0f);
-    hash_quantized_float(hash, position.z, 100000.0f);
-    return hash != 0 ? hash : 1;
-  }
-
-  static uint64_t segment_position_key(const float3 &a, const float3 &b)
-  {
-    uint64_t key_a = quantized_position_key(a);
-    uint64_t key_b = quantized_position_key(b);
-    if (key_b < key_a) {
-      std::swap(key_a, key_b);
-    }
-
-    uint64_t hash = 1469598103934665603ull;
-    hash_value(hash, key_a);
-    hash_value(hash, key_b);
-    return hash != 0 ? hash : 1;
-  }
-
-  static void add_silhouette_group_normal(SilhouetteSegmentGroup &group, const float3 &normal)
-  {
-    for (int i = 0; i < group.normals_num; i++) {
-      const float normal_dot = math::dot(group.normals[i], normal);
-      if (normal_dot <= 0.75f) {
-        group.has_sharp_pair = true;
-      }
-      if (normal_dot > 0.999f) {
-        return;
-      }
-    }
-    if (group.normals_num < 4) {
-      group.normals[group.normals_num++] = normal;
-    }
-  }
-
   static gpu::Batch *create_mesh_silhouette_batch(const Object &object, const View &view)
   {
     const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
@@ -444,39 +397,10 @@ class NurbBodies : Overlay {
       }
     }
 
-    Map<uint64_t, SilhouetteSegmentGroup> segment_groups;
-    segment_groups.reserve(edges.size());
-    for (const int edge_index : edges.index_range()) {
-      const int2 linked_faces = edge_faces[edge_index];
-      if (linked_faces[0] == -1) {
-        continue;
-      }
-      const int2 edge = edges[edge_index];
-      if (edge[0] < 0 || edge[0] >= positions.size() || edge[1] < 0 ||
-          edge[1] >= positions.size())
-      {
-        continue;
-      }
-
-      const uint64_t segment_key = segment_position_key(positions[edge[0]],
-                                                        positions[edge[1]]);
-      SilhouetteSegmentGroup &group = segment_groups.lookup_or_add_cb(
-          segment_key, [&]() {
-            SilhouetteSegmentGroup new_group;
-            new_group.first_edge_index = edge_index;
-            return new_group;
-          });
-      group.edge_count++;
-      add_silhouette_group_normal(group, face_normals[linked_faces[0]]);
-      if (linked_faces[1] != -1) {
-        add_silhouette_group_normal(group, face_normals[linked_faces[1]]);
-      }
-    }
-
     Vector<float3> verts;
     for (const int edge_index : edges.index_range()) {
       const int2 linked_faces = edge_faces[edge_index];
-      if (linked_faces[0] == -1) {
+      if (linked_faces[0] == -1 || linked_faces[1] == -1) {
         continue;
       }
 
@@ -487,32 +411,17 @@ class NurbBodies : Overlay {
         continue;
       }
 
-      bool is_silhouette = linked_faces[1] == -1;
-      const uint64_t segment_key = segment_position_key(positions[edge[0]],
-                                                        positions[edge[1]]);
-      if (is_silhouette) {
-        const SilhouetteSegmentGroup *group = segment_groups.lookup_ptr(segment_key);
-        if (group == nullptr || !group->has_sharp_pair || group->first_edge_index != edge_index) {
-          continue;
-        }
-      }
-      else {
-        const float3 midpoint = (positions[edge[0]] + positions[edge[1]]) * 0.5f;
-        const float3 view_direction = view_direction_for_edge(object, view, midpoint);
-        const float facing_a = math::dot(face_normals[linked_faces[0]], view_direction);
-        const float facing_b = math::dot(face_normals[linked_faces[1]], view_direction);
-        const bool crosses_view = (facing_a <= 0.0f && facing_b > 0.0f) ||
-                                  (facing_a > 0.0f && facing_b <= 0.0f);
-        const float adjacent_face_dot = math::dot(face_normals[linked_faces[0]],
-                                                 face_normals[linked_faces[1]]);
-        constexpr float near_silhouette_epsilon = 0.015f;
-        const bool near_silhouette = adjacent_face_dot < 0.999f &&
-                                     (std::abs(facing_a) <= near_silhouette_epsilon ||
-                                      std::abs(facing_b) <= near_silhouette_epsilon);
-        is_silhouette = crosses_view || near_silhouette;
+      const float adjacent_face_dot = math::dot(face_normals[linked_faces[0]],
+                                               face_normals[linked_faces[1]]);
+      if (adjacent_face_dot <= 0.75f) {
+        continue;
       }
 
-      if (is_silhouette) {
+      const float3 midpoint = (positions[edge[0]] + positions[edge[1]]) * 0.5f;
+      const float3 view_direction = view_direction_for_edge(object, view, midpoint);
+      const float facing_a = math::dot(face_normals[linked_faces[0]], view_direction);
+      const float facing_b = math::dot(face_normals[linked_faces[1]], view_direction);
+      if ((facing_a <= 0.0f && facing_b > 0.0f) || (facing_a > 0.0f && facing_b <= 0.0f)) {
         verts.append(positions[edge[0]]);
         verts.append(positions[edge[1]]);
       }
