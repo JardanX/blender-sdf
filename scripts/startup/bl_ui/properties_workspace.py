@@ -167,6 +167,29 @@ class WORKSPACE_UL_addons_items(UIList):
         ).owner_id = addon.module
 
 
+class WORKSPACE_PT_nurb_body_viewport(WorkSpaceButtonsPanel, Panel):
+    bl_label = "NURB Body Viewport"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob and ob.type == 'NURB_BODY'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        body = context.object.data
+        layout.prop(body, "tessellation_deflection", text="Deflection")
+        layout.prop(body, "tessellation_angle", text="Angle")
+        layout.prop(body, "use_triangulate_mesh")
+        layout.prop(body, "use_merge_vertices")
+        layout.prop(body, "use_smooth_shading")
+        layout.prop(body, "use_auto_crease_sharp_edges")
+
+
 class WORKSPACE_PT_custom_props(WorkSpaceButtonsPanel, PropertyPanel, Panel):
     bl_parent_id = "WORKSPACE_PT_main"
 
@@ -179,6 +202,7 @@ classes = (
 
     WORKSPACE_PT_main,
     WORKSPACE_PT_addons,
+    WORKSPACE_PT_nurb_body_viewport,
     WORKSPACE_PT_custom_props,
 )
 

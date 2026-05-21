@@ -222,6 +222,7 @@ class Prepass : Overlay {
     PassMain::Sub *pass = nullptr;
     switch (ob_ref.object->type) {
       case OB_MESH:
+      case OB_NURB_BODY:
         if (use_material_slot_selection_) {
           /* TODO(fclem): Improve the API. */
           const int materials_len = BKE_object_material_used_with_fallback_eval(*ob_ref.object);

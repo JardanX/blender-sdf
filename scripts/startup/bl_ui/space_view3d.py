@@ -850,6 +850,27 @@ class VIEW3D_HT_header(Header):
                     icon='CURVE_PATH',
                     depress=(domain == 'CURVE'),
                 ).domain = 'CURVE'
+            elif object_mode == 'OBJECT' and obj.type == 'NURB_BODY':
+                body = obj.data
+                row = layout.row(align=True)
+                row.operator(
+                    "object.nurb_body_select_mode",
+                    text="",
+                    icon='EDGESEL',
+                    depress=(body.select_mode == 'EDGE'),
+                ).mode = 'EDGE'
+                row.operator(
+                    "object.nurb_body_select_mode",
+                    text="",
+                    icon='FACESEL',
+                    depress=(body.select_mode == 'FACE'),
+                ).mode = 'FACE'
+                row.operator(
+                    "object.nurb_body_select_mode",
+                    text="",
+                    icon='OBJECT_DATAMODE',
+                    depress=(body.select_mode == 'OBJECT'),
+                ).mode = 'OBJECT'
 
         # Grease Pencil
         if obj and obj.type == 'GREASEPENCIL':
@@ -2528,6 +2549,17 @@ class VIEW3D_MT_sdf_add(Menu):
         layout.operator("object.sdf_add", text="SDF Polygon", icon='SDF_POLYGON').type = 'POLYGON'
 
 
+class VIEW3D_MT_nurb_body_add(Menu):
+    bl_idname = "VIEW3D_MT_nurb_body_add"
+    bl_label = "NURB Body"
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator_context = 'EXEC_REGION_WIN'
+        layout.operator("object.nurb_body_add", text="NURB Cylinder", icon='MESH_CYLINDER')
+
+
 class VIEW3D_MT_volume_add(Menu):
     bl_idname = "VIEW3D_MT_volume_add"
     bl_label = "Volume"
@@ -2617,6 +2649,7 @@ class VIEW3D_MT_add(Menu):
         layout.operator_context = 'EXEC_REGION_WIN'
 
         layout.menu("VIEW3D_MT_sdf_add", icon='OUTLINER_OB_SDF')
+        layout.menu("VIEW3D_MT_nurb_body_add", icon='MESH_CYLINDER')
 
         layout.separator()
 
@@ -9103,6 +9136,7 @@ classes = (
     VIEW3D_MT_curve_add,
     VIEW3D_MT_surface_add,
     VIEW3D_MT_sdf_add,
+    VIEW3D_MT_nurb_body_add,
     TOPBAR_MT_edit_curve_add,
     TOPBAR_MT_edit_armature_add,
     VIEW3D_MT_armature_add,

@@ -35,6 +35,7 @@
 #include "overlay_mode_transfer.hh"
 #include "overlay_motion_path.hh"
 #include "overlay_name.hh"
+#include "overlay_nurb_body.hh"
 #include "overlay_origin.hh"
 #include "overlay_outline.hh"
 #include "overlay_paint.hh"
@@ -98,6 +99,7 @@ class Instance : public DrawEngine {
     MeshUVs mesh_uvs;
     ModeTransfer mode_transfer;
     Names names;
+    NurbBodies nurb_bodies;
     Paints paints;
     Particles particles;
     PointClouds pointclouds;

@@ -1761,6 +1761,7 @@ void blo_do_versions_userdef(UserDef *userdef)
 
   if (!USER_VERSION_ATLEAST(501, 30)) {
     userdef->dupflag |= USER_DUP_SDF;
+    userdef->dupflag |= USER_DUP_NURB_BODY;
   }
 
   /**

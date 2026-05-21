@@ -4476,6 +4476,25 @@ def km_object_mode(params):
     )
 
     items.extend([
+        ("object.nurb_body_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value, "shift": True}, None),
+        ("object.nurb_body_edge_translate", {"type": 'G', "value": 'PRESS'}, None),
+        ("object.nurb_body_bevel_selected", {"type": 'B', "value": 'PRESS', "ctrl": True}, None),
+        ("object.nurb_body_boolean_apply", {"type": 'MINUS', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'DIFFERENCE')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'NUMPAD_MINUS', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'DIFFERENCE')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'EQUAL', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'UNION')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'NUMPAD_PLUS', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'UNION')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'ZERO', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'INTERSECT')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'NUMPAD_0', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'INTERSECT')]}),
         *_template_items_proportional_editing(
             params, connected=False, toggle_data_path="tool_settings.use_proportional_edit_objects"),
         *_template_items_select_actions(params, "object.select_all"),
@@ -4537,6 +4556,12 @@ def km_object_mode(params):
         ("object.sdf_shell_distance_adjust", {"type": 'D', "value": 'PRESS'}, None),
         # MATHOPS: Removed — old SDFGroup cycle
         ("sdf.polygon_point_context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
+        ("object.nurb_body_select_mode", {"type": 'ONE', "value": 'PRESS'},
+         {"properties": [("mode", 'EDGE')]}),
+        ("object.nurb_body_select_mode", {"type": 'TWO', "value": 'PRESS'},
+         {"properties": [("mode", 'FACE')]}),
+        ("object.nurb_body_select_mode", {"type": 'THREE', "value": 'PRESS'},
+         {"properties": [("mode", 'OBJECT')]}),
         *_template_items_context_menu("VIEW3D_MT_object_context_menu", params.context_menu_event),
     ])
 

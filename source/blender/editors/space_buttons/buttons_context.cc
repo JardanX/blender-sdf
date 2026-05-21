@@ -279,6 +279,9 @@ static bool buttons_context_path_data(ButsContextPath *path, int type)
   if (RNA_struct_is_a(ptr->type, RNA_SDF) && ELEM(type, -1, OB_SDF)) {
     return true;
   }
+  if (RNA_struct_is_a(ptr->type, RNA_NurbBody) && ELEM(type, -1, OB_NURB_BODY)) {
+    return true;
+  }
   /* try to get an object in the path, no pinning supported here */
   if (buttons_context_path_object(path)) {
     Object *ob = static_cast<Object *>(path->ptr[path->len - 1].data);
@@ -309,7 +312,8 @@ static bool buttons_context_path_modifier(ButsContextPath *path)
              OB_CURVES,
              OB_POINTCLOUD,
              OB_VOLUME,
-             OB_SDF))
+             OB_SDF,
+             OB_NURB_BODY))
     {
       ModifierData *md = BKE_object_active_modifier(ob);
       if (md != nullptr) {
@@ -1023,6 +1027,10 @@ int /*eContextResult*/ buttons_context(const bContext *C,
   }
   if (CTX_data_equals(member, "sdf")) {
     set_pointer_type(path, result, RNA_SDF);
+    return CTX_RESULT_OK;
+  }
+  if (CTX_data_equals(member, "nurb_body")) {
+    set_pointer_type(path, result, RNA_NurbBody);
     return CTX_RESULT_OK;
   }
   if (CTX_data_equals(member, "material")) {

@@ -2517,6 +2517,25 @@ def km_object_mode(params):
     )
 
     items.extend([
+        ("object.nurb_body_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value, "shift": True}, None),
+        ("object.nurb_body_edge_translate", {"type": 'G', "value": 'PRESS'}, None),
+        ("object.nurb_body_bevel_selected", {"type": 'B', "value": 'PRESS', "ctrl": True}, None),
+        ("object.nurb_body_boolean_apply", {"type": 'MINUS', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'DIFFERENCE')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'NUMPAD_MINUS', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'DIFFERENCE')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'EQUAL', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'UNION')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'NUMPAD_PLUS', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'UNION')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'ZERO', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'INTERSECT')]}),
+        ("object.nurb_body_boolean_apply", {"type": 'NUMPAD_0', "value": 'PRESS', "ctrl": True},
+         {"properties": [("operation", 'INTERSECT')]}),
         *_template_items_animation(),
         # Selection
         ("object.select_all", {"type": 'A', "value": 'PRESS', "ctrl": True}, {"properties": [("action", 'SELECT')]}),
@@ -2584,6 +2603,12 @@ def km_object_mode(params):
          {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'EDGE'})]}),
         ("object.mode_set_with_submode", {"type": 'THREE', "value": 'PRESS'},
          {"properties": [("mode", 'EDIT'), ("mesh_select_mode", {'FACE'})]}),
+        ("object.nurb_body_select_mode", {"type": 'ONE', "value": 'PRESS'},
+         {"properties": [("mode", 'EDGE')]}),
+        ("object.nurb_body_select_mode", {"type": 'TWO', "value": 'PRESS'},
+         {"properties": [("mode", 'FACE')]}),
+        ("object.nurb_body_select_mode", {"type": 'THREE', "value": 'PRESS'},
+         {"properties": [("mode", 'OBJECT')]}),
     ])
 
     return keymap

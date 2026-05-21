@@ -234,6 +234,7 @@ set(SRC
   intern/node_tree_structure_type_inferencing.cc
   intern/node_tree_update.cc
   intern/node_tree_zones.cc
+  intern/nurb_body.cc
   intern/object.cc
   intern/object_deform.cc
   intern/object_dupli.cc
@@ -477,6 +478,7 @@ set(SRC
   BKE_node_tree_reference_lifetimes.hh
   BKE_node_tree_update.hh
   BKE_node_tree_zones.hh
+  BKE_nurb_body.hh
   BKE_object.hh
   BKE_object_deform.h
   BKE_object_types.hh
@@ -596,6 +598,7 @@ set(LIB
   PRIVATE bf::dependencies::zstd
   PRIVATE bf::dependencies::freetype  # For `vfontdata_freetype.c`.
   PRIVATE bf::dependencies::optional::fftw3
+  PRIVATE bf::dependencies::optional::opencascade
   PRIVATE bf::dependencies::optional::opensubdiv
   PRIVATE bf::dependencies::optional::audaspace
 )

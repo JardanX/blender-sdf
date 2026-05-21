@@ -50,6 +50,7 @@ const EnumPropertyItem rna_enum_id_type_items[] = {
     {ID_MSK, "MASK", ICON_MOD_MASK, "Mask", ""},
     {ID_MA, "MATERIAL", ICON_MATERIAL_DATA, "Material", ""},
     {ID_ME, "MESH", ICON_MESH_DATA, "Mesh", ""},
+    {ID_NB, "NURB_BODY", ICON_MESH_CYLINDER, "NURB Body", ""},
 
     {ID_MC, "MOVIECLIP", ICON_TRACKER, "Movie Clip", ""},
     {ID_NT, "NODETREE", ICON_NODETREE, "Node Tree", ""},
@@ -170,6 +171,11 @@ const IDFilterEnumPropertyItem rna_enum_id_type_filter_items[] = {
      "Show Movie Clip data-blocks"},
     {FILTER_ID_ME, "filter_mesh", ICON_MESH_DATA, "Meshes", "Show Mesh data-blocks"},
     {FILTER_ID_MSK, "filter_mask", ICON_MOD_MASK, "Masks", "Show Mask data-blocks"},
+    {FILTER_ID_NB,
+     "filter_nurb_body",
+     ICON_MESH_CYLINDER,
+     "NURB Bodies",
+     "Show NURB Body data-blocks"},
     {FILTER_ID_NT, "filter_node_tree", ICON_NODETREE, "Node Trees", "Show Node Tree data-blocks"},
     {FILTER_ID_OB, "filter_object", ICON_OBJECT_DATA, "Objects", "Show Object data-blocks"},
     {FILTER_ID_PA,
@@ -436,6 +442,9 @@ short RNA_type_to_ID_code(const StructRNA *type)
   if (base_type == RNA_Mesh) {
     return ID_ME;
   }
+  if (base_type == RNA_NurbBody) {
+    return ID_NB;
+  }
   if (base_type == RNA_Mask) {
     return ID_MSK;
   }
@@ -542,6 +551,8 @@ StructRNA *ID_code_to_RNA_type(short idcode)
       return RNA_MovieClip;
     case ID_ME:
       return RNA_Mesh;
+    case ID_NB:
+      return RNA_NurbBody;
     case ID_MSK:
       return RNA_Mask;
     case ID_NT:
