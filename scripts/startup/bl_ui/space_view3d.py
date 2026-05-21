@@ -828,6 +828,28 @@ class VIEW3D_HT_header(Header):
         layout.template_header_3D_mode()
 
         # Contains buttons like Mode, Pivot, Layer, Mesh Select Mode...
+        if object_mode == 'OBJECT':
+            select_mode = context.tool_settings.nurb_body_select_mode
+            row = layout.row(align=True)
+            row.operator(
+                "object.nurb_body_select_mode",
+                text="",
+                icon='EDGESEL',
+                depress=(select_mode == 'EDGE'),
+            ).mode = 'EDGE'
+            row.operator(
+                "object.nurb_body_select_mode",
+                text="",
+                icon='FACESEL',
+                depress=(select_mode == 'FACE'),
+            ).mode = 'FACE'
+            row.operator(
+                "object.nurb_body_select_mode",
+                text="",
+                icon='OBJECT_DATAMODE',
+                depress=(select_mode == 'OBJECT'),
+            ).mode = 'OBJECT'
+
         if obj:
             # Particle edit
             if object_mode == 'PARTICLE_EDIT':
@@ -850,28 +872,6 @@ class VIEW3D_HT_header(Header):
                     icon='CURVE_PATH',
                     depress=(domain == 'CURVE'),
                 ).domain = 'CURVE'
-            elif object_mode == 'OBJECT' and obj.type == 'NURB_BODY':
-                select_mode = context.tool_settings.nurb_body_select_mode
-                row = layout.row(align=True)
-                row.operator(
-                    "object.nurb_body_select_mode",
-                    text="",
-                    icon='EDGESEL',
-                    depress=(select_mode == 'EDGE'),
-                ).mode = 'EDGE'
-                row.operator(
-                    "object.nurb_body_select_mode",
-                    text="",
-                    icon='FACESEL',
-                    depress=(select_mode == 'FACE'),
-                ).mode = 'FACE'
-                row.operator(
-                    "object.nurb_body_select_mode",
-                    text="",
-                    icon='OBJECT_DATAMODE',
-                    depress=(select_mode == 'OBJECT'),
-                ).mode = 'OBJECT'
-
         # Grease Pencil
         if obj and obj.type == 'GREASEPENCIL':
             # Select mode for Editing

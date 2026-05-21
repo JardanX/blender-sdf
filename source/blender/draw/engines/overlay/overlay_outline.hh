@@ -81,11 +81,9 @@ class Outline : Overlay {
 
   PassMain outline_prepass_flat_ps_ = {"PrepassFlat"};
 
-  static bool nurb_body_has_edge_interaction(const NurbBody &body)
+  static bool nurb_body_has_edge_selection(const NurbBody &body)
   {
-    if (body.selected_edges != 0 || body.surface_selected_edges != 0 || body.hovered_edge >= 0 ||
-        body.surface_hovered_edge >= 0)
-    {
+    if (body.selected_edges != 0 || body.surface_selected_edges != 0) {
       return true;
     }
     for (const NurbBodyBooleanOp *op = static_cast<const NurbBodyBooleanOp *>(
@@ -93,9 +91,7 @@ class Outline : Overlay {
          op;
          op = op->next)
     {
-      if (op->selected_edges != 0 || op->hovered_edge >= 0 ||
-          (op->flag & NURB_BODY_BOOLEAN_OP_HOVERED) != 0)
-      {
+      if (op->selected_edges != 0) {
         return true;
       }
     }
@@ -112,7 +108,7 @@ class Outline : Overlay {
     }
 
     const NurbBody *body = reinterpret_cast<const NurbBody *>(original_object->data);
-    if (body != nullptr && nurb_body_has_edge_interaction(*body)) {
+    if (body != nullptr && nurb_body_has_edge_selection(*body)) {
       return false;
     }
     return (original_object->base_flag & BASE_SELECTED) != 0;
@@ -262,19 +258,9 @@ class Outline : Overlay {
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
       case OB_NURB_BODY: {
-        const Object *original_object = DEG_get_original(ob_ref.object);
-        const NurbBody *body = (original_object != nullptr &&
-                                original_object->type == OB_NURB_BODY &&
-                                original_object->data != nullptr) ?
-                                   reinterpret_cast<const NurbBody *>(original_object->data) :
-                                   nullptr;
-        if (body != nullptr && nurb_body_has_edge_interaction(*body)) {
-          break;
-        }
-        geom = DRW_cache_mesh_surface_get(ob_ref.object);
-        (nurb_body_draw_as_object_selected(*ob_ref.object) ? prepass_nurb_body_selected_ps_ :
-                                                             prepass_nurb_body_black_ps_)
-            ->draw(geom, manager.unique_handle(ob_ref));
+        /* NURB Body silhouettes are drawn by overlay_nurb_body with the same retained polyline
+         * shader as sharp/hovered/selected NURB edges. Mixing this post-process outline with the
+         * NURB edge overlay gives different AA and depth coverage on the same rim. */
         break;
       }
       case OB_MESH:

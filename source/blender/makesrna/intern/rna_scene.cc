@@ -6,6 +6,7 @@
  * \ingroup RNA
  */
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "DNA_curve_types.h"
@@ -2232,6 +2233,34 @@ static void rna_Scene_nurb_body_select_mode_update(bContext *C, PointerRNA *ptr)
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
 
+static void rna_Scene_nurb_body_viewport_update(bContext *C, PointerRNA *ptr)
+{
+  ToolSettings *ts = static_cast<ToolSettings *>(ptr->data);
+  ts->nurb_body_tessellation_deflection = std::max(ts->nurb_body_tessellation_deflection,
+                                                   0.0001f);
+  ts->nurb_body_tessellation_angle = std::clamp(ts->nurb_body_tessellation_angle,
+                                                0.01f,
+                                                3.14159f);
+
+  const int viewport_flags = ts->nurb_body_viewport_flag &
+                             (NURB_BODY_TRIANGULATE_MESH | NURB_BODY_SMOOTH_SHADING);
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return;
+  }
+
+  for (NurbBody &body : bmain->nurb_bodies) {
+    body.tessellation_deflection = ts->nurb_body_tessellation_deflection;
+    body.tessellation_angle = ts->nurb_body_tessellation_angle;
+    body.flag &= ~(NURB_BODY_TRIANGULATE_MESH | NURB_BODY_SMOOTH_SHADING);
+    body.flag |= viewport_flags;
+    DEG_id_tag_update(&body.id, ID_RECALC_GEOMETRY);
+  }
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
+}
+
 static void rna_Scene_uv_select_mode_update(bContext *C, PointerRNA * /*ptr*/)
 {
   /* Makes sure that the UV selection states are consistent with the current UV select mode and
@@ -4392,6 +4421,43 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(
       prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_select_mode_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_deflection", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_deflection");
+  RNA_def_property_range(prop, 0.0001f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0001f, 1.0f, 0.1f, 4);
+  RNA_def_property_ui_text(
+      prop, "NURB Body Deflection", "Viewport tessellation linear deflection for NURB Bodies");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "nurb_body_tessellation_angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_angle");
+  RNA_def_property_range(prop, 0.01f, 3.14159f);
+  RNA_def_property_ui_range(prop, 0.01f, 1.0f, 1.0f, 4);
+  RNA_def_property_ui_text(
+      prop, "NURB Body Angle", "Viewport tessellation angular deflection for NURB Bodies");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "use_nurb_body_triangulate_mesh", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "nurb_body_viewport_flag", NURB_BODY_TRIANGULATE_MESH);
+  RNA_def_property_ui_text(
+      prop, "Triangulate Mesh", "Keep NURB Body viewport tessellation as triangles");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
+
+  prop = RNA_def_property(srna, "use_nurb_body_smooth_shading", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "nurb_body_viewport_flag", NURB_BODY_SMOOTH_SHADING);
+  RNA_def_property_ui_text(prop, "Smooth Shading", "Use smooth shading on NURB Body viewport meshes");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Scene_nurb_body_viewport_update");
 
   prop = RNA_def_property(srna, "vertex_group_weight", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "vgroup_weight");

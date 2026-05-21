@@ -2171,6 +2171,10 @@ struct ToolSettings {
   char selectmode = SCE_SELECT_VERTEX;
   /** Selection target for NURB Body object-mode tools. */
   char nurb_body_select_mode = 0;
+  /** Viewport tessellation settings for all NURB Body objects. */
+  int nurb_body_viewport_flag = (1 << 1) | (1 << 2);
+  float nurb_body_tessellation_deflection = 0.01f;
+  float nurb_body_tessellation_angle = 0.558505f;
 
   /* UV Calculation. */
 
@@ -2180,7 +2184,7 @@ struct ToolSettings {
   char uv_flag = UV_FLAG_SELECT_SYNC;
   char uv_selectmode = UV_SELECT_VERT;
   char uv_sticky = 0;
-  char _pad_nurb_body_select_mode[7] = {};
+  char _pad_nurb_body_viewport[3] = {};
 
   rctf uv_custom_region = {};
 

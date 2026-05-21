@@ -181,11 +181,11 @@ class WORKSPACE_PT_nurb_body_viewport(WorkSpaceButtonsPanel, Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
-        body = context.object.data
-        layout.prop(body, "tessellation_deflection", text="Deflection")
-        layout.prop(body, "tessellation_angle", text="Angle")
-        layout.prop(body, "use_triangulate_mesh")
-        layout.prop(body, "use_smooth_shading")
+        tool_settings = context.tool_settings
+        layout.prop(tool_settings, "nurb_body_tessellation_deflection", text="Deflection")
+        layout.prop(tool_settings, "nurb_body_tessellation_angle", text="Angle")
+        layout.prop(tool_settings, "use_nurb_body_triangulate_mesh")
+        layout.prop(tool_settings, "use_nurb_body_smooth_shading")
 
 
 class WORKSPACE_PT_custom_props(WorkSpaceButtonsPanel, PropertyPanel, Panel):

@@ -125,37 +125,12 @@ static void rna_def_nurb_body_data(BlenderRNA *brna)
       "Legacy option kept for compatibility; NURB body previews do not merge vertices");
   RNA_def_property_update(prop, 0, "rna_NurbBody_update");
 
-  prop = RNA_def_property(srna, "use_smooth_shading", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", NURB_BODY_SMOOTH_SHADING);
-  RNA_def_property_ui_text(prop, "Smooth Shading", "Use smooth shading on the viewport preview mesh");
-  RNA_def_property_update(prop, 0, "rna_NurbBody_update");
-
-  prop = RNA_def_property(srna, "use_triangulate_mesh", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", NURB_BODY_TRIANGULATE_MESH);
-  RNA_def_property_ui_text(
-      prop, "Triangulate Mesh", "Keep OCCT preview tessellation as triangles");
-  RNA_def_property_update(prop, 0, "rna_NurbBody_update");
-
   prop = RNA_def_property(srna, "use_auto_crease_sharp_edges", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", NURB_BODY_AUTO_CREASE_SHARP_EDGES);
   RNA_def_property_ui_text(
       prop,
       "Auto Crease Sharp Edges",
       "Legacy option kept for compatibility; NURB body shading uses NURB-derived custom normals");
-  RNA_def_property_update(prop, 0, "rna_NurbBody_update");
-
-  prop = RNA_def_property(srna, "tessellation_deflection", PROP_FLOAT, PROP_DISTANCE);
-  RNA_def_property_float_sdna(prop, nullptr, "tessellation_deflection");
-  RNA_def_property_range(prop, 0.0001f, 10.0f);
-  RNA_def_property_ui_range(prop, 0.0001f, 1.0f, 0.1f, 4);
-  RNA_def_property_ui_text(prop, "Deflection", "Preview tessellation linear deflection");
-  RNA_def_property_update(prop, 0, "rna_NurbBody_update");
-
-  prop = RNA_def_property(srna, "tessellation_angle", PROP_FLOAT, PROP_ANGLE);
-  RNA_def_property_float_sdna(prop, nullptr, "tessellation_angle");
-  RNA_def_property_range(prop, 0.01f, 3.14159f);
-  RNA_def_property_ui_range(prop, 0.01f, 1.0f, 1.0f, 4);
-  RNA_def_property_ui_text(prop, "Angle", "Preview tessellation angular deflection");
   RNA_def_property_update(prop, 0, "rna_NurbBody_update");
 
   prop = RNA_def_property(srna, "auto_crease_angle", PROP_FLOAT, PROP_ANGLE);
