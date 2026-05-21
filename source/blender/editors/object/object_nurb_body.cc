@@ -1255,6 +1255,7 @@ struct NurbBodyBevelData {
   uint64_t edit_edge_mask = 0;
   int start_mouse_x = 0;
   float radius_step = 0.001f;
+  float preview_radius_step = 0.004f;
   float max_preview_radius = FLT_MAX;
   float last_preview_radius = -1.0f;
   float mcenter[2] = {};
@@ -1413,6 +1414,34 @@ static NurbBodyEdgeHit nurb_body_selected_or_hovered_edge(bContext *C, NurbBody 
   return selected_edge;
 }
 
+static float nurb_body_polyline_length(const Span<float3> points)
+{
+  float length = 0.0f;
+  for (int i = 1; i < points.size(); i++) {
+    const float3 delta = points[i] - points[i - 1];
+    length += std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+  }
+  return length;
+}
+
+static bool nurb_body_edge_matches_polyline(const NurbBodyEdgeHit &edge,
+                                            const NurbBodyEdgePolyline &polyline)
+{
+  if (polyline.edge_index != edge.edge_index ||
+      (polyline.flag & NURB_BODY_EDGE_POLYLINE_SELECTABLE) == 0 || polyline.points.size() < 2)
+  {
+    return false;
+  }
+  if (edge.body_edge) {
+    return polyline.op == nullptr && (polyline.flag & NURB_BODY_EDGE_POLYLINE_BODY) != 0;
+  }
+  if (edge.surface_edge) {
+    return polyline.op == nullptr && (polyline.flag & NURB_BODY_EDGE_POLYLINE_FINAL) != 0 &&
+           (edge.edge_key == 0 || polyline.edge_key == edge.edge_key);
+  }
+  return polyline.op == edge.op;
+}
+
 static bool nurb_body_boolean_op_anchor_world(const Object &ob,
                                               const NurbBodyBooleanOp &op,
                                               const int edge_index,
@@ -1447,8 +1476,23 @@ static float nurb_body_modal_bevel_radius_limit(const Object &ob,
                                                 const NurbBodyEdgeHit &edge,
                                                 const float radius_limit)
 {
-  UNUSED_VARS(ob, edge, radius_limit);
-  return 100000.0f;
+  float limit = std::max(radius_limit * 0.95f, 0.001f);
+  float edge_length_limit = FLT_MAX;
+  const Span<NurbBodyEdgePolyline> polylines = BKE_nurb_body_boolean_edge_polylines_cached(&ob,
+                                                                                           64);
+  for (const NurbBodyEdgePolyline &polyline : polylines) {
+    if (!nurb_body_edge_matches_polyline(edge, polyline)) {
+      continue;
+    }
+    const float length = nurb_body_polyline_length(polyline.points.as_span());
+    if (length > 0.0f) {
+      edge_length_limit = std::min(edge_length_limit, length * 0.33f);
+    }
+  }
+  if (edge_length_limit != FLT_MAX) {
+    limit = std::min(limit, edge_length_limit);
+  }
+  return std::max(limit, 0.001f);
 }
 
 static void nurb_body_tag_geometry_changed(bContext *C, Object &ob, NurbBody &body)
@@ -1677,23 +1721,35 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
 
   NurbBody *body = id_cast<NurbBody *>(ob->data);
   if (!data->body_edge && !data->surface_edge && data->op == nullptr) {
+    body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
+    nurb_body_tag_geometry_changed(C, *ob, *body);
     object_nurb_body_bevel_finish(C, op);
     return OPERATOR_CANCELLED;
   }
   NurbBodyBevelTarget target = nurb_body_bevel_target_for_data(*body, *data);
 
+  auto radius_from_mouse = [&]() {
+    const float delta = float(event->mval[0] - data->start_mouse_x) * data->radius_step;
+    return std::clamp(data->start_radius + delta, 0.0f, data->max_preview_radius);
+  };
+
+  auto apply_radius = [&](const float radius) {
+    *target.bevel_radius = radius;
+    *target.bevel_edges = data->edge_mask;
+    *target.bevel_edge = data->edge_index;
+    nurb_body_set_edge_bevel_radii(data->edit_edge_mask, radius, target.bevel_radii);
+  };
+
   switch (event->type) {
     case MOUSEMOVE: {
-      const float delta = float(event->mval[0] - data->start_mouse_x) * data->radius_step;
-      const float radius = std::clamp(
-          data->start_radius + delta, 0.0f, data->max_preview_radius);
-      *target.bevel_radius = radius;
-      *target.bevel_edges = data->edge_mask;
-      *target.bevel_edge = data->edge_index;
-      nurb_body_set_edge_bevel_radii(data->edit_edge_mask, radius, target.bevel_radii);
-
+      const float radius = radius_from_mouse();
       const bool first_preview = data->last_preview_radius < 0.0f;
-      if (first_preview || radius != data->last_preview_radius) {
+      const bool force_endpoint_preview = radius == 0.0f || radius == data->max_preview_radius;
+      const bool endpoint_changed = force_endpoint_preview && radius != data->last_preview_radius;
+      if (first_preview || endpoint_changed ||
+          std::abs(radius - data->last_preview_radius) >= data->preview_radius_step)
+      {
+        apply_radius(radius);
         data->last_preview_radius = radius;
         nurb_body_tag_geometry_changed(C, *ob, *body);
       }
@@ -1722,6 +1778,8 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     case EVT_RETKEY:
     case EVT_PADENTER:
       if (event->val == KM_PRESS) {
+        apply_radius(radius_from_mouse());
+        body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
         *target.selected_edges = 0;
         *target.selected_edge = -1;
         *target.hovered_edge = -1;
@@ -1739,6 +1797,7 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     case RIGHTMOUSE:
     case EVT_ESCKEY:
       if (event->val == KM_PRESS) {
+        body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
         *target.bevel_radius = data->start_radius;
         *target.bevel_type = data->start_bevel_type;
         *target.bevel_edge = data->start_bevel_edge;
@@ -1842,6 +1901,12 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
                                                                        target.bevel_radii);
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const int profile = RNA_enum_get(op->ptr, "profile");
+  const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
+                                 body->radius :
+                                 nurb_body_boolean_op_scaled_radius(*active_edge.op);
+  const float max_preview_radius = nurb_body_modal_bevel_radius_limit(*ob,
+                                                                      active_edge,
+                                                                      radius_limit);
 
   nurb_body_materialize_edge_bevel_radii(
       existing_bevel_edges, *target.bevel_radius, target.bevel_radii);
@@ -1879,13 +1944,15 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   data->edge_mask = target_edges;
   data->edit_edge_mask = active_edges;
   data->start_mouse_x = event->mval[0];
-  const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
-                                 body->radius :
-                                 nurb_body_boolean_op_scaled_radius(*active_edge.op);
   const float radius_scale = std::max(radius_limit, 0.001f);
   data->radius_step = std::clamp(radius_scale * 0.001f, 0.0001f, 0.005f);
-  data->max_preview_radius = nurb_body_modal_bevel_radius_limit(*ob, active_edge, radius_limit);
+  data->preview_radius_step = std::clamp(std::max(data->radius_step * 4.0f,
+                                                  radius_scale * 0.002f),
+                                         0.001f,
+                                         0.02f);
+  data->max_preview_radius = max_preview_radius;
   data->last_preview_radius = -1.0f;
+  body->flag |= NURB_BODY_FAST_BEVEL_PREVIEW;
 
   if (region) {
     if (found_anchor) {

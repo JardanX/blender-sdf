@@ -59,7 +59,7 @@
 #  include <BRepMesh_IncrementalMesh.hxx>
 #  include <BRepPrimAPI_MakeCylinder.hxx>
 #  include <BRepTools.hxx>
-#  include <ChFiDS_ErrorStatus.hxx>
+#  include <ChFi3d_FilletShape.hxx>
 #  include <Geom_Circle.hxx>
 #  include <Geom_Curve.hxx>
 #  include <Geom_CylindricalSurface.hxx>
@@ -218,7 +218,8 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
   NurbBody *body = reinterpret_cast<NurbBody *>(id);
   BLO_read_pointer_array(reader, body->totcol, reinterpret_cast<void **>(&body->mat));
   BLO_read_struct_list(reader, NurbBodyBooleanOp, &body->boolean_ops);
-  body->flag &= ~(NURB_BODY_MERGE_VERTICES | NURB_BODY_AUTO_CREASE_SHARP_EDGES);
+  body->flag &= ~(NURB_BODY_MERGE_VERTICES | NURB_BODY_AUTO_CREASE_SHARP_EDGES |
+                  NURB_BODY_FAST_BEVEL_PREVIEW);
   body->hovered_edge = -1;
   body->surface_hovered_edge = -1;
   if (body->selected_edges == 0 && body->selected_edge >= 0) {
@@ -1390,6 +1391,18 @@ static Vector<NurbBodyBlendStep> sorted_blend_steps(const float bevel_radius,
   return steps;
 }
 
+static bool blend_steps_can_share_builder(const NurbBodyBlendStep &a,
+                                          const NurbBodyBlendStep &b)
+{
+  if (a.bevel_type != b.bevel_type) {
+    return false;
+  }
+  const float radius_tolerance = std::max(1.0e-6f,
+                                          std::max(std::abs(a.radius), std::abs(b.radius)) *
+                                              1.0e-5f);
+  return std::abs(a.radius - b.radius) <= radius_tolerance;
+}
+
 static Vector<Vector<float3>> reference_points_for_edges(const Vector<TopoDS_Edge> &edges)
 {
   Vector<Vector<float3>> references;
@@ -1461,7 +1474,7 @@ static double safe_blend_radius_limit(const float radius_limit, const TopoDS_Edg
   const double base_limit = double(std::max(radius_limit, 0.001f));
   Vector<float3> points;
   if (!edge.IsNull() && append_edge_polyline_local(edge, 16, points) && points.size() >= 2) {
-    const double edge_limit = double(polyline_length(points.as_span())) * 0.45;
+    const double edge_limit = double(polyline_length(points.as_span())) * 0.33;
     if (edge_limit > 0.0) {
       return std::max(std::min(base_limit, edge_limit), 1.0e-6);
     }
@@ -1502,6 +1515,7 @@ static bool try_edge_set_blend(const TopoDS_Shape &shape,
                                const Span<TopoDS_Edge> edges,
                                const bool validate_shape,
                                const bool prepare_edges,
+                               const ChFi3d_FilletShape fillet_shape,
                                TopoDS_Shape &r_shape)
 {
   if (radius <= 0.0 || edges.is_empty()) {
@@ -1533,10 +1547,6 @@ static bool try_edge_set_blend(const TopoDS_Shape &shape,
           continue;
         }
         contours.append(contour);
-        chamfer.Simulate(contour);
-        if (chamfer.NbSurf(contour) <= 0) {
-          return false;
-        }
       }
       if (contours.is_empty()) {
         return false;
@@ -1548,7 +1558,7 @@ static bool try_edge_set_blend(const TopoDS_Shape &shape,
       blended_shape = chamfer.Shape();
     }
     else {
-      BRepFilletAPI_MakeFillet fillet(shape);
+      BRepFilletAPI_MakeFillet fillet(shape, fillet_shape);
       bool added_edge = false;
       Vector<int> contours;
       for (const TopoDS_Edge &edge : edges) {
@@ -1570,16 +1580,15 @@ static bool try_edge_set_blend(const TopoDS_Shape &shape,
           continue;
         }
         contours.append(contour);
-        fillet.Simulate(contour);
-        if (fillet.NbSurf(contour) <= 0 || fillet.StripeStatus(contour) != ChFiDS_Ok) {
-          return false;
-        }
       }
       if (contours.is_empty()) {
         return false;
       }
       fillet.Build();
       if (!fillet.IsDone()) {
+        return false;
+      }
+      if (fillet.NbFaultyContours() > 0 || fillet.NbFaultyVertices() > 0) {
         return false;
       }
       blended_shape = fillet.Shape();
@@ -1606,12 +1615,19 @@ static bool try_single_edge_blend(const TopoDS_Shape &shape,
                                   const TopoDS_Edge &edge,
                                   const bool validate_shape,
                                   const bool prepare_edges,
+                                  const ChFi3d_FilletShape fillet_shape,
                                   TopoDS_Shape &r_shape)
 {
   Vector<TopoDS_Edge> edges;
   edges.append(edge);
-  return try_edge_set_blend(
-      shape, radius, bevel_type, edges.as_span(), validate_shape, prepare_edges, r_shape);
+  return try_edge_set_blend(shape,
+                            radius,
+                            bevel_type,
+                            edges.as_span(),
+                            validate_shape,
+                            prepare_edges,
+                            fillet_shape,
+                            r_shape);
 }
 
 static double edge_length_for_blend(const TopoDS_Edge &edge)
@@ -1770,26 +1786,28 @@ static TopoDS_Shape apply_single_edge_blend(const TopoDS_Shape &shape,
                                             const int bevel_type,
                                             const TopoDS_Edge &edge,
                                             const bool validate_shape,
+                                            const bool fast_preview,
                                             bool &r_applied)
 {
   r_applied = false;
   const double hard_limit = safe_blend_radius_limit(radius_limit, edge);
-  const double radius = double(bevel_radius);
+  const double radius = std::min(double(bevel_radius), hard_limit);
   if (radius <= 0.0) {
     return shape;
   }
   const bool strict_validate_shape = validate_shape && radius >= hard_limit * 0.85;
+  const ChFi3d_FilletShape fillet_shape = fast_preview ? ChFi3d_Polynomial : ChFi3d_Rational;
 
   Vector<TopoDS_Edge> connected_edges;
   bool connected_edges_ready = false;
   auto try_blend_radius = [&](const double test_radius, TopoDS_Shape &r_shape) {
     if (try_single_edge_blend(
-            shape, test_radius, bevel_type, edge, strict_validate_shape, false, r_shape))
+            shape, test_radius, bevel_type, edge, strict_validate_shape, false, fillet_shape, r_shape))
     {
       return true;
     }
     if (try_single_edge_blend(
-            shape, test_radius, bevel_type, edge, strict_validate_shape, true, r_shape))
+            shape, test_radius, bevel_type, edge, strict_validate_shape, true, fillet_shape, r_shape))
     {
       return true;
     }
@@ -1804,6 +1822,7 @@ static TopoDS_Shape apply_single_edge_blend(const TopoDS_Shape &shape,
                               connected_edges.as_span(),
                               strict_validate_shape,
                               true,
+                              fillet_shape,
                               r_shape);
   };
 
@@ -1829,6 +1848,7 @@ static TopoDS_Shape apply_edge_blend(const TopoDS_Shape &shape,
                                      const int selected_edge,
                                      const Vector<TopoDS_Edge> &edges,
                                      const bool validate_shape,
+                                     const bool fast_preview,
                                      EdgeRefinder &&refind_edges)
 {
   const Vector<NurbBodyBlendStep> steps = sorted_blend_steps(bevel_radius,
@@ -1850,10 +1870,63 @@ static TopoDS_Shape apply_edge_blend(const TopoDS_Shape &shape,
   Vector<Vector<float3>> edge_references;
   bool edge_references_ready = false;
   bool current_edges_match_input = true;
-  for (const NurbBodyBlendStep &step : steps) {
+  const ChFi3d_FilletShape fillet_shape = fast_preview ? ChFi3d_Polynomial : ChFi3d_Rational;
+  for (int step_i = 0; step_i < steps.size();) {
+    const NurbBodyBlendStep &step = steps[step_i];
     if (current_edges.is_empty() || step.edge_index < 0) {
+      step_i++;
       continue;
     }
+    if (current_edges_match_input && step.edge_index < current_edges.size() &&
+        !current_edges[step.edge_index].IsNull())
+    {
+      Vector<TopoDS_Edge> batch_edges;
+      int batch_end = step_i;
+      for (; batch_end < steps.size(); batch_end++) {
+        const NurbBodyBlendStep &candidate = steps[batch_end];
+        if (!blend_steps_can_share_builder(step, candidate)) {
+          break;
+        }
+        if (candidate.edge_index < 0 || candidate.edge_index >= current_edges.size() ||
+            current_edges[candidate.edge_index].IsNull())
+        {
+          break;
+        }
+        const double hard_limit = safe_blend_radius_limit(radius_limit,
+                                                          current_edges[candidate.edge_index]);
+        if (double(candidate.radius) > hard_limit + 1.0e-9) {
+          break;
+        }
+        batch_edges.append(current_edges[candidate.edge_index]);
+      }
+      if (batch_edges.size() > 1) {
+        TopoDS_Shape batch_shape;
+        if (try_edge_set_blend(result,
+                               double(step.radius),
+                               step.bevel_type,
+                               batch_edges.as_span(),
+                               validate_shape,
+                               false,
+                               fillet_shape,
+                               batch_shape) ||
+            try_edge_set_blend(result,
+                               double(step.radius),
+                               step.bevel_type,
+                               batch_edges.as_span(),
+                               validate_shape,
+                               true,
+                               fillet_shape,
+                               batch_shape))
+        {
+          result = batch_shape;
+          current_edges = refind_edges(result);
+          current_edges_match_input = false;
+          step_i = batch_end;
+          continue;
+        }
+      }
+    }
+
     int current_edge = -1;
     if (current_edges_match_input && step.edge_index < current_edges.size()) {
       current_edge = step.edge_index;
@@ -1872,6 +1945,7 @@ static TopoDS_Shape apply_edge_blend(const TopoDS_Shape &shape,
     if (current_edge < 0 || current_edge >= current_edges.size() ||
         current_edges[current_edge].IsNull())
     {
+      step_i++;
       continue;
     }
 
@@ -1883,11 +1957,13 @@ static TopoDS_Shape apply_edge_blend(const TopoDS_Shape &shape,
         step.bevel_type,
         current_edges[current_edge],
         validate_shape,
+        fast_preview,
         applied);
     if (applied) {
       current_edges = refind_edges(result);
       current_edges_match_input = false;
     }
+    step_i++;
   }
   return result;
 }
@@ -1906,6 +1982,7 @@ static TopoDS_Shape apply_stable_surface_edge_blend(const TopoDS_Shape &shape,
                                                     const uint64_t *edge_keys,
                                                     const int samples_per_edge,
                                                     const bool validate_shape,
+                                                    const bool fast_preview,
                                                     uint64_t *r_applied_edges)
 {
   if (r_applied_edges != nullptr) {
@@ -1928,14 +2005,74 @@ static TopoDS_Shape apply_stable_surface_edge_blend(const TopoDS_Shape &shape,
   TopoDS_Shape result = shape;
   Vector<NurbBodySurfaceEdgeEntry> current_edges = find_selectable_surface_edge_catalog(
       result, samples_per_edge);
-  for (const NurbBodyBlendStep &step : steps) {
+  const ChFi3d_FilletShape fillet_shape = fast_preview ? ChFi3d_Polynomial : ChFi3d_Rational;
+  for (int step_i = 0; step_i < steps.size();) {
+    const NurbBodyBlendStep &step = steps[step_i];
     if (step.edge_index < 0 || step.edge_index >= 64 || edge_keys == nullptr ||
         edge_keys[step.edge_index] == 0) {
+      step_i++;
       continue;
     }
     const int current_edge = find_catalog_edge_for_key(current_edges, edge_keys[step.edge_index]);
     if (current_edge == -1) {
+      step_i++;
       continue;
+    }
+    Vector<TopoDS_Edge> batch_edges;
+    Vector<int> batch_edge_indices;
+    int batch_end = step_i;
+    for (; batch_end < steps.size(); batch_end++) {
+      const NurbBodyBlendStep &candidate = steps[batch_end];
+      if (!blend_steps_can_share_builder(step, candidate)) {
+        break;
+      }
+      if (candidate.edge_index < 0 || candidate.edge_index >= 64 || edge_keys == nullptr ||
+          edge_keys[candidate.edge_index] == 0)
+      {
+        break;
+      }
+      const int candidate_current_edge = find_catalog_edge_for_key(
+          current_edges, edge_keys[candidate.edge_index]);
+      if (candidate_current_edge == -1) {
+        break;
+      }
+      const TopoDS_Edge &candidate_edge = current_edges[candidate_current_edge].edge;
+      const double hard_limit = safe_blend_radius_limit(radius_limit, candidate_edge);
+      if (double(candidate.radius) > hard_limit + 1.0e-9) {
+        break;
+      }
+      batch_edges.append(candidate_edge);
+      batch_edge_indices.append(candidate.edge_index);
+    }
+    if (batch_edges.size() > 1) {
+      TopoDS_Shape batch_shape;
+      if (try_edge_set_blend(result,
+                             double(step.radius),
+                             step.bevel_type,
+                             batch_edges.as_span(),
+                             validate_shape,
+                             false,
+                             fillet_shape,
+                             batch_shape) ||
+          try_edge_set_blend(result,
+                             double(step.radius),
+                             step.bevel_type,
+                             batch_edges.as_span(),
+                             validate_shape,
+                             true,
+                             fillet_shape,
+                             batch_shape))
+      {
+        result = batch_shape;
+        if (r_applied_edges != nullptr) {
+          for (const int edge_index : batch_edge_indices) {
+            *r_applied_edges |= nurb_body_edge_mask_for_index(edge_index);
+          }
+        }
+        current_edges = find_selectable_surface_edge_catalog(result, samples_per_edge);
+        step_i = batch_end;
+        continue;
+      }
     }
 
     bool applied = false;
@@ -1945,6 +2082,7 @@ static TopoDS_Shape apply_stable_surface_edge_blend(const TopoDS_Shape &shape,
                                      step.bevel_type,
                                      current_edges[current_edge].edge,
                                      validate_shape,
+                                     fast_preview,
                                      applied);
     if (applied) {
       if (r_applied_edges != nullptr) {
@@ -1952,12 +2090,14 @@ static TopoDS_Shape apply_stable_surface_edge_blend(const TopoDS_Shape &shape,
       }
       current_edges = find_selectable_surface_edge_catalog(result, samples_per_edge);
     }
+    step_i++;
   }
   return result;
 }
 
 static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
-                                               const bool validate_shape)
+                                               const bool validate_shape,
+                                               const bool fast_preview)
 {
   const float operand_radius = nurb_body_boolean_op_scaled_radius(op);
   const float radial_scale = nurb_body_boolean_op_radial_scale(op);
@@ -1994,6 +2134,7 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
                              op.operand_selected_edge,
                              body_edges,
                              validate_shape,
+                             fast_preview,
                              [](const TopoDS_Shape &shape) {
                                return find_selectable_surface_edges(shape);
                              });
@@ -2033,6 +2174,7 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
                                           op.operand_selected_edge,
                                           unscaled_body_edges,
                                           validate_shape,
+                                          fast_preview,
                                           [](const TopoDS_Shape &shape) {
                                             return find_selectable_surface_edges(shape);
                                           });
@@ -2070,6 +2212,7 @@ static TopoDS_Shape make_boolean_op_tool_shape(const NurbBodyBooleanOp &op,
                                             surface_edge_keys,
                                             64,
                                             validate_shape,
+                                            fast_preview,
                                             nullptr);
   }
 
@@ -2099,6 +2242,7 @@ static void nurb_body_stage_hash_body_base(uint64_t &hash,
   nurb_body_stage_hash_value(hash, body.primitive);
   nurb_body_stage_hash_value(hash, body.radius);
   nurb_body_stage_hash_value(hash, body.depth);
+  nurb_body_stage_hash_value(hash, body.flag & NURB_BODY_FAST_BEVEL_PREVIEW);
   nurb_body_stage_hash_value(hash, body.bevel_edge);
   nurb_body_stage_hash_value(hash, body.bevel_edges);
   nurb_body_stage_hash_value(hash, body.chamfer_edges);
@@ -2226,6 +2370,7 @@ static void nurb_body_stage_shape_cache_store(const Object *object,
 static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
 {
   TopoDS_Shape result = make_body_primitive_shape(body);
+  const bool fast_preview = (body.flag & NURB_BODY_FAST_BEVEL_PREVIEW) != 0;
   if (blend_settings_may_change_shape(body.bevel_radius,
                                       body.bevel_radii,
                                       body.bevel_edges,
@@ -2247,6 +2392,7 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
                               body.selected_edge,
                               body_edges,
                               true,
+                              fast_preview,
                               [](const TopoDS_Shape &shape) {
                                 return find_selectable_surface_edges(shape);
                               });
@@ -2270,7 +2416,7 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
         result = cached_pre_output_blend;
       }
       else {
-        const TopoDS_Shape tool = make_boolean_op_tool_shape(*op, true);
+        const TopoDS_Shape tool = make_boolean_op_tool_shape(*op, true, fast_preview);
         result = apply_boolean_operation(result, tool, op->operation);
         nurb_body_stage_shape_cache_store(object, pre_output_blend_key, result);
       }
@@ -2296,6 +2442,7 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
                                   op->selected_edge,
                                   cut_edges,
                                   true,
+                                  fast_preview,
                                   [&](const TopoDS_Shape &shape) {
                                     return find_cut_edges(shape, body.radius, operand_radius);
                                   });
@@ -2334,6 +2481,7 @@ static TopoDS_Shape evaluate_shape(const NurbBody &body, const Object *object)
                                              body.surface_edge_keys,
                                              64,
                                              true,
+                                             fast_preview,
                                              nullptr);
   }
 
@@ -2353,6 +2501,7 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                                           Vector<NurbBodyEdgePolyline> &r_polylines)
 {
   TopoDS_Shape result = make_body_primitive_shape(body);
+  const bool fast_preview = (body.flag & NURB_BODY_FAST_BEVEL_PREVIEW) != 0;
   r_polylines.clear();
   Vector<NurbBodySelectableEdgeRef> selectable_refs;
   const float base_threshold = std::max(0.05f, body.tessellation_deflection * 8.0f);
@@ -2387,6 +2536,7 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                             body.selected_edge,
                             body_edges,
                             true,
+                            fast_preview,
                             [](const TopoDS_Shape &shape) {
                               return find_selectable_surface_edges(shape);
                             });
@@ -2408,7 +2558,7 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
       result = cached_pre_output_blend;
     }
     else {
-      const TopoDS_Shape tool = make_boolean_op_tool_shape(*op, true);
+      const TopoDS_Shape tool = make_boolean_op_tool_shape(*op, true, fast_preview);
       result = apply_boolean_operation(result, tool, op->operation);
       nurb_body_stage_shape_cache_store(object, pre_output_blend_key, result);
     }
@@ -2445,6 +2595,7 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                               op->selected_edge,
                               cut_edges,
                               true,
+                              fast_preview,
                               [&](const TopoDS_Shape &shape) {
                                 return find_cut_edges(shape, body.radius, operand_radius);
                               });
@@ -2492,6 +2643,7 @@ static void sample_boolean_edge_polylines(const NurbBody &body,
                                              body.surface_edge_keys,
                                              samples_per_edge,
                                              true,
+                                             fast_preview,
                                              &surface_applied_edges);
     append_selectable_edge_refs(surface_edges,
                                 surface_edge_faces,
@@ -3044,6 +3196,7 @@ static uint64_t nurb_body_geometry_cache_key(const NurbBody &body,
   nurb_body_hash_value(hash, body.primitive);
   nurb_body_hash_value(hash, body.radius);
   nurb_body_hash_value(hash, body.depth);
+  nurb_body_hash_value(hash, body.flag & NURB_BODY_FAST_BEVEL_PREVIEW);
   if (include_viewport_mesh_settings) {
     nurb_body_hash_value(hash, body.tessellation_deflection);
     nurb_body_hash_value(hash, body.tessellation_angle);
