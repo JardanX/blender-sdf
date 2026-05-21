@@ -49,6 +49,15 @@ Span<NurbBodyEdgePolyline> BKE_nurb_body_boolean_edge_polylines_cached(const Obj
                                                                        int samples_per_edge = 96);
 uint64_t BKE_nurb_body_boolean_edge_polylines_cache_key(const Object *object,
                                                         int samples_per_edge = 96);
+bool BKE_nurb_body_hovered_edge_key_set(const Object *object,
+                                        const NurbBodyBooleanOp *op,
+                                        int edge_index,
+                                        int flag,
+                                        uint64_t edge_key);
+bool BKE_nurb_body_hovered_edge_key_clear(const Object *object);
+uint64_t BKE_nurb_body_hovered_edge_key_get(const Object *object);
+bool BKE_nurb_body_hovered_edge_key_matches(const Object *object,
+                                            const NurbBodyEdgePolyline &polyline);
 void BKE_nurb_body_data_update(Depsgraph *depsgraph, Scene *scene, Object *ob);
 
 }  // namespace blender

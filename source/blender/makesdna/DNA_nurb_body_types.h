@@ -44,7 +44,6 @@ enum {
   NURB_BODY_SMOOTH_SHADING = (1 << 1),
   NURB_BODY_TRIANGULATE_MESH = (1 << 2),
   NURB_BODY_AUTO_CREASE_SHARP_EDGES = (1 << 3),
-  NURB_BODY_FAST_BEVEL_PREVIEW = (1 << 4),
 };
 
 enum {
@@ -76,6 +75,32 @@ typedef struct NurbBodyBooleanOp {
   float _pad1;
 
   float operand_to_target[4][4];
+
+  uint64_t operand_selected_edges;
+  uint64_t operand_bevel_edges;
+  uint64_t operand_chamfer_edges;
+  uint64_t operand_surface_selected_edges;
+  uint64_t operand_surface_bevel_edges;
+  uint64_t operand_surface_chamfer_edges;
+  float operand_bevel_radii[64];
+  float operand_surface_bevel_radii[64];
+  int operand_bevel_order[64];
+  int operand_surface_bevel_order[64];
+  uint64_t operand_surface_edge_keys[64];
+
+  int operand_selected_edge;
+  int operand_bevel_edge;
+  int operand_bevel_type; /* eNurbBodyBevelType */
+  int operand_bevel_order_next;
+  int operand_surface_selected_edge;
+  int operand_surface_bevel_edge;
+  int operand_surface_bevel_type; /* eNurbBodyBevelType */
+  int operand_surface_bevel_order_next;
+
+  float operand_bevel_radius;
+  float operand_surface_bevel_radius;
+  float operand_scale[3];
+  float _pad2;
 } NurbBodyBooleanOp;
 
 typedef struct NurbBody {
@@ -124,7 +149,7 @@ typedef struct NurbBody {
   float bevel_radius = 0.0f;
   float surface_bevel_radius = 0.0f;
   float tessellation_deflection = 0.01f;
-  float tessellation_angle = 0.279253f;
+  float tessellation_angle = 0.558505f;
   float auto_crease_angle = 0.523599f;
   int select_mode = NURB_BODY_SELECT_MODE_EDGE;
   int _pad0 = 0;

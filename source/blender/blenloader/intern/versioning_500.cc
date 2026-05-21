@@ -4622,6 +4622,22 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 32)) {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      ToolSettings *ts = scene.toolsettings;
+      if (ts->nurb_body_tessellation_deflection <= 0.0f &&
+          ts->nurb_body_tessellation_angle <= 0.0f && ts->nurb_body_viewport_flag == 0)
+      {
+        ts->nurb_body_viewport_flag = (1 << 1) | (1 << 2);
+        ts->nurb_body_tessellation_deflection = 0.01f;
+        ts->nurb_body_tessellation_angle = 0.558505f;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

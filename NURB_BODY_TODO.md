@@ -24,7 +24,7 @@ Persistent tracker for NURB Body bevel, boolean, selection, and viewport issues.
 - [x] Replaying earlier bevels could make a later edge reference miss and then fall back to the same numeric OCCT edge index, causing a random edge to bevel: failed remaps now skip instead of applying to a different edge.
 - [x] Beveling a sharp edge created by a previous final chamfer/fillet could show the correct outline but not modify the mesh: final-edge replay now recomputes the stable surface-edge map after each final operation, so generated edges can be targeted by later operations.
 - [x] Fallback generated-edge overlay IDs used the raw stable hash slot while geometry replay used collision probing: fallback final-edge polylines now reserve and probe final slots the same way as the evaluator.
-- [x] Edge hover/selection worked but white/orange highlights could be hidden by depth fighting with the mesh/dark outline: highlighted NURB Body edge batches now draw without depth testing after the normal dark batch.
+- [x] Edge hover/selection worked but white/orange highlights could be hidden by depth fighting with the mesh/dark outline: highlighted NURB Body edge batches now replace the normal dark edge and remain scene-depth-tested while using the line depth bias needed to stay clean on the owning surface.
 - [x] During modal bevel, the outline could show a new radius while the mesh stayed sharp because only the overlay saw sub-threshold radius updates: every modal radius update now tags geometry so mesh and line overlay stay synchronized.
 - [x] Ctrl+B bevel increments feel too large: modal bevel uses radius-scaled mouse steps and throttles preview rebuilds.
 - [x] Bottom boolean rim cannot be selected or beveled: cutter rim edges are included in selectable cut-edge references.
@@ -40,9 +40,21 @@ Persistent tracker for NURB Body bevel, boolean, selection, and viewport issues.
 - [x] Hover/selection could stop updating after edge selection deselected the object base: edge picking now scans visible NURB bodies that are themselves in Edge mode instead of requiring the active object to be in Edge mode.
 - [x] Edge hover/select bindings were losing priority to Blender's normal 3D View select path: NURB Body hover/click bindings now live in the 3D View keymap before `view3d.select`, and miss/clear cases pass through to normal selection.
 - [x] Hover/selected edge lines still drew black after selection: overlay line and silhouette passes now read NURB hover/selection state from the original object data instead of the evaluated draw object.
+- [x] Hovering one edge could turn unrelated same-index rings white: hover highlight now stores a transient evaluated edge geometry key and the overlay only draws the matching polyline white.
+- [x] Occluded NURB silhouettes could create hidden depth holes that later let edge lines draw through another object: occluded NURB outline pixels now discard instead of writing transparent color plus hidden depth.
+- [x] Visible NURB outlines could partially disappear from owner-mesh depth precision: NURB outline occlusion now uses a small self-depth tolerance, and retained edge lines use the minimum stable depth bias with a proper offset reset.
+- [x] Selecting a NURB edge while another object was object-selected left stale selected-object outlines: edge selection now clears Blender object selection for every selected object in the view layer.
+- [x] Hovering a NURB edge made the object silhouette disappear: the NURB silhouette prepass now always emits the object outline, and hover state no longer suppresses normal object-selected outline color.
+- [x] Hovered/selected NURB border edges fought with Blender's expanded silhouette line: NURB silhouettes now skip the outline anti-alias expansion data so retained NURB edge lines own the highlighted border.
+- [x] Hovered/selected NURB border edges still showed a duplicate dark line underneath: line batches now rebuild normal/hover/selected colors together, so a highlighted edge is removed from the black batch instead of being overdrawn or erased afterward.
+- [x] NURB edge outlines could drift away from the shaded mesh because line batches preferred analytic OCCT curve samples while the viewport displayed OCCT triangulation: final visible edge polylines now prefer triangulation edge polygons from the same meshed shape.
 - [x] Unmatched pre-blend selectable refs could draw a requested/rounded outline even when OCCT left the evaluated mesh sharp: fallback ref-only lines are no longer emitted, and final refs are hidden only for blends that actually applied to the result shape.
 - [x] Final/generated edge selection and bevel replay depended on unstable numeric slots, hash probing, and nearest-line fallback: selected final edges now store an evaluated OCCT edge geometry key, confirmed bevels replay only when that exact key exists, and ambiguous/unmatched generated edges remain unselectable instead of beveling the wrong edge.
 - [x] Previous confirmed final-edge fillets/chamfers could disappear when adding another bevel because circular/arc edge keys used sampled bounds that shifted after OCCT rebuilt topology: edge identity now uses duplicate-safe center, length, and covariance invariants from fixed curve samples.
+- [x] The same visible edge could be emitted as two selectable/drawable line records: duplicate final surface edge keys and duplicate selectable refs are now collapsed at the source instead of disambiguated into separate selectable edges.
+- [x] Mesh and overlay lines could still diverge when the mesh path cleaned/retriangulated a shape after the line cache had already triangulated it: evaluated shape caching now includes tessellation settings and reuses an already-current triangulated shape for mesh conversion.
+- [x] NURB silhouettes and NURB edges used different render paths, AA, and depth coverage: NURB Body silhouettes now draw as mesh-derived retained polylines in the NURB edge overlay, and NURB bodies no longer submit to Blender's post-process outline pass.
+- [x] Mesh-derived silhouettes could pick a smooth cylinder seam strip as an interior line because OCCT split the closed face boundary: silhouette extraction now groups mesh segments by endpoint position and only draws duplicated sharp border groups, skipping smooth seam/open triangulation borders.
 
 ## Needs Manual Rebuild Verification
 
@@ -66,6 +78,18 @@ Persistent tracker for NURB Body bevel, boolean, selection, and viewport issues.
 - [ ] Hover and select body, boolean, and final generated edges; confirm white hover and orange selection draw visibly on top of the dark NURB Body lines.
 - [ ] Confirm hover turns edges white before object selection, left-click selects the edge orange, shift-click multi-selects, and clicking a non-edge still performs normal Blender object selection.
 - [ ] Confirm selected/hovered edge colors still update when the viewport is drawing evaluated NURB body meshes.
+- [ ] Select or hover an edge that is behind another object; confirm the white/orange NURB edge line is occluded by the nearer object instead of leaking through.
+- [ ] With another NURB Body in front, select an edge on the rear/overlapping body and confirm no dotted black hidden-outline fragments appear on the front surface.
+- [ ] Orbit and zoom a NURB cylinder with caps, fillets, and boolean rims; confirm visible black/orange/white outlines do not partially disappear from self-depth fighting.
+- [ ] Select an edge while a mesh or another NURB Body is object-selected; confirm all object-selected orange outlines clear and only the edge remains highlighted.
+- [ ] Hover NURB body, boolean, and final generated edges; confirm the hovered edge turns white while the object silhouette remains visible.
+- [ ] Hover/select a cap rim that is also the object silhouette; confirm the white/orange edge does not show a second black dashed silhouette beside it.
+- [ ] Hover/select the same cap rim repeatedly and confirm it cannot be selected as two separate edge lines.
+- [ ] Select a silhouette rim that is partially behind another object; confirm the orange edge uses the same AA/thickness as the black silhouette and is still occluded by the nearer object.
+- [ ] Orbit a plain cylinder and confirm no long smooth-side tessellation strip is drawn across the cylinder body.
+- [ ] Hover/select a silhouette rim, then move away; confirm the black object silhouette returns and does not leave transparent gaps.
+- [ ] Zoom into cap, fillet, chamfer, and boolean rim outlines; confirm black/white/orange lines sit on the shaded mesh boundary instead of drifting above or below it.
+- [ ] Hover close cap/chamfer/fillet rings that share source edge indices and confirm only the nearest ring turns white.
 - [ ] Drag Ctrl+B slowly on a final/generated edge and confirm the mesh surface updates at the same time as the line outline, with no sharp-edge/rounded-outline mismatch.
 - [ ] Repeat the cylinder chamfer plus two fillets case and bevel the remaining rings; confirm no rounded/requested outline appears unless the evaluated mesh also changes.
 - [ ] Select each generated ring after a confirmed chamfer/fillet sequence, add another bevel, and confirm unmatched/missing stored edges are skipped rather than remapped to another visible ring.

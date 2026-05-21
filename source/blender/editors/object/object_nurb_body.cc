@@ -187,10 +187,46 @@ static void nurb_body_boolean_op_snapshot_from_object(NurbBodyBooleanOp &op,
   op.primitive = operand_body->primitive;
   op.operand_radius = operand_body->radius;
   op.operand_depth = operand_body->depth;
+  op.operand_selected_edges = operand_body->selected_edges;
+  op.operand_bevel_edges = operand_body->bevel_edges;
+  op.operand_chamfer_edges = operand_body->chamfer_edges;
+  op.operand_surface_selected_edges = operand_body->surface_selected_edges;
+  op.operand_surface_bevel_edges = operand_body->surface_bevel_edges;
+  op.operand_surface_chamfer_edges = operand_body->surface_chamfer_edges;
+  std::copy_n(operand_body->bevel_radii, 64, op.operand_bevel_radii);
+  std::copy_n(operand_body->surface_bevel_radii, 64, op.operand_surface_bevel_radii);
+  std::copy_n(operand_body->bevel_order, 64, op.operand_bevel_order);
+  std::copy_n(operand_body->surface_bevel_order, 64, op.operand_surface_bevel_order);
+  std::copy_n(operand_body->surface_edge_keys, 64, op.operand_surface_edge_keys);
+  op.operand_selected_edge = operand_body->selected_edge;
+  op.operand_bevel_edge = operand_body->bevel_edge;
+  op.operand_bevel_type = operand_body->bevel_type;
+  op.operand_bevel_order_next = operand_body->bevel_order_next;
+  op.operand_surface_selected_edge = operand_body->surface_selected_edge;
+  op.operand_surface_bevel_edge = operand_body->surface_bevel_edge;
+  op.operand_surface_bevel_type = operand_body->surface_bevel_type;
+  op.operand_surface_bevel_order_next = operand_body->surface_bevel_order_next;
+  op.operand_bevel_radius = operand_body->bevel_radius;
+  op.operand_surface_bevel_radius = operand_body->surface_bevel_radius;
 
   float target_inv[4][4];
+  float operand_to_target[4][4];
   invert_m4_m4(target_inv, target_ob.object_to_world().ptr());
-  mul_m4_m4m4(op.operand_to_target, target_inv, operand_ob.object_to_world().ptr());
+  mul_m4_m4m4(operand_to_target, target_inv, operand_ob.object_to_world().ptr());
+
+  float loc[3];
+  float rot[3][3];
+  mat4_to_loc_rot_size(loc, rot, op.operand_scale, operand_to_target);
+
+  const float unit_scale[3] = {1.0f, 1.0f, 1.0f};
+  loc_rot_size_to_mat4(op.operand_to_target, loc, rot, unit_scale);
+}
+
+static float nurb_body_boolean_op_scaled_radius(const NurbBodyBooleanOp &op)
+{
+  const float y_scale = op.operand_scale[1] == 0.0f ? 1.0f : std::abs(op.operand_scale[1]);
+  const float z_scale = op.operand_scale[2] == 0.0f ? 1.0f : std::abs(op.operand_scale[2]);
+  return std::max(op.operand_radius * (y_scale + z_scale) * 0.5f, 0.001f);
 }
 
 static Object *object_nurb_body_add(bContext *C, wmOperator *op)
@@ -494,30 +530,43 @@ static bool nurb_body_base_can_pick_edges(const Base &base)
   return true;
 }
 
-static void nurb_body_deselect_object_when_edge_selected(bContext *C, Object &ob, NurbBody &body)
+static bool nurb_body_deselect_objects_for_edge_selection(bContext *C)
 {
-  if (!nurb_body_has_edge_selection(body)) {
-    return;
-  }
-
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
-  if (scene != nullptr && view_layer != nullptr) {
-    BKE_view_layer_synced_ensure(scene, view_layer);
-    if (Base *base = BKE_view_layer_base_find(view_layer, &ob)) {
-      base_select(base, BA_DESELECT);
+  if (scene == nullptr || view_layer == nullptr) {
+    return false;
+  }
+
+  bool changed = false;
+  BKE_view_layer_synced_ensure(scene, view_layer);
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+    Object *ob = base.object;
+    if (ob == nullptr) {
+      continue;
+    }
+    if ((base.flag & BASE_SELECTED) != 0 || (ob->base_flag & BASE_SELECTED) != 0) {
+      base_select(&base, BA_DESELECT);
+      ob->base_flag &= ~BASE_SELECTED;
+      DEG_id_tag_update(&ob->id, ID_RECALC_SELECT);
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+      changed = true;
     }
   }
 
-  ob.base_flag &= ~BASE_SELECTED;
-  WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+  if (changed) {
+    BKE_view_layer_need_resync_tag(view_layer);
+    WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+  }
+  return changed;
 }
 
-static void nurb_body_clear_edge_hover(NurbBody &body)
+static void nurb_body_clear_edge_hover(Object *ob, NurbBody &body)
 {
   body.hovered_edge = -1;
   body.surface_hovered_edge = -1;
   nurb_body_boolean_ops_clear_flag(body, NURB_BODY_BOOLEAN_OP_HOVERED);
+  BKE_nurb_body_hovered_edge_key_clear(ob);
 }
 
 static bool nurb_body_has_edge_hover(const NurbBody &body)
@@ -536,13 +585,13 @@ static bool nurb_body_has_edge_hover(const NurbBody &body)
   return false;
 }
 
-static void nurb_body_set_select_mode(NurbBody &body, const int mode)
+static void nurb_body_set_select_mode(Object *ob, NurbBody &body, const int mode)
 {
   body.select_mode = mode;
   if (body.select_mode != NURB_BODY_SELECT_MODE_EDGE) {
     nurb_body_clear_edge_selection(body);
   }
-  nurb_body_clear_edge_hover(body);
+  nurb_body_clear_edge_hover(ob, body);
 }
 
 static void nurb_body_set_global_select_mode(bContext *C, const int mode)
@@ -554,9 +603,13 @@ static void nurb_body_set_global_select_mode(bContext *C, const int mode)
   }
 
   if (Main *bmain = CTX_data_main(C)) {
-    for (NurbBody &body : bmain->nurb_bodies) {
-      nurb_body_set_select_mode(body, mode);
-      DEG_id_tag_update(&body.id, ID_RECALC_SELECT);
+    for (Object &ob : bmain->objects) {
+      if (ob.type != OB_NURB_BODY || ob.data == nullptr) {
+        continue;
+      }
+      NurbBody *body = id_cast<NurbBody *>(ob.data);
+      nurb_body_set_select_mode(&ob, *body, mode);
+      DEG_id_tag_update(&body->id, ID_RECALC_SELECT);
     }
   }
 }
@@ -566,6 +619,38 @@ static float3 nurb_body_local_point_to_world(const Object &ob, const float3 &loc
   float world[3];
   mul_v3_m4v3(world, ob.object_to_world().ptr(), local_point);
   return float3(world[0], world[1], world[2]);
+}
+
+struct NurbBodyProjectedPoint {
+  float co[2] = {};
+  bool ok = false;
+};
+
+static bool nurb_body_project_polyline_points(const Object &ob,
+                                              const ARegion &region,
+                                              const Span<float3> local_points,
+                                              Vector<NurbBodyProjectedPoint> &r_points,
+                                              float r_min[2],
+                                              float r_max[2])
+{
+  r_points.clear();
+  r_points.reserve(local_points.size());
+  r_min[0] = r_min[1] = FLT_MAX;
+  r_max[0] = r_max[1] = -FLT_MAX;
+
+  bool any_projected = false;
+  for (const float3 &local : local_points) {
+    NurbBodyProjectedPoint projected;
+    const float3 world = nurb_body_local_point_to_world(ob, local);
+    projected.ok = ED_view3d_project_float_global(
+                       &region, world, projected.co, V3D_PROJ_TEST_NOP) == V3D_PROJ_RET_OK;
+    if (projected.ok) {
+      minmax_v2v2_v2(r_min, r_max, projected.co);
+      any_projected = true;
+    }
+    r_points.append(projected);
+  }
+  return any_projected;
 }
 
 static NurbBodyEdgeHit nurb_body_mouse_near_boolean_edge(Object &ob,
@@ -582,6 +667,7 @@ static NurbBodyEdgeHit nurb_body_mouse_near_boolean_edge(Object &ob,
   NurbBodyEdgeHit best_hit;
   const Span<NurbBodyEdgePolyline> polylines =
       BKE_nurb_body_boolean_edge_polylines_cached(&ob, 64);
+  Vector<NurbBodyProjectedPoint> projected_points;
   for (const NurbBodyEdgePolyline &polyline : polylines) {
     const bool selectable_body_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_BODY) != 0;
     const bool selectable_surface_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_FINAL) != 0;
@@ -591,24 +677,30 @@ static NurbBodyEdgeHit nurb_body_mouse_near_boolean_edge(Object &ob,
     {
       continue;
     }
-    for (int i = 1; i < polyline.points.size(); i++) {
-      float prev_screen[2];
-      float screen[2];
-      const float3 prev_world = nurb_body_local_point_to_world(ob, polyline.points[i - 1]);
-      const float3 world = nurb_body_local_point_to_world(ob, polyline.points[i]);
-      if (ED_view3d_project_float_global(
-              &region, prev_world, prev_screen, V3D_PROJ_TEST_NOP) !=
-              V3D_PROJ_RET_OK ||
-          ED_view3d_project_float_global(&region, world, screen, V3D_PROJ_TEST_NOP) !=
-              V3D_PROJ_RET_OK)
-      {
+    float bounds_min[2];
+    float bounds_max[2];
+    if (!nurb_body_project_polyline_points(
+            ob, region, polyline.points.as_span(), projected_points, bounds_min, bounds_max))
+    {
+      continue;
+    }
+    const float bbox_slop = std::sqrt(best_dist_sq);
+    if (mouse[0] < bounds_min[0] - bbox_slop || mouse[0] > bounds_max[0] + bbox_slop ||
+        mouse[1] < bounds_min[1] - bbox_slop || mouse[1] > bounds_max[1] + bbox_slop)
+    {
+      continue;
+    }
+    for (int i = 1; i < projected_points.size(); i++) {
+      const NurbBodyProjectedPoint &prev = projected_points[i - 1];
+      const NurbBodyProjectedPoint &screen = projected_points[i];
+      if (!prev.ok || !screen.ok) {
         continue;
       }
 
-      const float dist_sq = dist_squared_to_line_segment_v2(mouse, prev_screen, screen);
+      const float dist_sq = dist_squared_to_line_segment_v2(mouse, prev.co, screen.co);
       if (dist_sq <= best_dist_sq) {
         best_dist_sq = dist_sq;
-        closest_to_line_segment_v2(best_anchor, mouse, prev_screen, screen);
+        closest_to_line_segment_v2(best_anchor, mouse, prev.co, screen.co);
         best_hit.op = const_cast<NurbBodyBooleanOp *>(polyline.op);
         best_hit.edge_index = polyline.edge_index;
         best_hit.edge_key = polyline.edge_key;
@@ -663,9 +755,32 @@ static NurbBodyObjectEdgeHit nurb_body_mouse_near_any_boolean_edge(bContext *C,
   return best_hit;
 }
 
-static bool nurb_body_set_edge_hover(NurbBody &body, const NurbBodyEdgeHit *hovered_edge)
+static int nurb_body_edge_hit_polyline_flag(const NurbBodyEdgeHit &edge)
+{
+  if (edge.body_edge) {
+    return NURB_BODY_EDGE_POLYLINE_BODY;
+  }
+  if (edge.surface_edge) {
+    return NURB_BODY_EDGE_POLYLINE_FINAL;
+  }
+  return 0;
+}
+
+static bool nurb_body_set_edge_hover(Object *ob,
+                                     NurbBody &body,
+                                     const NurbBodyEdgeHit *hovered_edge)
 {
   bool changed = false;
+  const bool key_changed =
+      (hovered_edge != nullptr && hovered_edge->is_valid()) ?
+          BKE_nurb_body_hovered_edge_key_set(ob,
+                                             hovered_edge->op,
+                                             hovered_edge->edge_index,
+                                             nurb_body_edge_hit_polyline_flag(*hovered_edge),
+                                             hovered_edge->edge_key) :
+          BKE_nurb_body_hovered_edge_key_clear(ob);
+  changed |= key_changed;
+
   const int new_body_hovered_edge = (hovered_edge != nullptr && hovered_edge->body_edge) ?
                                         hovered_edge->edge_index :
                                         -1;
@@ -727,7 +842,7 @@ static bool nurb_body_clear_visible_edge_state(bContext *C,
       body_changed = true;
     }
     if (clear_hover && nurb_body_has_edge_hover(*body)) {
-      nurb_body_clear_edge_hover(*body);
+      nurb_body_clear_edge_hover(ob, *body);
       body_changed = true;
     }
     if (!body_changed) {
@@ -859,7 +974,7 @@ static wmOperatorStatus object_nurb_body_hover_invoke(bContext *C,
     const NurbBodyEdgeHit *body_hover = hovered_edge.ob == ob ?
                                             &hovered_edge.edge :
                                             nullptr;
-    if (nurb_body_set_edge_hover(*body, body_hover)) {
+    if (nurb_body_set_edge_hover(ob, *body, body_hover)) {
       DEG_id_tag_update(&body->id, ID_RECALC_SELECT);
       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
       changed = true;
@@ -929,7 +1044,7 @@ static wmOperatorStatus object_nurb_body_select_cut_edge_invoke(bContext *C,
     base_activate(C, selected.base);
   }
 
-  nurb_body_set_edge_hover(*body, &selected_edge);
+  nurb_body_set_edge_hover(ob, *body, &selected_edge);
   if (selected_edge.body_edge) {
     if (extend && (body->selected_edges & edge_mask)) {
       body->selected_edges &= ~edge_mask;
@@ -962,7 +1077,7 @@ static wmOperatorStatus object_nurb_body_select_cut_edge_invoke(bContext *C,
     nurb_body_sync_active_selected_edge(*selected_edge.op);
   }
 
-  nurb_body_deselect_object_when_edge_selected(C, *ob, *body);
+  nurb_body_deselect_objects_for_edge_selection(C);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
   ED_region_tag_redraw(region);
   DEG_id_tag_update(&body->id, ID_RECALC_SELECT);
@@ -1328,43 +1443,12 @@ static bool nurb_body_boolean_op_anchor_world(const Object &ob,
   return true;
 }
 
-static float nurb_body_edge_polyline_length(const Span<float3> points)
-{
-  float length = 0.0f;
-  for (int i = 1; i < points.size(); i++) {
-    const float3 delta = points[i] - points[i - 1];
-    length += std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-  }
-  return length;
-}
-
 static float nurb_body_modal_bevel_radius_limit(const Object &ob,
                                                 const NurbBodyEdgeHit &edge,
                                                 const float radius_limit)
 {
-  float max_radius = std::max(radius_limit, 0.001f);
-  const int required_flag = edge.body_edge      ? NURB_BODY_EDGE_POLYLINE_BODY :
-                            edge.surface_edge   ? NURB_BODY_EDGE_POLYLINE_FINAL :
-                                                  NURB_BODY_EDGE_POLYLINE_SELECTABLE;
-  const Span<NurbBodyEdgePolyline> polylines = BKE_nurb_body_boolean_edge_polylines_cached(&ob,
-                                                                                           64);
-  for (const NurbBodyEdgePolyline &polyline : polylines) {
-    if (polyline.edge_index != edge.edge_index || polyline.points.size() < 2) {
-      continue;
-    }
-    if (edge.op != polyline.op) {
-      continue;
-    }
-    if ((polyline.flag & required_flag) == 0) {
-      continue;
-    }
-    const float edge_limit = nurb_body_edge_polyline_length(polyline.points.as_span()) * 0.25f;
-    if (edge_limit > 0.0f) {
-      max_radius = std::min(max_radius, edge_limit);
-    }
-    break;
-  }
-  return std::max(max_radius, 1.0e-6f);
+  UNUSED_VARS(ob, edge, radius_limit);
+  return 100000.0f;
 }
 
 static void nurb_body_tag_geometry_changed(bContext *C, Object &ob, NurbBody &body)
@@ -1571,10 +1655,6 @@ static void object_nurb_body_bevel_finish(bContext *C, wmOperator *op)
   if (!data) {
     return;
   }
-  if (Object *ob = active_nurb_body_object(C)) {
-    NurbBody *body = id_cast<NurbBody *>(ob->data);
-    body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
-  }
   if (data->draw_handle_pixel) {
     ARegion *region = CTX_wm_region(C);
     if (region) {
@@ -1642,7 +1722,6 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     case EVT_RETKEY:
     case EVT_PADENTER:
       if (event->val == KM_PRESS) {
-        body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
         *target.selected_edges = 0;
         *target.selected_edge = -1;
         *target.hovered_edge = -1;
@@ -1660,7 +1739,6 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     case RIGHTMOUSE:
     case EVT_ESCKEY:
       if (event->val == KM_PRESS) {
-        body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
         *target.bevel_radius = data->start_radius;
         *target.bevel_type = data->start_bevel_type;
         *target.bevel_edge = data->start_bevel_edge;
@@ -1782,7 +1860,6 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   nurb_body_set_edge_bevel_radii(active_edges, start_radius, target.bevel_radii);
   nurb_body_set_edge_chamfer_mask(
       active_edges, profile == NURB_BODY_BEVEL_CHAMFER, *target.chamfer_edges);
-  body->flag |= NURB_BODY_FAST_BEVEL_PREVIEW;
 
   NurbBodyBevelData *data = MEM_new<NurbBodyBevelData>(__func__);
   data->op = active_edge.op;
@@ -1804,7 +1881,7 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   data->start_mouse_x = event->mval[0];
   const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
                                  body->radius :
-                                 active_edge.op->operand_radius;
+                                 nurb_body_boolean_op_scaled_radius(*active_edge.op);
   const float radius_scale = std::max(radius_limit, 0.001f);
   data->radius_step = std::clamp(radius_scale * 0.001f, 0.0001f, 0.005f);
   data->max_preview_radius = nurb_body_modal_bevel_radius_limit(*ob, active_edge, radius_limit);
@@ -1857,7 +1934,7 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
                                  body->radius :
-                                 active_edge.op->operand_radius;
+                                 nurb_body_boolean_op_scaled_radius(*active_edge.op);
   const float radius = std::min(std::max(0.0f, RNA_float_get(op->ptr, "radius")),
                                 nurb_body_modal_bevel_radius_limit(*ob,
                                                                    active_edge,

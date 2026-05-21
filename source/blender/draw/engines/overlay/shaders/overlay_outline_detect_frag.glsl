@@ -254,9 +254,18 @@ void main()
   float ref_depth = textureLod(outline_depth_tx, depth_uv, 0.0f).r;
   float scene_depth = textureLod(scene_depth_tx, depth_uv, 0.0f).r;
 
-  /* Avoid bad cases of Z-fighting for occlusion only. */
+  /* Avoid bad cases of Z-fighting for occlusion only. NURB outlines discard when occluded, so
+   * they need a wider tolerance to avoid the owner mesh self-hiding parts of the silhouette. */
   constexpr float epsilon = 3.0f / 8388608.0f;
-  bool occluded = (ref_depth > scene_depth + epsilon);
+  float occlusion_epsilon = is_nurb_body_outline ? max(epsilon * 24.0f, scene_depth * 2.0e-6f) :
+                                                   epsilon;
+  bool occluded = (scene_depth > 0.0f && scene_depth < 1.0f &&
+                   ref_depth > scene_depth + occlusion_epsilon);
+  if (is_nurb_body_outline && occluded) {
+    gpu_discard_fragment();
+    return;
+  }
+
   float occlusion_alpha = is_nurb_body_outline ? 0.0f : alpha_occlu;
 
   /* NOTE: We never set alpha to 1.0 to avoid Anti-aliasing destroying the line. */
@@ -279,7 +288,7 @@ void main()
     return;
   }
 
-  if (!do_anti_aliasing) {
+  if (!do_anti_aliasing || is_nurb_body_outline) {
     line_output = float4(0.0f);
     return;
   }

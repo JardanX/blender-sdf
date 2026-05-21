@@ -43,24 +43,9 @@ class DATA_PT_nurb_body_shape(DataButtonsPanel, Panel):
         layout.prop(body, "depth")
 
 
-class DATA_PT_nurb_body_viewport(DataButtonsPanel, Panel):
-    bl_label = "Viewport Tessellation"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-
-        body = context.object.data
-        layout.prop(body, "tessellation_deflection", text="Deflection")
-        layout.prop(body, "tessellation_angle", text="Angle")
-        layout.prop(body, "use_triangulate_mesh")
-        layout.prop(body, "use_smooth_shading")
-
-
 classes = (
     DATA_PT_context_nurb_body,
     DATA_PT_nurb_body_shape,
-    DATA_PT_nurb_body_viewport,
 )
 
 if __name__ == "__main__":  # only for live edit.
