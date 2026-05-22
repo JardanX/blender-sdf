@@ -34,6 +34,8 @@ typedef enum eNurbBodyBooleanOperation {
   NURB_BODY_BOOLEAN_SURFACE_BLEND_STAGE = 3,
   NURB_BODY_BOOLEAN_BODY_BLEND_STAGE = 4,
   NURB_BODY_BOOLEAN_OUTPUT_BLEND_STAGE = 5,
+  NURB_BODY_BOOLEAN_FACE_EXTRUDE_STAGE = 6,
+  NURB_BODY_BOOLEAN_FACE_INSET_STAGE = 7,
 } eNurbBodyBooleanOperation;
 
 typedef enum eNurbBodyBevelType {
@@ -118,6 +120,10 @@ typedef struct NurbBodyBooleanOp {
   float operand_surface_bevel_radius;
   float operand_scale[3];
   float _pad1;
+
+  uint64_t face_key;
+  float face_extrude_delta[3];
+  float face_inset;
 } NurbBodyBooleanOp;
 
 typedef struct NurbBody {
@@ -148,11 +154,14 @@ typedef struct NurbBody {
   uint64_t surface_selected_edges = 0;
   uint64_t surface_bevel_edges = 0;
   uint64_t surface_chamfer_edges = 0;
+  uint64_t selected_faces = 0;
   float bevel_radii[64] = {};
   float surface_bevel_radii[64] = {};
   int bevel_order[64] = {};
   int surface_bevel_order[64] = {};
   uint64_t surface_edge_keys[64] = {};
+  uint64_t face_keys[64] = {};
+  uint64_t hovered_face_key = 0;
 
   int boolean_operation = NURB_BODY_BOOLEAN_DIFFERENCE;
   int selected_edge = -1;
@@ -165,6 +174,8 @@ typedef struct NurbBody {
   int surface_bevel_edge = -1;
   int surface_bevel_type = NURB_BODY_BEVEL_FILLET;
   int surface_bevel_order_next = 1;
+  int selected_face = -1;
+  int hovered_face = -1;
   float bevel_radius = 0.0f;
   float surface_bevel_radius = 0.0f;
   float tessellation_deflection = 0.004f;

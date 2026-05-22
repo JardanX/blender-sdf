@@ -43,7 +43,7 @@ static const EnumPropertyItem rna_enum_nurb_body_primitive_items[] = {
 
 static const EnumPropertyItem rna_enum_nurb_body_select_mode_items[] = {
     {NURB_BODY_SELECT_MODE_EDGE, "EDGE", ICON_EDGESEL, "Edge", "Select generated edges"},
-    {NURB_BODY_SELECT_MODE_FACE, "FACE", ICON_FACESEL, "Face", "Reserve face selection"},
+    {NURB_BODY_SELECT_MODE_FACE, "FACE", ICON_FACESEL, "Face", "Select generated faces"},
     {NURB_BODY_SELECT_MODE_OBJECT, "OBJECT", ICON_OBJECT_DATAMODE, "Object", "Select objects"},
     {0, nullptr, 0, nullptr, nullptr},
 };
@@ -76,8 +76,17 @@ static void rna_NurbBody_select_update(Main * /*bmain*/, Scene * /*scene*/, Poin
     body->surface_selected_edges = 0;
     body->surface_selected_edge = -1;
   }
+  if (body->select_mode != NURB_BODY_SELECT_MODE_FACE) {
+    body->selected_faces = 0;
+    body->selected_face = -1;
+    for (int i = 0; i < 64; i++) {
+      body->face_keys[i] = 0;
+    }
+  }
   body->hovered_edge = -1;
   body->surface_hovered_edge = -1;
+  body->hovered_face = -1;
+  body->hovered_face_key = 0;
   for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body->boolean_ops.first); op;
        op = op->next)
   {

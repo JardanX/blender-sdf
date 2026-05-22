@@ -171,6 +171,8 @@ void OBJECT_OT_nurb_body_hover(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_select_cut_edge(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_select_mode(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_edge_translate(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_face_extrude(wmOperatorType *ot);
+void OBJECT_OT_nurb_body_face_inset(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_bevel_selected(wmOperatorType *ot);
 void OBJECT_OT_nurb_body_boolean_apply(wmOperatorType *ot);
 wmKeyMap *nurb_body_bevel_modal_keymap(wmKeyConfig *keyconf);

@@ -54,9 +54,14 @@ class NurbBodies : Overlay {
     uint64_t geometry_key = 0;
     uint64_t selection_key = 0;
     uint64_t hover_key = 0;
+    uint64_t face_geometry_key = 0;
+    uint64_t face_selection_key = 0;
+    uint64_t face_hover_key = 0;
     gpu::Batch *normal_batch = nullptr;
     gpu::Batch *hovered_batch = nullptr;
     gpu::Batch *selected_batch = nullptr;
+    gpu::Batch *face_hovered_batch = nullptr;
+    gpu::Batch *face_selected_batch = nullptr;
   };
 
   Vector<Entry> entries_;
@@ -150,6 +155,31 @@ class NurbBodies : Overlay {
     return hash;
   }
 
+  static uint64_t face_selection_key(const NurbBody &body,
+                                     const int select_mode,
+                                     const bool object_selected)
+  {
+    uint64_t hash = 1469598103934665603ull;
+    hash_value(hash, select_mode);
+    hash_value(hash, object_selected);
+    hash_value(hash, body.selected_faces);
+    hash_value(hash, body.selected_face);
+    hash_bytes(hash, body.face_keys, sizeof(body.face_keys));
+    return hash;
+  }
+
+  static uint64_t face_hover_key(const NurbBody &body,
+                                 const int select_mode,
+                                 const bool object_selected)
+  {
+    uint64_t hash = 1469598103934665603ull;
+    hash_value(hash, select_mode);
+    hash_value(hash, object_selected);
+    hash_value(hash, body.hovered_face);
+    hash_value(hash, body.hovered_face_key);
+    return hash;
+  }
+
   static float line_thickness_for_overlay(const View3DOverlay &overlay)
   {
     if (!std::isfinite(overlay.nurb_body_line_thickness) ||
@@ -163,6 +193,11 @@ class NurbBodies : Overlay {
   static bool edge_selection_mode_enabled(const int select_mode, const bool /*object_selected*/)
   {
     return select_mode == NURB_BODY_SELECT_MODE_EDGE;
+  }
+
+  static bool face_selection_mode_enabled(const int select_mode, const bool /*object_selected*/)
+  {
+    return select_mode == NURB_BODY_SELECT_MODE_FACE;
   }
 
   static bool polyline_is_surface(const NurbBodyEdgePolyline &polyline)
@@ -183,6 +218,41 @@ class NurbBodies : Overlay {
       }
     }
     return false;
+  }
+
+  static bool face_key_is_selected(const NurbBody &body, const uint64_t face_key)
+  {
+    if (face_key == 0) {
+      return false;
+    }
+    for (int i = 0; i < 64; i++) {
+      if (edge_index_in_mask(body.selected_faces, i) && body.face_keys[i] == face_key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool face_is_selected(const NurbBody &body,
+                               const NurbBodyFaceSurface &face,
+                               const int select_mode,
+                               const bool object_selected)
+  {
+    if (!face_selection_mode_enabled(select_mode, object_selected)) {
+      return false;
+    }
+    return face_key_is_selected(body, face.face_key);
+  }
+
+  static bool face_is_hovered(const NurbBody &body,
+                              const NurbBodyFaceSurface &face,
+                              const int select_mode,
+                              const bool object_selected)
+  {
+    if (!face_selection_mode_enabled(select_mode, object_selected)) {
+      return false;
+    }
+    return face.face_key != 0 && body.hovered_face_key == face.face_key;
   }
 
   static bool polyline_is_selected(const Object *object,
@@ -260,9 +330,14 @@ class NurbBodies : Overlay {
     discard_batch(cache.normal_batch);
     discard_batch(cache.hovered_batch);
     discard_batch(cache.selected_batch);
+    discard_batch(cache.face_hovered_batch);
+    discard_batch(cache.face_selected_batch);
     cache.geometry_key = 0;
     cache.selection_key = 0;
     cache.hover_key = 0;
+    cache.face_geometry_key = 0;
+    cache.face_selection_key = 0;
+    cache.face_hover_key = 0;
   }
 
   static gpu::Batch *create_line_batch_from_segments(const Span<float3> verts)
@@ -277,6 +352,20 @@ class NurbBodies : Overlay {
     GPU_vertbuf_data_alloc(*vbo, verts.size());
     vbo->data<float3>().copy_from(verts);
     return GPU_batch_create_ex(GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+  }
+
+  static gpu::Batch *create_tri_batch_from_verts(const Span<float3> verts)
+  {
+    if (verts.is_empty()) {
+      return nullptr;
+    }
+
+    GPUVertFormat format = {0};
+    GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
+    GPU_vertbuf_data_alloc(*vbo, verts.size());
+    vbo->data<float3>().copy_from(verts);
+    return GPU_batch_create_ex(GPU_PRIM_TRIS, vbo, nullptr, GPU_BATCH_OWNS_VBO);
   }
 
   template<typename Predicate>
@@ -295,6 +384,32 @@ class NurbBodies : Overlay {
     }
 
     return create_line_batch_from_segments(verts.as_span());
+  }
+
+  template<typename Predicate>
+  static gpu::Batch *create_face_batch(const Span<NurbBodyFaceSurface> faces,
+                                       Predicate &&predicate)
+  {
+    Vector<float3> verts;
+    for (const NurbBodyFaceSurface &face : faces) {
+      if (face.face_key == 0 || face.triangles.size() < 3 || !predicate(face)) {
+        continue;
+      }
+      verts.extend(face.triangles.as_span());
+    }
+
+    return create_tri_batch_from_verts(verts.as_span());
+  }
+
+  static void draw_face_batch(gpu::Batch *batch, const float4 &color)
+  {
+    if (batch == nullptr) {
+      return;
+    }
+
+    GPU_batch_program_set_builtin(batch, GPU_SHADER_3D_UNIFORM_COLOR);
+    GPU_batch_uniform_4fv(batch, "color", &color.x);
+    GPU_batch_draw(batch);
   }
 
   static void draw_batch(gpu::Batch *batch, const float4 &color, const float width)
@@ -357,6 +472,25 @@ class NurbBodies : Overlay {
     cache.selected_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
           return polyline_is_selected(object, body, polyline, select_mode, object_selected);
+        });
+  }
+
+  static void rebuild_face_batches(DrawCache &cache,
+                                   const NurbBody &body,
+                                   const Span<NurbBodyFaceSurface> faces,
+                                   const int select_mode,
+                                   const bool object_selected)
+  {
+    discard_batch(cache.face_hovered_batch);
+    discard_batch(cache.face_selected_batch);
+    cache.face_hovered_batch = create_face_batch(
+        faces, [&](const NurbBodyFaceSurface &face) {
+          return face_is_hovered(body, face, select_mode, object_selected) &&
+                 !face_is_selected(body, face, select_mode, object_selected);
+        });
+    cache.face_selected_batch = create_face_batch(
+        faces, [&](const NurbBodyFaceSurface &face) {
+          return face_is_selected(body, face, select_mode, object_selected);
         });
   }
 
@@ -455,15 +589,19 @@ class NurbBodies : Overlay {
       const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.original_object->data);
       const uint64_t geometry_key = BKE_nurb_body_boolean_edge_polylines_cache_key(
           entry.original_object, 64);
-      if (geometry_key == 0) {
+      const uint64_t face_geometry_key = BKE_nurb_body_face_surfaces_cache_key(
+          entry.original_object);
+      if (geometry_key == 0 && face_geometry_key == 0) {
         continue;
       }
 
       DrawCache &cache = cache_for_object(entry.original_object);
-      const bool geometry_changed = cache.geometry_key != geometry_key;
+      const bool geometry_changed = cache.geometry_key != geometry_key ||
+                                    cache.face_geometry_key != face_geometry_key;
       if (geometry_changed) {
         clear_draw_cache(cache);
         cache.geometry_key = geometry_key;
+        cache.face_geometry_key = face_geometry_key;
       }
 
       const bool object_selected = ((entry.original_object->base_flag | entry.object->base_flag) &
@@ -473,8 +611,9 @@ class NurbBodies : Overlay {
           entry.original_object, *body, select_mode_, object_selected);
       const uint64_t hover_key = line_hover_key(
           entry.original_object, *body, select_mode_, object_selected);
-      if (geometry_changed || cache.selection_key != selection_key ||
-          cache.hover_key != hover_key)
+      if (geometry_key != 0 &&
+          (geometry_changed || cache.selection_key != selection_key ||
+           cache.hover_key != hover_key))
       {
         const Span<NurbBodyEdgePolyline> polylines =
             BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
@@ -484,10 +623,26 @@ class NurbBodies : Overlay {
         cache.hover_key = hover_key;
       }
 
+      const uint64_t face_select_key = face_selection_key(*body, select_mode_, object_selected);
+      const uint64_t face_hover_state_key = face_hover_key(*body, select_mode_, object_selected);
+      if (face_geometry_key != 0 &&
+          (geometry_changed || cache.face_selection_key != face_select_key ||
+           cache.face_hover_key != face_hover_state_key))
+      {
+        const Span<NurbBodyFaceSurface> faces = BKE_nurb_body_face_surfaces_cached(
+            entry.original_object);
+        rebuild_face_batches(cache, *body, faces, select_mode_, object_selected);
+        cache.face_selection_key = face_select_key;
+        cache.face_hover_key = face_hover_state_key;
+      }
+
       const bool draw_edge_outline = !(xray_enabled_ && object_selected);
 
       GPU_matrix_push();
       GPU_matrix_mul(entry.object->object_to_world().ptr());
+      GPU_polygon_offset(offset_data_.dist, 2.0f);
+      draw_face_batch(cache.face_hovered_batch, float4(1.0f, 1.0f, 1.0f, 0.30f));
+      draw_face_batch(cache.face_selected_batch, float4(1.0f, 0.62f, 0.0f, 0.45f));
       GPU_polygon_offset(offset_data_.dist, 4.0f);
       if (draw_edge_outline) {
         draw_batch(cache.normal_batch, float4(0.0f, 0.0f, 0.0f, 0.9f), line_width_);
