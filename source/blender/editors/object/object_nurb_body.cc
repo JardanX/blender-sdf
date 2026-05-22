@@ -50,6 +50,7 @@
 #include "ED_screen.hh"
 #include "ED_select_utils.hh"
 #include "ED_space_api.hh"
+#include "ED_undo.hh"
 #include "ED_util.hh"
 #include "ED_view3d.hh"
 
@@ -158,6 +159,7 @@ static int nurb_body_surface_selection_slot_for_key(const NurbBody &body,
 static void nurb_body_assign_edge_bevel_orders(uint64_t edges,
                                                int bevel_order[64],
                                                int &bevel_order_next);
+static void nurb_body_push_modeling_undo(bContext *C, wmOperator *op);
 
 static const char *nurb_body_primitive_name(const int primitive)
 {
@@ -362,6 +364,204 @@ static bool nurb_body_surface_bevel_may_change_shape(const NurbBody &body)
           nurb_body_edge_radii_has_positive(body.surface_bevel_radii, body.surface_bevel_edges));
 }
 
+static bool nurb_body_boolean_op_is_body_blend_stage(const NurbBodyBooleanOp &op)
+{
+  return op.operation == NURB_BODY_BOOLEAN_BODY_BLEND_STAGE;
+}
+
+static bool nurb_body_boolean_op_is_output_blend_stage(const NurbBodyBooleanOp &op)
+{
+  return op.operation == NURB_BODY_BOOLEAN_OUTPUT_BLEND_STAGE;
+}
+
+static uint64_t nurb_body_committable_bevel_edges(const uint64_t bevel_edges,
+                                                  const int bevel_edge,
+                                                  const float bevel_radius,
+                                                  const float bevel_radii[64])
+{
+  if (bevel_edges != 0) {
+    if (bevel_radius > 0.0f) {
+      return bevel_edges;
+    }
+    uint64_t positive_edges = 0;
+    for (int i = 0; i < 64; i++) {
+      const uint64_t edge_mask = nurb_body_edge_mask_for_index(i);
+      if ((bevel_edges & edge_mask) != 0 && bevel_radii[i] > 0.0f) {
+        positive_edges |= edge_mask;
+      }
+    }
+    return positive_edges;
+  }
+  const uint64_t edge_mask = nurb_body_edge_mask_for_index(bevel_edge);
+  if (edge_mask != 0 &&
+      (bevel_radius > 0.0f || nurb_body_edge_radii_has_positive(bevel_radii, edge_mask)))
+  {
+    return edge_mask;
+  }
+  return 0;
+}
+
+static void nurb_body_copy_committed_bevel_fields(NurbBodyBooleanOp &stage,
+                                                  const uint64_t bevel_edges,
+                                                  const uint64_t chamfer_edges,
+                                                  const int bevel_edge,
+                                                  const int bevel_type,
+                                                  const int bevel_order_next,
+                                                  const float bevel_radius,
+                                                  const float bevel_radii[64],
+                                                  const int bevel_order[64])
+{
+  stage.selected_edges = 0;
+  stage.selected_edge = -1;
+  stage.hovered_edge = -1;
+  stage.bevel_edges = bevel_edges;
+  stage.chamfer_edges = chamfer_edges & bevel_edges;
+  stage.bevel_edge = bevel_edge;
+  stage.bevel_type = bevel_type;
+  stage.bevel_order_next = bevel_order_next;
+  stage.bevel_radius = bevel_radius;
+  std::copy_n(bevel_radii, 64, stage.bevel_radii);
+  std::copy_n(bevel_order, 64, stage.bevel_order);
+  nurb_body_materialize_pending_edge_radii(stage.bevel_edges, stage.bevel_radius, stage.bevel_radii);
+  if (stage.bevel_type == NURB_BODY_BEVEL_CHAMFER && stage.chamfer_edges == 0) {
+    stage.chamfer_edges = stage.bevel_edges;
+  }
+  stage.chamfer_edges &= stage.bevel_edges;
+  nurb_body_assign_edge_bevel_orders(stage.bevel_edges, stage.bevel_order, stage.bevel_order_next);
+}
+
+static void nurb_body_clear_body_bevel_fields(NurbBody &body)
+{
+  body.selected_edges = 0;
+  body.bevel_edges = 0;
+  body.chamfer_edges = 0;
+  std::fill_n(body.bevel_radii, 64, 0.0f);
+  std::fill_n(body.bevel_order, 64, 0);
+  body.selected_edge = -1;
+  body.hovered_edge = -1;
+  body.bevel_edge = -1;
+  body.bevel_type = NURB_BODY_BEVEL_FILLET;
+  body.bevel_order_next = 1;
+  body.bevel_radius = 0.0f;
+}
+
+static void nurb_body_clear_output_bevel_fields(NurbBodyBooleanOp &op)
+{
+  op.selected_edges = 0;
+  op.bevel_edges = 0;
+  op.chamfer_edges = 0;
+  std::fill_n(op.bevel_radii, 64, 0.0f);
+  std::fill_n(op.bevel_order, 64, 0);
+  op.selected_edge = -1;
+  op.hovered_edge = -1;
+  op.bevel_edge = -1;
+  op.bevel_type = NURB_BODY_BEVEL_FILLET;
+  op.bevel_order_next = 1;
+  op.bevel_radius = 0.0f;
+  op.flag &= ~(NURB_BODY_BOOLEAN_OP_SELECTED | NURB_BODY_BOOLEAN_OP_HOVERED);
+}
+
+static void nurb_body_insert_body_blend_stage(NurbBody &body, NurbBodyBooleanOp *stage)
+{
+  NurbBodyBooleanOp *insert_after = nullptr;
+  for (NurbBodyBooleanOp *op = static_cast<NurbBodyBooleanOp *>(body.boolean_ops.first); op;
+       op = op->next)
+  {
+    if (!nurb_body_boolean_op_is_body_blend_stage(*op)) {
+      break;
+    }
+    insert_after = op;
+  }
+
+  if (insert_after != nullptr) {
+    BLI_insertlinkafter(&body.boolean_ops, insert_after, stage);
+  }
+  else if (body.boolean_ops.first != nullptr) {
+    BLI_insertlinkbefore(&body.boolean_ops, body.boolean_ops.first, stage);
+  }
+  else {
+    BLI_addtail(&body.boolean_ops, stage);
+  }
+}
+
+static void nurb_body_insert_output_blend_stage_after(NurbBody &body,
+                                                      NurbBodyBooleanOp &source_op,
+                                                      NurbBodyBooleanOp *stage)
+{
+  NurbBodyBooleanOp *insert_after = &source_op;
+  for (NurbBodyBooleanOp *op = source_op.next; op; op = op->next) {
+    if (!nurb_body_boolean_op_is_output_blend_stage(*op)) {
+      break;
+    }
+    insert_after = op;
+  }
+  BLI_insertlinkafter(&body.boolean_ops, insert_after, stage);
+}
+
+static bool nurb_body_commit_body_bevel_stage(NurbBody &body)
+{
+  const uint64_t bevel_edges = nurb_body_committable_bevel_edges(body.bevel_edges,
+                                                                body.bevel_edge,
+                                                                body.bevel_radius,
+                                                                body.bevel_radii);
+  if (bevel_edges == 0) {
+    return false;
+  }
+
+  NurbBodyBooleanOp *stage = MEM_new_zeroed<NurbBodyBooleanOp>(__func__);
+  stage->operation = NURB_BODY_BOOLEAN_BODY_BLEND_STAGE;
+  nurb_body_copy_committed_bevel_fields(*stage,
+                                        bevel_edges,
+                                        body.chamfer_edges,
+                                        body.bevel_edge,
+                                        body.bevel_type,
+                                        body.bevel_order_next,
+                                        body.bevel_radius,
+                                        body.bevel_radii,
+                                        body.bevel_order);
+  nurb_body_insert_body_blend_stage(body, stage);
+  nurb_body_clear_body_bevel_fields(body);
+  return true;
+}
+
+static bool nurb_body_commit_output_bevel_stage(NurbBody &body,
+                                                NurbBodyBooleanOp &source_op,
+                                                const uint64_t edge_keys[64])
+{
+  const uint64_t bevel_edges = nurb_body_committable_bevel_edges(source_op.bevel_edges,
+                                                                source_op.bevel_edge,
+                                                                source_op.bevel_radius,
+                                                                source_op.bevel_radii);
+  if (bevel_edges == 0) {
+    return false;
+  }
+
+  NurbBodyBooleanOp *stage = MEM_new_zeroed<NurbBodyBooleanOp>(__func__);
+  stage->operation = NURB_BODY_BOOLEAN_OUTPUT_BLEND_STAGE;
+  nurb_body_copy_committed_bevel_fields(*stage,
+                                        bevel_edges,
+                                        source_op.chamfer_edges,
+                                        source_op.bevel_edge,
+                                        source_op.bevel_type,
+                                        source_op.bevel_order_next,
+                                        source_op.bevel_radius,
+                                        source_op.bevel_radii,
+                                        source_op.bevel_order);
+  stage->primitive = source_op.primitive;
+  stage->operand_radius = source_op.operand_radius;
+  stage->operand_depth = source_op.operand_depth;
+  stage->operand_minor_radius = source_op.operand_minor_radius;
+  std::copy_n(source_op.operand_dimensions, 3, stage->operand_dimensions);
+  copy_m4_m4(stage->operand_to_target, source_op.operand_to_target);
+  std::copy_n(source_op.operand_scale, 3, stage->operand_scale);
+  if (edge_keys != nullptr) {
+    std::copy_n(edge_keys, 64, stage->operand_surface_edge_keys);
+  }
+  nurb_body_insert_output_blend_stage_after(body, source_op, stage);
+  nurb_body_clear_output_bevel_fields(source_op);
+  return true;
+}
+
 static bool nurb_body_commit_surface_bevel_stage(NurbBody &body)
 {
   if (!nurb_body_surface_bevel_may_change_shape(body)) {
@@ -369,12 +569,9 @@ static bool nurb_body_commit_surface_bevel_stage(NurbBody &body)
   }
 
   NurbBodyBooleanOp *stage = MEM_new_zeroed<NurbBodyBooleanOp>(__func__);
-  const uint64_t active_surface_edges = body.surface_selected_edges & body.surface_bevel_edges;
   stage->operation = NURB_BODY_BOOLEAN_SURFACE_BLEND_STAGE;
-  stage->selected_edges = active_surface_edges;
-  stage->selected_edge = active_surface_edges != 0 ?
-                             nurb_body_first_selected_edge(active_surface_edges) :
-                             -1;
+  stage->selected_edges = 0;
+  stage->selected_edge = -1;
   stage->hovered_edge = -1;
   stage->bevel_edges = body.surface_bevel_edges;
   stage->chamfer_edges = body.surface_chamfer_edges & body.surface_bevel_edges;
@@ -703,26 +900,41 @@ static void nurb_body_assign_edge_bevel_orders(const uint64_t edges,
   bevel_order_next = next_order;
 }
 
-static void nurb_body_promote_edge_bevel_orders(const uint64_t edges,
-                                                int bevel_order[64],
-                                                int &bevel_order_next)
+static void nurb_body_assign_shared_edge_bevel_order(const uint64_t edges,
+                                                     int bevel_order[64],
+                                                     int &bevel_order_next)
 {
   if (edges == 0) {
     return;
   }
 
-  int next_order = std::max(bevel_order_next, 1);
+  int shared_order = 0;
   for (int i = 0; i < 64; i++) {
-    if (bevel_order[i] > 0) {
-      next_order = std::max(next_order, bevel_order[i] + 1);
+    if ((edges & nurb_body_edge_mask_for_index(i)) != 0 && bevel_order[i] > 0) {
+      shared_order = shared_order == 0 ? bevel_order[i] :
+                                          std::min(shared_order, bevel_order[i]);
     }
   }
+
+  if (shared_order == 0) {
+    int next_order = std::max(bevel_order_next, 1);
+    for (int i = 0; i < 64; i++) {
+      if (bevel_order[i] > 0) {
+        next_order = std::max(next_order, bevel_order[i] + 1);
+      }
+    }
+    shared_order = next_order++;
+    bevel_order_next = next_order;
+  }
+  else {
+    bevel_order_next = std::max(bevel_order_next, shared_order + 1);
+  }
+
   for (int i = 0; i < 64; i++) {
     if ((edges & nurb_body_edge_mask_for_index(i)) != 0) {
-      bevel_order[i] = next_order++;
+      bevel_order[i] = shared_order;
     }
   }
-  bevel_order_next = next_order;
 }
 
 static void nurb_body_clear_unused_edge_bevel_orders(const uint64_t edges, int bevel_order[64])
@@ -2134,7 +2346,6 @@ void OBJECT_OT_nurb_body_select_cut_edge(wmOperatorType *ot)
   ot->idname = "OBJECT_OT_nurb_body_select_cut_edge";
   ot->invoke = object_nurb_body_select_cut_edge_invoke;
   ot->poll = object_nurb_body_select_cut_edge_poll;
-  ot->flag = OPTYPE_UNDO;
 
   RNA_def_boolean(ot->srna,
                   "bevel_chain",
@@ -2177,7 +2388,7 @@ void OBJECT_OT_nurb_body_select_mode(wmOperatorType *ot)
   ot->idname = "OBJECT_OT_nurb_body_select_mode";
   ot->exec = object_nurb_body_select_mode_exec;
   ot->poll = object_nurb_body_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_enum(ot->srna,
                "mode",
@@ -2202,11 +2413,6 @@ static wmOperatorStatus object_nurb_body_boolean_apply_exec(bContext *C, wmOpera
   bool operands_hidden = false;
   Vector<Object *> operands;
 
-  nurb_body_preserve_existing_bevel_edges(*body);
-  nurb_body_commit_surface_bevel_stage(*body);
-  nurb_body_boolean_ops_clear_flag(*body,
-                                   NURB_BODY_BOOLEAN_OP_SELECTED | NURB_BODY_BOOLEAN_OP_HOVERED);
-
   CTX_DATA_BEGIN (C, Object *, selected_ob, selected_editable_objects) {
     if (selected_ob == active_ob || selected_ob->type != OB_NURB_BODY || selected_ob->data == nullptr)
     {
@@ -2220,6 +2426,11 @@ static wmOperatorStatus object_nurb_body_boolean_apply_exec(bContext *C, wmOpera
     BKE_report(op->reports, RPT_WARNING, "Select at least one other NURB Body operand");
     return OPERATOR_CANCELLED;
   }
+
+  nurb_body_preserve_existing_bevel_edges(*body);
+  nurb_body_commit_surface_bevel_stage(*body);
+  nurb_body_boolean_ops_clear_flag(*body,
+                                   NURB_BODY_BOOLEAN_OP_SELECTED | NURB_BODY_BOOLEAN_OP_HOVERED);
 
   BKE_view_layer_synced_ensure(scene, view_layer);
   for (Object *selected_ob : operands) {
@@ -2249,12 +2460,16 @@ static wmOperatorStatus object_nurb_body_boolean_apply_exec(bContext *C, wmOpera
     }
 
     boolean_op->operation = operation;
+    BKE_nurb_body_runtime_cache_clear(selected_ob);
+    DEG_id_tag_update(&selected_ob->id, ID_RECALC_GEOMETRY);
     DEG_id_tag_update(&operand_body->id, ID_RECALC_GEOMETRY);
   }
   body->selected_edges = 0;
   body->selected_edge = -1;
   body->hovered_edge = -1;
 
+  BKE_nurb_body_runtime_cache_clear(active_ob);
+  DEG_id_tag_update(&active_ob->id, ID_RECALC_GEOMETRY);
   DEG_id_tag_update(&body->id, ID_RECALC_GEOMETRY);
   if (operands_hidden) {
     BKE_view_layer_need_resync_tag(view_layer);
@@ -2263,6 +2478,7 @@ static wmOperatorStatus object_nurb_body_boolean_apply_exec(bContext *C, wmOpera
     WM_event_add_notifier(C, NC_SCENE | ND_OB_VISIBLE, scene);
   }
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, active_ob);
+  nurb_body_push_modeling_undo(C, op);
   return OPERATOR_FINISHED;
 }
 
@@ -2273,7 +2489,7 @@ void OBJECT_OT_nurb_body_boolean_apply(wmOperatorType *ot)
   ot->idname = "OBJECT_OT_nurb_body_boolean_apply";
   ot->exec = object_nurb_body_boolean_apply_exec;
   ot->poll = object_nurb_body_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_enum(ot->srna,
                "operation",
@@ -2306,6 +2522,7 @@ struct NurbBodyBevelData {
   uint64_t start_selected_edges = 0;
   uint64_t edge_mask = 0;
   uint64_t edit_edge_mask = 0;
+  uint64_t edge_keys[64] = {};
   int active_edge_count = 1;
   int start_mouse_x = 0;
   int start_mouse_y = 0;
@@ -2390,6 +2607,32 @@ static NurbBodyBevelTarget nurb_body_bevel_target_for_data(NurbBody &body,
   edge.body_edge = data.body_edge;
   edge.surface_edge = data.surface_edge;
   return nurb_body_bevel_target_for_edge(body, edge);
+}
+
+static void nurb_body_clear_committed_bevel_selection(const Object *ob,
+                                                      NurbBodyBevelTarget &target,
+                                                      const NurbBodyEdgeHit &edge)
+{
+  *target.selected_edges = 0;
+  *target.selected_edge = -1;
+  *target.hovered_edge = -1;
+  if (!edge.body_edge && !edge.surface_edge && edge.op != nullptr) {
+    edge.op->flag &= ~(NURB_BODY_BOOLEAN_OP_SELECTED | NURB_BODY_BOOLEAN_OP_HOVERED);
+  }
+  BKE_nurb_body_selected_edge_key_clear(ob);
+  BKE_nurb_body_hovered_edge_key_clear(ob);
+}
+
+static void nurb_body_clear_committed_bevel_selection(const Object *ob,
+                                                      NurbBodyBevelTarget &target,
+                                                      const NurbBodyBevelData &data)
+{
+  NurbBodyEdgeHit edge;
+  edge.op = data.op;
+  edge.edge_index = data.edge_index;
+  edge.body_edge = data.body_edge;
+  edge.surface_edge = data.surface_edge;
+  nurb_body_clear_committed_bevel_selection(ob, target, edge);
 }
 
 static NurbBodyEdgeHit nurb_body_active_edge(bContext *C, NurbBody &body)
@@ -2548,6 +2791,161 @@ static float nurb_body_modal_bevel_edge_length(const Object &ob, const NurbBodyE
   return length;
 }
 
+static void nurb_body_collect_boolean_output_edge_keys(const Object &ob,
+                                                       const NurbBodyBooleanOp &source_op,
+                                                       const uint64_t edge_mask,
+                                                       uint64_t r_edge_keys[64])
+{
+  std::fill_n(r_edge_keys, 64, uint64_t(0));
+  if (edge_mask == 0) {
+    return;
+  }
+
+  const Span<NurbBodyEdgePolyline> polylines =
+      BKE_nurb_body_boolean_edge_polylines_cached(&ob, 64);
+  for (const NurbBodyEdgePolyline &polyline : polylines) {
+    if (!nurb_body_polyline_is_selectable_edge(polyline) ||
+        polyline.op != static_cast<const NurbBodyBooleanOp *>(&source_op) ||
+        (polyline.flag & (NURB_BODY_EDGE_POLYLINE_BODY | NURB_BODY_EDGE_POLYLINE_FINAL)) != 0 ||
+        polyline.edge_index < 0 || polyline.edge_index >= 64 || polyline.edge_key == 0)
+    {
+      continue;
+    }
+    const uint64_t polyline_mask = nurb_body_edge_mask_for_index(polyline.edge_index);
+    if ((edge_mask & polyline_mask) != 0) {
+      r_edge_keys[polyline.edge_index] = polyline.edge_key;
+    }
+  }
+}
+
+static void nurb_body_collect_active_edge_keys(const Object &ob,
+                                               const NurbBody &body,
+                                               const NurbBodyEdgeHit &edge,
+                                               const uint64_t edge_mask,
+                                               uint64_t r_edge_keys[64])
+{
+  std::fill_n(r_edge_keys, 64, uint64_t(0));
+  if (edge_mask == 0) {
+    return;
+  }
+
+  if (edge.surface_edge) {
+    for (int i = 0; i < 64; i++) {
+      const uint64_t slot_mask = nurb_body_edge_mask_for_index(i);
+      if ((edge_mask & slot_mask) != 0) {
+        r_edge_keys[i] = body.surface_edge_keys[i];
+      }
+    }
+    return;
+  }
+
+  const Span<NurbBodyEdgePolyline> polylines =
+      BKE_nurb_body_boolean_edge_polylines_cached(&ob, 64);
+  for (const NurbBodyEdgePolyline &polyline : polylines) {
+    if (!nurb_body_polyline_is_selectable_edge(polyline) ||
+        !nurb_body_polyline_matches_edge_hit_domain(polyline, edge) ||
+        polyline.edge_index < 0 || polyline.edge_index >= 64 || polyline.edge_key == 0)
+    {
+      continue;
+    }
+    const uint64_t polyline_mask = nurb_body_edge_mask_for_index(polyline.edge_index);
+    if ((edge_mask & polyline_mask) != 0) {
+      r_edge_keys[polyline.edge_index] = polyline.edge_key;
+    }
+  }
+}
+
+static bool nurb_body_edge_keys_cover_mask(const uint64_t edge_mask, const uint64_t edge_keys[64])
+{
+  if (edge_mask == 0) {
+    return false;
+  }
+  for (int i = 0; i < 64; i++) {
+    const uint64_t slot_mask = nurb_body_edge_mask_for_index(i);
+    if ((edge_mask & slot_mask) != 0 && edge_keys[i] == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool nurb_body_route_active_edges_to_surface_slots(NurbBody &body,
+                                                          const uint64_t source_edges,
+                                                          const uint64_t source_edge_keys[64],
+                                                          uint64_t &r_surface_edges)
+{
+  r_surface_edges = 0;
+  if (!nurb_body_edge_keys_cover_mask(source_edges, source_edge_keys)) {
+    return false;
+  }
+
+  uint64_t allocated_edges = 0;
+  for (int source_i = 0; source_i < 64; source_i++) {
+    const uint64_t source_mask = nurb_body_edge_mask_for_index(source_i);
+    if ((source_edges & source_mask) == 0) {
+      continue;
+    }
+    const uint64_t edge_key = source_edge_keys[source_i];
+    const int slot = nurb_body_surface_selection_slot_for_key(body, source_i, edge_key);
+    const uint64_t slot_mask = nurb_body_edge_mask_for_index(slot);
+    if (slot_mask == 0) {
+      for (int i = 0; i < 64; i++) {
+        const uint64_t allocated_mask = nurb_body_edge_mask_for_index(i);
+        if ((allocated_edges & allocated_mask) != 0) {
+          body.surface_selected_edges &= ~allocated_mask;
+          if ((body.surface_bevel_edges & allocated_mask) == 0) {
+            body.surface_edge_keys[i] = 0;
+          }
+        }
+      }
+      r_surface_edges = 0;
+      return false;
+    }
+    body.surface_edge_keys[slot] = edge_key;
+    body.surface_selected_edges |= slot_mask;
+    r_surface_edges |= slot_mask;
+    allocated_edges |= slot_mask;
+  }
+  body.surface_selected_edge = nurb_body_first_selected_edge(body.surface_selected_edges);
+  return r_surface_edges != 0;
+}
+
+static void nurb_body_clear_original_edge_selection_for_reroute(NurbBody &body,
+                                                                const NurbBodyEdgeHit &edge)
+{
+  if (edge.body_edge) {
+    body.selected_edges = 0;
+    body.selected_edge = -1;
+    body.hovered_edge = -1;
+    return;
+  }
+  if (!edge.surface_edge && edge.op != nullptr) {
+    edge.op->selected_edges = 0;
+    edge.op->selected_edge = -1;
+    edge.op->hovered_edge = -1;
+    edge.op->flag &= ~(NURB_BODY_BOOLEAN_OP_SELECTED | NURB_BODY_BOOLEAN_OP_HOVERED);
+  }
+}
+
+static void nurb_body_commit_existing_mutable_bevel_stage(Object &ob,
+                                                          NurbBody &body,
+                                                          const NurbBodyEdgeHit &active_edge)
+{
+  bool committed = false;
+  if (active_edge.body_edge) {
+    committed = nurb_body_commit_body_bevel_stage(body);
+  }
+  else if (!active_edge.surface_edge && active_edge.op != nullptr) {
+    uint64_t edge_keys[64];
+    nurb_body_collect_boolean_output_edge_keys(
+        ob, *active_edge.op, active_edge.op->bevel_edges, edge_keys);
+    committed = nurb_body_commit_output_bevel_stage(body, *active_edge.op, edge_keys);
+  }
+  if (committed) {
+    BKE_nurb_body_runtime_cache_clear(&ob);
+  }
+}
+
 static int nurb_body_debug_bevel_domain(const NurbBodyBevelData &data)
 {
   if (data.body_edge) {
@@ -2561,11 +2959,22 @@ static int nurb_body_debug_bevel_domain(const NurbBodyBevelData &data)
 
 static void nurb_body_tag_geometry_changed(bContext *C, Object &ob, NurbBody &body)
 {
+  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
   DEG_id_tag_update(&body.id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
   if (ARegion *region = CTX_wm_region(C)) {
     ED_region_tag_redraw(region);
   }
+}
+
+static void nurb_body_push_modeling_undo(bContext *C, wmOperator *op)
+{
+  /* Modal NURB tools edit the body during preview; push only the confirmed commit.
+   * Force a full memfile barrier so undo does not reuse stale in-place NurbBody history lists. */
+  if (Main *bmain = CTX_data_main(C)) {
+    bmain->use_memfile_full_barrier = true;
+  }
+  ED_undo_push_op(C, op);
 }
 
 struct NurbBodyEdgeTranslateData {
@@ -2674,7 +3083,10 @@ static wmOperatorStatus object_nurb_body_edge_translate_modal(bContext *C,
     case EVT_RETKEY:
     case EVT_PADENTER:
       if (event->val == KM_PRESS) {
+        BKE_nurb_body_runtime_cache_clear(ob);
+        nurb_body_tag_geometry_changed(C, *ob, *body);
         object_nurb_body_edge_translate_finish(op);
+        nurb_body_push_modeling_undo(C, op);
         return OPERATOR_FINISHED;
       }
       break;
@@ -2682,6 +3094,7 @@ static wmOperatorStatus object_nurb_body_edge_translate_modal(bContext *C,
     case EVT_ESCKEY:
       if (event->val == KM_PRESS) {
         copy_m4_m4(data->op->operand_to_target, data->start_operand_to_target);
+        BKE_nurb_body_runtime_cache_clear(ob);
         nurb_body_tag_geometry_changed(C, *ob, *body);
         object_nurb_body_edge_translate_finish(op);
         return OPERATOR_CANCELLED;
@@ -2754,7 +3167,7 @@ void OBJECT_OT_nurb_body_edge_translate(wmOperatorType *ot)
   ot->invoke = object_nurb_body_edge_translate_invoke;
   ot->modal = object_nurb_body_edge_translate_modal;
   ot->poll = object_nurb_body_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_GRAB_CURSOR_XY;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_GRAB_CURSOR_XY;
 }
 
 static void object_nurb_body_bevel_finish(bContext *C, wmOperator *op)
@@ -2786,6 +3199,7 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
   NurbBody *body = id_cast<NurbBody *>(ob->data);
   if (!data->body_edge && !data->surface_edge && data->op == nullptr) {
     body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
+    BKE_nurb_body_runtime_cache_clear(ob);
     nurb_body_tag_geometry_changed(C, *ob, *body);
     object_nurb_body_bevel_finish(C, op);
     return OPERATOR_CANCELLED;
@@ -2831,6 +3245,16 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     const float radius = data->precision_anchor_radius +
                          drag_delta * data->radius_step * NURB_BODY_BEVEL_PRECISION_FACTOR;
     return std::clamp(radius, 0.0f, current_max_preview_radius());
+  };
+
+  auto clamped_preview_radius = [&](const float requested_radius) {
+    float clamped_radius = requested_radius;
+    if (BKE_nurb_body_bevel_preview_radius_clamp(
+            ob, data->edit_edge_mask, requested_radius, &clamped_radius))
+    {
+      return std::clamp(clamped_radius, 0.0f, current_max_preview_radius());
+    }
+    return requested_radius;
   };
 
   auto rebase_drag_pixels_to_radius = [&](const float radius) {
@@ -2891,11 +3315,9 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
   auto current_preview_radius_step = [&]() {
     float step = data->preview_radius_step;
     if (data->active_edge_count > 1) {
-      const float edge_factor = data->active_edge_count > 1 ?
-                                    std::min(float(data->active_edge_count) * 2.0f, 16.0f) :
-                                    4.0f;
+      const float edge_factor = std::min(4.0f + float(data->active_edge_count) * 2.0f, 24.0f);
       step = std::max(step, data->radius_step * edge_factor);
-      step = std::max(step, current_max_preview_radius() / 160.0f);
+      step = std::max(step, current_max_preview_radius() / 96.0f);
     }
     else if (active_chamfer_mode()) {
       step = std::max(step, data->radius_step * 4.0f);
@@ -2983,7 +3405,7 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
   switch (event->type) {
     case MOUSEMOVE: {
       accumulate_mouse_delta();
-      const float radius = radius_from_mouse();
+      const float radius = clamped_preview_radius(radius_from_mouse());
       const bool first_preview = data->last_preview_radius < 0.0f;
       const float max_preview_radius = current_max_preview_radius();
       const bool force_endpoint_preview = radius == 0.0f || radius == max_preview_radius;
@@ -3054,6 +3476,7 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
         std::fflush(stderr);
       }
       if (will_tag_geometry) {
+        BKE_nurb_body_bevel_preview_radius_begin(ob, data->edit_edge_mask, radius);
         apply_radius(radius);
         data->last_preview_radius = radius;
         nurb_body_tag_geometry_changed(C, *ob, *body);
@@ -3086,6 +3509,8 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
         const float radius = radius_from_mouse();
         const bool use_chamfer = (*target.chamfer_edges & data->edit_edge_mask) !=
                                  data->edit_edge_mask;
+        BKE_nurb_body_bevel_preview_radius_clear(ob);
+        BKE_nurb_body_bevel_preview_radius_begin(ob, data->edit_edge_mask, radius);
         apply_radius(radius);
         nurb_body_set_edge_chamfer_mask(data->edit_edge_mask, use_chamfer, *target.chamfer_edges);
         *target.bevel_type = use_chamfer ? NURB_BODY_BEVEL_CHAMFER : NURB_BODY_BEVEL_FILLET;
@@ -3097,6 +3522,8 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     case EVT_FKEY:
       if (event->val == KM_PRESS) {
         const float radius = radius_from_mouse();
+        BKE_nurb_body_bevel_preview_radius_clear(ob);
+        BKE_nurb_body_bevel_preview_radius_begin(ob, data->edit_edge_mask, radius);
         apply_radius(radius);
         nurb_body_set_edge_chamfer_mask(data->edit_edge_mask, false, *target.chamfer_edges);
         *target.bevel_type = NURB_BODY_BEVEL_FILLET;
@@ -3109,31 +3536,39 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
     case EVT_RETKEY:
     case EVT_PADENTER:
       if (event->val == KM_PRESS) {
-        const float accepted_radius = data->last_preview_radius >= 0.0f ?
-                                          data->last_preview_radius :
-                                          radius_from_mouse();
+        float accepted_radius = data->last_preview_radius >= 0.0f ? data->last_preview_radius :
+                                                                    radius_from_mouse();
+        accepted_radius = clamped_preview_radius(accepted_radius);
+        float solved_radius = 0.0f;
+        if (BKE_nurb_body_bevel_preview_radius_get(
+                ob, data->edit_edge_mask, accepted_radius, &solved_radius))
+        {
+          accepted_radius = std::min(accepted_radius, solved_radius);
+        }
         apply_radius(accepted_radius);
+        BKE_nurb_body_bevel_preview_radius_clear(ob);
         body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
-        const bool committed_surface_stage = data->surface_edge &&
-                                             nurb_body_commit_surface_bevel_stage(*body);
-        if (!committed_surface_stage) {
-          /* Keep the accepted edge selected so the next evaluated mesh uses the same active
-           * blend path as the modal preview. Clearing it here can rebuild the confirmed topology
-           * differently from the previewed fillet/chamfer. */
-          *target.hovered_edge = -1;
+        if (data->body_edge) {
+          nurb_body_commit_body_bevel_stage(*body);
         }
-        if (!data->body_edge && !data->surface_edge) {
-          data->op->hovered_edge = -1;
-          data->op->flag &= ~NURB_BODY_BOOLEAN_OP_HOVERED;
+        else if (data->surface_edge) {
+          nurb_body_commit_surface_bevel_stage(*body);
         }
+        else if (data->op != nullptr) {
+          nurb_body_commit_output_bevel_stage(*body, *data->op, data->edge_keys);
+        }
+        BKE_nurb_body_runtime_cache_clear(ob);
+        nurb_body_clear_committed_bevel_selection(ob, target, *data);
         nurb_body_tag_geometry_changed(C, *ob, *body);
         object_nurb_body_bevel_finish(C, op);
+        nurb_body_push_modeling_undo(C, op);
         return OPERATOR_FINISHED;
       }
       break;
     case RIGHTMOUSE:
     case EVT_ESCKEY:
       if (event->val == KM_PRESS) {
+        BKE_nurb_body_bevel_preview_radius_clear(ob);
         body->flag &= ~NURB_BODY_FAST_BEVEL_PREVIEW;
         *target.bevel_radius = data->start_radius;
         *target.bevel_type = data->start_bevel_type;
@@ -3148,6 +3583,7 @@ static wmOperatorStatus object_nurb_body_bevel_modal(bContext *C,
         if (!data->body_edge && !data->surface_edge) {
           nurb_body_sync_active_selected_edge(*data->op);
         }
+        BKE_nurb_body_runtime_cache_clear(ob);
         nurb_body_tag_geometry_changed(C, *ob, *body);
         object_nurb_body_bevel_finish(C, op);
         return OPERATOR_CANCELLED;
@@ -3251,6 +3687,49 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   }
 
   NurbBodyBevelTarget target = nurb_body_bevel_target_for_edge(*body, active_edge);
+  uint64_t active_edges = *target.selected_edges;
+  if (active_edges == 0) {
+    active_edges = nurb_body_edge_mask_for_index(active_edge.edge_index);
+  }
+  const float source_radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
+                                        nurb_body_bevel_radius_limit(*body) :
+                                        std::max(nurb_body_bevel_radius_limit(*body),
+                                                 nurb_body_boolean_op_scaled_bevel_radius_limit(
+                                                     *active_edge.op));
+  uint64_t active_edge_keys[64];
+  nurb_body_collect_active_edge_keys(*ob, *body, active_edge, active_edges, active_edge_keys);
+  if (!active_edge.surface_edge &&
+      !nurb_body_edge_keys_cover_mask(active_edges, active_edge_keys))
+  {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Cannot resolve exact NURB Body edge keys for a stable bevel operation");
+    return OPERATOR_CANCELLED;
+  }
+  nurb_body_commit_existing_mutable_bevel_stage(*ob, *body, active_edge);
+  if (!active_edge.surface_edge) {
+    uint64_t surface_edges = 0;
+    if (nurb_body_route_active_edges_to_surface_slots(
+            *body, active_edges, active_edge_keys, surface_edges))
+    {
+      nurb_body_clear_original_edge_selection_for_reroute(*body, active_edge);
+      active_edge.op = nullptr;
+      active_edge.body_edge = false;
+      active_edge.surface_edge = true;
+      active_edges = surface_edges;
+      active_edge.edge_index = nurb_body_first_selected_edge(active_edges);
+      active_edge.edge_key = active_edge.edge_index >= 0 ?
+                                 body->surface_edge_keys[active_edge.edge_index] :
+                                 0;
+    }
+    else {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Cannot allocate exact NURB Body edge slots for a stable bevel operation");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  target = nurb_body_bevel_target_for_edge(*body, active_edge);
   const int start_bevel_type = nurb_body_edge_bevel_type(*target.bevel_type,
                                                          *target.bevel_edges,
                                                          *target.chamfer_edges,
@@ -3262,10 +3741,6 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   const int start_bevel_order_next = *target.bevel_order_next;
   const int start_selected_edge = *target.selected_edge;
   const uint64_t start_selected_edges = *target.selected_edges;
-  uint64_t active_edges = *target.selected_edges;
-  if (active_edges == 0) {
-    active_edges = nurb_body_edge_mask_for_index(active_edge.edge_index);
-  }
   const int active_edge_count = std::max(nurb_body_edge_mask_count(active_edges), 1);
   const float start_radius = active_edge_count > 1 ?
                                  nurb_body_uniform_edge_bevel_radius(*target.bevel_radius,
@@ -3290,11 +3765,7 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
                                                                        target.bevel_radii);
   const uint64_t target_edges = existing_bevel_edges | active_edges;
   const int profile = start_bevel_type;
-  const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
-                                 nurb_body_bevel_radius_limit(*body) :
-                                 std::max(nurb_body_bevel_radius_limit(*body),
-                                          nurb_body_boolean_op_scaled_bevel_radius_limit(
-                                              *active_edge.op));
+  const float radius_limit = source_radius_limit;
   const float max_preview_radius = nurb_body_modal_bevel_radius_limit(*ob,
                                                                       active_edge,
                                                                       radius_limit);
@@ -3310,8 +3781,9 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   }
   nurb_body_assign_edge_bevel_orders(
       existing_bevel_edges, target.bevel_order, *target.bevel_order_next);
-  nurb_body_assign_edge_bevel_orders(active_edges, target.bevel_order, *target.bevel_order_next);
-  nurb_body_promote_edge_bevel_orders(active_edges, target.bevel_order, *target.bevel_order_next);
+  nurb_body_assign_shared_edge_bevel_order(active_edges,
+                                           target.bevel_order,
+                                           *target.bevel_order_next);
   *target.bevel_edges = target_edges;
   nurb_body_clear_unused_edge_bevel_orders(*target.bevel_edges, target.bevel_order);
   *target.bevel_edge = active_edge.edge_index;
@@ -3337,6 +3809,7 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   data->start_selected_edges = start_selected_edges;
   data->edge_mask = target_edges;
   data->edit_edge_mask = active_edges;
+  std::copy_n(active_edge_keys, 64, data->edge_keys);
   data->active_edge_count = active_edge_count;
   data->start_mouse_x = event->mval[0];
   data->start_mouse_y = event->mval[1];
@@ -3350,6 +3823,7 @@ static wmOperatorStatus object_nurb_body_bevel_invoke(bContext *C,
   data->max_preview_radius = max_preview_radius;
   data->max_chamfer_preview_radius = max_chamfer_preview_radius;
   data->last_preview_radius = -1.0f;
+  BKE_nurb_body_bevel_preview_radius_clear(ob);
   body->flag |= NURB_BODY_FAST_BEVEL_PREVIEW;
 
   if (region) {
@@ -3397,17 +3871,52 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
   if (active_edges == 0) {
     active_edges = nurb_body_edge_mask_for_index(active_edge.edge_index);
   }
+  const float source_radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
+                                        nurb_body_bevel_radius_limit(*body) :
+                                        std::max(nurb_body_bevel_radius_limit(*body),
+                                                 nurb_body_boolean_op_scaled_bevel_radius_limit(
+                                                     *active_edge.op));
+  uint64_t active_edge_keys[64];
+  nurb_body_collect_active_edge_keys(*ob, *body, active_edge, active_edges, active_edge_keys);
+  if (!active_edge.surface_edge &&
+      !nurb_body_edge_keys_cover_mask(active_edges, active_edge_keys))
+  {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Cannot resolve exact NURB Body edge keys for a stable bevel operation");
+    return OPERATOR_CANCELLED;
+  }
+  nurb_body_commit_existing_mutable_bevel_stage(*ob, *body, active_edge);
+  if (!active_edge.surface_edge) {
+    uint64_t surface_edges = 0;
+    if (nurb_body_route_active_edges_to_surface_slots(
+            *body, active_edges, active_edge_keys, surface_edges))
+    {
+      nurb_body_clear_original_edge_selection_for_reroute(*body, active_edge);
+      active_edge.op = nullptr;
+      active_edge.body_edge = false;
+      active_edge.surface_edge = true;
+      active_edges = surface_edges;
+      active_edge.edge_index = nurb_body_first_selected_edge(active_edges);
+      active_edge.edge_key = active_edge.edge_index >= 0 ?
+                                 body->surface_edge_keys[active_edge.edge_index] :
+                                 0;
+    }
+    else {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Cannot allocate exact NURB Body edge slots for a stable bevel operation");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  target = nurb_body_bevel_target_for_edge(*body, active_edge);
   const bool had_explicit_bevel_edges = *target.bevel_edges != 0;
   const uint64_t existing_bevel_edges = nurb_body_effective_bevel_edges(*target.bevel_radius,
                                                                        *target.bevel_edges,
                                                                        *target.bevel_edge,
                                                                        target.bevel_radii);
   const uint64_t target_edges = existing_bevel_edges | active_edges;
-  const float radius_limit = (active_edge.body_edge || active_edge.surface_edge) ?
-                                 nurb_body_bevel_radius_limit(*body) :
-                                 std::max(nurb_body_bevel_radius_limit(*body),
-                                          nurb_body_boolean_op_scaled_bevel_radius_limit(
-                                              *active_edge.op));
+  const float radius_limit = source_radius_limit;
   const float radius = std::min(std::max(0.0f, RNA_float_get(op->ptr, "radius")),
                                 nurb_body_modal_bevel_radius_limit(*ob,
                                                                    active_edge,
@@ -3423,8 +3932,9 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
   }
   nurb_body_assign_edge_bevel_orders(
       existing_bevel_edges, target.bevel_order, *target.bevel_order_next);
-  nurb_body_assign_edge_bevel_orders(active_edges, target.bevel_order, *target.bevel_order_next);
-  nurb_body_promote_edge_bevel_orders(active_edges, target.bevel_order, *target.bevel_order_next);
+  nurb_body_assign_shared_edge_bevel_order(active_edges,
+                                           target.bevel_order,
+                                           *target.bevel_order_next);
   *target.bevel_edges = target_edges;
   nurb_body_clear_unused_edge_bevel_orders(*target.bevel_edges, target.bevel_order);
   *target.bevel_edge = active_edge.edge_index;
@@ -3433,17 +3943,21 @@ static wmOperatorStatus object_nurb_body_bevel_exec(bContext *C, wmOperator *op)
   nurb_body_set_uniform_edge_bevel_radii(active_edges, radius, target.bevel_radii);
   nurb_body_set_edge_chamfer_mask(
       active_edges, profile == NURB_BODY_BEVEL_CHAMFER, *target.chamfer_edges);
-  const bool committed_surface_stage = active_edge.surface_edge &&
-                                       nurb_body_commit_surface_bevel_stage(*body);
-  if (!committed_surface_stage) {
-    *target.hovered_edge = -1;
+  if (active_edge.body_edge) {
+    nurb_body_commit_body_bevel_stage(*body);
   }
-  if (!active_edge.body_edge && !active_edge.surface_edge) {
-    active_edge.op->hovered_edge = -1;
-    active_edge.op->flag &= ~NURB_BODY_BOOLEAN_OP_HOVERED;
+  else if (active_edge.surface_edge) {
+    nurb_body_commit_surface_bevel_stage(*body);
   }
+  else if (active_edge.op != nullptr) {
+    nurb_body_commit_output_bevel_stage(*body, *active_edge.op, active_edge_keys);
+  }
+  BKE_nurb_body_runtime_cache_clear(ob);
+  nurb_body_clear_committed_bevel_selection(ob, target, active_edge);
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
   DEG_id_tag_update(&body->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  nurb_body_push_modeling_undo(C, op);
   return OPERATOR_FINISHED;
 }
 
@@ -3456,7 +3970,7 @@ void OBJECT_OT_nurb_body_bevel_selected(wmOperatorType *ot)
   ot->modal = object_nurb_body_bevel_modal;
   ot->exec = object_nurb_body_bevel_exec;
   ot->poll = object_nurb_body_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_GRAB_CURSOR_XY | OPTYPE_BLOCKING;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_GRAB_CURSOR_XY | OPTYPE_BLOCKING;
 
   RNA_def_float(ot->srna, "radius", 0.08f, 0.0f, 100000.0f, "Radius", "", 0.0f, 10.0f);
   RNA_def_enum(ot->srna,

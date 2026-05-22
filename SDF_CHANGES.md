@@ -91,6 +91,8 @@ Added `OB_NURB_BODY = 24` / `ID_NB = 'NB'` as a native Blender object type backe
 
 **Bevel/Fillet/Chamfer**: Interactive modal operator. Drag mouse horizontally to change radius. Press C to toggle chamfer, F for fillet. Escape reverts. Per-edge bevel radii stored in `bevel_radii[64]`. Both body edges and boolean op cut edges are bevelable independently.
 
+**NURB Body undo**: Confirmed boolean, edge move, bevel, fillet, and chamfer commits push explicit full-barrier undo checkpoints after the NurbBody/Object IDs are tagged. Edge hover and edge selection changes stay out of the geometry undo stream so Ctrl+Z only rolls back the last confirmed modeling operation. Runtime NURB body OCCT/evaluated-shape caches are cleared on undo restore and committed modeling changes so Ctrl+Z cannot display a stale combined bevel/chamfer state. Undo/file restore preserves exact committed surface/output fillet edge keys so rolling back the latest chamfer does not also drop earlier fillet stages.
+
 **Edge translation**: Modal operator for moving boolean op edge positions. X/Y/Z keys constrain to axis. Drag mouse to translate the operand position relative to the target body.
 
 **Viewport rendering**: The overlay engine renders silhouette lines detected from the tessellated mesh (boundary edges + edges between front/back-facing faces). Boolean edge polylines are sampled from OCCT curves and rendered with color coding: black = normal, white = hovered, orange = selected.
