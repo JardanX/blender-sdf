@@ -4489,6 +4489,8 @@ def km_object_mode(params):
 
     items.extend([
         ("object.nurb_body_edge_translate", {"type": 'G', "value": 'PRESS'}, None),
+        ("object.nurb_body_face_extrude", {"type": 'E', "value": 'PRESS'}, None),
+        ("object.nurb_body_face_inset", {"type": 'I', "value": 'PRESS'}, None),
         ("object.nurb_body_bevel_selected", {"type": 'B', "value": 'PRESS', "ctrl": True}, None),
         ("object.nurb_body_boolean_apply", {"type": 'MINUS', "value": 'PRESS', "ctrl": True},
          {"properties": [("operation", 'DIFFERENCE')]}),

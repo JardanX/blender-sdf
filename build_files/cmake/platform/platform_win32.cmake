@@ -740,6 +740,8 @@ if(WITH_OPENCASCADE)
       TKBO
       TKBool
       TKFillet
+      TKFeat
+      TKOffset
       TKMesh
       TKShHealing
     )

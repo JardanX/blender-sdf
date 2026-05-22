@@ -112,6 +112,8 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_nurb_body_select_cut_edge);
   WM_operatortype_append(OBJECT_OT_nurb_body_select_mode);
   WM_operatortype_append(OBJECT_OT_nurb_body_edge_translate);
+  WM_operatortype_append(OBJECT_OT_nurb_body_face_extrude);
+  WM_operatortype_append(OBJECT_OT_nurb_body_face_inset);
   WM_operatortype_append(OBJECT_OT_nurb_body_bevel_selected);
   WM_operatortype_append(OBJECT_OT_nurb_body_boolean_apply);
   WM_operatortype_append(OBJECT_OT_add);
