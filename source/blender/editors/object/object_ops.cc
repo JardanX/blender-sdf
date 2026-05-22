@@ -348,6 +348,8 @@ void keymap_object(wmKeyConfig *keyconf)
 {
   wmKeyMap *keymap;
 
+  nurb_body_bevel_modal_keymap(keyconf);
+
   /* Objects, Regardless of Mode -------------------------------------------------- */
   keymap = WM_keymap_ensure(keyconf, "Object Non-modal", SPACE_EMPTY, RGN_TYPE_WINDOW);
 

@@ -182,9 +182,10 @@ class WORKSPACE_PT_nurb_body_viewport(WorkSpaceButtonsPanel, Panel):
         layout.use_property_decorate = False
 
         tool_settings = context.tool_settings
-        layout.prop(tool_settings, "nurb_body_tessellation_deflection", text="Deflection")
-        layout.prop(tool_settings, "nurb_body_tessellation_angle", text="Angle")
-        layout.prop(tool_settings, "use_nurb_body_triangulate_mesh")
+        layout.prop(tool_settings, "nurb_body_tessellation_topology", text="Topology", expand=True)
+        layout.prop(tool_settings, "nurb_body_tessellation_density", text="Quality")
+        layout.prop(tool_settings, "nurb_body_tessellation_deflection", text="Plane Tolerance")
+        layout.prop(tool_settings, "nurb_body_tessellation_angle", text="Angle Tolerance")
         layout.prop(tool_settings, "use_nurb_body_smooth_shading")
 
 

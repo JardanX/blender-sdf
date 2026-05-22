@@ -1784,6 +1784,13 @@ def km_view3d(params):
          {"type": params.select_mouse, "value": params.select_mouse_value_fallback}, None),
         ("object.nurb_body_select_cut_edge",
          {"type": params.select_mouse, "value": params.select_mouse_value_fallback, "shift": True}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value_fallback, "alt": True},
+         {"properties": [("bevel_chain", True)]}),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value_fallback,
+          "shift": True, "alt": True},
+         {"properties": [("bevel_chain", True)]}),
         # Selection.
         *_template_view3d_select(
             type=params.select_mouse,
@@ -6498,6 +6505,24 @@ def km_bevel_modal_map(_params):
     return keymap
 
 
+def km_nurb_body_bevel_modal_map(_params):
+    items = []
+    keymap = (
+        "NURB Body Bevel Modal Map",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    items.extend([
+        ("PRECISION_ON", {"type": 'LEFT_SHIFT', "value": 'PRESS', "any": True}, None),
+        ("PRECISION_OFF", {"type": 'LEFT_SHIFT', "value": 'RELEASE', "any": True}, None),
+        ("PRECISION_ON", {"type": 'RIGHT_SHIFT', "value": 'PRESS', "any": True}, None),
+        ("PRECISION_OFF", {"type": 'RIGHT_SHIFT', "value": 'RELEASE', "any": True}, None),
+    ])
+
+    return keymap
+
+
 def km_view3d_fly_modal(_params):
     items = []
     keymap = (
@@ -9027,6 +9052,7 @@ def generate_keymaps(params=None):
         km_knife_tool_modal_map(params),
         km_custom_normals_modal_map(params),
         km_bevel_modal_map(params),
+        km_nurb_body_bevel_modal_map(params),
         km_view3d_fly_modal(params),
         km_view3d_walk_modal(params),
         km_view3d_rotate_modal(params),

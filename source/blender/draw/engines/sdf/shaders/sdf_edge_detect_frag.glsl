@@ -18,7 +18,7 @@ void main()
   }
 
   float scene_d = texture(scene_depth_tx, screen_uv).r;
-  float eps = max(0.0001f, scene_d * 0.005f);
+  float eps = max(3.0f / 8388608.0f, scene_d * 2.0e-6f);
   if (scene_d > 0.0f && scene_d < 1.0f && center_depth > scene_d + eps) {
     discard;
     return;

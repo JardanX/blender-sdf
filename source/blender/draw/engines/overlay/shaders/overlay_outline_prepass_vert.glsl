@@ -16,7 +16,8 @@ VERTEX_SHADER_CREATE_INFO(overlay_outline_prepass_mesh)
 
 bool outline_is_nurb_body_override()
 {
-  return outline_color_override == 2 || outline_color_override == 3;
+  return outline_color_override == 1 || outline_color_override == 2 ||
+         outline_color_override == 3;
 }
 
 uint outline_colorid_get()

@@ -49,6 +49,13 @@ Span<NurbBodyEdgePolyline> BKE_nurb_body_boolean_edge_polylines_cached(const Obj
                                                                        int samples_per_edge = 96);
 uint64_t BKE_nurb_body_boolean_edge_polylines_cache_key(const Object *object,
                                                         int samples_per_edge = 96);
+void BKE_nurb_body_debug_bevel_set_drag_tick(uint64_t tick_id,
+                                             float radius,
+                                             int edge_index,
+                                             int domain,
+                                             uint64_t active_mask);
+void BKE_nurb_body_debug_bevel_end_drag_tick(const char *reason);
+bool BKE_nurb_body_debug_bevel_enabled();
 bool BKE_nurb_body_hovered_edge_key_set(const Object *object,
                                         const NurbBodyBooleanOp *op,
                                         int edge_index,
@@ -58,6 +65,15 @@ bool BKE_nurb_body_hovered_edge_key_clear(const Object *object);
 uint64_t BKE_nurb_body_hovered_edge_key_get(const Object *object);
 bool BKE_nurb_body_hovered_edge_key_matches(const Object *object,
                                             const NurbBodyEdgePolyline &polyline);
+bool BKE_nurb_body_selected_edge_key_set(const Object *object,
+                                         const NurbBodyBooleanOp *op,
+                                         int edge_index,
+                                         int flag,
+                                         uint64_t edge_key);
+bool BKE_nurb_body_selected_edge_key_clear(const Object *object);
+uint64_t BKE_nurb_body_selected_edge_key_get(const Object *object);
+bool BKE_nurb_body_selected_edge_key_matches(const Object *object,
+                                             const NurbBodyEdgePolyline &polyline);
 void BKE_nurb_body_data_update(Depsgraph *depsgraph, Scene *scene, Object *ob);
 
 }  // namespace blender

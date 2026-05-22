@@ -22,11 +22,8 @@
 #include "draw_common.hh"
 #include "draw_view.hh"
 
-#include "DNA_nurb_body_types.h"
 #include "DNA_object_types.h"
 #include "DNA_userdef_types.h"
-
-#include "DEG_depsgraph_query.hh"
 
 #include "GPU_batch.hh"
 #include "GPU_shader.hh"
@@ -54,8 +51,7 @@ class Outline : Overlay {
   /* MATHOPS: Removed — Grease Pencil */
   // PassMain::Sub *prepass_gpencil_ps_ = nullptr;
   PassMain::Sub *prepass_mesh_ps_ = nullptr;
-  PassMain::Sub *prepass_nurb_body_black_ps_ = nullptr;
-  PassMain::Sub *prepass_nurb_body_selected_ps_ = nullptr;
+  PassMain::Sub *prepass_nurb_body_ps_ = nullptr;
   PassMain::Sub *prepass_volume_ps_ = nullptr;
   PassMain::Sub *prepass_wire_ps_ = nullptr;
   /* Detect edges inside the ID pass and output color for each of them. */
@@ -80,41 +76,6 @@ class Outline : Overlay {
   Vector<FlatObjectRef> flat_objects_;
 
   PassMain outline_prepass_flat_ps_ = {"PrepassFlat"};
-
-  static bool nurb_body_has_edge_selection(const NurbBody &body)
-  {
-    if (body.selected_edges != 0 || body.surface_selected_edges != 0) {
-      return true;
-    }
-    for (const NurbBodyBooleanOp *op = static_cast<const NurbBodyBooleanOp *>(
-             body.boolean_ops.first);
-         op;
-         op = op->next)
-    {
-      if (op->selected_edges != 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  static bool nurb_body_draw_as_object_selected(const Object &object)
-  {
-    const Object *original_object = DEG_get_original(&object);
-    if (original_object == nullptr || original_object->type != OB_NURB_BODY ||
-        original_object->data == nullptr)
-    {
-      return (object.base_flag & BASE_SELECTED) != 0;
-    }
-
-    const NurbBody *body = reinterpret_cast<const NurbBody *>(original_object->data);
-    if (body != nullptr && nurb_body_has_edge_selection(*body)) {
-      return false;
-    }
-    return (original_object->base_flag & BASE_SELECTED) != 0;
-  }
-
-
 
  public:
   ~Outline()
@@ -177,18 +138,11 @@ class Outline : Overlay {
         prepass_mesh_ps_ = &sub;
       }
       {
-        auto &sub = pass.sub("NurbBodyBlack");
+        auto &sub = pass.sub("NurbBody");
         sub.shader_set(res.shaders->outline_prepass_mesh.get());
-        sub.push_constant("is_transform", false);
-        sub.push_constant("outline_color_override", 2);
-        prepass_nurb_body_black_ps_ = &sub;
-      }
-      {
-        auto &sub = pass.sub("NurbBodySelected");
-        sub.shader_set(res.shaders->outline_prepass_mesh.get());
-        sub.push_constant("is_transform", false);
-        sub.push_constant("outline_color_override", 3);
-        prepass_nurb_body_selected_ps_ = &sub;
+        sub.push_constant("is_transform", is_transform);
+        sub.push_constant("outline_color_override", 1);
+        prepass_nurb_body_ps_ = &sub;
       }
       {
         auto &sub = pass.sub("Volume");
@@ -258,9 +212,8 @@ class Outline : Overlay {
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
       case OB_NURB_BODY: {
-        /* NURB Body outlines are represented by overlay_nurb_body edge polylines. Mixing this
-         * post-process outline with the NURB edge overlay gives different AA and depth coverage
-         * on the same rim. */
+        geom = DRW_cache_mesh_surface_get(ob_ref.object);
+        prepass_nurb_body_ps_->draw(geom, manager.unique_handle(ob_ref));
         break;
       }
       case OB_MESH:
