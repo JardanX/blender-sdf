@@ -32,6 +32,8 @@ typedef enum eNurbBodyBooleanOperation {
   NURB_BODY_BOOLEAN_UNION = 1,
   NURB_BODY_BOOLEAN_INTERSECT = 2,
   NURB_BODY_BOOLEAN_SURFACE_BLEND_STAGE = 3,
+  NURB_BODY_BOOLEAN_BODY_BLEND_STAGE = 4,
+  NURB_BODY_BOOLEAN_OUTPUT_BLEND_STAGE = 5,
 } eNurbBodyBooleanOperation;
 
 typedef enum eNurbBodyBevelType {
