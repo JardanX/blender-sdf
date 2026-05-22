@@ -17,7 +17,6 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
-#include "BLI_array.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.hh"
@@ -63,9 +62,10 @@ class NurbBodies : Overlay {
   Vector<Entry> entries_;
   Vector<DrawCache> draw_caches_;
   float line_width_ = 2.0f;
+  View::OffsetData offset_data_;
   int select_mode_ = NURB_BODY_SELECT_MODE_EDGE;
   bool edge_overlay_enabled_ = false;
-  bool xray_flag_enabled_ = false;
+  bool xray_enabled_ = false;
   bool needs_depth_prepass_ = false;
 
   static bool edge_index_in_mask(const uint64_t mask, const int edge_index)
@@ -94,7 +94,8 @@ class NurbBodies : Overlay {
            select_mode == NURB_BODY_SELECT_MODE_OBJECT;
   }
 
-  static uint64_t line_selection_key(const NurbBody &body,
+  static uint64_t line_selection_key(const Object *object,
+                                     const NurbBody &body,
                                      const int select_mode,
                                      const bool object_selected)
   {
@@ -106,6 +107,7 @@ class NurbBodies : Overlay {
     hash_value(hash, body.surface_selected_edges);
     hash_value(hash, body.surface_selected_edge);
     hash_bytes(hash, body.surface_edge_keys, sizeof(body.surface_edge_keys));
+    hash_value(hash, BKE_nurb_body_selected_edge_key_get(object));
 
     int op_count = 0;
     for (const NurbBodyBooleanOp *op = static_cast<const NurbBodyBooleanOp *>(
@@ -158,9 +160,9 @@ class NurbBodies : Overlay {
     return std::clamp(overlay.nurb_body_line_thickness, 0.5f, 8.0f);
   }
 
-  static bool edge_selection_mode_enabled(const int select_mode, const bool object_selected)
+  static bool edge_selection_mode_enabled(const int select_mode, const bool /*object_selected*/)
   {
-    return select_mode == NURB_BODY_SELECT_MODE_EDGE && !object_selected;
+    return select_mode == NURB_BODY_SELECT_MODE_EDGE;
   }
 
   static bool polyline_is_surface(const NurbBodyEdgePolyline &polyline)
@@ -168,7 +170,23 @@ class NurbBodies : Overlay {
     return (polyline.flag & NURB_BODY_EDGE_POLYLINE_SURFACE) != 0 && polyline.points.size() >= 2;
   }
 
-  static bool polyline_is_selected(const NurbBody &body,
+  static bool surface_edge_key_is_selected(const NurbBody &body, const uint64_t edge_key)
+  {
+    if (edge_key == 0) {
+      return false;
+    }
+    for (int i = 0; i < 64; i++) {
+      if (edge_index_in_mask(body.surface_selected_edges, i) &&
+          body.surface_edge_keys[i] == edge_key)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool polyline_is_selected(const Object *object,
+                                   const NurbBody &body,
                                    const NurbBodyEdgePolyline &polyline,
                                    const int select_mode,
                                    const bool object_selected)
@@ -180,6 +198,15 @@ class NurbBodies : Overlay {
     const NurbBodyBooleanOp *op = polyline.op;
     const bool body_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_BODY) != 0;
     const bool surface_edge = (polyline.flag & NURB_BODY_EDGE_POLYLINE_FINAL) != 0;
+    const uint64_t selected_edge_key = BKE_nurb_body_selected_edge_key_get(object);
+    if (selected_edge_key != 0 && BKE_nurb_body_selected_edge_key_matches(object, polyline)) {
+      return true;
+    }
+    if ((polyline.flag & NURB_BODY_EDGE_POLYLINE_SELECTABLE) != 0 &&
+        surface_edge_key_is_selected(body, polyline.edge_key))
+    {
+      return true;
+    }
     if (body_edge) {
       return edge_index_in_mask(body.selected_edges, polyline.edge_index);
     }
@@ -319,17 +346,17 @@ class NurbBodies : Overlay {
     discard_batch(cache.selected_batch);
     cache.normal_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
-          return !polyline_is_selected(body, polyline, select_mode, object_selected) &&
+          return !polyline_is_selected(object, body, polyline, select_mode, object_selected) &&
                  !polyline_is_hovered(object, body, polyline, select_mode, object_selected);
         });
     cache.hovered_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
           return polyline_is_hovered(object, body, polyline, select_mode, object_selected) &&
-                 !polyline_is_selected(body, polyline, select_mode, object_selected);
+                 !polyline_is_selected(object, body, polyline, select_mode, object_selected);
         });
     cache.selected_batch = create_line_batch(
         polylines, [&](const NurbBodyEdgePolyline &polyline) {
-          return polyline_is_selected(body, polyline, select_mode, object_selected);
+          return polyline_is_selected(object, body, polyline, select_mode, object_selected);
         });
   }
 
@@ -346,6 +373,7 @@ class NurbBodies : Overlay {
     enabled_ = state.is_space_v3d() && !state.hide_overlays;
     entries_.clear();
     line_width_ = line_thickness_for_overlay(state.overlay);
+    offset_data_ = state.offset_data_get();
     select_mode_ = NURB_BODY_SELECT_MODE_EDGE;
     if (state.scene != nullptr && state.scene->toolsettings != nullptr &&
         select_mode_is_valid(state.scene->toolsettings->nurb_body_select_mode))
@@ -353,7 +381,7 @@ class NurbBodies : Overlay {
       select_mode_ = state.scene->toolsettings->nurb_body_select_mode;
     }
     edge_overlay_enabled_ = enabled_;
-    xray_flag_enabled_ = state.xray_flag_enabled;
+    xray_enabled_ = state.xray_enabled;
     needs_depth_prepass_ = edge_overlay_enabled_ && state.xray_enabled;
     depth_ps_.init();
     depth_mesh_ps_ = nullptr;
@@ -383,7 +411,7 @@ class NurbBodies : Overlay {
 
     const Object *original_object = DEG_get_original(ob_ref.object);
     if (original_object == nullptr || original_object->type != OB_NURB_BODY ||
-        original_object->data == nullptr)
+        original_object->data == nullptr || GS(original_object->data->name) != ID_NB)
     {
       return;
     }
@@ -414,12 +442,16 @@ class NurbBodies : Overlay {
     }
 
     GPU_framebuffer_bind(framebuffer);
-    GPU_depth_test(xray_flag_enabled_ ? GPU_DEPTH_NONE : GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_test(xray_enabled_ ? GPU_DEPTH_NONE : GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(false);
     GPU_blend(GPU_BLEND_ALPHA);
     GPU_line_smooth(true);
 
     for (const Entry &entry : entries_) {
+      if (entry.original_object->data == nullptr || GS(entry.original_object->data->name) != ID_NB)
+      {
+        continue;
+      }
       const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.original_object->data);
       const uint64_t geometry_key = BKE_nurb_body_boolean_edge_polylines_cache_key(
           entry.original_object, 64);
@@ -437,7 +469,8 @@ class NurbBodies : Overlay {
       const bool object_selected = ((entry.original_object->base_flag | entry.object->base_flag) &
                                     BASE_SELECTED) != 0;
 
-      const uint64_t selection_key = line_selection_key(*body, select_mode_, object_selected);
+      const uint64_t selection_key = line_selection_key(
+          entry.original_object, *body, select_mode_, object_selected);
       const uint64_t hover_key = line_hover_key(
           entry.original_object, *body, select_mode_, object_selected);
       if (geometry_changed || cache.selection_key != selection_key ||
@@ -451,10 +484,14 @@ class NurbBodies : Overlay {
         cache.hover_key = hover_key;
       }
 
+      const bool draw_edge_outline = !(xray_enabled_ && object_selected);
+
       GPU_matrix_push();
       GPU_matrix_mul(entry.object->object_to_world().ptr());
-      GPU_polygon_offset(1.0f, 2.0f);
-      draw_batch(cache.normal_batch, float4(0.0f, 0.0f, 0.0f, 0.9f), line_width_);
+      GPU_polygon_offset(offset_data_.dist, 4.0f);
+      if (draw_edge_outline) {
+        draw_batch(cache.normal_batch, float4(0.0f, 0.0f, 0.0f, 0.9f), line_width_);
+      }
       draw_batch(cache.hovered_batch, float4(1.0f, 1.0f, 1.0f, 1.0f), line_width_);
       draw_batch(cache.selected_batch, float4(1.0f, 0.62f, 0.0f, 1.0f), line_width_);
       GPU_polygon_offset(0.0f, 0.0f);

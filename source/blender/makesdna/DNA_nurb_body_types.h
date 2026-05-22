@@ -31,6 +31,7 @@ typedef enum eNurbBodyBooleanOperation {
   NURB_BODY_BOOLEAN_DIFFERENCE = 0,
   NURB_BODY_BOOLEAN_UNION = 1,
   NURB_BODY_BOOLEAN_INTERSECT = 2,
+  NURB_BODY_BOOLEAN_SURFACE_BLEND_STAGE = 3,
 } eNurbBodyBooleanOperation;
 
 typedef enum eNurbBodyBevelType {
@@ -43,6 +44,12 @@ typedef enum eNurbBodySelectMode {
   NURB_BODY_SELECT_MODE_FACE = 1,
   NURB_BODY_SELECT_MODE_OBJECT = 2,
 } eNurbBodySelectMode;
+
+typedef enum eNurbBodyTessellationTopology {
+  NURB_BODY_TESSELLATION_TRIS = 0,
+  NURB_BODY_TESSELLATION_QUADS = 1,
+  NURB_BODY_TESSELLATION_NGONS = 2,
+} eNurbBodyTessellationTopology;
 
 enum {
   NURB_BODY_MERGE_VERTICES = (1 << 0),
@@ -121,7 +128,7 @@ typedef struct NurbBody {
   struct AnimData *adt = nullptr;
 
   int primitive = NURB_BODY_PRIMITIVE_CYLINDER;
-  int flag = NURB_BODY_SMOOTH_SHADING | NURB_BODY_TRIANGULATE_MESH;
+  int flag = NURB_BODY_SMOOTH_SHADING;
 
   float radius = 1.0f;
   float depth = 2.0f;
@@ -158,18 +165,24 @@ typedef struct NurbBody {
   int surface_bevel_order_next = 1;
   float bevel_radius = 0.0f;
   float surface_bevel_radius = 0.0f;
-  float tessellation_deflection = 0.01f;
-  float tessellation_angle = 0.558505f;
+  float tessellation_deflection = 0.004f;
+  float tessellation_angle = 0.10472f;
+  float tessellation_face_deflection = 0.012f;
+  float tessellation_face_angle = 0.20944f;
+  float tessellation_density = 0.75f;
+  float tessellation_min_width = 0.0f;
+  float tessellation_plane_angle = 0.523599f;
   float auto_crease_angle = 0.523599f;
   int select_mode = NURB_BODY_SELECT_MODE_EDGE;
-  int _pad0 = 0;
-  void *_pad1 = nullptr;
+  int tessellation_topology = NURB_BODY_TESSELLATION_NGONS;
+  int _pad1 = 0;
 
   ListBase boolean_ops = {}; /* NurbBodyBooleanOp */
 
   struct Material **mat = nullptr;
   short totcol = 0;
   char _pad[6] = {};
+  void *_pad2 = nullptr;
 } NurbBody;
 
 }  // namespace blender

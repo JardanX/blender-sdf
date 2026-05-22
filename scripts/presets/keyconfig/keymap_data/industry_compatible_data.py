@@ -769,6 +769,13 @@ def km_view3d(params):
          {"type": params.select_mouse, "value": params.select_mouse_value}, None),
         ("object.nurb_body_select_cut_edge",
          {"type": params.select_mouse, "value": params.select_mouse_value, "shift": True}, None),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value, "alt": True},
+         {"properties": [("bevel_chain", True)]}),
+        ("object.nurb_body_select_cut_edge",
+         {"type": params.select_mouse, "value": params.select_mouse_value,
+          "shift": True, "alt": True},
+         {"properties": [("bevel_chain", True)]}),
         # Selection.
         *((operator,
            {"type": 'LEFTMOUSE', "value": 'CLICK', **{m: True for m in mods}},

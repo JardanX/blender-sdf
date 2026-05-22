@@ -40,6 +40,8 @@
 
 namespace blender::draw::overlay {
 
+static constexpr uint32_t SDF_STRICT_DEPTH_OUTLINE_ID_FLAG = (1u << 13u);
+
 static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max)
 {
   if (sdf->sdf_type == SDF_TYPE_GROUP) {
@@ -276,7 +278,8 @@ class Sdfs : Overlay {
         entries_[ei].sorted_index = si;
       }
       uint32_t color_id = entries_[ei].outline_packed_id >> 14u;
-      uint32_t new_packed = (color_id << 14u) | (uint32_t(si + 1) & 0x3FFFu);
+      uint32_t new_packed = (color_id << 14u) | SDF_STRICT_DEPTH_OUTLINE_ID_FLAG |
+                            (uint32_t(si + 1) & 0x1FFFu);
       outline_table[si] = new_packed;
       select_table_[si] = entries_[ei].select_id;
     }

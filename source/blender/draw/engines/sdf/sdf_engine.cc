@@ -2044,21 +2044,6 @@ class Instance : public DrawEngine {
       }
     }
 
-      printf("SDF_FINAL: %d objects, %d groups\n",
-             int(objects_.size()), int(groups_gpu_.size()));
-      for (int i = 0; i < int(objects_.size()); i++) {
-        printf("  [%d] gid=%d csg=%d idx=%d mgb=%.3f %s\n",
-               i, objects_[i].group_id, objects_[i].csg_operation,
-               objects_[i].original_index, objects_[i].max_group_blend,
-               object_ptrs_.size() > size_t(i) ? object_ptrs_[i]->id.name + 2 : "?");
-      }
-      for (int g = 0; g < int(groups_gpu_.size()); g++) {
-        printf("  grp[%d] csg=%d first=%d count=%d mod_start=%d mod_count=%d\n",
-               g, groups_gpu_[g].csg_operation, groups_gpu_[g].first_object,
-               groups_gpu_[g].object_count, groups_gpu_[g].modifier_start,
-               groups_gpu_[g].modifier_count);
-      }
-
     /* Early frustum cull on pre-expansion AABBs with conservative padding */
     {
       float max_expansion = max_blend_ + max_shell_distance_;
@@ -2572,39 +2557,11 @@ class Instance : public DrawEngine {
 
       needs_upload_ = true;
       compute_valid_ = false;
+    }
 
-      /* Create and zero eval counter SSBO */
-      int obj_count = int(objects_.size());
-      int n = std::max(obj_count, 1);
-      if (prof_eval_ssbo_ && prof_eval_ssbo_count_ != obj_count) {
-        GPU_storagebuf_free(prof_eval_ssbo_);
-        prof_eval_ssbo_ = nullptr;
-      }
-      {
-        Vector<uint32_t> zeros(n, 0);
-        size_t buf_sz = n * sizeof(uint32_t);
-        if (prof_eval_ssbo_ == nullptr) {
-          prof_eval_ssbo_ = GPU_storagebuf_create_ex(
-              buf_sz, zeros.data(), GPU_USAGE_DYNAMIC, "sdf_prof_eval_counts");
-          prof_eval_ssbo_count_ = obj_count;
-        }
-        else {
-          GPU_storagebuf_update(prof_eval_ssbo_, zeros.data());
-        }
-      }
+    ensure_profile_buffers(profiling);
 
-      /* Stats SSBO (16 uints) */
-      {
-        SdfTraceStats zero_stats = {};
-        if (prof_stats_ssbo_ == nullptr) {
-          prof_stats_ssbo_ = GPU_storagebuf_create_ex(
-              sizeof(SdfTraceStats), &zero_stats, GPU_USAGE_DYNAMIC, "sdf_prof_trace_stats");
-        }
-        else {
-          GPU_storagebuf_update(prof_stats_ssbo_, &zero_stats);
-        }
-      }
-
+    if (profiling) {
       s_profiler.begin();
     }
 
@@ -2977,6 +2934,37 @@ class Instance : public DrawEngine {
   void ensure_shaders()
   {
     sdf_shaders_ensure();
+  }
+
+  void ensure_profile_buffers(bool clear)
+  {
+    const int obj_count = int(objects_.size());
+    const int n = math::max(obj_count, 1);
+
+    if (prof_eval_ssbo_ && prof_eval_ssbo_count_ != obj_count) {
+      GPU_storagebuf_free(prof_eval_ssbo_);
+      prof_eval_ssbo_ = nullptr;
+    }
+
+    Vector<uint32_t> zeros(n, 0);
+    const size_t buf_sz = n * sizeof(uint32_t);
+    if (prof_eval_ssbo_ == nullptr) {
+      prof_eval_ssbo_ = GPU_storagebuf_create_ex(
+          buf_sz, zeros.data(), GPU_USAGE_DYNAMIC, "sdf_prof_eval_counts");
+      prof_eval_ssbo_count_ = obj_count;
+    }
+    else if (clear) {
+      GPU_storagebuf_update(prof_eval_ssbo_, zeros.data());
+    }
+
+    SdfTraceStats zero_stats = {};
+    if (prof_stats_ssbo_ == nullptr) {
+      prof_stats_ssbo_ = GPU_storagebuf_create_ex(
+          sizeof(SdfTraceStats), &zero_stats, GPU_USAGE_DYNAMIC, "sdf_prof_trace_stats");
+    }
+    else if (clear) {
+      GPU_storagebuf_update(prof_stats_ssbo_, &zero_stats);
+    }
   }
 
   void upload_objects()

@@ -652,8 +652,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
     motion_paths.object_sync(manager, ob_ref, resources, state);
     origins.object_sync(manager, ob_ref, resources, state);
 
-    /* NURB Body outlines are represented by their retained edge overlay. */
-    const bool outline_object = object_is_selected(ob_ref) && ob_ref.object->type != OB_NURB_BODY;
+    const bool outline_object = object_is_selected(ob_ref);
     if (outline_object && !in_edit_paint_mode) {
       outline.object_sync(manager, ob_ref, resources, state);
     }
