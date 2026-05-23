@@ -3019,6 +3019,8 @@ void OBJECT_OT_nurb_body_boolean_apply(wmOperatorType *ot)
 
 struct NurbBodyBevelData {
   NurbBodyBooleanOp *op = nullptr;
+  NurbBodyBooleanOp *readjust_stage = nullptr;
+  NurbBodyBooleanOp *readjust_insert_after = nullptr;
   int edge_index = -1;
   bool body_edge = false;
   bool surface_edge = false;
@@ -3047,6 +3049,7 @@ struct NurbBodyBevelData {
   bool use_precision = false;
   bool precision_key_down = false;
   bool precision_anchor_valid = false;
+  bool readjust_stage_removed = false;
   float precision_anchor_radius = 0.0f;
   float precision_anchor_drag_pixels = 0.0f;
   uint64_t debug_tick = 0;
