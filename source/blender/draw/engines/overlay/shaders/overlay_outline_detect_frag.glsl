@@ -27,7 +27,6 @@ FRAGMENT_SHADER_CREATE_INFO(overlay_outline_detect)
 #define APEX_YPOS (ALL & (~YPOS))
 #define APEX_YNEG (ALL & (~YNEG))
 #define STRICT_DEPTH_OUTLINE_ID_FLAG (1u << 13u)
-#define NURB_BODY_OUTLINE_ID_FLAG STRICT_DEPTH_OUTLINE_ID_FLAG
 
 bool has_edge(uint id, float2 uv, uint ref, uint &ref_col, float2 &depth_uv)
 {

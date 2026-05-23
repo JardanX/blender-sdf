@@ -12,14 +12,6 @@ VERTEX_SHADER_CREATE_INFO(overlay_outline_prepass_mesh)
 #include "draw_view_lib.glsl"
 #include "gpu_shader_utildefines_lib.glsl"
 
-#define NURB_BODY_OUTLINE_ID_FLAG (1u << 13u)
-
-bool outline_is_nurb_body_override()
-{
-  return outline_color_override == 1 || outline_color_override == 2 ||
-         outline_color_override == 3;
-}
-
 uint outline_colorid_get()
 {
   if (outline_color_override >= 0) {
@@ -48,16 +40,11 @@ void main()
 
   gl_Position = drw_point_world_to_homogenous(world_pos);
 
-  if (!outline_is_nurb_body_override()) {
-    /* Small bias to always be on top of the geom. */
-    gl_Position.z -= 1e-3f;
-  }
+  /* Small bias to always be on top of the geom. */
+  gl_Position.z -= 1e-3f;
 
   /* ID 0 is nothing (background) */
   interp.ob_id = uint(drw_resource_id() + 1);
-  if (outline_is_nurb_body_override()) {
-    interp.ob_id |= NURB_BODY_OUTLINE_ID_FLAG;
-  }
 
   /* Should be 2 bits only [0..3]. */
   uint outline_id = outline_colorid_get();

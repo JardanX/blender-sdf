@@ -13,7 +13,7 @@ Added `OB_NURB_BODY = 24` / `ID_NB = 'NB'` as a native Blender object type backe
 
 | File | Purpose |
 |------|---------|
-| `makesdna/DNA_nurb_body_types.h` | DNA struct: `NurbBody` with shape params (radius, depth), boolean op linked list (`NurbBodyBooleanOp`), 64-bit edge selection masks, bevel/fillet/chamfer data, tessellation quality, selection mode |
+| `makesdna/DNA_nurb_body_types.h` | DNA struct: `NurbBody` with shape params (radius, depth), boolean op linked list (`NurbBodyBooleanOp`), 64-bit edge selection masks, bevel/fillet/chamfer data, generated face provenance keys, tessellation quality, selection mode |
 | `blenkernel/BKE_nurb_body.hh` | BKE API: `BKE_nurb_body_add()`, `BKE_nurb_body_to_mesh()`, edge polyline sampling, data update callback. Defines `NurbBodyEdgePolyline` struct for viewport overlay |
 | `blenkernel/intern/nurb_body.cc` | BKE implementation (~1755 lines OCCT): `IDType_ID_NB` registration, shape evaluation via OCCT BRep primitives, boolean operations (cut/fuse/common), edge bevel/fillet/chamfer (via `BRepFilletAPI_MakeFillet`/`MakeChamfer`), tessellation with `BRepMesh_IncrementalMesh`, mesh extraction with quad optimization, topological workflow and auto-crease, edge polyline sampling for overlay |
 | `editors/object/object_nurb_body.cc` | Operators (~1500 lines): add (cylinder), boolean apply (multi-operand with hide/boundbox toggle), edge select/hover in Object Mode, edge translate (modal with X/Y/Z axis constraint, operator grab), interactive bevel (modal radius drag, C key chamfer toggle, F key fillet reset, undo on escape) |
@@ -2696,25 +2696,51 @@ Strict-depth outlines pushed `epsilon*4` behind surface in resolve shader.
 
 ## Fix NURB Body Topology Lines and Grid Interaction (2026-05-23)
 
-Kept the NURB Body screen-space object-ID silhouette, but moved it into a dedicated silhouette draw step after the grid and before the NURB Body edge lines. The silhouette uses the thin outline branch with reduced opacity and no longer writes into the shared overlay-line depth buffer, so it cannot reject or fight the explicit edge-line pass.
+Removed the custom NURB Body screen-space silhouette pass. NURB Body now uses Blender's regular selected-object outline path and the NURB-specific overlay only draws NURB edge topology lines. The edge overlay still reconstructs lines from cached NURB Body edge polylines, but emitted segments must now be actual evaluated mesh edges between snapped vertices so the visible path follows mesh topology instead of connecting nearby projected vertices through a wavy shortcut.
 
-The normal edge layer now draws the evaluated mesh edge topology with the same thin one-pixel UI-scaled Blender polyline AA stroke, so basic primitives use the same topology that the shaded mesh uses. Hovered and selected edges continue to use cached `NurbBodyEdgePolyline` batches on top for NURB Body interaction feedback. A positive view-dependent depth bias keeps visible feature lines on top of their own shaded surface while normal depth testing still lets mesh surfaces occlude them. In X-Ray/Alt-Z, NURB Body edges first draw with depth ignored at 25% opacity, then draw a normal visible-depth pass on top so occluded selectable edges remain available without fighting the surface lines.
+The visible edge layer now reconstructs each cached NURB Body edge polyline from evaluated mesh vertices instead of drawing free analytic curve samples, mesh `corner_tris()` topology, or independently classified mesh edges. Mesh vertices near a NURB-derived edge are projected onto that edge, sorted by edge distance, de-duplicated by projection, and connected only in that NURB edge order. This keeps the existing NURB edge classification while making the drawn path follow the viewport mesh vertices, so bevel-band triangle diagonals are no longer eligible as line segments and coplanar topology such as inset edges can still draw. Hovered and selected edge batches are rebuilt with the same snapped-vertex path reconstruction and draw on top in NURB edge colors. A positive view-dependent depth bias keeps visible feature lines on top of their own shaded surface while normal depth testing still lets mesh surfaces occlude them. In X-Ray/Alt-Z, NURB Body edges first draw with depth ignored at 25% opacity, then draw a normal visible-depth pass on top so occluded selectable edges remain available without fighting the surface lines.
+
+The generated preview mesh now stores the source NURB/OCCT face index on each mesh face. The overlay uses that face provenance to reject evaluated mesh edges whose adjacent faces both come from the same source face, so internal triangulation diagonals near a bevel or inset curve are not classified as NURB edge lines.
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `draw/engines/overlay/overlay_nurb_body.hh` | Restored thin object-ID silhouette pass without shared depth writes; draw normal edge lines from evaluated mesh topology; keep hovered/selected NURB Body edge polylines on top; thin UI-scaled Blender AA polyline stroke; visible-depth line pass with positive surface bias; X-Ray draws all edges at 25% before the visible pass |
-| `draw/engines/overlay/overlay_instance.cc` | Calls NURB Body silhouette after grid and before NURB Body edge lines, so the edge pass draws over the object-ID outline instead of competing with its depth |
+| `blenkernel/intern/nurb_body.cc` | Writes hidden per-face `.nurb_body_source_face_index` provenance onto generated NURB Body meshes |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Removed the custom NURB Body silhouette pass; edge overlay now emits only real evaluated mesh edge segments between snapped NURB-edge vertices, with no projection-order fallback |
+| `draw/engines/overlay/overlay_outline.hh` / `overlay_outline_detect_frag.glsl` / `overlay_outline_infos.hh` / `overlay_outline_prepass_vert.glsl` | Removed the NURB-specific silhouette tuning from the shared outline shader path; NURB Body participates in the normal Blender outline path like mesh objects |
+| `draw/engines/overlay/overlay_instance.cc` | Removed the custom NURB Body silhouette draw call so only Blender outline and NURB edge overlay remain |
 
 ---
 
 ## NURB Body Face-Mode Bevel Readjust Entry (2026-05-23)
 
-Allows `Ctrl+B` in NURB Body face mode when result/bevel faces are selected. The bevel operator now derives exact final surface-edge slots from selected face boundaries and routes into the existing NURB Body bevel modal, preserving previous modeling stages and using the same radius/chamfer/fillet controls.
+Allows `Ctrl+B` in NURB Body face mode when result/bevel faces are selected. Surface bevel commits store generated face provenance, but face-mode `Ctrl+B` now follows Plasticity's selected-face refillet model: it appends a face refillet/chamfer stage at the end of the stack instead of mutating old edge history, preventing later extrudes/chamfers from being invalidated by topology changes below them.
 
 ### Modified Files (Editor)
 
 | File | Change |
 |------|--------|
-| `editors/object/object_nurb_body.cc` | Added selected-face to final-surface-edge conversion for NURB Body bevel invoke/exec; warning now accepts selected bevel faces as valid bevel input |
+| `makesdna/DNA_nurb_body_types.h` | Added `NurbBodyBooleanOp.generated_face_keys` to persist all generated bevel/chamfer face provenance keys for a surface bevel stage |
+| `makesdna/DNA_nurb_body_types.h` | Added `NURB_BODY_BOOLEAN_FACE_REFILLET_STAGE` for Plasticity-style selected-face refillet/chamfer modification |
+| `blenkernel/intern/nurb_body.cc` | Included generated face provenance keys in NURB Body hashing so cache keys update when provenance is assigned; added face refillet stage evaluator that defeatures the selected face and applies a new fillet/chamfer to nearby restored edges |
+| `editors/object/object_nurb_body.cc` | Surface bevel commits now store generated bevel face provenance using whole-face distance to the source edge polyline while excluding pre-existing faces; generated face keys are stored as a set; face-mode `Ctrl+B` now follows Plasticity-style refillet behavior by appending a selected-face refillet stage instead of mutating old edge history; `C`/`F` switch chamfer/fillet during the refillet drag; face-stage modal clears NURB Body runtime caches and reselects the best current result face during live edits so lines and face selection track topology changes; removed blind latest-stage readjust, boundary-edge fallback, and unprovenanced lazy matching so wrong edge fillets are not created; existing edge-stage resize still refuses when later stages depend on that bevel; edit-stage confirm restores original state if no solved preview exists |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Draw NURB Body visible edge overlay from evaluated mesh vertices snapped to cached NURB Body edge polylines, with analytic polyline fallback when live refillet topology has no matching mesh edges; disable silhouette overlay to avoid Vulkan indirect draw crashes from mesh surface batches |
+
+---
+
+## Fix NURB Body Bevel Preview Blocking and Fillet Instability (2026-05-23)
+
+Removed conservative preview behavior that made fillets clamp early, reject confirmation before a solved preview arrived, or reuse a stale lower-radius/last-good shape. Fast preview now asks OCCT for the requested radius directly without timeout cancellation, last-good substitution, or reduced-radius fallback, so switching Chamfer -> Fillet is no longer needed to clear bad fillet preview state.
+
+### Modified Files (BKE)
+
+| File | Change |
+|------|--------|
+| `blenkernel/intern/nurb_body.cc` | Removed fast bevel build timeout, preview failure radius clamp, last-good single/group blend reuse, and reduced-radius preview fallback |
+
+### Modified Files (Editor)
+
+| File | Change |
+|------|--------|
+| `editors/object/object_nurb_body.cc` | Confirmation no longer blocks when preview has not yet recorded a solved radius; timeout-budget warning removed |
