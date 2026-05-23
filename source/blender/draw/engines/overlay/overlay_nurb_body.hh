@@ -9,22 +9,23 @@
 #pragma once
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 
-#include "DNA_nurb_body_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_nurb_body_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 
-#include "BLI_math_matrix.h"
-#include "BLI_math_matrix_types.hh"
+#include "BLI_array.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
 #include "BKE_nurb_body.hh"
 
@@ -74,13 +75,6 @@ class NurbBodies : Overlay {
   bool edge_overlay_enabled_ = false;
   bool xray_enabled_ = false;
   bool needs_depth_prepass_ = false;
-
-  PassMain silhouette_prepass_ps_ = {"NurbBodySilhouettePrepass"};
-  PassMain::Sub *silhouette_prepass_sub_ps_ = nullptr;
-  PassSimple silhouette_detect_ps_ = {"NurbBodySilhouetteDetect"};
-  TextureFromPool silhouette_id_tx_ = {"nurb_sil_id"};
-  TextureFromPool silhouette_depth_tx_ = {"nurb_sil_depth"};
-  Framebuffer silhouette_fb_ = {"nurb_sil_fb"};
 
   static bool edge_index_in_mask(const uint64_t mask, const int edge_index)
   {
@@ -365,6 +359,267 @@ class NurbBodies : Overlay {
     return GPU_batch_create_ex(GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
   }
 
+  struct PolylineProjection {
+    float dist_sq = FLT_MAX;
+    float3 tangent = float3(0.0f);
+    float length = 0.0f;
+  };
+
+  struct PolylineVertexCandidate {
+    int vert_index = -1;
+    float length = 0.0f;
+    float dist_sq = FLT_MAX;
+  };
+
+  static PolylineProjection closest_polyline_projection(const float3 &point,
+                                                        const Span<float3> polyline)
+  {
+    PolylineProjection best;
+    if (polyline.size() < 2) {
+      return best;
+    }
+
+    float length_before = 0.0f;
+    for (int i = 1; i < polyline.size(); i++) {
+      const float3 a = polyline[i - 1];
+      const float3 b = polyline[i];
+      const float3 ab = b - a;
+      const float ab_len_sq = math::length_squared(ab);
+      if (ab_len_sq <= 1.0e-20f) {
+        continue;
+      }
+
+      const float segment_length = std::sqrt(ab_len_sq);
+      const float factor = std::clamp(math::dot(point - a, ab) / ab_len_sq, 0.0f, 1.0f);
+      const float3 closest = a + ab * factor;
+      const float dist_sq = math::distance_squared(point, closest);
+      if (dist_sq < best.dist_sq) {
+        best.dist_sq = dist_sq;
+        best.tangent = ab / segment_length;
+        best.length = length_before + segment_length * factor;
+      }
+      length_before += segment_length;
+    }
+    return best;
+  }
+
+  static float polyline_length(const Span<float3> polyline)
+  {
+    float length = 0.0f;
+    for (int i = 1; i < polyline.size(); i++) {
+      length += math::distance(polyline[i - 1], polyline[i]);
+    }
+    return length;
+  }
+
+  static bool polyline_is_closed(const Span<float3> polyline, const float threshold)
+  {
+    return polyline.size() > 2 &&
+           math::distance_squared(polyline.first(), polyline.last()) <= threshold * threshold;
+  }
+
+  static float mesh_topology_match_threshold(const Span<float3> polyline)
+  {
+    if (polyline.size() < 2) {
+      return 0.0f;
+    }
+
+    const float length = polyline_length(polyline);
+    const float average_segment_length = length / float(polyline.size() - 1);
+    return std::max(std::max(average_segment_length * 0.18f, length * 0.0005f), 1.0e-5f);
+  }
+
+  static void add_edge_source_face(Array<int2> &edge_source_faces,
+                                   const int edge_i,
+                                   const int source_face)
+  {
+    if (source_face < 0 || edge_i < 0 || edge_i >= edge_source_faces.size()) {
+      return;
+    }
+
+    int2 &source_faces = edge_source_faces[edge_i];
+    if (source_faces[0] == -1) {
+      source_faces[0] = source_face;
+      return;
+    }
+    if (source_faces[0] == source_face) {
+      if (source_faces[1] == -1) {
+        source_faces[1] = source_face;
+      }
+      return;
+    }
+    if (source_faces[1] == -1 || source_faces[1] == source_faces[0]) {
+      source_faces[1] = source_face;
+    }
+  }
+
+  static Array<int2> mesh_edge_source_face_pairs(const Mesh &mesh)
+  {
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    const bke::AttributeReader<int> source_face_reader = attributes.lookup<int>(
+        ".nurb_body_source_face_index", bke::AttrDomain::Face);
+    if (!source_face_reader) {
+      return {};
+    }
+
+    const VArraySpan<int> source_faces_by_face = *source_face_reader;
+    if (source_faces_by_face.size() != mesh.faces_num) {
+      return {};
+    }
+
+    Array<int2> edge_source_faces(mesh.edges().size(), int2(-1, -1));
+    const OffsetIndices<int> faces = mesh.faces();
+    const Span<int> corner_edges = mesh.corner_edges();
+    for (const int face_i : faces.index_range()) {
+      const int source_face = source_faces_by_face[face_i];
+      for (const int corner : faces[face_i]) {
+        add_edge_source_face(edge_source_faces, corner_edges[corner], source_face);
+      }
+    }
+    return edge_source_faces;
+  }
+
+  static bool mesh_edge_is_internal_source_face(const Span<int2> edge_source_faces,
+                                                const int edge_i)
+  {
+    if (edge_i < 0 || edge_i >= edge_source_faces.size()) {
+      return false;
+    }
+    const int2 source_faces = edge_source_faces[edge_i];
+    return source_faces[0] != -1 && source_faces[1] == source_faces[0];
+  }
+
+  static void append_snapped_polyline_segments(const Span<float3> positions,
+                                               const Span<int2> edges,
+                                               const Span<int2> edge_source_faces,
+                                               const Span<float3> polyline,
+                                               Vector<float3> &r_verts)
+  {
+    const float threshold = mesh_topology_match_threshold(polyline);
+    const float threshold_sq = threshold * threshold;
+    Vector<PolylineVertexCandidate> candidates;
+    candidates.reserve(positions.size());
+    for (const int vert_i : positions.index_range()) {
+      const PolylineProjection projection = closest_polyline_projection(positions[vert_i],
+                                                                        polyline);
+      if (projection.dist_sq > threshold_sq) {
+        continue;
+      }
+
+      PolylineVertexCandidate candidate;
+      candidate.vert_index = vert_i;
+      candidate.length = projection.length;
+      candidate.dist_sq = projection.dist_sq;
+      candidates.append(candidate);
+    }
+
+    if (candidates.size() < 2) {
+      return;
+    }
+
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const PolylineVertexCandidate &a, const PolylineVertexCandidate &b) {
+                return a.length < b.length;
+              });
+
+    Vector<PolylineVertexCandidate> snapped_vertices;
+    snapped_vertices.reserve(candidates.size());
+    const float merge_threshold = std::max(threshold * 1.5f, 1.0e-5f);
+    for (const PolylineVertexCandidate &candidate : candidates) {
+      if (snapped_vertices.is_empty() ||
+          std::abs(candidate.length - snapped_vertices.last().length) > merge_threshold)
+      {
+        snapped_vertices.append(candidate);
+        continue;
+      }
+
+      if (candidate.dist_sq < snapped_vertices.last().dist_sq) {
+        snapped_vertices.last() = candidate;
+      }
+    }
+
+    if (snapped_vertices.size() < 2) {
+      return;
+    }
+
+    const int segment_count = std::max(int(polyline.size()) - 1, 1);
+    const float edge_length_limit = std::max(threshold * 8.0f,
+                                            polyline_length(polyline) /
+                                                float(segment_count) * 3.0f);
+    const bool closed = polyline_is_closed(polyline, threshold);
+
+    Array<int> snapped_by_vert(positions.size(), -1);
+    for (const int i : snapped_vertices.index_range()) {
+      snapped_by_vert[snapped_vertices[i].vert_index] = i;
+    }
+
+    const float total_length = polyline_length(polyline);
+    for (const int edge_i : edges.index_range()) {
+      if (mesh_edge_is_internal_source_face(edge_source_faces, edge_i)) {
+        continue;
+      }
+
+      const int2 &edge = edges[edge_i];
+      if (edge[0] < 0 || edge[1] < 0 || edge[0] >= positions.size() ||
+          edge[1] >= positions.size())
+      {
+        continue;
+      }
+
+      const int snapped_a = snapped_by_vert[edge[0]];
+      const int snapped_b = snapped_by_vert[edge[1]];
+      if (snapped_a == -1 || snapped_b == -1 || snapped_a == snapped_b) {
+        continue;
+      }
+
+      float length_delta = std::abs(snapped_vertices[snapped_a].length -
+                                    snapped_vertices[snapped_b].length);
+      if (closed) {
+        length_delta = std::min(length_delta, std::max(total_length - length_delta, 0.0f));
+      }
+      if (length_delta > edge_length_limit) {
+        continue;
+      }
+
+      const float3 &a = positions[edge[0]];
+      const float3 &b = positions[edge[1]];
+      const float3 edge_vec = b - a;
+      const float edge_len_sq = math::length_squared(edge_vec);
+      if (edge_len_sq <= 1.0e-20f) {
+        continue;
+      }
+
+      const PolylineProjection midpoint_projection = closest_polyline_projection((a + b) * 0.5f,
+                                                                                 polyline);
+      if (midpoint_projection.dist_sq > threshold_sq * 4.0f) {
+        continue;
+      }
+
+      const float3 edge_dir = edge_vec / std::sqrt(edge_len_sq);
+      if (std::abs(math::dot(edge_dir, midpoint_projection.tangent)) < 0.35f) {
+        continue;
+      }
+
+      r_verts.append(a);
+      r_verts.append(b);
+    }
+  }
+
+  static void append_analytic_polyline_segments(const Span<float3> polyline, Vector<float3> &r_verts)
+  {
+    if (polyline.size() < 2) {
+      return;
+    }
+    for (int i = 1; i < polyline.size(); i++) {
+      if (math::distance_squared(polyline[i - 1], polyline[i]) <= 1.0e-12f) {
+        continue;
+      }
+      r_verts.append(polyline[i - 1]);
+      r_verts.append(polyline[i]);
+    }
+  }
+
   static gpu::Batch *create_tri_batch_from_verts(const Span<float3> verts)
   {
     if (verts.is_empty()) {
@@ -380,17 +635,28 @@ class NurbBodies : Overlay {
   }
 
   template<typename Predicate>
-  static gpu::Batch *create_line_batch(const Span<NurbBodyEdgePolyline> polylines,
+  static gpu::Batch *create_line_batch(const Mesh &mesh,
+                                       const Span<NurbBodyEdgePolyline> polylines,
                                        Predicate &&predicate)
   {
+    const Span<float3> positions = mesh.vert_positions();
+    const Span<int2> edges = mesh.edges();
+    if (positions.is_empty()) {
+      return nullptr;
+    }
+
+    const Array<int2> edge_source_faces = mesh_edge_source_face_pairs(mesh);
     Vector<float3> verts;
     for (const NurbBodyEdgePolyline &polyline : polylines) {
       if (!polyline_is_surface(polyline) || !predicate(polyline)) {
         continue;
       }
-      for (int i = 1; i < polyline.points.size(); i++) {
-        verts.append(polyline.points[i - 1]);
-        verts.append(polyline.points[i]);
+
+      const int verts_before = verts.size();
+      append_snapped_polyline_segments(
+          positions, edges, edge_source_faces.as_span(), polyline.points.as_span(), verts);
+      if (verts.size() == verts_before) {
+        append_analytic_polyline_segments(polyline.points.as_span(), verts);
       }
     }
 
@@ -461,6 +727,7 @@ class NurbBodies : Overlay {
   }
 
   static void rebuild_line_batches(DrawCache &cache,
+                                   const Object *evaluated_object,
                                    const Object *object,
                                    const NurbBody &body,
                                    const Span<NurbBodyEdgePolyline> polylines,
@@ -470,18 +737,19 @@ class NurbBodies : Overlay {
     discard_batch(cache.normal_batch);
     discard_batch(cache.hovered_batch);
     discard_batch(cache.selected_batch);
+    const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*evaluated_object);
     cache.normal_batch = create_line_batch(
-        polylines, [&](const NurbBodyEdgePolyline &polyline) {
+        mesh, polylines, [&](const NurbBodyEdgePolyline &polyline) {
           return !polyline_is_selected(object, body, polyline, select_mode, object_selected) &&
                  !polyline_is_hovered(object, body, polyline, select_mode, object_selected);
         });
     cache.hovered_batch = create_line_batch(
-        polylines, [&](const NurbBodyEdgePolyline &polyline) {
+        mesh, polylines, [&](const NurbBodyEdgePolyline &polyline) {
           return polyline_is_hovered(object, body, polyline, select_mode, object_selected) &&
                  !polyline_is_selected(object, body, polyline, select_mode, object_selected);
         });
     cache.selected_batch = create_line_batch(
-        polylines, [&](const NurbBodyEdgePolyline &polyline) {
+        mesh, polylines, [&](const NurbBodyEdgePolyline &polyline) {
           return polyline_is_selected(object, body, polyline, select_mode, object_selected);
         });
   }
@@ -543,7 +811,13 @@ class NurbBodies : Overlay {
       const Span<NurbBodyEdgePolyline> polylines =
           BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
       rebuild_line_batches(
-          cache, entry.original_object, *body, polylines, select_mode_, object_selected);
+          cache,
+          entry.object,
+          entry.original_object,
+          *body,
+          polylines,
+          select_mode_,
+          object_selected);
       cache.selection_key = selection_key;
       cache.hover_key = hover_key;
     }
@@ -589,7 +863,6 @@ class NurbBodies : Overlay {
     needs_depth_prepass_ = edge_overlay_enabled_ && state.xray_enabled;
     depth_ps_.init();
     depth_mesh_ps_ = nullptr;
-    silhouette_prepass_sub_ps_ = nullptr;
 
     if (needs_depth_prepass_) {
       depth_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
@@ -600,43 +873,6 @@ class NurbBodies : Overlay {
       auto &sub = depth_ps_.sub("Mesh");
       sub.shader_set(res.shaders->depth_mesh.get());
       depth_mesh_ps_ = &sub;
-    }
-
-    {
-      auto &pass = silhouette_prepass_ps_;
-      pass.init();
-      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
-      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
-      pass.framebuffer_set(&silhouette_fb_);
-      pass.clear_color_depth_stencil(float4(0.0f), 1.0f, 0x0);
-      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL,
-                     state.clipping_plane_count);
-      {
-        auto &sub = pass.sub("NurbBodySilhouette");
-        sub.shader_set(res.shaders->outline_prepass_mesh.get());
-        sub.push_constant("is_transform", false);
-        sub.push_constant("outline_color_override", 2);
-        silhouette_prepass_sub_ps_ = &sub;
-      }
-    }
-
-    {
-      auto &pass = silhouette_detect_ps_;
-      pass.init();
-      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA_PREMUL |
-                     DRW_STATE_DEPTH_ALWAYS);
-      pass.shader_set(res.shaders->outline_detect.get());
-      pass.push_constant("alpha_occlu", 1.0f);
-      pass.push_constant("sdf_line_opacity", 0.65f);
-      pass.push_constant("do_thick_outlines", false);
-      pass.push_constant("do_anti_aliasing", true);
-      pass.push_constant("is_xray_wires", false);
-      pass.bind_texture("outline_id_tx", &silhouette_id_tx_);
-      pass.bind_texture("outline_depth_tx", &silhouette_depth_tx_);
-      pass.bind_texture("scene_depth_tx", &res.depth_tx);
-      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
-      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
-      pass.draw_procedural(GPU_PRIM_TRIS, 1, 3);
     }
   }
 
@@ -660,12 +896,6 @@ class NurbBodies : Overlay {
 
     entries_.append({ob_ref.object, original_object});
 
-    if (silhouette_prepass_sub_ps_ != nullptr) {
-      if (gpu::Batch *geom = DRW_cache_mesh_surface_get(ob_ref.object)) {
-        silhouette_prepass_sub_ps_->draw(geom, manager.unique_handle(ob_ref));
-      }
-    }
-
     if (depth_mesh_ps_ != nullptr) {
       if (gpu::Batch *geom = DRW_cache_mesh_surface_get(ob_ref.object)) {
         depth_mesh_ps_->draw(geom, manager.unique_handle(ob_ref));
@@ -683,31 +913,6 @@ class NurbBodies : Overlay {
     manager.submit(depth_ps_, view);
   }
 
-  void draw_silhouette(Framebuffer &framebuffer, Manager &manager, View &view)
-  {
-    if (!edge_overlay_enabled_ || entries_.is_empty()) {
-      return;
-    }
-
-    int viewport[4];
-    GPU_viewport_size_get_i(viewport);
-    int2 render_size(viewport[2], viewport[3]);
-    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
-    silhouette_depth_tx_.acquire(render_size, gpu::TextureFormat::SFLOAT_32_DEPTH_UINT_8, usage);
-    silhouette_id_tx_.acquire(render_size, gpu::TextureFormat::UINT_16, usage);
-    silhouette_fb_.ensure(GPU_ATTACHMENT_TEXTURE(silhouette_depth_tx_),
-                          GPU_ATTACHMENT_TEXTURE(silhouette_id_tx_));
-
-    manager.generate_commands(silhouette_prepass_ps_, view);
-    manager.submit_only(silhouette_prepass_ps_, view);
-
-    GPU_framebuffer_bind(framebuffer);
-    manager.submit(silhouette_detect_ps_, view);
-
-    silhouette_depth_tx_.release();
-    silhouette_id_tx_.release();
-  }
-
   void draw_on_render(gpu::FrameBuffer *framebuffer, Manager & /*manager*/, View & /*view*/) final
   {
     if (!edge_overlay_enabled_ || entries_.is_empty() ||
@@ -719,7 +924,7 @@ class NurbBodies : Overlay {
     GPU_framebuffer_bind(framebuffer);
     GPU_depth_mask(false);
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-    GPU_polygon_offset(offset_data_.dist, 2.0f);
+    GPU_polygon_offset(offset_data_.dist, 8.0f);
 
     for (const Entry &entry : entries_) {
       DrawCache *cache = ensure_cache_for_entry(entry);
@@ -770,22 +975,20 @@ class NurbBodies : Overlay {
 
       GPU_matrix_push();
       GPU_matrix_mul(entry.object->object_to_world().ptr());
-      gpu::Batch *topology_batch = DRW_cache_mesh_all_edges_get(entry.object);
-      gpu::Batch *normal_batch = topology_batch != nullptr ? topology_batch : cache->normal_batch;
       if (xray_enabled_) {
         GPU_depth_test(GPU_DEPTH_ALWAYS);
         draw_batch(
-            normal_batch, float4(0.0f, 0.0f, 0.0f, xray_occluded_alpha), line_width_);
+            cache->normal_batch, float4(0.0f, 0.0f, 0.0f, xray_occluded_alpha), line_width_);
         draw_batch(
-            cache->hovered_batch, float4(1.0f, 1.0f, 1.0f, xray_occluded_alpha), line_width_);
+            cache->hovered_batch, float4(1.0f, 0.78f, 0.18f, xray_occluded_alpha), line_width_);
         draw_batch(
-            cache->selected_batch, float4(1.0f, 0.62f, 0.0f, xray_occluded_alpha), line_width_);
+            cache->selected_batch, float4(1.0f, 0.58f, 0.08f, xray_occluded_alpha), line_width_);
       }
 
       GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-      draw_batch(normal_batch, float4(0.0f, 0.0f, 0.0f, normal_alpha), line_width_);
-      draw_batch(cache->hovered_batch, float4(1.0f, 1.0f, 1.0f, 1.0f), line_width_);
-      draw_batch(cache->selected_batch, float4(1.0f, 0.62f, 0.0f, 1.0f), line_width_);
+      draw_batch(cache->normal_batch, float4(0.0f, 0.0f, 0.0f, normal_alpha), line_width_);
+      draw_batch(cache->hovered_batch, float4(1.0f, 0.78f, 0.18f, normal_alpha), line_width_);
+      draw_batch(cache->selected_batch, float4(1.0f, 0.58f, 0.08f, normal_alpha), line_width_);
       GPU_matrix_pop();
     }
 

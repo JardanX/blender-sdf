@@ -36,6 +36,7 @@ typedef enum eNurbBodyBooleanOperation {
   NURB_BODY_BOOLEAN_OUTPUT_BLEND_STAGE = 5,
   NURB_BODY_BOOLEAN_FACE_EXTRUDE_STAGE = 6,
   NURB_BODY_BOOLEAN_FACE_INSET_STAGE = 7,
+  NURB_BODY_BOOLEAN_FACE_REFILLET_STAGE = 8,
 } eNurbBodyBooleanOperation;
 
 typedef enum eNurbBodyBevelType {
@@ -122,6 +123,7 @@ typedef struct NurbBodyBooleanOp {
   float _pad1;
 
   uint64_t face_key;
+  uint64_t generated_face_keys[64];
   float face_extrude_delta[3];
   float face_inset;
 } NurbBodyBooleanOp;
