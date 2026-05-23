@@ -366,7 +366,7 @@ class Sdfs : Overlay {
 
   }
 
-  void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
+  void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View & /*view*/) final
   {
     if (!enabled_ || (!show_bbox_ && !show_bbox_grid_)) {
       return;

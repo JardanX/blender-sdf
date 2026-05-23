@@ -2289,7 +2289,7 @@ static void rna_Scene_nurb_body_viewport_update(bContext *C, PointerRNA *ptr)
             NURB_BODY_TESSELLATION_QUADS,
             NURB_BODY_TESSELLATION_NGONS))
   {
-    ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_NGONS;
+    ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
   }
   if ((ts->nurb_body_viewport_flag & NURB_BODY_TRIANGULATE_MESH) != 0) {
     ts->nurb_body_tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
@@ -4504,7 +4504,7 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   prop = RNA_def_property(srna, "nurb_body_tessellation_deflection", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_deflection");
   RNA_def_property_range(prop, 0.0001f, 10.0f);
-  RNA_def_property_ui_range(prop, 0.0005f, 0.02f, 0.001f, 4);
+  RNA_def_property_ui_range(prop, 0.0005f, 1.0f, 0.1f, 4);
   RNA_def_property_ui_text(
       prop, "Plane Tolerance", "Linear deflection for NURB Body tessellation");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
@@ -4528,7 +4528,7 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   prop = RNA_def_property(srna, "nurb_body_tessellation_angle", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_float_sdna(prop, nullptr, "nurb_body_tessellation_angle");
   RNA_def_property_range(prop, 0.01f, 3.14159f);
-  RNA_def_property_ui_range(prop, 0.03f, 0.35f, 0.01f, 4);
+  RNA_def_property_ui_range(prop, 0.03f, 1.0f, 0.1f, 4);
   RNA_def_property_ui_text(
       prop, "Angle Tolerance", "Angular deflection for NURB Body tessellation");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);

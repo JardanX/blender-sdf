@@ -178,16 +178,16 @@ typedef struct NurbBody {
   int hovered_face = -1;
   float bevel_radius = 0.0f;
   float surface_bevel_radius = 0.0f;
-  float tessellation_deflection = 0.004f;
-  float tessellation_angle = 0.10472f;
-  float tessellation_face_deflection = 0.012f;
-  float tessellation_face_angle = 0.20944f;
-  float tessellation_density = 0.75f;
+  float tessellation_deflection = 1.0f;
+  float tessellation_angle = 0.558505f;
+  float tessellation_face_deflection = 3.0f;
+  float tessellation_face_angle = 1.11701f;
+  float tessellation_density = 1.0f;
   float tessellation_min_width = 0.0f;
   float tessellation_plane_angle = 0.523599f;
   float auto_crease_angle = 0.523599f;
   int select_mode = NURB_BODY_SELECT_MODE_EDGE;
-  int tessellation_topology = NURB_BODY_TESSELLATION_NGONS;
+  int tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
   int _pad1 = 0;
 
   ListBase boolean_ops = {}; /* NurbBodyBooleanOp */

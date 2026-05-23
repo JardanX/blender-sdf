@@ -2173,12 +2173,12 @@ struct ToolSettings {
   char nurb_body_select_mode = 0;
   /** Viewport tessellation settings for all NURB Body objects. */
   int nurb_body_viewport_flag = (1 << 1);
-  int nurb_body_tessellation_topology = 2;
-  float nurb_body_tessellation_deflection = 0.004f;
-  float nurb_body_tessellation_angle = 0.10472f;
-  float nurb_body_tessellation_face_deflection = 0.012f;
-  float nurb_body_tessellation_face_angle = 0.20944f;
-  float nurb_body_tessellation_density = 0.75f;
+  int nurb_body_tessellation_topology = 0;
+  float nurb_body_tessellation_deflection = 1.0f;
+  float nurb_body_tessellation_angle = 0.558505f;
+  float nurb_body_tessellation_face_deflection = 3.0f;
+  float nurb_body_tessellation_face_angle = 1.11701f;
+  float nurb_body_tessellation_density = 1.0f;
   float nurb_body_tessellation_min_width = 0.0f;
   float nurb_body_tessellation_plane_angle = 0.523599f;
 
