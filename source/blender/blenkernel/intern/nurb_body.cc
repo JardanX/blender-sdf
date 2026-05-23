@@ -869,7 +869,7 @@ static void nurb_body_blend_read_data(BlendDataReader *reader, ID *id)
             NURB_BODY_TESSELLATION_QUADS,
             NURB_BODY_TESSELLATION_NGONS))
   {
-    body->tessellation_topology = NURB_BODY_TESSELLATION_NGONS;
+    body->tessellation_topology = NURB_BODY_TESSELLATION_TRIS;
   }
   body->tessellation_deflection = std::max(body->tessellation_deflection, 0.0001f);
   body->tessellation_angle = std::clamp(body->tessellation_angle, 0.01f, 3.14159f);
@@ -11398,11 +11398,11 @@ static void nurb_body_apply_viewport_tool_settings(NurbBody &body, const Scene *
       tool_settings.nurb_body_viewport_flag == 0;
   const float deflection = tool_settings.nurb_body_tessellation_deflection > 0.0f ?
                                tool_settings.nurb_body_tessellation_deflection :
-                               0.004f;
+                               1.0f;
   const float angle = tool_settings.nurb_body_tessellation_angle > 0.0f ?
                           tool_settings.nurb_body_tessellation_angle :
-                          0.10472f;
-  const float density = missing_legacy_tool_values ? 0.75f :
+                          0.558505f;
+  const float density = missing_legacy_tool_values ? 1.0f :
                                                      tool_settings.nurb_body_tessellation_density;
   const float plane_angle = tool_settings.nurb_body_tessellation_plane_angle > 0.0f ?
                                 tool_settings.nurb_body_tessellation_plane_angle :
@@ -11437,7 +11437,7 @@ static void nurb_body_apply_viewport_tool_settings(NurbBody &body, const Scene *
                                          NURB_BODY_TESSELLATION_QUADS,
                                          NURB_BODY_TESSELLATION_NGONS) ?
                                         tool_settings.nurb_body_tessellation_topology :
-                                        NURB_BODY_TESSELLATION_NGONS);
+                                        NURB_BODY_TESSELLATION_TRIS);
   body.flag &= ~(NURB_BODY_TRIANGULATE_MESH | NURB_BODY_SMOOTH_SHADING);
   body.flag |= viewport_flags;
 }

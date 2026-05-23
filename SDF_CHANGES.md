@@ -2663,3 +2663,58 @@ Fixed selection bugs where wrong SDF gets highlighted, overlays not clearing on 
 | `draw/engines/sdf/sdf_engine.cc` | After sorting objects, force first ungrouped object and first object in each group to `SDF_CSG_UNION` — prevents subtract-from-nothing |
 | `draw/engines/overlay/overlay_sdf.hh` | Set `outline_packed_id = 0` for unselected objects (was `(2 << 14) \| resource_id`); fix `sel_id` bounds check to use unsigned comparison |
 | `scripts/startup/bl_ui/properties_data_sdf.py` | Show Operation panel for first group member and first scene SDF, but with CSG buttons disabled and "First in stack — forced to Union" info label |
+
+---
+
+## Fix NURB Body Viewport: Silhouette Outline + Edge Lines (2026-05-23)
+
+Superseded later on 2026-05-23 by the topology-line fix below.
+
+### Outline: Blender Outline System with Black Override
+NURB body silhouette drawn via standard Blender outline pipeline (smooth anti-aliased silhouette, not mesh edge detection). Single subpass with `outline_color_override=2` — all NURB bodies get black outline unconditionally. The outline prepass draws tessellated mesh surface to ID texture; resolve shader detects object boundaries.
+
+### Edge Lines: Fixed Minimal Polygon Offset
+Face overlays keep camera-dependent offset `(dist, 2.0f)`. Edge lines use `GPU_polygon_offset(0.0f, -1.0f)` — pulls one depth unit forward, camera-independent.
+
+### X-Ray Mode: Depth-Aware Two-Pass
+- Pass 1: `GPU_DEPTH_GREATER` @ 25% alpha — occluded portions
+- Pass 2: `GPU_DEPTH_LESS_EQUAL` @ 100% alpha — visible portions
+Hovered/selected edges full opacity.
+
+### Outline Depth Push
+Strict-depth outlines pushed `epsilon*4` behind surface in resolve shader.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/overlay/overlay_outline.hh` | Added `prepass_nurb_body_ps_` subpass with `outline_color_override=2` (black); NURB body draws tessellated mesh surface to outline prepass |
+| `draw/engines/overlay/overlay_nurb_body.hh` | Edge offset `(0.0f, -1.0f)`; xray two-pass `DEPTH_GREATER`+`DEPTH_LESS_EQUAL` for depth-aware occlusion |
+| `draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Strict-depth outlines write `gl_FragDepth = ref_depth + epsilon*4` |
+
+---
+
+## Fix NURB Body Topology Lines and Grid Interaction (2026-05-23)
+
+Kept the NURB Body screen-space object-ID silhouette, but moved it into a dedicated silhouette draw step after the grid and before the NURB Body edge lines. The silhouette uses the thin outline branch with reduced opacity and no longer writes into the shared overlay-line depth buffer, so it cannot reject or fight the explicit edge-line pass.
+
+The normal edge layer now draws the evaluated mesh edge topology with the same thin one-pixel UI-scaled Blender polyline AA stroke, so basic primitives use the same topology that the shaded mesh uses. Hovered and selected edges continue to use cached `NurbBodyEdgePolyline` batches on top for NURB Body interaction feedback. A positive view-dependent depth bias keeps visible feature lines on top of their own shaded surface while normal depth testing still lets mesh surfaces occlude them. In X-Ray/Alt-Z, NURB Body edges first draw with depth ignored at 25% opacity, then draw a normal visible-depth pass on top so occluded selectable edges remain available without fighting the surface lines.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/overlay/overlay_nurb_body.hh` | Restored thin object-ID silhouette pass without shared depth writes; draw normal edge lines from evaluated mesh topology; keep hovered/selected NURB Body edge polylines on top; thin UI-scaled Blender AA polyline stroke; visible-depth line pass with positive surface bias; X-Ray draws all edges at 25% before the visible pass |
+| `draw/engines/overlay/overlay_instance.cc` | Calls NURB Body silhouette after grid and before NURB Body edge lines, so the edge pass draws over the object-ID outline instead of competing with its depth |
+
+---
+
+## NURB Body Face-Mode Bevel Readjust Entry (2026-05-23)
+
+Allows `Ctrl+B` in NURB Body face mode when result/bevel faces are selected. The bevel operator now derives exact final surface-edge slots from selected face boundaries and routes into the existing NURB Body bevel modal, preserving previous modeling stages and using the same radius/chamfer/fillet controls.
+
+### Modified Files (Editor)
+
+| File | Change |
+|------|--------|
+| `editors/object/object_nurb_body.cc` | Added selected-face to final-surface-edge conversion for NURB Body bevel invoke/exec; warning now accepts selected bevel faces as valid bevel input |

@@ -51,7 +51,6 @@ class Outline : Overlay {
   /* MATHOPS: Removed — Grease Pencil */
   // PassMain::Sub *prepass_gpencil_ps_ = nullptr;
   PassMain::Sub *prepass_mesh_ps_ = nullptr;
-  PassMain::Sub *prepass_nurb_body_ps_ = nullptr;
   PassMain::Sub *prepass_volume_ps_ = nullptr;
   PassMain::Sub *prepass_wire_ps_ = nullptr;
   /* Detect edges inside the ID pass and output color for each of them. */
@@ -138,13 +137,6 @@ class Outline : Overlay {
         prepass_mesh_ps_ = &sub;
       }
       {
-        auto &sub = pass.sub("NurbBody");
-        sub.shader_set(res.shaders->outline_prepass_mesh.get());
-        sub.push_constant("is_transform", is_transform);
-        sub.push_constant("outline_color_override", 1);
-        prepass_nurb_body_ps_ = &sub;
-      }
-      {
         auto &sub = pass.sub("Volume");
         sub.shader_set(res.shaders->outline_prepass_mesh.get());
         sub.push_constant("is_transform", is_transform);
@@ -185,7 +177,7 @@ class Outline : Overlay {
 
   void object_sync(Manager &manager,
                    const ObjectRef &ob_ref,
-                   Resources &res,
+                   Resources & /*res*/,
                    const State &state) final
   {
     if (!enabled_) {
@@ -201,8 +193,6 @@ class Outline : Overlay {
     switch (ob_ref.object->type) {
       case OB_CURVES: {
         const char *error = nullptr;
-        /* The error string will always have been printed by the engine already.
-         * No need to display it twice. */
         geom = curves_sub_pass_setup(*prepass_curves_ps_, state.scene, ob_ref.object, error);
         prepass_curves_ps_->draw(geom, manager.unique_handle(ob_ref));
         break;
@@ -211,11 +201,8 @@ class Outline : Overlay {
       // case OB_GREASE_PENCIL:
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
-      case OB_NURB_BODY: {
-        geom = DRW_cache_mesh_surface_get(ob_ref.object);
-        prepass_nurb_body_ps_->draw(geom, manager.unique_handle(ob_ref));
+      case OB_NURB_BODY:
         break;
-      }
       case OB_MESH:
         if (state.xray_enabled_and_not_wire) {
           geom = DRW_cache_mesh_edge_detection_get(ob_ref.object, nullptr);
@@ -244,13 +231,11 @@ class Outline : Overlay {
         break;
       case OB_VOLUME:
         geom = DRW_cache_volume_selection_surface_get(ob_ref.object);
-        /* TODO(fclem): Get rid of these check and enforce correct API on the batch cache. */
         if (geom) {
           prepass_volume_ps_->draw(geom, manager.unique_handle(ob_ref));
         }
         break;
       case OB_SDF:
-        /* SDF outlines handled by Sdfs overlay (fullscreen SDF eval). */
         break;
       default:
         break;

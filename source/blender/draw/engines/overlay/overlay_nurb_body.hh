@@ -16,6 +16,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_userdef_types.h"
 
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
@@ -33,6 +34,7 @@
 
 #include "GPU_batch.hh"
 #include "GPU_matrix.hh"
+#include "GPU_shader.hh"
 #include "GPU_state.hh"
 
 #include "overlay_base.hh"
@@ -45,7 +47,7 @@ class NurbBodies : Overlay {
   PassMain::Sub *depth_mesh_ps_ = nullptr;
 
   struct Entry {
-    const Object *object;
+    Object *object;
     const Object *original_object;
   };
 
@@ -72,6 +74,13 @@ class NurbBodies : Overlay {
   bool edge_overlay_enabled_ = false;
   bool xray_enabled_ = false;
   bool needs_depth_prepass_ = false;
+
+  PassMain silhouette_prepass_ps_ = {"NurbBodySilhouettePrepass"};
+  PassMain::Sub *silhouette_prepass_sub_ps_ = nullptr;
+  PassSimple silhouette_detect_ps_ = {"NurbBodySilhouetteDetect"};
+  TextureFromPool silhouette_id_tx_ = {"nurb_sil_id"};
+  TextureFromPool silhouette_depth_tx_ = {"nurb_sil_depth"};
+  Framebuffer silhouette_fb_ = {"nurb_sil_fb"};
 
   static bool edge_index_in_mask(const uint64_t mask, const int edge_index)
   {
@@ -182,12 +191,14 @@ class NurbBodies : Overlay {
 
   static float line_thickness_for_overlay(const View3DOverlay &overlay)
   {
+    const float pixel_size = std::max(U.pixelsize, 1.0f);
     if (!std::isfinite(overlay.nurb_body_line_thickness) ||
         overlay.nurb_body_line_thickness <= 0.0f)
     {
-      return 2.0f;
+      return pixel_size;
     }
-    return std::clamp(overlay.nurb_body_line_thickness, 0.5f, 8.0f);
+    return std::clamp(overlay.nurb_body_line_thickness * 0.5f, 1.0f, 2.0f) *
+           pixel_size;
   }
 
   static bool edge_selection_mode_enabled(const int select_mode, const bool /*object_selected*/)
@@ -494,6 +505,65 @@ class NurbBodies : Overlay {
         });
   }
 
+  DrawCache *ensure_cache_for_entry(const Entry &entry)
+  {
+    if (entry.original_object->data == nullptr || GS(entry.original_object->data->name) != ID_NB)
+    {
+      return nullptr;
+    }
+
+    const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.original_object->data);
+    const uint64_t geometry_key = BKE_nurb_body_boolean_edge_polylines_cache_key(
+        entry.original_object, 64);
+    const uint64_t face_geometry_key = BKE_nurb_body_face_surfaces_cache_key(
+        entry.original_object);
+    if (geometry_key == 0 && face_geometry_key == 0) {
+      return nullptr;
+    }
+
+    DrawCache &cache = cache_for_object(entry.original_object);
+    const bool geometry_changed = cache.geometry_key != geometry_key ||
+                                  cache.face_geometry_key != face_geometry_key;
+    if (geometry_changed) {
+      clear_draw_cache(cache);
+      cache.geometry_key = geometry_key;
+      cache.face_geometry_key = face_geometry_key;
+    }
+
+    const bool object_selected = ((entry.original_object->base_flag | entry.object->base_flag) &
+                                  BASE_SELECTED) != 0;
+
+    const uint64_t selection_key = line_selection_key(
+        entry.original_object, *body, select_mode_, object_selected);
+    const uint64_t hover_key = line_hover_key(
+        entry.original_object, *body, select_mode_, object_selected);
+    if (geometry_key != 0 &&
+        (geometry_changed || cache.selection_key != selection_key || cache.hover_key != hover_key))
+    {
+      const Span<NurbBodyEdgePolyline> polylines =
+          BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
+      rebuild_line_batches(
+          cache, entry.original_object, *body, polylines, select_mode_, object_selected);
+      cache.selection_key = selection_key;
+      cache.hover_key = hover_key;
+    }
+
+    const uint64_t face_select_key = face_selection_key(*body, select_mode_, object_selected);
+    const uint64_t face_hover_state_key = face_hover_key(*body, select_mode_, object_selected);
+    if (face_geometry_key != 0 &&
+        (geometry_changed || cache.face_selection_key != face_select_key ||
+         cache.face_hover_key != face_hover_state_key))
+    {
+      const Span<NurbBodyFaceSurface> faces = BKE_nurb_body_face_surfaces_cached(
+          entry.original_object);
+      rebuild_face_batches(cache, *body, faces, select_mode_, object_selected);
+      cache.face_selection_key = face_select_key;
+      cache.face_hover_key = face_hover_state_key;
+    }
+
+    return &cache;
+  }
+
  public:
   ~NurbBodies()
   {
@@ -519,6 +589,7 @@ class NurbBodies : Overlay {
     needs_depth_prepass_ = edge_overlay_enabled_ && state.xray_enabled;
     depth_ps_.init();
     depth_mesh_ps_ = nullptr;
+    silhouette_prepass_sub_ps_ = nullptr;
 
     if (needs_depth_prepass_) {
       depth_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
@@ -529,6 +600,43 @@ class NurbBodies : Overlay {
       auto &sub = depth_ps_.sub("Mesh");
       sub.shader_set(res.shaders->depth_mesh.get());
       depth_mesh_ps_ = &sub;
+    }
+
+    {
+      auto &pass = silhouette_prepass_ps_;
+      pass.init();
+      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+      pass.framebuffer_set(&silhouette_fb_);
+      pass.clear_color_depth_stencil(float4(0.0f), 1.0f, 0x0);
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL,
+                     state.clipping_plane_count);
+      {
+        auto &sub = pass.sub("NurbBodySilhouette");
+        sub.shader_set(res.shaders->outline_prepass_mesh.get());
+        sub.push_constant("is_transform", false);
+        sub.push_constant("outline_color_override", 2);
+        silhouette_prepass_sub_ps_ = &sub;
+      }
+    }
+
+    {
+      auto &pass = silhouette_detect_ps_;
+      pass.init();
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA_PREMUL |
+                     DRW_STATE_DEPTH_ALWAYS);
+      pass.shader_set(res.shaders->outline_detect.get());
+      pass.push_constant("alpha_occlu", 1.0f);
+      pass.push_constant("sdf_line_opacity", 0.65f);
+      pass.push_constant("do_thick_outlines", false);
+      pass.push_constant("do_anti_aliasing", true);
+      pass.push_constant("is_xray_wires", false);
+      pass.bind_texture("outline_id_tx", &silhouette_id_tx_);
+      pass.bind_texture("outline_depth_tx", &silhouette_depth_tx_);
+      pass.bind_texture("scene_depth_tx", &res.depth_tx);
+      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+      pass.draw_procedural(GPU_PRIM_TRIS, 1, 3);
     }
   }
 
@@ -552,6 +660,12 @@ class NurbBodies : Overlay {
 
     entries_.append({ob_ref.object, original_object});
 
+    if (silhouette_prepass_sub_ps_ != nullptr) {
+      if (gpu::Batch *geom = DRW_cache_mesh_surface_get(ob_ref.object)) {
+        silhouette_prepass_sub_ps_->draw(geom, manager.unique_handle(ob_ref));
+      }
+    }
+
     if (depth_mesh_ps_ != nullptr) {
       if (gpu::Batch *geom = DRW_cache_mesh_surface_get(ob_ref.object)) {
         depth_mesh_ps_->draw(geom, manager.unique_handle(ob_ref));
@@ -569,96 +683,118 @@ class NurbBodies : Overlay {
     manager.submit(depth_ps_, view);
   }
 
-  void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View &view) final
+  void draw_silhouette(Framebuffer &framebuffer, Manager &manager, View &view)
+  {
+    if (!edge_overlay_enabled_ || entries_.is_empty()) {
+      return;
+    }
+
+    int viewport[4];
+    GPU_viewport_size_get_i(viewport);
+    int2 render_size(viewport[2], viewport[3]);
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
+    silhouette_depth_tx_.acquire(render_size, gpu::TextureFormat::SFLOAT_32_DEPTH_UINT_8, usage);
+    silhouette_id_tx_.acquire(render_size, gpu::TextureFormat::UINT_16, usage);
+    silhouette_fb_.ensure(GPU_ATTACHMENT_TEXTURE(silhouette_depth_tx_),
+                          GPU_ATTACHMENT_TEXTURE(silhouette_id_tx_));
+
+    manager.generate_commands(silhouette_prepass_ps_, view);
+    manager.submit_only(silhouette_prepass_ps_, view);
+
+    GPU_framebuffer_bind(framebuffer);
+    manager.submit(silhouette_detect_ps_, view);
+
+    silhouette_depth_tx_.release();
+    silhouette_id_tx_.release();
+  }
+
+  void draw_on_render(gpu::FrameBuffer *framebuffer, Manager & /*manager*/, View & /*view*/) final
+  {
+    if (!edge_overlay_enabled_ || entries_.is_empty() ||
+        select_mode_ != NURB_BODY_SELECT_MODE_FACE || framebuffer == nullptr)
+    {
+      return;
+    }
+
+    GPU_framebuffer_bind(framebuffer);
+    GPU_depth_mask(false);
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_polygon_offset(offset_data_.dist, 2.0f);
+
+    for (const Entry &entry : entries_) {
+      DrawCache *cache = ensure_cache_for_entry(entry);
+      if (cache == nullptr) {
+        continue;
+      }
+
+      GPU_matrix_push();
+      GPU_matrix_mul(entry.object->object_to_world().ptr());
+
+      /* Tint the already-rendered shaded surface instead of drawing a second shaded surface. */
+      GPU_blend(GPU_BLEND_MULTIPLY);
+      draw_face_batch(cache->face_selected_batch, float4(1.0f, 0.90f, 0.66f, 1.0f));
+
+      GPU_blend(GPU_BLEND_ALPHA);
+      draw_face_batch(cache->face_hovered_batch, float4(1.0f, 1.0f, 1.0f, 0.08f));
+      draw_face_batch(cache->face_selected_batch, float4(1.0f, 0.74f, 0.24f, 0.14f));
+
+      GPU_matrix_pop();
+    }
+
+    GPU_polygon_offset(0.0f, 0.0f);
+    GPU_blend(GPU_BLEND_NONE);
+    GPU_depth_mask(true);
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+  }
+
+  void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View & /*view*/) final
   {
     if (!edge_overlay_enabled_ || entries_.is_empty()) {
       return;
     }
 
     GPU_framebuffer_bind(framebuffer);
-    GPU_depth_test(xray_enabled_ ? GPU_DEPTH_NONE : GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
     GPU_depth_mask(false);
     GPU_blend(GPU_BLEND_ALPHA);
-    GPU_line_smooth(true);
+    GPU_polygon_offset(offset_data_.dist, 1.0f);
+
+    const float xray_occluded_alpha = 0.25f;
+    const float normal_alpha = 1.0f;
 
     for (const Entry &entry : entries_) {
-      if (entry.original_object->data == nullptr || GS(entry.original_object->data->name) != ID_NB)
-      {
+      DrawCache *cache = ensure_cache_for_entry(entry);
+      if (cache == nullptr) {
         continue;
       }
-      const NurbBody *body = reinterpret_cast<const NurbBody *>(entry.original_object->data);
-      const uint64_t geometry_key = BKE_nurb_body_boolean_edge_polylines_cache_key(
-          entry.original_object, 64);
-      const uint64_t face_geometry_key = BKE_nurb_body_face_surfaces_cache_key(
-          entry.original_object);
-      if (geometry_key == 0 && face_geometry_key == 0) {
-        continue;
-      }
-
-      DrawCache &cache = cache_for_object(entry.original_object);
-      const bool geometry_changed = cache.geometry_key != geometry_key ||
-                                    cache.face_geometry_key != face_geometry_key;
-      if (geometry_changed) {
-        clear_draw_cache(cache);
-        cache.geometry_key = geometry_key;
-        cache.face_geometry_key = face_geometry_key;
-      }
-
-      const bool object_selected = ((entry.original_object->base_flag | entry.object->base_flag) &
-                                    BASE_SELECTED) != 0;
-
-      const uint64_t selection_key = line_selection_key(
-          entry.original_object, *body, select_mode_, object_selected);
-      const uint64_t hover_key = line_hover_key(
-          entry.original_object, *body, select_mode_, object_selected);
-      if (geometry_key != 0 &&
-          (geometry_changed || cache.selection_key != selection_key ||
-           cache.hover_key != hover_key))
-      {
-        const Span<NurbBodyEdgePolyline> polylines =
-            BKE_nurb_body_boolean_edge_polylines_cached(entry.original_object, 64);
-        rebuild_line_batches(
-            cache, entry.original_object, *body, polylines, select_mode_, object_selected);
-        cache.selection_key = selection_key;
-        cache.hover_key = hover_key;
-      }
-
-      const uint64_t face_select_key = face_selection_key(*body, select_mode_, object_selected);
-      const uint64_t face_hover_state_key = face_hover_key(*body, select_mode_, object_selected);
-      if (face_geometry_key != 0 &&
-          (geometry_changed || cache.face_selection_key != face_select_key ||
-           cache.face_hover_key != face_hover_state_key))
-      {
-        const Span<NurbBodyFaceSurface> faces = BKE_nurb_body_face_surfaces_cached(
-            entry.original_object);
-        rebuild_face_batches(cache, *body, faces, select_mode_, object_selected);
-        cache.face_selection_key = face_select_key;
-        cache.face_hover_key = face_hover_state_key;
-      }
-
-      const bool draw_edge_outline = !(xray_enabled_ && object_selected);
 
       GPU_matrix_push();
       GPU_matrix_mul(entry.object->object_to_world().ptr());
-      GPU_polygon_offset(offset_data_.dist, 2.0f);
-      draw_face_batch(cache.face_hovered_batch, float4(1.0f, 1.0f, 1.0f, 0.30f));
-      draw_face_batch(cache.face_selected_batch, float4(1.0f, 0.62f, 0.0f, 0.45f));
-      GPU_polygon_offset(offset_data_.dist, 4.0f);
-      if (draw_edge_outline) {
-        draw_batch(cache.normal_batch, float4(0.0f, 0.0f, 0.0f, 0.9f), line_width_);
+      gpu::Batch *topology_batch = DRW_cache_mesh_all_edges_get(entry.object);
+      gpu::Batch *normal_batch = topology_batch != nullptr ? topology_batch : cache->normal_batch;
+      if (xray_enabled_) {
+        GPU_depth_test(GPU_DEPTH_ALWAYS);
+        draw_batch(
+            normal_batch, float4(0.0f, 0.0f, 0.0f, xray_occluded_alpha), line_width_);
+        draw_batch(
+            cache->hovered_batch, float4(1.0f, 1.0f, 1.0f, xray_occluded_alpha), line_width_);
+        draw_batch(
+            cache->selected_batch, float4(1.0f, 0.62f, 0.0f, xray_occluded_alpha), line_width_);
       }
-      draw_batch(cache.hovered_batch, float4(1.0f, 1.0f, 1.0f, 1.0f), line_width_);
-      draw_batch(cache.selected_batch, float4(1.0f, 0.62f, 0.0f, 1.0f), line_width_);
-      GPU_polygon_offset(0.0f, 0.0f);
+
+      GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+      draw_batch(normal_batch, float4(0.0f, 0.0f, 0.0f, normal_alpha), line_width_);
+      draw_batch(cache->hovered_batch, float4(1.0f, 1.0f, 1.0f, 1.0f), line_width_);
+      draw_batch(cache->selected_batch, float4(1.0f, 0.62f, 0.0f, 1.0f), line_width_);
       GPU_matrix_pop();
     }
 
     GPU_polygon_offset(0.0f, 0.0f);
-    GPU_line_smooth(false);
     GPU_blend(GPU_BLEND_NONE);
     GPU_depth_mask(true);
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
   }
+
 };
 
 }  // namespace blender::draw::overlay

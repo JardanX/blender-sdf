@@ -882,6 +882,8 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.sculpts.draw_on_render(resources.render_fb, manager, view);
     infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
+    regular.nurb_bodies.draw_on_render(resources.render_fb, manager, view);
+    infront.nurb_bodies.draw_on_render(resources.render_in_front_fb, manager, view);
   }
   {
     /* Overlay Line prepass. */
@@ -950,6 +952,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     if (!state.is_depth_only_drawing) {
       grid.draw_line(resources.overlay_line_fb, manager, view);
     }
+    regular.nurb_bodies.draw_silhouette(resources.overlay_line_fb, manager, view);
     regular.nurb_bodies.draw_line(resources.overlay_line_fb, manager, view);
 
     /* Here because of custom order of regular.facing. */
@@ -958,6 +961,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     draw(infront, resources.overlay_in_front_fb);
     infront.nurb_bodies.draw_depth_prepass(resources.overlay_line_in_front_fb, manager, view);
     draw_line(infront, resources.overlay_line_in_front_fb);
+    infront.nurb_bodies.draw_silhouette(resources.overlay_line_in_front_fb, manager, view);
     infront.nurb_bodies.draw_line(resources.overlay_line_in_front_fb, manager, view);
 
   }

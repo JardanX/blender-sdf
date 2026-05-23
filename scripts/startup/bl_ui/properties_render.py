@@ -101,8 +101,8 @@ _SDF_PRESETS = {
         'sdf_resolution_scale': 100.0,
         'sdf_adaptive_resolution': False,
         'sdf_frustum_cull': True,
-        'sdf_max_steps': 100,
-        'sdf_ray_epsilon': 0.001,
+        'sdf_max_steps': 128,
+        'sdf_ray_epsilon': 0.005,
         'sdf_over_relaxation': 1.5,
         'sdf_use_cone_trace': True,
         'sdf_cone_aperture': 0.5,
@@ -124,8 +124,8 @@ _SDF_PRESETS = {
 
 _SDF_UNVERSIONED_DEFAULTS = {
     'sdf_resolution_scale': (0.0, 100.0),
-    'sdf_max_steps': (0, 100),
-    'sdf_ray_epsilon': (0.0, 0.001),
+    'sdf_max_steps': (0, 128),
+    'sdf_ray_epsilon': (0.0, 0.005),
     'sdf_over_relaxation': (0.0, 1.5),
     'sdf_cone_aperture': (0.0, 0.5),
     'sdf_cone_steps': (0, 32),
@@ -159,7 +159,7 @@ class SDF_OT_raymarcher_preset(Operator):
     preset: EnumProperty(
         items=[
             ('LOW', "Low", "Fast viewport: 50% resolution, adaptive, 100 steps"),
-            ('MEDIUM', "Medium", "Balanced: full resolution, 100 steps, 0.001 epsilon"),
+            ('MEDIUM', "Medium", "Balanced: full resolution, 128 steps, 0.005 epsilon"),
             ('HIGH', "High", "Maximum quality: full resolution, 512 steps, 0.0001 epsilon"),
         ],
     )

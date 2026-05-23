@@ -381,11 +381,11 @@ class Instance : public DrawEngine {
   int debug_bvh_views_ = 0;
   int debug_fd_normals_ = 0;
   int use_cone_trace_ = 0;
-  int sdf_max_steps_ = 256;
-  float sdf_ray_epsilon_ = 0.001f;
-  float sdf_over_relaxation_ = 1.2f;
-  float sdf_cone_aperture_ = 1.25f;
-  int sdf_cone_steps_ = 16;
+  int sdf_max_steps_ = 128;
+  float sdf_ray_epsilon_ = 0.005f;
+  float sdf_over_relaxation_ = 1.5f;
+  float sdf_cone_aperture_ = 0.5f;
+  int sdf_cone_steps_ = 32;
 
   float4 frustum_planes_[6];
   bool frustum_valid_ = false;
@@ -2748,11 +2748,11 @@ class Instance : public DrawEngine {
     debug_bvh_views_ = (s.sdf_bvh_debug_view <= 5) ? s.sdf_bvh_debug_view : 0;
     debug_fd_normals_ = s.sdf_fd_normals ? 1 : 0;
     use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
-    sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 512;
-    sdf_ray_epsilon_ = s.sdf_ray_epsilon > 0.0f ? s.sdf_ray_epsilon : 0.0001f;
-    sdf_over_relaxation_ = s.sdf_over_relaxation >= 1.0f ? s.sdf_over_relaxation : 1.3f;
+    sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 128;
+    sdf_ray_epsilon_ = s.sdf_ray_epsilon > 0.0f ? s.sdf_ray_epsilon : 0.005f;
+    sdf_over_relaxation_ = s.sdf_over_relaxation >= 1.0f ? s.sdf_over_relaxation : 1.5f;
     sdf_cone_aperture_ = s.sdf_cone_aperture > 0.0f ? s.sdf_cone_aperture : 0.5f;
-    sdf_cone_steps_ = s.sdf_cone_steps > 0 ? s.sdf_cone_steps : 64;
+    sdf_cone_steps_ = s.sdf_cone_steps > 0 ? s.sdf_cone_steps : 32;
 
     float scale_pct = s.sdf_resolution_scale;
     resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
