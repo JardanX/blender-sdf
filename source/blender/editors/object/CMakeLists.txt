@@ -69,6 +69,7 @@ set(LIB
   PRIVATE bf::dna
   bf_editor_mesh
   bf_editor_grease_pencil
+  bf_editor_metaball
   PRIVATE bf::functions
   PRIVATE bf::geometry
   PRIVATE bf::gpu

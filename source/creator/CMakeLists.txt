@@ -22,7 +22,6 @@ set(LIB
   PRIVATE bf::render
   PRIVATE bf::sequencer
   PRIVATE bf::windowmanager
-  bf_editor_metaball
   PRIVATE bf::dependencies::optional::opencolorio
 )
 
