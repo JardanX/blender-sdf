@@ -21,3 +21,8 @@
 - [x] Edge overlay uses cached analytic NURB edge batches during recalculation, avoiding stale mesh edge GPU batches.
 - [x] Removed fast bevel timeout, solved-preview confirmation gate, failure clamp, stale last-good reuse, and reduced-radius fallback.
 - [ ] Verify in Blender: select confirmed bevel face, press `Ctrl+B`, adjust radius, toggle `C` chamfer and `F` fillet.
+
+## Object Selection
+
+- [x] Fix total selection break: `object.nurb_body_select_cut_edge` is bound to the select mouse button in `km_view3d` (before `view3d.select`) with a poll that passes for any object in Object Mode. On a miss (no NURB edge/face under cursor) its invoke returned `OPERATOR_FINISHED`/`OPERATOR_CANCELLED` without `OPERATOR_PASS_THROUGH`, consuming the click so `view3d.select` never ran — nothing (mesh/SDF/object) could be selected with LMB. Miss paths now return `... | OPERATOR_PASS_THROUGH` (`object_nurb_body.cc`).
+- [ ] Verify in Blender: with NURB select mode = Edge (default), LMB selects meshes/SDFs/objects normally; LMB on a NURB boolean edge still selects the edge.

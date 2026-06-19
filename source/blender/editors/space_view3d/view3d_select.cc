@@ -2934,6 +2934,40 @@ static bool ed_object_select_pick(bContext *C,
                                                           do_bones_get_priotity,
                                                           nullptr) :
                                  nullptr;
+
+      /* SDF fallback: no GPU geometry, test screen-space bounding rect. */
+      if (basact == nullptr) {
+        const float mval_fl[2] = {float(mval[0]), float(mval[1])};
+        float best_depth = FLT_MAX;
+        BKE_view_layer_synced_ensure(scene, view_layer);
+        for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+          if (base.object->type != OB_SDF || !BASE_SELECTABLE(v3d, &base)) {
+            continue;
+          }
+          rcti sr;
+          float corners[8][2];
+          int count;
+          if (!sdf_bb_project_to_screen(vc.region, base.object, corners, &count, &sr)) {
+            continue;
+          }
+          if (mval_fl[0] < sr.xmin || mval_fl[0] > sr.xmax ||
+              mval_fl[1] < sr.ymin || mval_fl[1] > sr.ymax) {
+            continue;
+          }
+          float3 obj_center = base.object->object_to_world().location();
+          float sc[2];
+          float depth = FLT_MAX;
+          if (ED_view3d_project_float_global(
+                  vc.region, obj_center, sc, V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
+          {
+            depth = len_squared_v2v2(mval_fl, sc);
+          }
+          if (depth < best_depth) {
+            best_depth = depth;
+            basact = &base;
+          }
+        }
+      }
     }
 
     /* Group point selection handled by GPU buffer (DEPTH_ALWAYS) */
