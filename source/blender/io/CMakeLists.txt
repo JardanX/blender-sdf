@@ -18,10 +18,9 @@ if(WITH_IO_STL)
   add_subdirectory(stl)
 endif()
 
-# MATHOPS: Removed — Grease Pencil IO
-# if(WITH_IO_GREASE_PENCIL)
-#   add_subdirectory(grease_pencil)
-# endif()
+if(WITH_IO_GREASE_PENCIL)
+  add_subdirectory(grease_pencil)
+endif()
 
 if(WITH_IO_FBX)
   add_subdirectory(fbx)
