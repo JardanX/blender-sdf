@@ -907,10 +907,12 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.prepass.draw_line(resources.overlay_line_fb, manager, view);
 
-    /* SDF selection: read G-buffer and write select IDs. */
-    if (resources.is_selection()) {
-      regular.sdfs.draw(resources.overlay_line_fb, manager, view);
-    }
+    /* SDF selection handled CPU-side via BB projection (see view3d_select.cc).
+     * The old GPU path injected mis-encoded depths into the shared select buffer,
+     * corrupting mesh picking whenever an SDF was under the cursor. */
+    // if (resources.is_selection()) {
+    //   regular.sdfs.draw(resources.overlay_line_fb, manager, view);
+    // }
 
     /* TODO(fclem): Split overlay and rename draw functions. */
     /* TODO(fclem): Draw on line framebuffer. */

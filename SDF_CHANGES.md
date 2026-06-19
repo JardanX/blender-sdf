@@ -1149,6 +1149,17 @@ SDF objects were invisible to Blender's GPU picking system because they had no o
 | `source/blender/draw/engines/overlay/overlay_private.hh` | Added `StaticShader sdf_pick = shader_selectable("overlay_sdf_pick")` + `ensure_compile_async()` |
 | `source/blender/draw/CMakeLists.txt` | Added overlay_sdf.hh, overlay_sdf_infos.hh, overlay_sdf_pick_vert.glsl, overlay_sdf_pick_frag.glsl |
 
+### Update — GPU select-buffer injection disabled (CPU BB picking is authoritative)
+
+The `Sdfs::draw()` GPU path injected SDF hits directly into the shared `select_output_buf` during the object-select pass, writing a raw float depth whose encoding does not match what the mesh conservative-select shader writes (which packs screen-distance into the low bits). It also sampled the previous frame's full-window SDF G-buffer while the select pass renders into a small pick-rect framebuffer. Whenever an SDF was under/near the cursor this injected a mis-encoded hit that won the nearest-pick, so **clicking a mesh selected the SDF (or nothing) and SDF picking itself was unreliable** — both mesh and SDF object selection appeared broken.
+
+**Fix:** SDF object picking is now CPU-side via `sdf_bb_project_to_screen` (screen-space bounding-box projection), matching the existing box/lasso/circle selectors. The `regular.sdfs.draw(...)` selection call in `overlay_instance.cc::draw_v3d` is commented out; single-click picking uses a fallback in `ed_object_select_pick` (`view3d_select.cc`) that runs when GPU selection returns no hit. `Sdfs::draw_outline`/`draw_line` (visual overlays) are unaffected.
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/overlay/overlay_instance.cc` | Disabled the `regular.sdfs.draw()` select-buffer injection in `draw_v3d` (corrupted mesh picking) |
+| `source/blender/editors/space_view3d/view3d_select.cc` | `ed_object_select_pick`: SDF single-click fallback via `sdf_bb_project_to_screen` when no GPU hit |
+
 ---
 
 ## Cycles GPU Crash Fix
