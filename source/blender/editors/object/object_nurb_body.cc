@@ -2766,8 +2766,9 @@ static wmOperatorStatus object_nurb_body_select_cut_edge_invoke(bContext *C,
     nurb_body_clear_visible_edge_state(C, region, true, true);
     NurbBodyObjectFaceHit selected = nurb_body_mouse_hit_any_face(C, *region, event->mval);
     if (!selected.is_valid()) {
+      /* No face under cursor — pass through so view3d.select can select the object. */
       const bool changed = nurb_body_clear_visible_face_state(C, region, !extend, true);
-      return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+      return (changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED) | OPERATOR_PASS_THROUGH;
     }
 
     Object *ob = selected.ob;
@@ -2812,11 +2813,9 @@ static wmOperatorStatus object_nurb_body_select_cut_edge_invoke(bContext *C,
   NurbBodyObjectEdgeHit selected = nurb_body_mouse_near_any_boolean_edge(C, *region, event->mval);
 
   if (!selected.is_valid()) {
+    /* No edge under cursor — pass through so view3d.select can select the object. */
     const bool changed = nurb_body_clear_visible_edge_state(C, region, !extend, true);
-    if (changed) {
-      return OPERATOR_FINISHED;
-    }
-    return OPERATOR_CANCELLED;
+    return (changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED) | OPERATOR_PASS_THROUGH;
   }
 
   Object *ob = selected.ob;
