@@ -23,10 +23,13 @@ using blender::int4;
 #define SDF_MOD_SOLIDIFY 4
 #define SDF_MOD_ROUND 5
 #define SDF_MOD_ONION 6
+#define SDF_MOD_ARRAY 8
 #define SDF_MOD_DISPLACE 9
 #define SDF_MOD_MIRROR_X 1
 #define SDF_MOD_MIRROR_Y 2
 #define SDF_MOD_MIRROR_Z 4
+#define SDF_MOD_ARRAY_LINEAR 0
+#define SDF_MOD_ARRAY_RADIAL 1
 
 /* Primitives */
 
@@ -49,16 +52,21 @@ inline float sdCylinder(float3 p, float3 size)
          math::length(math::max(float2(d.x, d.y), float2(0.0f)));
 }
 
+inline float sdConeFrustum(float3 p, float rb, float rt, float h)
+{
+  /* Mirror of GLSL sdConeFrustum: bottom radius rb at z=-h, top radius rt at z=+h. */
+  float2 q = float2(math::length(float2(p.x, p.y)), p.z);
+  float2 k1 = float2(rt, h);
+  float2 k2 = float2(rt - rb, 2.0f * h);
+  float2 ca = float2(q.x - std::min(q.x, (q.y < 0.0f) ? rb : rt), fabsf(q.y) - h);
+  float2 cb = q - k1 + k2 * math::clamp(math::dot(k1 - q, k2) / math::dot(k2, k2), 0.0f, 1.0f);
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  return s * std::sqrt(std::min(math::dot(ca, ca), math::dot(cb, cb)));
+}
+
 inline float sdCone(float3 p, float r, float h)
 {
-  float2 q = float2(math::length(float2(p.x, p.y)), p.z + h);
-  float2 e = float2(-r, 2.0f * h);
-  float2 pq = q - float2(r, 0.0f);
-  float t = math::clamp(math::dot(pq, e) / math::dot(e, e), 0.0f, 1.0f);
-  float2 d1 = pq - e * t;
-  float d1l = math::length(d1);
-  float s = (e.x * pq.y - e.y * pq.x < 0.0f && q.y < 2.0f * h && q.y > 0.0f) ? -1.0f : 1.0f;
-  return std::min(s * d1l, std::max(-q.y, std::max(q.y - 2.0f * h, q.x - r)));
+  return sdConeFrustum(p, r, 0.0f, h);
 }
 
 inline float sdCapsule(float3 p, float3 size)
@@ -79,11 +87,12 @@ inline float sdTorus(float3 p, float2 t)
 
 inline float evalPrimitive(const SDFObjectGPU &obj, float3 p)
 {
-  /* sdf_size.xyz = pre-subtracted (size - bevel), sdf_size.w = effective bevel */
+  /* sdf_size.xyz = pre-subtracted BASE (size - bevel), sdf_size.w = effective bevel.
+   * obj_scale.xyz applies object scale as a coordinate transform. */
   float3 size(obj.sdf_size);
   float bevel = obj.sdf_size.w;
+  p = p / float3(obj.obj_scale);
 
-  /* size is already (raw_size - bevel) clamped to 0.001 */
   float dist;
   switch (obj.sdf_type) {
     case 1: { /* SPHERE */
@@ -94,8 +103,8 @@ inline float evalPrimitive(const SDFObjectGPU &obj, float3 p)
       dist = sdCylinder(p, size);
       break;
     }
-    case 3: { /* CONE */
-      dist = sdCone(p, size.x, size.y);
+    case 3: { /* CONE / FRUSTUM */
+      dist = sdConeFrustum(p, size.x, size.z, size.y);
       break;
     }
     case 4: { /* CAPSULE */
@@ -208,6 +217,70 @@ inline DomainResult applyDomainMods(float3 p,
       float3 h(m.params.x, m.params.y, m.params.z);
       p = p - math::clamp(p, -h, h);
     }
+    else if (mtype == SDF_MOD_ARRAY) {
+      /* Mirror of GLSL SDF_MOD_ARRAY domain fold (always-smooth blend). */
+      auto sabs = [](float x, float k) -> float {
+        if (k <= 0.0001f) { return fabsf(x); }
+        float hh = std::clamp(0.5f + 0.5f * x / k, 0.0f, 1.0f);
+        return x * (2.0f * hh - 1.0f) + k * hh * (1.0f - hh);
+      };
+      auto fractf = [](float x) -> float { return x - std::floor(x); };
+      float count = m.params.x;
+      float blend = m.params2.x;
+      float bk = (blend > 0.001f) ? blend : 0.0f;
+      if (mflags == SDF_MOD_ARRAY_LINEAR) {
+        float3 offset(m.params.y, m.params.z, m.params.w);
+        float spacing = math::length(offset);
+        if (spacing > 0.0001f && count > 0.5f) {
+          float3 dir = offset / spacing;
+          float t = math::dot(p, dir);
+          float norm_t = t / spacing;
+          float id = std::clamp(std::round(norm_t), 0.0f, count - 1.0f);
+          float local = norm_t - id;
+          bool mirrored = false;
+          if (count > 1.5f && fractf(id * 0.5f) > 0.25f) { local = -local; mirrored = true; }
+          if (count > 1.5f) {
+            float d_r = (0.5f - local) * spacing;
+            float pull_r = d_r - sabs(d_r, bk);
+            float d_l = (0.5f + local) * spacing;
+            float pull_l = d_l - sabs(d_l, bk);
+            if (id < 0.5f) { pull_l = 0.0f; }
+            if (id > count - 1.5f) {
+              if (mirrored) { pull_l = 0.0f; }
+              else { pull_r = 0.0f; }
+            }
+            local += (pull_r - pull_l) / spacing;
+          }
+          p += dir * (local * spacing - t);
+        }
+      }
+      else if (mflags == SDF_MOD_ARRAY_RADIAL) {
+        float radius = m.params.y;
+        if (count > 1.5f) {
+          float sector = (2.0f * float(M_PI)) / count;
+          float angle = std::atan2(p.y, p.x);
+          float norm_a = angle / sector;
+          float id = std::round(norm_a);
+          float local = norm_a - id;
+          bool mir = fractf(fabsf(id) * 0.5f) > 0.25f;
+          bool odd = fractf(count * 0.5f) > 0.25f;
+          bool at_defect = odd && (fabsf(angle) > float(M_PI) - sector * 0.5f);
+          if (at_defect) { local = fabsf(local); }
+          else if (mir) { local = -local; }
+          float arc = sector * std::max(radius, 0.0001f);
+          float d_r = (0.5f - local) * arc;
+          float pull_r = d_r - sabs(d_r, bk);
+          float d_l = (0.5f + local) * arc;
+          float pull_l = d_l - sabs(d_l, bk);
+          local += (pull_r - pull_l) / arc;
+          if (bk > 0.001f) { scale *= 0.5f; }
+          float fold_a = local * sector;
+          float r = math::length(float2(p.x, p.y));
+          p.x = r * cosf(fold_a) - radius;
+          p.y = r * sinf(fold_a);
+        }
+      }
+    }
   }
   return {p, scale};
 }
@@ -294,7 +367,8 @@ inline float evalObjectSDF(const SDFObjectGPU &obj,
 {
   DomainResult dm = applyDomainMods(
       local_pos, mods, obj.modifier_start, obj.modifier_count, obj.inverse_matrix, skip_mirror);
-  float d = evalPrimitive(obj, dm.p);
+  /* evalPrimitive returns a BASE-space distance; convert to world via min(scale). */
+  float d = evalPrimitive(obj, dm.p) * obj.obj_scale.w;
   return applyDistMods(d, dm.p, obj, mods, obj.modifier_start, obj.modifier_count, skip_shell);
 }
 

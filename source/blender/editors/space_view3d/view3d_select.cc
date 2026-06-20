@@ -16,6 +16,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_meta_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_pointcloud_types.h"
@@ -578,7 +579,7 @@ static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
   float ext[3] = {sz[0], sz[1], sz[2]};
   switch (sdf->sdf_type) {
     case SDF_TYPE_CONE:
-      ext[0] = ext[1] = sz[0];
+      ext[0] = ext[1] = max_ff(sz[0], sz[2]);
       ext[2] = sz[1];
       break;
     case SDF_TYPE_CAPSULE:
@@ -617,6 +618,101 @@ static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
 }
 
 /**
+ * Expand local-space SDF extents to cover its modifiers (array, mirror, …) so
+ * picking matches where the geometry renders. Works in object-local (pre-scale)
+ * units; absolute world offsets are divided by per-axis scale so the later
+ * object_to_world transform recovers them. Twist/bend are not bounded.
+ */
+static void sdf_expand_local_extents_for_modifiers(const Object *ob,
+                                                    const float scale[3],
+                                                    float bb_min[3],
+                                                    float bb_max[3])
+{
+  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+  for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first); md;
+       md = md->next)
+  {
+    if (!(md->mode & eModifierMode_Realtime)) {
+      continue;
+    }
+    switch (md->type) {
+      case eModifierType_SDFArray: {
+        const auto *am = reinterpret_cast<const SDFArrayModifierData *>(md);
+        if (am->count < 2) {
+          break;
+        }
+        if (am->array_type == MOD_SDF_ARRAY_RADIAL) {
+          float rx = am->array_radius / max_ff(scale[0], 1e-6f);
+          float ry = am->array_radius / max_ff(scale[1], 1e-6f);
+          bb_min[0] -= rx;  bb_max[0] += rx;
+          bb_min[1] -= ry;  bb_max[1] += ry;
+        }
+        else {
+          for (int i = 0; i < 3; i++) {
+            float off = 0.0f;
+            if (am->use_relative_offset) {
+              off += am->relative_offset[i] * (sdf->size[i] * 2.0f);
+            }
+            if (am->use_constant_offset) {
+              off += am->constant_offset[i] / max_ff(scale[i], 1e-6f);
+            }
+            float e = fabsf(off) * float(am->count - 1);
+            bb_min[i] -= e;  bb_max[i] += e;
+          }
+        }
+        break;
+      }
+      case eModifierType_SDFMirror: {
+        const auto *mm = reinterpret_cast<const SDFMirrorModifierData *>(md);
+        float ofs = mm->offset_distance;
+        auto expand_axis = [&](int ax) {
+          float add = (bb_max[ax] - bb_min[ax]) + fabsf(ofs) / max_ff(scale[ax], 1e-6f);
+          bb_min[ax] -= add;  bb_max[ax] += add;
+        };
+        if (mm->flag & MOD_SDF_MIRROR_AXIS_X) { expand_axis(0); }
+        if (mm->flag & MOD_SDF_MIRROR_AXIS_Y) { expand_axis(1); }
+        if (mm->flag & MOD_SDF_MIRROR_AXIS_Z) { expand_axis(2); }
+        break;
+      }
+      case eModifierType_SDFElongate: {
+        const auto *em = reinterpret_cast<const SDFElongateModifierData *>(md);
+        for (int i = 0; i < 3; i++) {
+          float e = fabsf(em->elongation[i]);
+          bb_min[i] -= e;  bb_max[i] += e;
+        }
+        break;
+      }
+      case eModifierType_SDFRound: {
+        float r = reinterpret_cast<const SDFRoundModifierData *>(md)->offset;
+        for (int i = 0; i < 3; i++) {
+          float e = fabsf(r) / max_ff(scale[i], 1e-6f);
+          bb_min[i] -= e;  bb_max[i] += e;
+        }
+        break;
+      }
+      case eModifierType_SDFBevel: {
+        float r = reinterpret_cast<const SDFBevelModifierData *>(md)->radius;
+        for (int i = 0; i < 3; i++) {
+          float e = fabsf(r) / max_ff(scale[i], 1e-6f);
+          bb_min[i] -= e;  bb_max[i] += e;
+        }
+        break;
+      }
+      case eModifierType_SDFDisplace: {
+        float s = reinterpret_cast<const SDFDisplaceModifierData *>(md)->strength;
+        for (int i = 0; i < 3; i++) {
+          float e = fabsf(s) / max_ff(scale[i], 1e-6f);
+          bb_min[i] -= e;  bb_max[i] += e;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+/**
  * Project 8 corners of SDF bounding box to screen, returning screen-space AABB.
  * Also fills `r_corners` (up to 8 valid projected points) and `r_count`.
  * Returns false if no corner projects successfully.
@@ -635,14 +731,23 @@ static bool sdf_bb_project_to_screen(const ARegion *region,
   float bb_min[3], bb_max[3];
   sdf_local_extents(sdf, bb_min, bb_max);
 
-  /* Expand by bevel. */
+  const float4x4 &obmat = ob->object_to_world();
+  float scale[3] = {
+      math::length(float3(obmat[0])),
+      math::length(float3(obmat[1])),
+      math::length(float3(obmat[2])),
+  };
+
+  /* Expand by bevel (world units) in local space. */
   float bevel = sdf->bevel;
   for (int i = 0; i < 3; i++) {
-    bb_min[i] -= bevel;
-    bb_max[i] += bevel;
+    float b = bevel / max_ff(scale[i], 1e-6f);
+    bb_min[i] -= b;
+    bb_max[i] += b;
   }
 
-  const float4x4 &obmat = ob->object_to_world();
+  /* Expand for modifiers so arrayed/mirrored geometry is selectable. */
+  sdf_expand_local_extents_for_modifiers(ob, scale, bb_min, bb_max);
   int count = 0;
   float smin[2] = {FLT_MAX, FLT_MAX};
   float smax[2] = {-FLT_MAX, -FLT_MAX};

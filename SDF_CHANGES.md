@@ -2755,3 +2755,117 @@ Removed conservative preview behavior that made fillets clamp early, reject conf
 | File | Change |
 |------|--------|
 | `editors/object/object_nurb_body.cc` | Confirmation no longer blocks when preview has not yet recorded a solved radius; timeout-budget warning removed |
+
+---
+
+## SDF Cone Frustum, Named Shape Controls, Array Domain Repetition, Selection Parity (2026-06-19)
+
+Reworked the SDF shape/scale model and the array feature, and fixed picking to match.
+
+### Cone → frustum + named per-primitive shape controls
+
+- **Cone is now a frustum.** `size.z` (previously unused for cones) is the **top radius**; `size.x` = bottom radius, `size.y` = half-height. `size.z = 0` gives the old sharp apex. New evaluator `sdConeFrustum(p, rb, rt, h)` (Inigo Quilez two-radius capped cone) replaces `sdCone`, which becomes a `rt=0` wrapper. Landed in **all three eval mirrors**: GPU `sdf_lib.glsl`, gradient `sdf_grad_lib.glsl` (`sdgConeFrustum`), CPU `sdf_cpu_eval.hh`. Downstream compute shaders inherit it via `#include`.
+- **Named shape aliases** added to `rna_sdf.cc` (`cone_radius_bottom/top`, `cone_height`, `sphere_radius`, `cylinder_radius/height`, `capsule_radius/height`, `torus_major/minor_radius`, `ngon_radius/height`) — additive get/set over `size[]`, so `sdf.size` (and the MathOPS addon) keep working. `properties_data_sdf.py` now shows explicit shape fields; **object transform scale is the only "scale."**
+- Cone radial AABB extent uses `max(size.x, size.z)` everywhere (engine early/base/copy AABB, BKE `object.cc` bounds, overlay `overlay_sdf.hh`, selection `view3d_select.cc`). Bevel packing lets the cone top shrink to a true 0.
+- New-cone defaults set `size.z = 0` (`object_sdf.cc`, `rna_SDF_type_update`). Migration in `versioning_510.cc` zeroes `size[2]` for pre-bump cones (gated at `BLENDER_FILE_SUBVERSION` 39).
+
+### Array → domain repetition (no instancing)
+
+- The SDF Array modifier is now packed as a single GPU **domain-fold** modifier (`SDF_MOD_ARRAY`) instead of emitting N instanced `SDFObjectGPU` copies (`sdf_engine.cc`). This **fixes the radial phantom copy at the center** structurally (the old `ci==0` copy sat at the object origin) and is O(1) per sample.
+- Domain blend is **always smooth** — the array `blend_type` dropdown and per-copy `rotation_offset` were removed from the UI (`MOD_sdf_array.cc`); the DNA fields are kept as tombstones. The GLSL/gradient folds drop the `blend_type` gate and the per-copy rotation block; CPU parity added via a new `SDF_MOD_ARRAY` branch in `sdf_cpu_eval.hh::applyDomainMods`.
+- **Scale vs spacing:** object scale grows the repeated unit; radial `array_radius` and linear `constant_offset` stay absolute (not multiplied by scale), so scaling fattens copies without spreading the ring. The object AABB is expanded for the array fold.
+
+### Selection parity across modifiers
+
+- `view3d_select.cc` `sdf_bb_project_to_screen` now expands local extents (in pre-scale units) for the array (so ring/linear copies are clickable), plus mirror/elongate/round/bevel/displace, and scales the bevel pad. Covers single-click, box, lasso, and circle select. Twist/bend are not bounded.
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | `sdConeFrustum` + wrapper; cone dispatch uses `r.z`; array fold forced smooth, per-copy rotation removed |
+| `draw/engines/sdf/shaders/sdf_grad_lib.glsl` | `sdgConeFrustum` + wrapper; array-fold blend forced smooth (both passes) |
+| `draw/engines/sdf/sdf_cpu_eval.hh` | `sdConeFrustum`; `SDF_MOD_ARRAY` domain-fold branch + defines |
+| `draw/engines/sdf/sdf_engine.cc` | Array packed as domain modifier (object + group), instancing reduced to single emit, array AABB expansion, cone frustum extents, sharp-cone bevel packing |
+| `draw/engines/overlay/overlay_sdf.hh` | Cone frustum extent; radial overlay ignores dropped rotation offset |
+| `makesrna/intern/rna_sdf.cc` | Named shape aliases; cone type-update default `size.z = 0` |
+| `editors/object/object_sdf.cc` | New cone default `size.z = 0` |
+| `blenkernel/intern/object.cc` | Cone bounds use `max(size.x, size.z)` |
+| `editors/space_view3d/view3d_select.cc` | Modifier-aware picking bbox (`sdf_expand_local_extents_for_modifiers`) |
+| `modifiers/intern/MOD_sdf_array.cc` | Removed array `blend_type` + `rotation_offset` UI (always-smooth) |
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Per-primitive named shape controls |
+| `blenloader/intern/versioning_510.cc`, `BKE_blender_version.h` | Cone `size.z` migration; subversion gated at 39 |
+
+### MathOPS addon (separate repo — not edited here)
+
+Changes are additive: `sdf.size` is unchanged, so the addon keeps working. For the addon team: new optional named shape props (`cone_radius_top`, etc.); array blend is now always smooth (`blend_type` ignored); array `rotation_offset` ignored.
+
+## Low-Res Render Upscaling — Edge-Aware (JBU) + Sharpening (2026-06-20)
+
+Added selectable upscaling quality for the low-res SDF render, replacing the previous nearest-neighbor blit. The engine already rendered at `sdf_resolution_scale` and stretched the result in the blit; this adds proper Nearest / Bilinear / Bicubic / Edge-Aware filters plus an optional contrast-adaptive sharpening pass.
+
+### What & why
+
+- **Edge-aware (joint bilateral) upsample** is the default. It weights low-res color taps by spatial distance, surface plane distance (`gbuf_pos`), normal similarity (`gbuf_normal`), and a hard object-ID gate (`gbuf_color.w`), so color does not bleed across silhouettes or material boundaries — the failure mode of plain bilinear on an implicit surface. No new G-buffers were needed; all guides already existed.
+- **Sharpening** is AMD CAS / FSR-RCAS style: a 3×3 contrast-adaptive unsharp limited to the local min/max to avoid halos. Runs as a full-res post pass between blit and FXAA, with a `sdf_upscale_sharpness` slider.
+- Temporal upscaling (FSR2/DLSS-style) was scoped out: the engine has no motion vectors, history, or jitter. Spatial edge-aware was the correct first target.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `draw/engines/sdf/shaders/sdf_sharpen_frag.glsl` | Contrast-adaptive sharpening (CAS/RCAS) post pass |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | `View3DShading`: `sdf_upscale_quality` (char enum), `sdf_upscale_sharpen` (char), `sdf_upscale_sharpness` (float) |
+| `makesrna/intern/rna_space.cc` | RNA enum + bool + float props for the three fields |
+| `scripts/startup/bl_ui/properties_render.py` | Upscale quality dropdown + sharpen toggle + sharpness slider |
+| `draw/engines/sdf/shaders/sdf_blit_frag.glsl` | Rewritten: nearest / bilinear / bicubic (Catmull-Rom) / edge-aware (JBU) modes; validity from `gbuf_pos.w`; debug views fall back to nearest; short-circuits to direct fetch at 100% scale |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_blit` gains `gbuf_normal/pos/color` samplers + `upscale_quality`, `src_size`, `tex_size` push constants; new `sdf_sharpen` create-info |
+| `draw/engines/sdf/sdf_engine.cc` | `SH_SHARPEN` shader, `draw_sharpen()` + `ensure_sharpen_target()`, blit binds guide buffers + new uniforms, post chain blit → sharpen → FXAA with a second intermediate when both enabled, settings sync, destructor cleanup |
+| `draw/CMakeLists.txt` | Register `sdf_sharpen_frag.glsl` |
+| `blenloader/intern/versioning_500.cc`, `BKE_blender_version.h` | Default existing files/startup to edge-aware + sharpness 0.5; subversion bumped to 38 |
+
+### Post-process chain
+
+`blit (upscale) → [sharpen] → [FXAA] → viewport`. The blit renders to the shared intermediate (`march_*`) when either post pass is active; a second target (`sharpen_*`) is allocated only when sharpen and FXAA are both enabled.
+
+### Notes / limits
+
+- Object-ID gate relies on `gbuf_color.w` holding `original_index` as float16 — exact only up to ~2048 objects.
+- Thin features below one low-res texel still cannot be recovered by any spatial filter; keep `sdf_resolution_scale` ≥ ~67% for fine detail.
+
+### MathOPS addon (separate repo — not edited here)
+
+No addon impact: changes are viewport-shading settings only; no `SDF` struct or RNA fields the addon uses were touched.
+
+---
+
+## SDF Object Scale as a True Coordinate Transform (2026-06-20)
+
+Object scale previously baked into `size` (`raw_size = size * scale`), so for primitives whose `size` components are not XYZ-aligned (cone/capsule/torus/ngon) a non-uniform scale edited a *shape property* instead of stretching the geometry — e.g. scaling a cone's Z fattened its top radius instead of making it taller. Scale is now applied as a coordinate transform so it stretches/squishes the actual geometry for **all** primitives (including making circular cross-sections elliptical).
+
+- New `SDFObjectGPU.obj_scale` (`xyz` = per-axis scale, `w` = `min(scale)`). `sdf_size` now stores **base** (unscaled) dimensions.
+- Primitive eval divides the sample point by `obj_scale.xyz` and multiplies the result by `obj_scale.w` (a conservative Lipschitz factor) — in `sdf_lib.glsl::evalPrimitiveOnly`/`evalObjectSDF` and the CPU mirror `sdf_cpu_eval.hh`. Domain modifiers (mirror/array/twist) are untouched: they still run in the rotation-only local space, so array spacing/blend behavior is unchanged.
+- Both engine AABB paths and the CPU search-region (`sdf_object_bbox_get`) compute the base extent with correct geometric-axis assignment, then apply per-axis scale, so culling/BVH/meshing bounds match the stretched geometry under non-uniform scale.
+- Render normals are unaffected (reconstructed in screen space from the world-position buffer). The unused `sdf_grad_lib.glsl` is not in the render path. Selection already stretched correctly (it projects DNA `size` through `object_to_world`).
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_shader_shared.hh` | Added `obj_scale` to `SDFObjectGPU` |
+| `draw/engines/sdf/sdf_engine.cc` | `sdf_size` = base size; set `obj_scale`; AABB + CPU bbox compute base extent × per-axis scale |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | `evalPrimitiveOnly` divides by `obj_scale.xyz`; `evalObjectSDF` × `obj_scale.w` |
+| `draw/engines/sdf/sdf_cpu_eval.hh` | Same divide/multiply for CPU picking/meshing parity |
+
+---
+
+## Fix SDF Shift+D Duplicate Sharing Params (2026-06-20)
+
+Shift+D (non-linked duplicate) shared the SDF data-block, so edits to one copy affected the other. The `USER_DUP_SDF` versioning that sets the pref bit is gated at `!USER_VERSION_ATLEAST(501, 30)`, which no longer fires for current prefs, so the bit was never set. Following the existing NURB Body pattern, `BKE_object_duplicate` now force-sets `USER_DUP_SDF` for `OB_SDF` after the `dupflag == 0` (Alt+D linked) early-return. Shift+D now deep-copies via `sdf_copy_data` (independent params, modifiers, polygon points, fresh `sdf_index`); Alt+D still shares.
+
+| File | Change |
+|------|--------|
+| `blenkernel/intern/object.cc` | Force `USER_DUP_SDF` on non-linked duplicate of `OB_SDF` |

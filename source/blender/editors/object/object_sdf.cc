@@ -139,9 +139,10 @@ static Object *object_sdf_add(bContext *C, wmOperator *op, const char *name)
         sdf_data->size[2] = 0.5f;
         break;
       case SDF_TYPE_CONE:
+        /* size = {bottom radius, half-height, top radius}; 0 top = sharp apex. */
         sdf_data->size[0] = 1.0f;
         sdf_data->size[1] = 1.0f;
-        sdf_data->size[2] = 1.0f;
+        sdf_data->size[2] = 0.0f;
         break;
       case SDF_TYPE_TORUS:
         sdf_data->size[0] = 0.8f;

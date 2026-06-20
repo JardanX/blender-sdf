@@ -4982,6 +4982,42 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Frustum Cull", "Skip SDF objects outside the camera frustum");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  static const EnumPropertyItem sdf_upscale_quality_items[] = {
+      {0, "NEAREST", 0, "Nearest", "Point sampling (fastest, blocky)"},
+      {1, "BILINEAR", 0, "Bilinear", "Smooth linear interpolation"},
+      {2, "BICUBIC", 0, "Bicubic", "Catmull-Rom interpolation (sharper than bilinear)"},
+      {3,
+       "EDGE_AWARE",
+       0,
+       "Edge-Aware",
+       "Joint bilateral upsample guided by depth, normal and object boundaries (best quality, "
+       "preserves silhouettes)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_upscale_quality", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_upscale_quality");
+  RNA_def_property_enum_items(prop, sdf_upscale_quality_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Upscale Quality", "Filter used to upscale the low-res render to viewport resolution");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_upscale_sharpen", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_upscale_sharpen", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Sharpen", "Apply contrast-adaptive sharpening after upscaling to recover detail");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_upscale_sharpness", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_upscale_sharpness");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1, 2);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Sharpness", "Strength of the post-upscale sharpening pass");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   static const EnumPropertyItem sdf_debug_grid_items[] = {
       {0, "OFF", 0, "Off", "No debug overlay"},
       {1, "VOXEL_GRID", 0, "3D Voxel Grid", "Wireframe cubes around active bricks"},
