@@ -233,6 +233,7 @@ enum ShaderIndex {
   SH_SHADE_COMP,
   SH_BLIT,
   SH_FXAA,
+  SH_SHARPEN,
   SH_COUNT,
 };
 
@@ -247,6 +248,7 @@ static constexpr const char *s_shader_info_names[SH_COUNT] = {
     "sdf_shade_comp",
     "sdf_blit",
     "sdf_fxaa",
+    "sdf_sharpen",
 };
 
 static gpu::StaticShader s_shaders[SH_COUNT];
@@ -304,6 +306,7 @@ class Instance : public DrawEngine {
   gpu::Shader *shade_comp_sh() { return sdf_shader_get(SH_SHADE_COMP); }
   gpu::Shader *blit_sh() { return sdf_shader_get(SH_BLIT); }
   gpu::Shader *fxaa_sh() { return sdf_shader_get(SH_FXAA); }
+  gpu::Shader *sharpen_sh() { return sdf_shader_get(SH_SHARPEN); }
 
   gpu::Texture *comp_color_tx_ = nullptr;
   gpu::Texture *comp_depth_tx_ = nullptr;
@@ -312,6 +315,9 @@ class Instance : public DrawEngine {
   gpu::Texture *gbuf_normal_tx_ = nullptr;
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
+  gpu::Texture *sharpen_color_tx_ = nullptr;
+  gpu::FrameBuffer *sharpen_fb_ = nullptr;
+  int2 sharpen_size_ = int2(0);
   int2 render_size_ = int2(0);
   int2 prev_render_size_ = int2(0);
   int2 texture_size_ = int2(0);
@@ -319,6 +325,9 @@ class Instance : public DrawEngine {
   int2 fxaa_size_ = int2(0);
   float resolution_scale_ = 1.0f;
   bool adaptive_resolution_ = false;
+  int upscale_quality_ = 3;
+  bool sharpen_enabled_ = false;
+  float sharpen_sharpness_ = 0.5f;
   bool scene_changed_ = false;
   bool view_changed_ = false;
   bool mesh_changed_ = false;
@@ -510,10 +519,6 @@ class Instance : public DrawEngine {
     gpu_obj.inverse_matrix = inv_rot;
     gpu_obj.position = float4(mat[3].x, mat[3].y, mat[3].z, 0.0f);
 
-    float3 raw_size = float3(sdf_data->size[0] * scale.x,
-                             sdf_data->size[1] * scale.y,
-                             sdf_data->size[2] * scale.z);
-
     /* Detect group parent early — needed for bevel accumulation and modifier propagation */
     Object *group_parent_ob = nullptr;
     {
@@ -541,12 +546,30 @@ class Instance : public DrawEngine {
         }
       }
     }
-    bevel *= math::reduce_min(scale);
-    float min_dim = math::reduce_min(raw_size);
+    /* Object scale is applied as a coordinate transform at eval time (so it
+     * stretches/squishes the geometry rather than editing shape params). sdf_size
+     * stores BASE (unscaled) dimensions; the AABB below applies per-axis scale. */
+    float min_scale = std::max(math::reduce_min(scale), 1e-6f);
+    float3 base_size(sdf_data->size[0], sdf_data->size[1], sdf_data->size[2]);
+    /* Bevel radii are authored in base units; eval converts to world via min_scale. */
+    float min_dim = math::reduce_min(base_size);
+    /* Cone top radius (size.z) may be 0 for a sharp apex — exclude it from the
+     * auto-bevel min dimension so a sharp cone keeps its small rounding. */
+    if (sdf_data->sdf_type == SDF_TYPE_CONE) {
+      min_dim = std::min(base_size.x, base_size.y);
+    }
     float eff_bevel = std::max(bevel, std::min(0.005f, min_dim * 0.5f));
-    /* Store pre-bevel-subtracted size in xyz, effective bevel in w */
-    float3 net_size = math::max(raw_size - float3(eff_bevel), float3(0.001f));
+    /* Store pre-bevel-subtracted BASE size in xyz, effective bevel in w */
+    float3 net_size = math::max(base_size - float3(eff_bevel), float3(0.001f));
+    /* Cone top radius may shrink to 0 (sharp apex), not clamped to 0.001. */
+    if (sdf_data->sdf_type == SDF_TYPE_CONE) {
+      net_size.z = std::max(base_size.z - eff_bevel, 0.0f);
+    }
     gpu_obj.sdf_size = float4(net_size.x, net_size.y, net_size.z, eff_bevel);
+    gpu_obj.obj_scale = float4(std::max(scale.x, 1e-6f),
+                               std::max(scale.y, 1e-6f),
+                               std::max(scale.z, 1e-6f),
+                               min_scale);
     gpu_obj.bevel = bevel;
 
     gpu_obj.blend = sdf_data->blend;
@@ -573,55 +596,55 @@ class Instance : public DrawEngine {
       float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
       float aabb_pad = blend_pad + shell_expand;
       float3 local_extent;
-      float3 sz = raw_size;
+      /* Base (unscaled) extent with correct geometric-axis assignment; per-axis
+       * object scale is applied afterward so it stretches the geometry. */
+      float3 sz = base_size;
       switch (sdf_data->sdf_type) {
         case SDF_TYPE_SPHERE:
-          local_extent = sz + float3(aabb_pad);
+          local_extent = sz;
           break;
         case SDF_TYPE_CAPSULE: {
           float r = sz.x;
           float h = sz.y;
-          local_extent = float3(r + aabb_pad, r + aabb_pad, h + r + aabb_pad);
+          local_extent = float3(r, r, h + r);
           break;
         }
         case SDF_TYPE_CYLINDER:
-          local_extent = sz + float3(aabb_pad);
+          local_extent = sz;
           break;
         case SDF_TYPE_CONE: {
-          float r = sz.x;
+          float r = std::max(sz.x, sz.z);
           float h = sz.y;
-          local_extent = float3(r + aabb_pad, r + aabb_pad, h + aabb_pad);
+          local_extent = float3(r, r, h);
           break;
         }
         case SDF_TYPE_TORUS: {
           float outer = sz.x + sz.y;
-          local_extent = float3(outer + aabb_pad, outer + aabb_pad, sz.y + aabb_pad);
+          local_extent = float3(outer, outer, sz.y);
           break;
         }
         case SDF_TYPE_NGON: {
           float r = sz.x;
-          local_extent = float3(r + aabb_pad, r + aabb_pad, sz.z + aabb_pad);
+          local_extent = float3(r, r, sz.z);
           break;
         }
         case SDF_TYPE_POLYGON: {
           float max_x = 0.0f, max_y = 0.0f;
           for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
-            max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
-            max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
+            max_x = math::max(max_x, fabsf(pt->co[0]));
+            max_y = math::max(max_y, fabsf(pt->co[1]));
           }
           float line_pad = sdf_data->polygon_is_line ?
-                               sdf_data->polygon_line_thickness * 0.5f *
-                                   math::min(scale.x, scale.y) :
+                               sdf_data->polygon_line_thickness * 0.5f :
                                0.0f;
-          local_extent = float3(max_x + line_pad + aabb_pad,
-                                max_y + line_pad + aabb_pad,
-                                sz.z + aabb_pad);
+          local_extent = float3(max_x + line_pad, max_y + line_pad, sz.z);
           break;
         }
         default:
-          local_extent = sz + float3(aabb_pad);
+          local_extent = sz;
           break;
       }
+      local_extent = local_extent * scale + float3(aabb_pad);
 
       for (int mi = gpu_obj.modifier_start;
            mi < gpu_obj.modifier_start + gpu_obj.modifier_count; mi++)
@@ -1047,10 +1070,39 @@ class Instance : public DrawEngine {
       gpu_obj.box_modes = int4(sdf_data->box_corner_mode, sdf_data->box_edge_mode, 0, 0);
     }
 
-    /* Pack modifiers (skip array — handled via instancing below) */
+    /* Pack modifiers. Array is packed as a GPU domain-repetition (space-folding)
+     * modifier rather than instanced into N separate objects. */
     gpu_obj.modifier_start = int(modifiers_.size());
     gpu_obj.modifier_count = 0;
     const SDFArrayModifierData *array_mod = nullptr;
+
+    auto pack_array_gpu_mod = [&](const SDFArrayModifierData *am) -> SDFModifierGPU {
+      SDFModifierGPU gm = {};
+      gm.header = int4(SDF_MOD_ARRAY, am->array_type, 0, 0);
+      float countf = float(math::max(am->count, 1));
+      if (am->array_type == MOD_SDF_ARRAY_RADIAL) {
+        /* Radius is absolute world units — object scale grows the unit, not the ring. */
+        gm.params = float4(countf, am->array_radius, 0.0f, 0.0f);
+      }
+      else {
+        /* Linear offset in object-local (rotated, world-scale) space. Relative tracks
+         * the scaled unit; constant offset stays absolute. */
+        float3 dims(sdf_data->size[0] * scale.x * 2.0f,
+                    sdf_data->size[1] * scale.y * 2.0f,
+                    sdf_data->size[2] * scale.z * 2.0f);
+        float3 off(0.0f);
+        if (am->use_relative_offset) {
+          off += float3(am->relative_offset[0], am->relative_offset[1], am->relative_offset[2]) *
+                 dims;
+        }
+        if (am->use_constant_offset) {
+          off += float3(am->constant_offset[0], am->constant_offset[1], am->constant_offset[2]);
+        }
+        gm.params = float4(countf, off.x, off.y, off.z);
+      }
+      gm.params2 = float4(am->blend, 0.0f, 0.0f, 0.0f);
+      return gm;
+    };
 
     for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first);
          md; md = md->next)
@@ -1060,6 +1112,10 @@ class Instance : public DrawEngine {
       }
       if (md->type == eModifierType_SDFArray) {
         array_mod = reinterpret_cast<const SDFArrayModifierData *>(md);
+        if (array_mod->count > 1) {
+          modifiers_.append(pack_array_gpu_mod(array_mod));
+          gpu_obj.modifier_count++;
+        }
         continue;
       }
       SDFModifierGPU gpu_mod = {};
@@ -1167,31 +1223,32 @@ class Instance : public DrawEngine {
     float pad = blend_pad + shell_expand;
     float3 base_local_extent;
     {
-      float3 sz = raw_size;
+      /* Base (unscaled) extent; per-axis object scale applied afterward. */
+      float3 sz = base_size;
       switch (sdf_data->sdf_type) {
         case SDF_TYPE_CAPSULE: {
           float r = sz.x;
           float h = sz.y;
-          base_local_extent = float3(r + pad, r + pad, h + r + pad);
+          base_local_extent = float3(r, r, h + r);
           break;
         }
         case SDF_TYPE_CYLINDER:
-          base_local_extent = sz + float3(pad);
+          base_local_extent = sz;
           break;
         case SDF_TYPE_CONE: {
-          float r = sz.x;
+          float r = std::max(sz.x, sz.z);
           float h = sz.y;
-          base_local_extent = float3(r + pad, r + pad, h + pad);
+          base_local_extent = float3(r, r, h);
           break;
         }
         case SDF_TYPE_TORUS: {
           float outer = sz.x + sz.y;
-          base_local_extent = float3(outer + pad, outer + pad, sz.y + pad);
+          base_local_extent = float3(outer, outer, sz.y);
           break;
         }
         case SDF_TYPE_NGON: {
           float r = sz.x;
-          base_local_extent = float3(r + pad, r + pad, sz.z + pad);
+          base_local_extent = float3(r, r, sz.z);
           break;
         }
         case SDF_TYPE_POLYGON: {
@@ -1200,21 +1257,20 @@ class Instance : public DrawEngine {
                    sdf_data->polygon_points.first);
                pt; pt = pt->next)
           {
-            max_x = math::max(max_x, fabsf(pt->co[0]) * scale.x);
-            max_y = math::max(max_y, fabsf(pt->co[1]) * scale.y);
+            max_x = math::max(max_x, fabsf(pt->co[0]));
+            max_y = math::max(max_y, fabsf(pt->co[1]));
           }
           float lp = sdf_data->polygon_is_line ?
-                         sdf_data->polygon_line_thickness * 0.5f *
-                             math::min(scale.x, scale.y) :
+                         sdf_data->polygon_line_thickness * 0.5f :
                          0.0f;
-          base_local_extent = float3(
-              max_x + lp + pad, max_y + lp + pad, sz.z + pad);
+          base_local_extent = float3(max_x + lp, max_y + lp, sz.z);
           break;
         }
         default:
-          base_local_extent = sz + float3(pad);
+          base_local_extent = sz;
           break;
       }
+      base_local_extent = base_local_extent * scale + float3(pad);
     }
 
     /* Expand extent for domain modifiers (excluding array) */
@@ -1333,6 +1389,10 @@ class Instance : public DrawEngine {
         if (gmd->type == eModifierType_SDFArray) {
           if (!array_mod) {
             array_mod = reinterpret_cast<const SDFArrayModifierData *>(gmd);
+            if (array_mod->count > 1) {
+              modifiers_.append(pack_array_gpu_mod(array_mod));
+              gpu_obj.modifier_count++;
+            }
           }
           continue;
         }
@@ -1438,8 +1498,32 @@ class Instance : public DrawEngine {
       }
     }
 
-    /* Instance array copies (or single object when no array) */
-    int copy_count = (array_mod != nullptr && array_mod->count > 1) ? array_mod->count : 1;
+    /* Expand the AABB for the array domain repetition (object or group array). */
+    if (array_mod != nullptr && array_mod->count > 1) {
+      if (array_mod->array_type == MOD_SDF_ARRAY_RADIAL) {
+        float rr = math::max(base_local_extent.x, base_local_extent.y) + array_mod->array_radius;
+        base_local_extent.x = rr;
+        base_local_extent.y = rr;
+      }
+      else {
+        float3 dims(sdf_data->size[0] * scale.x * 2.0f,
+                    sdf_data->size[1] * scale.y * 2.0f,
+                    sdf_data->size[2] * scale.z * 2.0f);
+        float3 off(0.0f);
+        if (array_mod->use_relative_offset) {
+          off += float3(array_mod->relative_offset[0], array_mod->relative_offset[1],
+                        array_mod->relative_offset[2]) * dims;
+        }
+        if (array_mod->use_constant_offset) {
+          off += float3(array_mod->constant_offset[0], array_mod->constant_offset[1],
+                        array_mod->constant_offset[2]);
+        }
+        base_local_extent += math::abs(off) * float(array_mod->count - 1);
+      }
+    }
+
+    /* Array is a domain-repetition modifier now — emit a single object (no instancing). */
+    int copy_count = 1;
 
     /* Precompute object offset delta (local space) */
     float4x4 obj_delta = float4x4::identity();
@@ -1589,7 +1673,7 @@ class Instance : public DrawEngine {
             break;
           }
           case SDF_TYPE_CONE: {
-            float r = copy_sz.x, h = copy_sz.y;
+            float r = std::max(copy_sz.x, copy_sz.z), h = copy_sz.y;
             copy_local_extent = float3(r + copy_pad, r + copy_pad, h + copy_pad);
             break;
           }
@@ -2643,6 +2727,10 @@ class Instance : public DrawEngine {
     GPU_debug_group_end();
     PROF_END();
 
+    GPU_debug_group_begin("SDF Sharpen");
+    draw_sharpen();
+    GPU_debug_group_end();
+
     PROF_START("FXAA");
     GPU_debug_group_begin("SDF FXAA");
     draw_fxaa();
@@ -2758,9 +2846,13 @@ class Instance : public DrawEngine {
     resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
     adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
     use_frustum_cull_ = s.sdf_frustum_cull != 0;
+    upscale_quality_ = s.sdf_upscale_quality;
+    sharpen_enabled_ = s.sdf_upscale_sharpen != 0;
+    sharpen_sharpness_ = s.sdf_upscale_sharpness;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
-    if (!new_fxaa && fxaa_enabled_) {
+    /* First post-process target is shared by FXAA and sharpening. */
+    if (!new_fxaa && !sharpen_enabled_) {
       if (march_color_tx_) {
         GPU_texture_free(march_color_tx_);
         march_color_tx_ = nullptr;
@@ -2770,6 +2862,18 @@ class Instance : public DrawEngine {
         march_fb_ = nullptr;
       }
       fxaa_size_ = int2(0);
+    }
+    /* Second target only needed when both passes are chained. */
+    if (!(new_fxaa && sharpen_enabled_)) {
+      if (sharpen_color_tx_) {
+        GPU_texture_free(sharpen_color_tx_);
+        sharpen_color_tx_ = nullptr;
+      }
+      if (sharpen_fb_) {
+        GPU_framebuffer_free(sharpen_fb_);
+        sharpen_fb_ = nullptr;
+      }
+      sharpen_size_ = int2(0);
     }
     fxaa_enabled_ = new_fxaa;
   }
@@ -3600,7 +3704,7 @@ class Instance : public DrawEngine {
     if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
       GPU_framebuffer_bind(dfbl->depth_only_fb);
     }
-    else if (fxaa_enabled_) {
+    else if (fxaa_enabled_ || sharpen_enabled_) {
       ensure_fxaa_target();
       GPU_framebuffer_bind(march_fb_);
       float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -3618,6 +3722,7 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(blit_sh());
     GPU_shader_uniform_1i(blit_sh(), "debug_bvh_views", debug_bvh_views_);
+    GPU_shader_uniform_1i(blit_sh(), "upscale_quality", upscale_quality_);
 
     float bg[3] = {0.0f, 0.0f, 0.0f};
     if (draw_ctx_->scene && draw_ctx_->v3d) {
@@ -3628,13 +3733,27 @@ class Instance : public DrawEngine {
     float uv_sc[2] = {float(render_size_.x) / float(texture_size_.x),
                        float(render_size_.y) / float(texture_size_.y)};
     GPU_shader_uniform_2fv(blit_sh(), "uv_scale", uv_sc);
+    GPU_shader_uniform_2iv(blit_sh(), "src_size", &render_size_.x);
+    GPU_shader_uniform_2iv(blit_sh(), "tex_size", &texture_size_.x);
+    GPU_shader_uniform_2iv(blit_sh(), "out_size", &viewport_size_.x);
 
+    /* Linear filtering only used by the bilinear path; other modes texelFetch. */
+    bool linear_color = (upscale_quality_ == 1);
     int color_slot = GPU_shader_get_sampler_binding(blit_sh(), "color_tx");
-    GPU_texture_filter_mode(comp_color_tx_, false);
+    GPU_texture_filter_mode(comp_color_tx_, linear_color);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh(), "depth_tx");
     GPU_texture_filter_mode(comp_depth_tx_, false);
     GPU_texture_bind(comp_depth_tx_, depth_slot);
+    int gn_slot = GPU_shader_get_sampler_binding(blit_sh(), "gbuf_normal_tx");
+    GPU_texture_filter_mode(gbuf_normal_tx_, false);
+    GPU_texture_bind(gbuf_normal_tx_, gn_slot);
+    int gp_slot = GPU_shader_get_sampler_binding(blit_sh(), "gbuf_pos_tx");
+    GPU_texture_filter_mode(gbuf_pos_tx_, false);
+    GPU_texture_bind(gbuf_pos_tx_, gp_slot);
+    int gc_slot = GPU_shader_get_sampler_binding(blit_sh(), "gbuf_color_tx");
+    GPU_texture_filter_mode(gbuf_color_tx_, false);
+    GPU_texture_bind(gbuf_color_tx_, gc_slot);
 
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
@@ -3644,7 +3763,87 @@ class Instance : public DrawEngine {
 
     GPU_texture_unbind(comp_color_tx_);
     GPU_texture_unbind(comp_depth_tx_);
+    GPU_texture_unbind(gbuf_normal_tx_);
+    GPU_texture_unbind(gbuf_pos_tx_);
+    GPU_texture_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
+  }
+
+  /* Contrast-adaptive sharpen post-process */
+
+  void ensure_sharpen_target()
+  {
+    const int2 vp = int2(draw_ctx_->viewport_size_get());
+    if (sharpen_color_tx_ != nullptr && sharpen_size_ == vp) {
+      return;
+    }
+
+    if (sharpen_color_tx_) {
+      GPU_texture_free(sharpen_color_tx_);
+      sharpen_color_tx_ = nullptr;
+    }
+    if (sharpen_fb_) {
+      GPU_framebuffer_free(sharpen_fb_);
+      sharpen_fb_ = nullptr;
+    }
+
+    sharpen_size_ = vp;
+
+    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
+    sharpen_color_tx_ = GPU_texture_create_2d(
+        "sdf_sharpen_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
+
+    sharpen_fb_ = GPU_framebuffer_create("sdf_sharpen_fb");
+    GPU_framebuffer_texture_attach(sharpen_fb_, sharpen_color_tx_, 0, 0);
+  }
+
+  void draw_sharpen()
+  {
+    if (!sharpen_enabled_ || sharpen_sh() == nullptr || march_color_tx_ == nullptr) {
+      return;
+    }
+    if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
+      return;
+    }
+
+    /* Chain into the FXAA input when both are enabled, else straight to screen. */
+    if (fxaa_enabled_) {
+      ensure_sharpen_target();
+      GPU_framebuffer_bind(sharpen_fb_);
+      float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      GPU_framebuffer_clear_color(sharpen_fb_, clear_color);
+    }
+    else {
+      DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
+      GPU_framebuffer_bind(dfbl->default_fb);
+    }
+
+    GPU_depth_test(GPU_DEPTH_NONE);
+    GPU_depth_mask(false);
+    GPU_blend(GPU_BLEND_ALPHA);
+    GPU_face_culling(GPU_CULL_NONE);
+    GPU_stencil_test(GPU_STENCIL_NONE);
+
+    GPU_shader_bind(sharpen_sh());
+    GPU_shader_uniform_1f(sharpen_sh(), "sharpness", sharpen_sharpness_);
+    GPU_shader_uniform_2iv(sharpen_sh(), "tex_size", &viewport_size_.x);
+
+    int color_slot = GPU_shader_get_sampler_binding(sharpen_sh(), "color_tx");
+    GPU_texture_filter_mode(march_color_tx_, false);
+    GPU_texture_bind(march_color_tx_, color_slot);
+
+    if (fullscreen_batch_ == nullptr) {
+      fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
+    }
+    GPU_batch_set_shader(fullscreen_batch_, sharpen_sh());
+    GPU_batch_draw(fullscreen_batch_);
+
+    GPU_texture_unbind(march_color_tx_);
+    GPU_shader_unbind();
+
+    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+    GPU_depth_mask(true);
+    GPU_blend(GPU_BLEND_NONE);
   }
 
   /* FXAA post-process */
@@ -3698,9 +3897,10 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(fxaa_sh());
 
+    gpu::Texture *fxaa_input = sharpen_enabled_ ? sharpen_color_tx_ : march_color_tx_;
     int color_slot = GPU_shader_get_sampler_binding(fxaa_sh(), "color_tx");
-    GPU_texture_filter_mode(march_color_tx_, true);
-    GPU_texture_bind(march_color_tx_, color_slot);
+    GPU_texture_filter_mode(fxaa_input, true);
+    GPU_texture_bind(fxaa_input, color_slot);
 
     float2 rcp = float2(1.0f / float(viewport_size_.x), 1.0f / float(viewport_size_.y));
     GPU_shader_uniform_2fv(fxaa_sh(), "rcpFrame", rcp);
@@ -3711,7 +3911,7 @@ class Instance : public DrawEngine {
     GPU_batch_set_shader(fullscreen_batch_, fxaa_sh());
     GPU_batch_draw(fullscreen_batch_);
 
-    GPU_texture_unbind(march_color_tx_);
+    GPU_texture_unbind(fxaa_input);
     GPU_shader_unbind();
 
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
@@ -3766,6 +3966,12 @@ class Instance : public DrawEngine {
     }
     if (march_fb_) {
       GPU_framebuffer_free(march_fb_);
+    }
+    if (sharpen_color_tx_) {
+      GPU_texture_free(sharpen_color_tx_);
+    }
+    if (sharpen_fb_) {
+      GPU_framebuffer_free(sharpen_fb_);
     }
     if (matcap_tx_) {
       GPU_texture_free(matcap_tx_);
@@ -3913,14 +4119,16 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
     int i = best;
     {
       const SDFObjectGPU &obj = s_objects_cpu[i];
+      /* sdf_size is BASE (unscaled); apply per-axis object scale to get world extent. */
       float3 sz(obj.sdf_size);
+      float3 oscale(obj.obj_scale);
       float3 pos = float3(obj.position);
       float4x4 rot = math::transpose(obj.inverse_matrix);
 
       /* Rotation-stable search region: compute in local space from primitive. */
       float3 ext;
       switch (obj.sdf_type) {
-        case SDF_TYPE_CONE: ext = float3(sz.x, sz.x, sz.y); break;
+        case SDF_TYPE_CONE: { float r = std::max(sz.x, sz.z); ext = float3(r, r, sz.y); break; }
         case SDF_TYPE_CAPSULE: ext = float3(sz.x, sz.x, sz.y + sz.x); break;
         case SDF_TYPE_TORUS: ext = float3(sz.x + sz.y, sz.x + sz.y, sz.y); break;
         case SDF_TYPE_NGON: ext = float3(sz.x, sz.x, sz.z); break;
@@ -3941,14 +4149,15 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
           }
           mn.z = -sz.z;
           mx.z = sz.z;
-          out_min = mn;
-          out_max = mx;
+          out_min = mn * oscale;
+          out_max = mx * oscale;
           out_rot = rot;
           out_pos = pos;
           return true;
         }
         default: ext = sz; break;
       }
+      ext = ext * oscale;
       /* Search region: expand by non-mirror modifiers only.
        * Mirror bbox copies are drawn by the overlay's copy system. */
       float3 search_ext = ext;

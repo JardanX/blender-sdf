@@ -9,6 +9,8 @@
 struct [[host_shared]] SDFObjectGPU {
   float4x4 inverse_matrix;
   float4 position;
+  /* xyz = per-axis object scale (applied as coordinate transform), w = min(scale). */
+  float4 obj_scale;
   float4 sdf_size;
   float4 bbox_min;
   float4 bbox_max;

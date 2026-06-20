@@ -69,49 +69,41 @@ float4 sdgCylinder(float3 p, float3 size)
   return float4(fl, (hh.x * du + hh.y * dv) / max(fl, 1e-8f));
 }
 
-float4 sdgCone(float3 p, float r, float h)
+float4 sdgConeFrustum(float3 p, float rb, float rt, float h)
 {
-  /* Capped cone (Z-up): base radius r at z=-h, apex at z=+h.
-   * Side gradient uses b/|b| (from closest point) instead of fixed perpendicular —
-   * this is correct when the closest side point is at an endpoint (clamped t),
-   * and naturally agrees with the cap gradient at the junction. */
-  float2 k = float2(0.0f - r, 2.0f * h);
-  float m = dot(k, k);
+  /* Frustum (Z-up): bottom radius rb at z=-h, top radius rt at z=+h.
+   * Gradient = normalize(query - closest_surface_point); cap and side branches
+   * agree at the junction. rt = 0 reduces to a sharp-apex cone. */
   float l = length(p.xy);
-  float2 q = float2(0.0f - l, h - p.z);
-  float2 a = float2(l - min(l, (p.z < 0.0f) ? r : 0.0f), abs(p.z) - h);
-  float t_raw = dot(q, k) / m;
-  float2 b = k * clamp(t_raw, 0.0f, 1.0f) - q;
-  float s = (b.x < 0.0f && a.y < 0.0f) ? -1.0f : 1.0f;
-  float la = dot(a, a);
-  float lb = dot(b, b);
+  float2 q = float2(l, p.z);
+  float2 k1 = float2(rt, h);
+  float2 k2 = float2(rt - rb, 2.0f * h);
+  float cap_r = (p.z < 0.0f) ? rb : rt;
+  float2 ca = float2(l - min(l, cap_r), abs(p.z) - h);
+  float t = clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
+  float2 cb = q - k1 + k2 * t;
+  float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
+  float la = dot(ca, ca);
+  float lb = dot(cb, cb);
   float dist = s * sqrt(min(la, lb));
 
   float2 radial = p.xy / max(l, 1e-8f);
-
-  /* Gradient = normalize(query - closest_surface_point).
-   * Using the actual closest point (not a/b tricks) ensures both cap and side
-   * branches compute the same gradient at the junction — no discontinuity. */
-  float2 closest;
-  if (la < lb) {
-    float r_cap = (p.z < 0.0f) ? r : 0.0f;
-    closest = float2(min(l, r_cap), sign(p.z) * h);
-  }
-  else {
-    float tc = clamp(t_raw, 0.0f, 1.0f);
-    closest = float2(tc * r, h - 2.0f * tc * h);
-  }
-  float2 delta = float2(l, p.z) - closest;
-  float dl2 = length(delta);
+  float2 delta = (la < lb) ? float2(ca.x, sign(p.z) * ca.y) : cb;
+  float dl = length(delta);
   float3 grad;
-  if (dl2 > 1e-6f) {
-    grad = s * float3(radial * delta.x, delta.y) / dl2;
+  if (dl > 1e-6f) {
+    grad = s * float3(radial * delta.x, delta.y) / dl;
   }
   else {
-    grad = s * float3(radial * k.y, -k.x) / sqrt(m);
+    grad = s * normalize(float3(radial * k2.y, -k2.x));
   }
 
   return float4(dist, grad);
+}
+
+float4 sdgCone(float3 p, float r, float h)
+{
+  return sdgConeFrustum(p, r, 0.0f, h);
 }
 
 float4 sdgCapsule(float3 p, float3 size)
@@ -680,7 +672,7 @@ float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
     dg = sdgCylinder(local_pos, r);
   }
   else if (obj.sdf_type == 3) {
-    dg = sdgCone(local_pos, r.x, r.y);
+    dg = sdgConeFrustum(local_pos, r.x, r.z, r.y);
   }
   else if (obj.sdf_type == 4) {
     dg = sdgCapsule(local_pos, r);
@@ -882,8 +874,8 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
       else if (mtype == SDF_MOD_ARRAY) {
         float cnt = smod.params.x;
         float arr_blend = smod.params2.x;
-        int arr_bt = smod.header.z;
-        float abk = (arr_bt > 0 && arr_blend > 0.001f) ? arr_blend : 0.0f;
+        /* Array domain blend is always smooth. */
+        float abk = (arr_blend > 0.001f) ? arr_blend : 0.0f;
         if (mflags == SDF_MOD_ARRAY_LINEAR) {
           float3 aoff = smod.params.yzw;
           float sp = length(aoff);
@@ -1016,8 +1008,8 @@ float3 invertDomainModifiersGrad(float3 grad, float3 orig_p,
     else if (mtype == SDF_MOD_ARRAY) {
       float cnt = smod.params.x;
       float arr_blend = smod.params2.x;
-      int arr_bt = smod.header.z;
-      float bk = (arr_bt > 0 && arr_blend > 0.001f) ? arr_blend : 0.0f;
+      /* Array domain blend is always smooth. */
+      float bk = (arr_blend > 0.001f) ? arr_blend : 0.0f;
       if (mflags == SDF_MOD_ARRAY_LINEAR) {
         float3 aoff = smod.params.yzw;
         float sp = length(aoff);

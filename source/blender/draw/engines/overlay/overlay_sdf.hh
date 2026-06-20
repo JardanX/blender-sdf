@@ -52,9 +52,11 @@ static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max
   float3 sz(sdf->size[0], sdf->size[1], sdf->size[2]);
   float3 ext = sz;
   switch (sdf->sdf_type) {
-    case SDF_TYPE_CONE:
-      ext = float3(sz.x, sz.x, sz.y);
+    case SDF_TYPE_CONE: {
+      float r = math::max(sz.x, sz.z);
+      ext = float3(r, r, sz.y);
       break;
+    }
     case SDF_TYPE_CAPSULE:
       ext = float3(sz.x, sz.x, sz.y + sz.x);
       break;
@@ -538,8 +540,8 @@ class Sdfs : Overlay {
           }
           else if (m.array_type == MOD_SDF_ARRAY_RADIAL) {
             float radius = m.array_radius;
-            float rx = m.rotation_offset[0], ry = m.rotation_offset[1],
-                  rz = m.rotation_offset[2];
+            /* Per-copy rotation offset dropped (domain repetition) — keep at 0. */
+            float rx = 0.0f, ry = 0.0f, rz = 0.0f;
             float4x4 fwd = math::from_rotation<float4x4>(
                 math::EulerXYZ(rx, ry, rz));
             float4x4 rot_std = math::invert(fwd);

@@ -65,7 +65,6 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   int array_type = RNA_enum_get(ptr, "array_type");
   if (array_type == MOD_SDF_ARRAY_RADIAL) {
     layout.prop(ptr, "array_radius", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    layout.prop(ptr, "rotation_offset", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
 
   modifier_error_message_draw(layout, ptr);
@@ -128,17 +127,14 @@ static void object_offset_draw(const bContext * /*C*/, Panel *panel)
   col.prop(ptr, "offset_object", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
-/* Blend sub-panel */
+/* Blend sub-panel — domain blend is always smooth. */
 static void blend_panel_draw(const bContext * /*C*/, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
   layout.use_property_split_set(true);
 
-  layout.prop(ptr, "blend_type", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  ui::Layout &col = layout.column(false);
-  col.active_set(RNA_enum_get(ptr, "blend_type") != MOD_SDF_BLEND_LINEAR);
-  col.prop(ptr, "blend", UI_ITEM_NONE, IFACE_("Radius"), ICON_NONE);
+  layout.prop(ptr, "blend", UI_ITEM_NONE, IFACE_("Radius"), ICON_NONE);
 }
 
 static void panel_register(ARegionType *region_type)

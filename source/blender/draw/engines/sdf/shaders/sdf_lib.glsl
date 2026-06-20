@@ -1238,8 +1238,8 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
     else if (mtype == SDF_MOD_ARRAY) {
       float count = smod.params.x;
       float blend = smod.params2.x;
-      int blend_type = smod.header.z;
-      float bk = (blend_type > 0 && blend > 0.001f) ? blend : 0.0f;
+      /* Array domain blend is always smooth. */
+      float bk = (blend > 0.001f) ? blend : 0.0f;
       if (mflags == SDF_MOD_ARRAY_LINEAR) {
         float3 offset = smod.params.yzw;
         float spacing = length(offset);
@@ -1306,21 +1306,6 @@ float4 applyDomainModifiers(float3 p, int mod_start, int mod_count, float4x4 inv
           float r = length(p.xy);
           p.x = r * cos(fold_a) - radius;
           p.y = r * sin(fold_a);
-
-          float3 rot = smod.params2.yzw;
-          rot.y += 0.001f;
-          if (abs(rot.x) > 0.0001f) {
-            float cx = cos(rot.x), sx = sin(rot.x);
-            p = float3(p.x, cx * p.y - sx * p.z, sx * p.y + cx * p.z);
-          }
-          if (abs(rot.y) > 0.0001f) {
-            float cy = cos(rot.y), sy = sin(rot.y);
-            p = float3(cy * p.x + sy * p.z, p.y, -sy * p.x + cy * p.z);
-          }
-          if (abs(rot.z) > 0.0001f) {
-            float cz = cos(rot.z), sz = sin(rot.z);
-            p = float3(cz * p.x - sz * p.y, sz * p.x + cz * p.y, p.z);
-          }
         }
       }
     }
@@ -1345,20 +1330,24 @@ float sdCylinder(float3 p, float3 size)
 }
 
 /**
- * Cone SDF.
+ * Cone frustum SDF: bottom radius rb at z=-h, top radius rt at z=+h.
+ * rt = 0 gives a sharp-apex cone. Inigo Quilez two-radius capped cone.
+ * Must match CPU sdConeFrustum() and gradient sdgConeFrustum().
  */
-float sdCone(float3 p, float r, float h)
+float sdConeFrustum(float3 p, float rb, float rt, float h)
 {
-  /* Capped cone: base radius r at z=-h, apex at z=+h.
-   * Based on Inigo Quilez's sdCappedCone.
-   * Must match CPU evaluation in shape_classify_cpu(). */
   float2 q = float2(length(p.xy), p.z);
-  float2 k1 = float2(0.0f, h);
-  float2 k2 = float2(-r, 2.0f * h);
-  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? r : 0.0f), abs(q.y) - h);
+  float2 k1 = float2(rt, h);
+  float2 k2 = float2(rt - rb, 2.0f * h);
+  float2 ca = float2(q.x - min(q.x, (q.y < 0.0f) ? rb : rt), abs(q.y) - h);
   float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
   float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
   return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
+float sdCone(float3 p, float r, float h)
+{
+  return sdConeFrustum(p, r, 0.0f, h);
 }
 
 /**
@@ -1681,10 +1670,12 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
 
 float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
 {
-  /* sdf_size.xyz = pre-subtracted (size - bevel), pre-clamped on CPU.
-   * sdf_size.w = effective bevel. */
+  /* sdf_size.xyz = pre-subtracted BASE (size - bevel), pre-clamped on CPU.
+   * sdf_size.w = effective bevel. obj_scale.xyz applies object scale as a
+   * coordinate transform so the geometry stretches/squishes. */
   float3 r = obj.sdf_size.xyz;
   float bevel = obj.sdf_size.w;
+  local_pos /= obj.obj_scale.xyz;
   float dist;
 
 #ifdef SDF_BENCH_BOX_ONLY
@@ -1698,8 +1689,8 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
   else if (obj.sdf_type == 2) { /* CYLINDER */
     dist = sdCylinder(local_pos, r);
   }
-  else if (obj.sdf_type == 3) { /* CONE */
-    dist = sdCone(local_pos, r.x, r.y);
+  else if (obj.sdf_type == 3) { /* CONE / FRUSTUM */
+    dist = sdConeFrustum(local_pos, r.x, r.z, r.y);
   }
   else if (obj.sdf_type == 4) { /* CAPSULE */
     dist = sdCapsule(local_pos, r);
@@ -1886,7 +1877,8 @@ float evalObjectSDF(SDFObjectGPU obj, float3 p)
   /* All modifiers (mirror, array, twist, etc.) use domain folding — single eval path. */
   float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
   p = dm.xyz;
-  float d = evalPrimitiveOnly(obj, p);
+  /* evalPrimitiveOnly returns a BASE-space distance; convert to world via min(scale). */
+  float d = evalPrimitiveOnly(obj, p) * obj.obj_scale.w;
   d = applyDistanceModifiers(d, p, obj, obj.modifier_start, obj.modifier_count);
   return d * dm.w;
 }

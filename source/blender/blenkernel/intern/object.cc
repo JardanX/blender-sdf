@@ -2512,6 +2512,11 @@ Object *BKE_object_duplicate(Main *bmain,
   if (dupflag == 0) {
     return obn;
   }
+  /* Force data copy for SDF/NURB Body on non-linked (Shift+D) duplicate so params
+   * are independent; linked (Alt+D) duplicate returns above with dupflag == 0. */
+  if (obn->type == OB_SDF) {
+    dupflag |= USER_DUP_SDF;
+  }
   if (obn->type == OB_NURB_BODY) {
     dupflag |= USER_DUP_NURB_BODY;
   }
@@ -3512,9 +3517,11 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
           half_size = {major + minor, major + minor, minor};
           break;
         }
-        case SDF_TYPE_CONE:
-          half_size = {sdf->size[0], sdf->size[0], sdf->size[1]};
+        case SDF_TYPE_CONE: {
+          float r = std::max(sdf->size[0], sdf->size[2]);
+          half_size = {r, r, sdf->size[1]};
           break;
+        }
         default:
           half_size = float3(sdf->size[0], sdf->size[1], sdf->size[2]);
           break;

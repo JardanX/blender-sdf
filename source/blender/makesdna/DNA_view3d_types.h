@@ -622,7 +622,9 @@ struct View3DShading {
   char sdf_adaptive_resolution = 0;
   char sdf_frustum_cull = 1;
   char sdf_fd_normals = 0;
-  char _pad_sdf_bvh[2] = {};
+  /* Upscale algorithm for low-res render: 0 nearest, 1 bilinear, 2 bicubic, 3 edge-aware. */
+  char sdf_upscale_quality = 3;
+  char sdf_upscale_sharpen = 0;
 
   int sdf_max_steps = 128;
   float sdf_ray_epsilon = 0.005f;
@@ -630,6 +632,8 @@ struct View3DShading {
   float sdf_cone_aperture = 0.5f;
   int sdf_cone_steps = 32;
   float sdf_resolution_scale = 100.0f;
+  float sdf_upscale_sharpness = 0.5f;
+  char _pad_sdf_up[4] = {};
 };
 
 /** 3D Viewport Overlay settings. */
