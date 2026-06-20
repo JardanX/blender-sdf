@@ -451,6 +451,31 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
 
         layout.use_property_split = True
         layout.use_property_decorate = False
+
+        t = sdf.sdf_type
+        col = layout.column(align=True)
+        if t == 'SPHERE':
+            col.prop(sdf, "sphere_radius")
+        elif t == 'CYLINDER':
+            col.prop(sdf, "cylinder_radius")
+            col.prop(sdf, "cylinder_height")
+        elif t == 'CONE':
+            col.prop(sdf, "cone_radius_bottom")
+            col.prop(sdf, "cone_radius_top")
+            col.prop(sdf, "cone_height")
+        elif t == 'CAPSULE':
+            col.prop(sdf, "capsule_radius")
+            col.prop(sdf, "capsule_height")
+        elif t == 'TORUS':
+            col.prop(sdf, "torus_major_radius")
+            col.prop(sdf, "torus_minor_radius")
+        elif t == 'NGON':
+            col.prop(sdf, "ngon_radius")
+            col.prop(sdf, "ngon_height")
+        elif t == 'BOX':
+            col.prop(sdf, "size", text="Dimensions")
+
+        layout.separator()
         layout.prop(sdf, "color")
 
 

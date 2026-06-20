@@ -17,6 +17,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_node_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
@@ -916,6 +917,16 @@ void blo_do_versions_510(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         if (scene.toolsettings->snap_mode_tools == snap_geom_old) {
           scene.toolsettings->snap_mode_tools = SCE_SNAP_TO_GEOM;
         }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 39)) {
+    /* SDF cone gained an explicit top radius in size[2] (frustum). Older cones
+     * stored an unused stale value there; reset to 0 for a sharp apex. */
+    for (SDF &sdf : bmain->sdfs) {
+      if (sdf.sdf_type == SDF_TYPE_CONE) {
+        sdf.size[2] = 0.0f;
       }
     }
   }

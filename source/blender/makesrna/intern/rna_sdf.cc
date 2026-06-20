@@ -106,9 +106,10 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
       sdf->size[2] = 0.8f;
       break;
     case SDF_TYPE_CONE:
+      /* size = {bottom radius, half-height, top radius}; 0 top = sharp apex. */
       sdf->size[0] = 1.0f;
       sdf->size[1] = 1.0f;
-      sdf->size[2] = 1.0f;
+      sdf->size[2] = 0.0f;
       break;
     case SDF_TYPE_NGON:
       sdf->size[0] = 1.0f;
@@ -139,6 +140,51 @@ static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, Pointer
   DEG_id_tag_update(owner, ID_RECALC_GEOMETRY);
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
 }
+
+/* Named shape-parameter aliases onto SDF.size[] — explicit per-primitive
+ * dimensions; object transform scale remains the only "scale". */
+
+static float rna_SDF_sphere_radius_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[0]; }
+static void rna_SDF_sphere_radius_set(PointerRNA *ptr, float v)
+{
+  SDF *s = (SDF *)ptr->data;
+  s->size[0] = s->size[1] = s->size[2] = v;
+}
+
+static float rna_SDF_cyl_radius_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[0]; }
+static void rna_SDF_cyl_radius_set(PointerRNA *ptr, float v)
+{
+  SDF *s = (SDF *)ptr->data;
+  s->size[0] = s->size[1] = v;
+}
+static float rna_SDF_cyl_height_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[2]; }
+static void rna_SDF_cyl_height_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[2] = v; }
+
+static float rna_SDF_cone_rbottom_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[0]; }
+static void rna_SDF_cone_rbottom_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[0] = v; }
+static float rna_SDF_cone_height_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[1]; }
+static void rna_SDF_cone_height_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[1] = v; }
+static float rna_SDF_cone_rtop_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[2]; }
+static void rna_SDF_cone_rtop_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[2] = v; }
+
+static float rna_SDF_capsule_radius_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[0]; }
+static void rna_SDF_capsule_radius_set(PointerRNA *ptr, float v)
+{
+  SDF *s = (SDF *)ptr->data;
+  s->size[0] = s->size[2] = v;
+}
+static float rna_SDF_capsule_height_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[1]; }
+static void rna_SDF_capsule_height_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[1] = v; }
+
+static float rna_SDF_torus_major_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[0]; }
+static void rna_SDF_torus_major_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[0] = v; }
+static float rna_SDF_torus_minor_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[1]; }
+static void rna_SDF_torus_minor_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[1] = v; }
+
+static float rna_SDF_ngon_radius_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[0]; }
+static void rna_SDF_ngon_radius_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[0] = v; }
+static float rna_SDF_ngon_height_get(PointerRNA *ptr) { return ((SDF *)ptr->data)->size[2]; }
+static void rna_SDF_ngon_height_set(PointerRNA *ptr, float v) { ((SDF *)ptr->data)->size[2] = v; }
 
 /* SDFModifier computed property getters/setters (params[] mapping) */
 
@@ -763,6 +809,91 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.001f, FLT_MAX);
   RNA_def_property_ui_range(prop, 0.001f, 5.0f, 1.0f, 3);
   RNA_def_property_ui_text(prop, "Size", "Size in each axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Named per-primitive shape aliases onto size[] (object scale is the only scale) */
+  prop = RNA_def_property(srna, "sphere_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_sphere_radius_get", "rna_SDF_sphere_radius_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Radius", "Sphere radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cylinder_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_cyl_radius_get", "rna_SDF_cyl_radius_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Radius", "Cylinder radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cylinder_height", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_cyl_height_get", "rna_SDF_cyl_height_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Height", "Cylinder half-height");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cone_radius_bottom", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_cone_rbottom_get", "rna_SDF_cone_rbottom_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Bottom Radius", "Cone radius at the base");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cone_radius_top", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_cone_rtop_get", "rna_SDF_cone_rtop_set", nullptr);
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Top Radius", "Cone radius at the top (0 for a sharp apex)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cone_height", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_cone_height_get", "rna_SDF_cone_height_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Height", "Cone half-height");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "capsule_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_capsule_radius_get", "rna_SDF_capsule_radius_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Radius", "Capsule radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "capsule_height", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_capsule_height_get", "rna_SDF_capsule_height_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Height", "Capsule half-height");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "torus_major_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_torus_major_get", "rna_SDF_torus_major_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Major Radius", "Torus ring radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "torus_minor_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_torus_minor_get", "rna_SDF_torus_minor_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Minor Radius", "Torus tube radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "ngon_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_ngon_radius_get", "rna_SDF_ngon_radius_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Radius", "N-gon radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "ngon_height", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop, "rna_SDF_ngon_height_get", "rna_SDF_ngon_height_set", nullptr);
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.001f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Height", "N-gon half-height");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Color */
