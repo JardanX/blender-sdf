@@ -639,12 +639,16 @@ struct Object {
   uint8_t modifier_flag = 0;
 
   int is_sdf = 0;
-  int sdf_settings_version = 1;
-  int sdf_normal_mode = 1;
+  int sdf_settings_version = 2;
+  int sdf_normal_mode = 1; /* Deprecated: evaluated Mesh corner normals are authoritative. */
   int sdf_index = 0;
   int sdf_csg_operation = 0;
   float sdf_blend = 0.1f;
   int sdf_blend_type = 1;
+  float sdf_clearance = 0.0f;
+  float sdf_color_blend = 0.1f;
+  int sdf_color_blend_type = 0;
+  char _pad_sdf_color_blend[4] = {};
   float sdf_shell_distance = 0.2f;
   int sdf_shell_mode = 0;
   int sdf_shell_op = 0;

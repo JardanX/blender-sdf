@@ -51,6 +51,7 @@ enum {
   SDF_MESH_FLAG_CLOSED = (1 << 0),
   SDF_MESH_FLAG_ORIENTED = (1 << 1),
   SDF_MESH_FLAG_THREADED_BVH = (1 << 2),
+  SDF_MESH_FLAG_CORNER_NORMALS = (1 << 3),
 };
 
 /* Box corner/edge blend mode */
@@ -66,6 +67,11 @@ typedef enum eSDFBlendType {
   SDF_BLEND_ROUND = 3,
 } eSDFBlendType;
 
+typedef enum eSDFColorBlendType {
+  SDF_COLOR_BLEND_RGB = 0,
+  SDF_COLOR_BLEND_HUE = 1,
+} eSDFColorBlendType;
+
 typedef enum eSDFCSGOperation {
   SDF_CSG_UNION = 0,
   SDF_CSG_SUBTRACT = 1,
@@ -73,6 +79,7 @@ typedef enum eSDFCSGOperation {
   SDF_CSG_SHELL = 3,
   SDF_CSG_PUSH = 4,
   SDF_CSG_AVOID = 5,
+  SDF_CSG_PAINT = 6,
 } eSDFCSGOperation;
 
 typedef enum eSDFShellMode {
@@ -192,6 +199,10 @@ typedef struct SDF {
   float blend = 0.1f;
   int blend_type = 1;    /* eSDFBlendType: SDF_BLEND_SMOOTH */
   int csg_operation = 0; /* eSDFCSGOperation */
+  float clearance = 0.0f;
+  float color_blend = 0.1f;
+  int color_blend_type = 0; /* eSDFColorBlendType */
+  char _pad_color_blend[4] = {};
   float shell_distance = 0.2f;
   int shell_mode = 0; /* eSDFShellMode */
   int shell_op = 0;   /* eSDFShellOp */

@@ -10,18 +10,10 @@
 
 COMPUTE_SHADER_CREATE_INFO(sdf_normal_comp)
 
-#include "sdf_mesh_lib.glsl"
-
 float4 loadPos(int2 p)
 {
   p = clamp(p, int2(0), screen_size - int2(1));
   return imageLoad(gbuf_pos_img, p);
-}
-
-float4 loadColor(int2 p)
-{
-  p = clamp(p, int2(0), screen_size - int2(1));
-  return imageLoad(gbuf_color_img, p);
 }
 
 void main()
@@ -39,50 +31,10 @@ void main()
 
   float3 pc = c.xyz;
 
-  int object_index = int(loadColor(pixel).a + 0.5f);
-  if (object_index >= 0 && object_index < object_count) {
-    SDFObjectGPU obj = objects[object_index];
-    bool use_mesh_normal = object_count <= 2048 && obj.sdf_type == SDF_GPU_TYPE_MESH &&
-                            obj.mesh_settings.y != 0 &&
-                            obj.modifier_count == 0 && obj.csg_operation != 3;
-    if (obj.group_id >= 0) {
-      SDFGroupGPU group = groups[obj.group_id];
-      use_mesh_normal = use_mesh_normal && group.modifier_count == 0 &&
-                        group.csg_operation != 3;
-    }
-    if (use_mesh_normal) {
-      float3 local_pos = (obj.inverse_matrix * float4(pc - obj.position.xyz, 1.0f)).xyz;
-      float distance_squared;
-      int triangle_index;
-      float3 closest_point;
-      float3 barycentric;
-      if (sdfMeshNearest(obj,
-                         local_pos,
-                         distance_squared,
-                         triangle_index,
-                         closest_point,
-                         barycentric))
-      {
-        float source_distance = sqrt(max(distance_squared, 0.0f)) * obj.obj_scale.w;
-        if (source_distance <= sdf_ray_epsilon * 2.0f) {
-          float3 local_normal = sdfMeshShadingNormal(obj, triangle_index, barycentric);
-          if (obj.mesh_settings.x == SDF_MESH_NORMAL_SMOOTH) {
-            local_normal = normalize(local_normal / obj.obj_scale.xyz);
-          }
-          float3 normal = normalize(transpose(to_float3x3(obj.inverse_matrix)) *
-                                    local_normal);
-          bool flip_normal = obj.csg_operation == 1;
-          if (obj.group_id >= 0 && groups[obj.group_id].csg_operation == 1) {
-            flip_normal = !flip_normal;
-          }
-          if (flip_normal) {
-            normal = -normal;
-          }
-          imageStore(gbuf_normal_img, pixel, float4(normal, 1.0f));
-          return;
-        }
-      }
-    }
+  float4 exact_normal = imageLoad(gbuf_normal_img, pixel);
+  if (exact_normal.w > 0.5f) {
+    imageStore(gbuf_normal_img, pixel, exact_normal);
+    return;
   }
 
   float4 pl1 = loadPos(pixel + int2(-1, 0));

@@ -174,7 +174,9 @@ class Sdfs : Overlay {
     }
     const Object *ob = ob_ref.object;
     const bool is_native_sdf = (ob->type == OB_SDF);
-    const bool is_mesh_to_sdf = (ob->type == OB_MESH && BKE_sdf_object_is_enabled(*ob));
+    SDFMeshRuntimeSnapshot mesh_snapshot;
+    const bool is_mesh_to_sdf = ob->type == OB_MESH && BKE_sdf_object_is_enabled(*ob) &&
+                                BKE_sdf_mesh_runtime_snapshot(*ob, mesh_snapshot);
     if (!is_native_sdf && !is_mesh_to_sdf) {
       return;
     }
@@ -242,10 +244,9 @@ class Sdfs : Overlay {
       poly_max.z = sdf_data->size[2];
     }
     else if (is_mesh_to_sdf) {
-      SDFMeshRuntimeSnapshot snapshot;
-      if (BKE_sdf_mesh_runtime_snapshot(*ob, snapshot) && snapshot.payload) {
-        poly_min = float3(snapshot.payload->bounds_min);
-        poly_max = float3(snapshot.payload->bounds_max);
+      if (mesh_snapshot.payload) {
+        poly_min = float3(mesh_snapshot.payload->bounds_min);
+        poly_max = float3(mesh_snapshot.payload->bounds_max);
       }
     }
     /* sdf_data stays null for mesh-to-SDF; draw_line treats a null sdf_data as
@@ -274,8 +275,9 @@ class Sdfs : Overlay {
 
     /* Build tables indexed by sorted GPU position.
      * Use direct Object* → sorted index lookup for robustness. */
-    int obj_count = sdf::sdf_object_count_get();
-    int table_size = math::max(obj_count, 1);
+    int sorted_obj_count = 0;
+    const Object *const *sorted_ptrs = sdf::sdf_sorted_object_ptrs_get(&sorted_obj_count);
+    int table_size = math::max(sorted_obj_count, 1);
     Vector<uint32_t> outline_table(table_size, 0u);
     select_table_.reinitialize(table_size);
     select_table_.fill(uint32_t(-1));
@@ -293,8 +295,6 @@ class Sdfs : Overlay {
 
     /* Populate tables for ALL sorted positions (including Array copies).
      * Use sorted_to_object map from engine to find each position's entry. */
-    int sorted_obj_count = 0;
-    const Object *const *sorted_ptrs = sdf::sdf_sorted_object_ptrs_get(&sorted_obj_count);
     for (int si = 0; si < math::min(sorted_obj_count, table_size); si++) {
       if (!sorted_ptrs || !sorted_ptrs[si]) { continue; }
       const Object *orig = DEG_get_original(const_cast<Object *>(sorted_ptrs[si]));
@@ -391,6 +391,7 @@ class Sdfs : Overlay {
 
     float2 uv_sc = sdf::sdf_uv_scale_get();
     GPU_shader_uniform_2fv(outline_sh_, "uv_scale", &uv_sc.x);
+    GPU_shader_uniform_1i(outline_sh_, "outline_id_count", int(select_table_.size()));
 
     GPU_batch_set_shader(fullscreen_batch_, outline_sh_);
     GPU_batch_draw(fullscreen_batch_);

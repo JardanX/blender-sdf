@@ -189,7 +189,6 @@ static float sdf_mesh_bounds_area(const float3 &bounds_min, const float3 &bounds
 
 SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
                                       const Mesh *mesh,
-                                      const int normal_mode,
                                       int *r_degenerate_triangles)
 {
   if (r_degenerate_triangles) {
@@ -677,9 +676,10 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
   sdf->mesh_vertex_count = int(positions.size());
   sdf->mesh_triangle_count = triangle_count;
   sdf->mesh_bvh_node_count = node_count;
-  sdf->mesh_normal_mode = normal_mode;
+  /* Shading uses the evaluated mesh corner normals, including sharp edges. */
+  sdf->mesh_normal_mode = SDF_MESH_NORMAL_SMOOTH;
   sdf->mesh_flags = SDF_MESH_FLAG_CLOSED | SDF_MESH_FLAG_ORIENTED |
-                    SDF_MESH_FLAG_THREADED_BVH;
+                    SDF_MESH_FLAG_THREADED_BVH | SDF_MESH_FLAG_CORNER_NORMALS;
   sdf->blend_type = SDF_BLEND_LINEAR;
   sdf->blend = 0.0f;
   sdf->mesh_data_version++;
@@ -712,7 +712,7 @@ void BKE_sdf_mesh_runtime_update(Object &object, const Mesh &mesh)
   SDF temporary_sdf = {};
   int degenerate_triangles = 0;
   const SDFMeshBuildResult result = BKE_sdf_mesh_build(
-      &temporary_sdf, &mesh, object.sdf_normal_mode, &degenerate_triangles);
+      &temporary_sdf, &mesh, &degenerate_triangles);
 
   std::shared_ptr<SDFMeshPayload> payload;
   if (result == SDFMeshBuildResult::Success) {

@@ -663,6 +663,9 @@ float opSmoothUnion(float d1, float d2, float k)
   if (k <= 0.0001f) {
     return min(d1, d2);
   }
+  if (abs(d2 - d1) >= k) {
+    return min(d1, d2);
+  }
   float h = clamp(0.5f + 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
   return mix(d2, d1, h) - k * h * (1.0f - h);
 }
@@ -672,6 +675,9 @@ float opSmoothSubtraction(float d1, float d2, float k)
   if (k <= 0.0001f) {
     return max(-d1, d2);
   }
+  if (abs(d2 + d1) >= k) {
+    return max(-d1, d2);
+  }
   float h = clamp(0.5f - 0.5f * (d2 + d1) / k, 0.0f, 1.0f);
   return mix(d2, -d1, h) + k * h * (1.0f - h);
 }
@@ -679,6 +685,9 @@ float opSmoothSubtraction(float d1, float d2, float k)
 float opSmoothIntersection(float d1, float d2, float k)
 {
   if (k <= 0.0001f) {
+    return max(d1, d2);
+  }
+  if (abs(d2 - d1) >= k) {
     return max(d1, d2);
   }
   float h = clamp(0.5f - 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
@@ -692,6 +701,7 @@ float opSmoothIntersection(float d1, float d2, float k)
 #define SDF_CSG_OP_SHELL 3
 #define SDF_CSG_OP_PUSH 4
 #define SDF_CSG_OP_AVOID 5
+#define SDF_CSG_OP_PAINT 6
 
 /** Shell op IDs (must match eSDFShellOp in DNA_sdf_types.h). */
 #define SDF_SHELL_OP_UNION 0
@@ -709,45 +719,86 @@ float colorBlendFactor(float d_prev, float d_new, int blend_type, float blend)
 }
 
 /* CSG-aware color blend factor: returns how much of the NEW shape's color to mix in. */
-float csgColorFactor(float d_prev, float d_new, int csg_op, int blend_type, float blend,
-                     float shell_dist, int shell_op)
+float3 rgb_to_hsv(float3 c)
 {
-  bool has_blend = (blend_type > 0 && blend > 0.0f);
+  float4 k = float4(0.0f, -1.0f / 3.0f, 2.0f / 3.0f, -1.0f);
+  float4 p = mix(float4(c.bg, k.wz), float4(c.gb, k.xy), step(c.b, c.g));
+  float4 q = mix(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1e-10f;
+  return float3(abs(q.z + (q.w - q.y) / (6.0f * d + e)), d / (q.x + e), q.x);
+}
+
+float3 hsv_to_rgb(float3 c)
+{
+  float3 p = abs(fract(c.xxx + float3(0.0f, 2.0f / 3.0f, 1.0f / 3.0f)) * 6.0f - 3.0f);
+  return c.z * mix(float3(1.0f), clamp(p - 1.0f, 0.0f, 1.0f), c.y);
+}
+
+float3 blendSDFColor(float3 a, float3 b, float t, int blend_type)
+{
+  if (blend_type == 0) {
+    return mix(a, b, t);
+  }
+  float3 ah = rgb_to_hsv(a);
+  float3 bh = rgb_to_hsv(b);
+  if (ah.y < 1e-4f || bh.y < 1e-4f) {
+    return mix(a, b, t);
+  }
+  return hsv_to_rgb(mix(ah, bh, t));
+}
+
+float csgColorFactor(float d_prev, float d_new, float d_result, int csg_op, float color_blend,
+                     float clearance, float shell_dist, int shell_op)
+{
+  bool has_blend = color_blend > 0.0f;
 
   if (csg_op == SDF_CSG_OP_SUBTRACT) {
     /* Carved surface shows the subtractor's color in the blend zone. */
     if (!has_blend) { return (-d_new > d_prev) ? 1.0f : 0.0f; }
-    float h = clamp(0.5f - 0.5f * (d_prev + d_new) / blend, 0.0f, 1.0f);
+    float h = clamp(0.5f - 0.5f * (d_prev + d_new) / color_blend, 0.0f, 1.0f);
     return smoothstep(0.0f, 1.0f, h);
   }
   else if (csg_op == SDF_CSG_OP_INTERSECT) {
     /* Intersection: color follows the constraining (farther) shape. */
     if (!has_blend) { return (d_new > d_prev) ? 1.0f : 0.0f; }
-    float h = clamp(0.5f - 0.5f * (d_new - d_prev) / blend, 0.0f, 1.0f);
+    float h = clamp(0.5f - 0.5f * (d_new - d_prev) / color_blend, 0.0f, 1.0f);
     return smoothstep(0.0f, 1.0f, 1.0f - h);
   }
   else if (csg_op == SDF_CSG_OP_SHELL) {
-    /* Shell band: abs(d_new) < thickness means inside the shell region. */
-    float sd = (shell_op == SDF_SHELL_OP_SUBTRACTION) ? -shell_dist : shell_dist;
-    float thickness = abs(sd);
-    float d_from_band = abs(d_new) - thickness;
-    if (!has_blend) { return (d_from_band < 0.0f) ? 1.0f : 0.0f; }
-    return smoothstep(0.0f, 1.0f, clamp(-d_from_band / max(blend, 0.001f), 0.0f, 1.0f));
+    float shell_contribution = abs(d_result - d_prev);
+    if (!has_blend) { return shell_contribution > sdf_ray_epsilon * 8.0f ? 1.0f : 0.0f; }
+    return smoothstep(0.0f, color_blend, shell_contribution);
+  }
+  else if (csg_op == SDF_CSG_OP_PUSH) {
+    return (d_new < max(d_prev, -d_new + clearance)) ? 1.0f : 0.0f;
+  }
+  else if (csg_op == SDF_CSG_OP_AVOID) {
+    return (max(d_new, -d_prev + clearance) < d_prev) ? 1.0f : 0.0f;
+  }
+  else if (csg_op == SDF_CSG_OP_PAINT) {
+    if (!has_blend) { return d_new < 0.0f ? 1.0f : 0.0f; }
+    return 1.0f - smoothstep(-color_blend, color_blend, d_new);
   }
 
-  /* Union, Push, Avoid: color follows whichever shape is closer. */
-  return colorBlendFactor(d_prev, d_new, blend_type, blend);
+  return colorBlendFactor(d_prev, d_new, has_blend ? 1 : 0, color_blend);
 }
 
 /* ---- Chamfer blend operations ---- */
 
 float opChamferUnion(float a, float b, float r)
 {
+  if (r <= 0.0f || abs(a - b) >= r) {
+    return min(a, b);
+  }
   return min(min(a, b), (a - r + b) * 0.5f);
 }
 
 float opChamferIntersection(float a, float b, float r)
 {
+  if (r <= 0.0f || abs(a - b) >= r) {
+    return max(a, b);
+  }
   return max(max(a, b), (a + r + b) * 0.5f);
 }
 
@@ -813,16 +864,25 @@ float opUnionIRound(float a, float b, float r)
 
 float opRoundUnion(float d1, float d2, float r)
 {
+  if (r <= 0.0f || abs(d1 - d2) >= r) {
+    return min(d1, d2);
+  }
   return opUnionIRound(d1, d2, r);
 }
 
 float opRoundSubtraction(float d1, float d2, float r)
 {
+  if (r <= 0.0f || abs(d1 + d2) >= r) {
+    return max(-d1, d2);
+  }
   return -opUnionIRound(d1, -d2, r);
 }
 
 float opRoundIntersection(float d1, float d2, float r)
 {
+  if (r <= 0.0f || abs(d1 - d2) >= r) {
+    return max(d1, d2);
+  }
   return -opUnionIRound(-d1, -d2, r);
 }
 
@@ -1412,12 +1472,16 @@ float sdEllipsoid(float3 p, float3 r)
 /**
  * Combine two SDF distances using the specified CSG operation and blend type.
  */
-float combineCSG(float d1, float d2, int op, int bt, float k,
+float combineCSG(float d1, float d2, int op, int bt, float k, float clearance,
                  float shell_dist, int shell_mode, int shell_op,
                  float shell_k_top, float shell_k_bot,
                  float k2, float k3, float k4, float k5,
                  int flip_blend, int flip_blend_end)
 {
+  if (op == SDF_CSG_OP_PAINT) {
+    return d1;
+  }
+
   bool has_smooth = (k2 > 0.0f || k3 > 0.0f);
   bool has_smooth_end = (k4 > 0.0f || k5 > 0.0f);
   bool fb = (flip_blend != 0);
@@ -1472,42 +1536,44 @@ float combineCSG(float d1, float d2, int op, int bt, float k,
     return max(d1, d2);
   }
   else if (op == SDF_CSG_OP_PUSH) {
+    float cutter = d2 - clearance;
     float subtracted;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
-        subtracted = opSmoothSubtraction(d2, d1, k);
+        subtracted = opSmoothSubtraction(cutter, d1, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) { subtracted = opSmoothChamferSubtraction(d2, d1, k, k2, k3); }
-        else { subtracted = opChamferSubtraction(d2, d1, k); }
+        subtracted = has_smooth ? opSmoothChamferSubtraction(cutter, d1, k, k2, k3) :
+                                 opChamferSubtraction(cutter, d1, k);
       }
       else {
-        if (has_smooth) { subtracted = opSmoothRoundSubtraction(d2, d1, k, k2, k3); }
-        else { subtracted = opRoundSubtraction(d2, d1, k); }
+        subtracted = has_smooth ? opSmoothRoundSubtraction(cutter, d1, k, k2, k3) :
+                                 opRoundSubtraction(cutter, d1, k);
       }
     }
     else {
-      subtracted = max(d1, -d2);
+      subtracted = max(d1, -cutter);
     }
     return min(subtracted, d2);
   }
   else if (op == SDF_CSG_OP_AVOID) {
+    float field = d1 - clearance;
     float carved;
     if (k > 0.0f && bt > 0) {
       if (bt == SDF_BLEND_TYPE_SMOOTH) {
-        carved = opSmoothSubtraction(d1, d2, k);
+        carved = opSmoothSubtraction(field, d2, k);
       }
       else if (bt == SDF_BLEND_TYPE_CHAMFER) {
-        if (has_smooth) { carved = opSmoothChamferSubtraction(d1, d2, k, k2, k3); }
-        else { carved = opChamferSubtraction(d1, d2, k); }
+        carved = has_smooth ? opSmoothChamferSubtraction(field, d2, k, k2, k3) :
+                              opChamferSubtraction(field, d2, k);
       }
       else {
-        if (has_smooth) { carved = opSmoothRoundSubtraction(d1, d2, k, k2, k3); }
-        else { carved = opRoundSubtraction(d1, d2, k); }
+        carved = has_smooth ? opSmoothRoundSubtraction(field, d2, k, k2, k3) :
+                              opRoundSubtraction(field, d2, k);
       }
     }
     else {
-      carved = max(d2, -d1);
+      carved = max(d2, -field);
     }
     return min(d1, carved);
   }
@@ -1940,14 +2006,14 @@ void flushGroup(int gid, float grp_dist, float3 grp_color,
     SDFGroupGPU grp = groups[gid];
     float prev = scene_dist;
     scene_dist = combineCSG(
-        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.clearance,
         grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
         grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5,
         grp.flip_blend, grp.flip_blend_end);
-    float t = csgColorFactor(prev, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
-                             grp.shell_distance, grp.shell_op);
-    out_color = mix(out_color, grp_color, t);
+    float t = csgColorFactor(prev, grp_dist, scene_dist, grp.csg_operation, grp.color_blend,
+                             grp.clearance, grp.shell_distance, grp.shell_op);
+    out_color = blendSDFColor(out_color, grp_color, t, grp.color_blend_type);
   }
 }
 
@@ -1959,7 +2025,7 @@ void flushGroupDist(int gid, float grp_dist, inout float scene_dist)
   else {
     SDFGroupGPU grp = groups[gid];
     scene_dist = combineCSG(
-        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+        scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.clearance,
         grp.shell_distance, grp.shell_mode, grp.shell_op,
         grp.shell_blend_top, grp.shell_blend_bottom,
         grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5,

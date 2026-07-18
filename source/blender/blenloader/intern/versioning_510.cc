@@ -931,6 +931,14 @@ void blo_do_versions_510(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 40)) {
+    for (SDF &sdf : bmain->sdfs) {
+      sdf.clearance = 0.0f;
+      sdf.color_blend = sdf.blend;
+      sdf.color_blend_type = SDF_COLOR_BLEND_RGB;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

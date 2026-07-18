@@ -211,14 +211,10 @@ class Instance : public DrawEngine {
             sdf, sdf->mesh_vertex_count, sdf->mesh_triangle_count, sdf->mesh_bvh_node_count);
       }
     }
-    else if (ob->type == OB_MESH && !draw_ctx->is_scene_render()) {
+    else if (ob->type == OB_MESH && !draw_ctx->is_scene_render() &&
+             BKE_sdf_object_is_enabled(*ob)) {
       SDFMeshRuntimeSnapshot snapshot;
-      if (BKE_sdf_mesh_runtime_snapshot(*ob, snapshot) &&
-          reserve_sdf_mesh_payload(snapshot.payload.get(),
-                                   snapshot.payload->vertex_count,
-                                   snapshot.payload->triangle_count,
-                                   snapshot.payload->bvh_node_count))
-      {
+      if (BKE_sdf_mesh_runtime_snapshot(*ob, snapshot) && snapshot.payload) {
         is_object_data_visible = false;
       }
     }

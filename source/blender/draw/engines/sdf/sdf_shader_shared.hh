@@ -27,8 +27,11 @@ struct [[host_shared]] SDFObjectGPU {
   float4 bbox_max;
   float bevel;
   float blend;
+  float clearance;
+  float color_blend;
   int sdf_type;
   int blend_type;
+  int color_blend_type;
   int csg_operation;
   float shell_distance;
   int shell_mode;
@@ -49,6 +52,7 @@ struct [[host_shared]] SDFObjectGPU {
   int polygon_point_count;
   int _pad2;
   float max_group_blend;
+  int _pad3;
   float4 color;
   float4 box_corners;
   float4 box_edges;
@@ -63,7 +67,7 @@ struct [[host_shared]] SDFObjectGPU {
   int4 mesh_settings;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFObjectGPU, 16)
-BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 400, "SDFObjectGPU size mismatch")
+BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 416, "SDFObjectGPU size mismatch")
 
 struct [[host_shared]] SDFObjectAABB {
   float4 bbox_min;
@@ -79,6 +83,9 @@ struct [[host_shared]] SDFGroupGPU {
   int csg_operation;
   int blend_type;
   float blend;
+  float clearance;
+  float color_blend;
+  int color_blend_type;
   float shell_distance;
   int shell_mode;
   int shell_op;
@@ -96,6 +103,7 @@ struct [[host_shared]] SDFGroupGPU {
   int modifier_count;
   int _pad0;
   int _pad1;
+  int _pad2;
   float4 color;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFGroupGPU, 16)

@@ -75,7 +75,6 @@ struct SDFMeshRuntimeSnapshot {
 
 SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
                                       const Mesh *mesh,
-                                      int normal_mode,
                                       int *r_degenerate_triangles);
 void BKE_sdf_mesh_clear(SDF *sdf);
 bool BKE_sdf_mesh_bvh_make_stackless(SDF *sdf);

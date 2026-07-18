@@ -344,7 +344,6 @@ class Instance : public DrawEngine {
   float max_shell_distance_ = 0.0f;
   float step_factor_ = 0.85f;
   bool needs_upload_ = true;
-  bool depth_mode_ = false;
 
   gpu::Shader *trace_comp_sh() { return sdf_shader_get(SH_TRACE_COMP); }
   gpu::Shader *trace_tile_sh() { return sdf_shader_get(SH_TRACE_TILE_COMP); }
@@ -374,11 +373,13 @@ class Instance : public DrawEngine {
   bool scene_changed_ = false;
   bool view_changed_ = false;
   bool mesh_changed_ = false;
+  bool mesh_data_changed_ = false;
   int scroll_cooldown_ = 0;
   int idle_frames_ = 0;
   bool compute_valid_ = false;
   uint64_t prev_data_hash_ = 0;
   uint64_t prev_mesh_hash_ = 0;
+  uint64_t prev_mesh_data_hash_ = 0;
   uint64_t prev_shading_hash_ = 0;
   Vector<float4x4> mesh_transforms_;
   float4x4 prev_viewmat_ = float4x4::identity();
@@ -410,6 +411,8 @@ class Instance : public DrawEngine {
   int group_ssbo_count_ = 0;
 
   SdfAabbTree bvh_tree_;
+  Vector<const Object *> bvh_object_ptrs_;
+  Vector<int> bvh_proxies_;
   gpu::StorageBuf *bvh_nodes_ssbo_ = nullptr;
   int bvh_nodes_ssbo_count_ = 0;
 
@@ -481,7 +484,6 @@ class Instance : public DrawEngine {
 
   void begin_sync() final
   {
-    depth_mode_ = draw_ctx_->is_depth();
     objects_.clear();
     object_ptrs_.clear();
     group_empties_.clear();
@@ -494,7 +496,6 @@ class Instance : public DrawEngine {
     s_depsgraph_to_sorted.clear();
     s_object_to_sorted.clear();
     s_sorted_object_ptrs.clear();
-    bvh_tree_.clear();
     mesh_transforms_.clear();
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
@@ -503,17 +504,10 @@ class Instance : public DrawEngine {
     step_factor_ = 0.85f;
     frustum_valid_ = false;
 
-    if (depth_mode_) {
-      clear_exported_state();
-    }
   }
 
   void object_sync(ObjectRef &ob_ref, Manager & /*manager*/) final
   {
-    if (depth_mode_) {
-      return;
-    }
-
     Object *ob = ob_ref.object;
 
     SDF live_sdf = {};
@@ -531,6 +525,9 @@ class Instance : public DrawEngine {
       live_sdf.blend = ob->sdf_blend;
       live_sdf.blend_type = ob->sdf_blend_type;
       live_sdf.csg_operation = ob->sdf_csg_operation;
+      live_sdf.clearance = ob->sdf_clearance;
+      live_sdf.color_blend = ob->sdf_color_blend;
+      live_sdf.color_blend_type = ob->sdf_color_blend_type;
       live_sdf.shell_distance = ob->sdf_shell_distance;
       live_sdf.shell_mode = ob->sdf_shell_mode;
       live_sdf.shell_op = ob->sdf_shell_op;
@@ -548,8 +545,8 @@ class Instance : public DrawEngine {
       live_sdf.mesh_vertex_count = payload.vertex_count;
       live_sdf.mesh_triangle_count = payload.triangle_count;
       live_sdf.mesh_bvh_node_count = payload.bvh_node_count;
-      live_sdf.mesh_flags = payload.flags;
-      live_sdf.mesh_normal_mode = ob->sdf_normal_mode;
+      live_sdf.mesh_flags = payload.flags | SDF_MESH_FLAG_CORNER_NORMALS;
+      live_sdf.mesh_normal_mode = SDF_MESH_NORMAL_SMOOTH;
       live_sdf.mesh_data_version = int(payload.revision);
       copy_v3_v3(live_sdf.mesh_bounds_min, payload.bounds_min);
       copy_v3_v3(live_sdf.mesh_bounds_max, payload.bounds_max);
@@ -772,8 +769,11 @@ class Instance : public DrawEngine {
     gpu_obj.bevel = bevel;
 
     gpu_obj.blend = sdf_data->blend;
+    gpu_obj.clearance = sdf_data->clearance;
+    gpu_obj.color_blend = sdf_data->color_blend;
     gpu_obj.sdf_type = sdf_data->sdf_type;
     gpu_obj.blend_type = sdf_data->blend_type;
+    gpu_obj.color_blend_type = sdf_data->color_blend_type;
     gpu_obj.csg_operation = sdf_data->csg_operation;
     gpu_obj.shell_distance = sdf_data->shell_distance;
     gpu_obj.shell_mode = sdf_data->shell_mode;
@@ -793,7 +793,7 @@ class Instance : public DrawEngine {
                                fabsf(sdf_data->shell_distance) :
                                0.0f;
       float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
-      float aabb_pad = blend_pad + shell_expand;
+      float aabb_pad = std::max(blend_pad, sdf_data->color_blend) + shell_expand;
       float3 local_extent;
       /* Base (unscaled) extent with correct geometric-axis assignment; per-axis
        * object scale is applied afterward so it stretches the geometry. */
@@ -1423,7 +1423,7 @@ class Instance : public DrawEngine {
                              fabsf(sdf_data->shell_distance) :
                              0.0f;
     float blend_pad = (sdf_data->blend_type != 0) ? sdf_data->blend : 0.0f;
-    float pad = blend_pad + shell_expand;
+    float pad = std::max(blend_pad, sdf_data->color_blend) + shell_expand;
     float3 base_local_extent;
     {
       /* Base (unscaled) extent; per-axis object scale applied afterward. */
@@ -1480,11 +1480,7 @@ class Instance : public DrawEngine {
       base_local_extent = base_local_extent * scale + float3(pad);
     }
 
-    /* Expand extent for domain modifiers (excluding array) */
-    for (int mi = gpu_obj.modifier_start;
-         mi < gpu_obj.modifier_start + gpu_obj.modifier_count; mi++)
-    {
-      const SDFModifierGPU &mod = modifiers_[mi];
+    auto expand_modifier_bound = [&](const SDFModifierGPU &mod) {
       int mtype = mod.header.x;
       int mflags = mod.header.y;
       switch (mtype) {
@@ -1553,38 +1549,43 @@ class Instance : public DrawEngine {
           int axis = int(mod.params.y);
           float3 origin = float3(mod.params.z, mod.params.w, mod.params2.x);
           if (fabsf(k) > 0.0001f) {
-            float3 new_ext = float3(0.0f);
-            for (int c = 0; c < 8; c++) {
-              float3 pt = float3((c & 1) ? base_local_extent.x : -base_local_extent.x,
-                                 (c & 2) ? base_local_extent.y : -base_local_extent.y,
-                                 (c & 4) ? base_local_extent.z : -base_local_extent.z);
-              pt -= origin;
-              float drive, curve, free_val;
-              if (axis == 1) { drive = pt.y; curve = pt.z; free_val = pt.x; }
-              else if (axis == 2) { drive = pt.z; curve = pt.x; free_val = pt.y; }
-              else { drive = pt.x; curve = pt.y; free_val = pt.z; }
-              float a = k * drive;
-              float nd = cosf(a) * drive - sinf(a) * curve;
-              float nc = sinf(a) * drive + cosf(a) * curve;
-              float3 bent;
-              if (axis == 1) { bent = float3(free_val, nd, nc); }
-              else if (axis == 2) { bent = float3(nc, free_val, nd); }
-              else { bent = float3(nd, nc, free_val); }
-              bent += origin;
-              new_ext = math::max(new_ext, math::abs(bent));
+            const float3 relative_extent = base_local_extent + math::abs(origin);
+            if (axis == 1) {
+              const float radius = math::sqrt(math::square(relative_extent.y) +
+                                              math::square(relative_extent.z));
+              base_local_extent.y = radius + math::abs(origin.y);
+              base_local_extent.z = radius + math::abs(origin.z);
             }
-            base_local_extent = new_ext;
+            else if (axis == 2) {
+              const float radius = math::sqrt(math::square(relative_extent.z) +
+                                              math::square(relative_extent.x));
+              base_local_extent.z = radius + math::abs(origin.z);
+              base_local_extent.x = radius + math::abs(origin.x);
+            }
+            else {
+              const float radius = math::sqrt(math::square(relative_extent.x) +
+                                              math::square(relative_extent.y));
+              base_local_extent.x = radius + math::abs(origin.x);
+              base_local_extent.y = radius + math::abs(origin.y);
+            }
           }
           break;
         }
         default:
           break;
       }
+    };
+    for (int mi = gpu_obj.modifier_start;
+         mi < gpu_obj.modifier_start + gpu_obj.modifier_count;
+         mi++)
+    {
+      expand_modifier_bound(modifiers_[mi]);
     }
 
     /* Propagate group parent's modifiers to this child.
      * Each child gets the group's modifiers applied individually:
      * Array → instancing, others → appended as GPU modifiers. */
+    const int group_modifier_start = int(modifiers_.size());
     if (group_parent_ob) {
       for (const ModifierData *gmd = static_cast<const ModifierData *>(
                group_parent_ob->modifiers.first);
@@ -1687,10 +1688,6 @@ class Instance : public DrawEngine {
             const auto &m = *reinterpret_cast<const SDFBevelModifierData *>(gmd);
             gpu_mod.header = int4(SDF_MOD_BEVEL, 0, 0, 0);
             gpu_mod.params = float4(m.radius, 0.0f, 0.0f, 0.0f);
-            if (sdf_data->sdf_type == SDF_TYPE_MESH) {
-              base_local_extent = math::max(base_local_extent + float3(m.radius),
-                                            float3(0.0f));
-            }
             valid = true;
             break;
           }
@@ -1709,6 +1706,9 @@ class Instance : public DrawEngine {
           gpu_obj.modifier_count++;
         }
       }
+    }
+    for (int mi = group_modifier_start; mi < int(modifiers_.size()); mi++) {
+      expand_modifier_bound(modifiers_[mi]);
     }
 
     /* Expand the AABB for the array domain repetition (object or group array). */
@@ -1923,9 +1923,21 @@ class Instance : public DrawEngine {
       float3 world_min = float3(1e30f);
       float3 world_max = float3(-1e30f);
       for (int corner = 0; corner < 8; corner++) {
-        float3 lc = float3((corner & 1) ? copy_local_extent.x : -copy_local_extent.x,
-                           (corner & 2) ? copy_local_extent.y : -copy_local_extent.y,
-                           (corner & 4) ? copy_local_extent.z : -copy_local_extent.z);
+        float3 lc;
+        if (sdf_data->sdf_type == SDF_TYPE_MESH && copy_obj.modifier_count == 0) {
+          float3 mesh_min = float3(sdf_data->mesh_bounds_min) * float3(copy_obj.obj_scale) -
+                            float3(pad);
+          float3 mesh_max = float3(sdf_data->mesh_bounds_max) * float3(copy_obj.obj_scale) +
+                            float3(pad);
+          lc = float3((corner & 1) ? mesh_max.x : mesh_min.x,
+                      (corner & 2) ? mesh_max.y : mesh_min.y,
+                      (corner & 4) ? mesh_max.z : mesh_min.z);
+        }
+        else {
+          lc = float3((corner & 1) ? copy_local_extent.x : -copy_local_extent.x,
+                      (corner & 2) ? copy_local_extent.y : -copy_local_extent.y,
+                      (corner & 4) ? copy_local_extent.z : -copy_local_extent.z);
+        }
         float3 wc = float3(copy_rot * float4(lc, 0.0f)) +
                      float3(copy_mat[3].x, copy_mat[3].y, copy_mat[3].z);
         world_min = math::min(world_min, wc);
@@ -1963,7 +1975,7 @@ class Instance : public DrawEngine {
       scene_min_ = math::min(scene_min_, obj_center - float3(sphere_radius));
       scene_max_ = math::max(scene_max_, obj_center + float3(sphere_radius));
 
-      max_blend_ = math::max(max_blend_, copy_obj.blend);
+      max_blend_ = math::max(max_blend_, std::max(copy_obj.blend, copy_obj.color_blend));
       {
         float sf = 0.85f;
         if (copy_obj.blend > 0.001f && copy_obj.blend_type > 0) {
@@ -1985,10 +1997,6 @@ class Instance : public DrawEngine {
 
   void end_sync() final
   {
-    if (depth_mode_) {
-      return;
-    }
-
     if (objects_.is_empty()) {
       clear_exported_state();
       return;
@@ -2018,6 +2026,9 @@ class Instance : public DrawEngine {
         gpu_grp.csg_operation = grp_sdf->csg_operation;
         gpu_grp.blend_type = grp_sdf->blend_type;
         gpu_grp.blend = grp_sdf->blend;
+        gpu_grp.clearance = grp_sdf->clearance;
+        gpu_grp.color_blend = grp_sdf->color_blend;
+        gpu_grp.color_blend_type = grp_sdf->color_blend_type;
         gpu_grp.shell_distance = grp_sdf->shell_distance;
         gpu_grp.shell_mode = grp_sdf->shell_mode;
         gpu_grp.shell_op = grp_sdf->shell_op;
@@ -2232,12 +2243,6 @@ class Instance : public DrawEngine {
         for (int m = start; m < start + cnt; m++) {
           objects_[m].bbox_min = float4(combined_min, 0.0f);
           objects_[m].bbox_max = float4(combined_max, 0.0f);
-          objects_[m].orig_bbox_min = float4(combined_min, objects_[m].orig_bbox_min.w);
-          objects_[m].orig_bbox_max = float4(combined_max, objects_[m].orig_bbox_max.w);
-        }
-        float diag = math::length(combined_max - combined_min);
-        for (int m = start; m < start + cnt; m++) {
-          objects_[m].max_group_blend = std::max(objects_[m].max_group_blend, diag);
         }
       }
 
@@ -2677,9 +2682,13 @@ class Instance : public DrawEngine {
       }
       for (int g = 0; g < int(groups_gpu_.size()); g++) {
         int grp_op = groups_gpu_[g].csg_operation;
-        if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH) {
-          int start = groups_gpu_[g].first_object;
-          int count = groups_gpu_[g].object_count;
+        int start = groups_gpu_[g].first_object;
+        int count = groups_gpu_[g].object_count;
+        bool has_push = false;
+        for (int i = start; i < start + count; i++) {
+          has_push |= objects_[i].csg_operation == SDF_CSG_PUSH;
+        }
+        if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH || has_push) {
           for (int i = start; i < start + count; i++) {
             objects_[i].bbox_min = float4(smin, 0.0f);
             objects_[i].bbox_max = float4(smax, 0.0f);
@@ -2687,20 +2696,70 @@ class Instance : public DrawEngine {
           }
         }
       }
+
+      /* Preserve CSG field dependencies. */
+      for (int i = 0; i < int(objects_.size()); i++) {
+        int op = objects_[i].csg_operation;
+        if (op != SDF_CSG_PUSH && op != SDF_CSG_AVOID && op != SDF_CSG_SHELL) {
+          continue;
+        }
+
+        float3 target_min = float3(objects_[i].bbox_min);
+        float3 target_max = float3(objects_[i].bbox_max);
+        for (int j = 0; j < i; j++) {
+          float3 source_min = float3(objects_[j].orig_bbox_min);
+          float3 source_max = float3(objects_[j].orig_bbox_max);
+          float max_dist = 0.0f;
+          for (int c = 0; c < 8; c++) {
+            float3 point(c & 1 ? target_max.x : target_min.x,
+                         c & 2 ? target_max.y : target_min.y,
+                         c & 4 ? target_max.z : target_min.z);
+            float3 closest = math::clamp(point, source_min, source_max);
+            max_dist = std::max(max_dist, math::length(point - closest));
+          }
+          objects_[j].bbox_min = float4(math::min(float3(objects_[j].bbox_min), target_min),
+                                        0.0f);
+          objects_[j].bbox_max = float4(math::max(float3(objects_[j].bbox_max), target_max),
+                                        0.0f);
+          objects_[j].max_group_blend = std::max(objects_[j].max_group_blend, max_dist);
+        }
+      }
     }
 
-    /* Recompute scene AABB and build BVH from visible objects */
+    /* Recompute scene AABB and update the persistent BVH. */
     scene_min_ = float3(1e30f);
     scene_max_ = float3(-1e30f);
-    bvh_tree_.clear();
-    for (int i = 0; i < int(objects_.size()); i++) {
+    const int object_count = int(objects_.size());
+    bool rebuild_bvh = bvh_object_ptrs_.size() != object_count;
+    if (!rebuild_bvh) {
+      for (int i = 0; i < object_count; i++) {
+        if (bvh_object_ptrs_[i] != s_sorted_object_ptrs[i]) {
+          rebuild_bvh = true;
+          break;
+        }
+      }
+    }
+    if (rebuild_bvh) {
+      bvh_tree_.clear();
+      bvh_object_ptrs_.clear();
+      bvh_proxies_.clear();
+      bvh_object_ptrs_.reserve(object_count);
+      bvh_proxies_.reserve(object_count);
+    }
+    for (int i = 0; i < object_count; i++) {
       scene_min_ = math::min(scene_min_, float3(objects_[i].bbox_min));
       scene_max_ = math::max(scene_max_, float3(objects_[i].bbox_max));
 
       SdfAabb bounds;
       bounds.min = float3(objects_[i].bbox_min);
       bounds.max = float3(objects_[i].bbox_max);
-      bvh_tree_.create_proxy(bounds, i);
+      if (rebuild_bvh) {
+        bvh_object_ptrs_.append(s_sorted_object_ptrs[i]);
+        bvh_proxies_.append(bvh_tree_.create_proxy(bounds, i));
+      }
+      else {
+        bvh_tree_.update_proxy(bvh_proxies_[i], bounds);
+      }
     }
 
     /* Hot AABB buffer (must be after compaction + AABB expansion) */
@@ -2811,6 +2870,15 @@ class Instance : public DrawEngine {
       mesh_changed_ = (mh != prev_mesh_hash_);
       bool mesh_changed = mesh_changed_;
       prev_mesh_hash_ = mh;
+
+      uint64_t mesh_data_hash = 0xcbf29ce484222325ULL;
+      const uint8_t *mesh_bytes = reinterpret_cast<const uint8_t *>(mesh_gpu_data_.data());
+      for (size_t i = 0; i < mesh_gpu_data_.size() * sizeof(uint4); i++) {
+        mesh_data_hash ^= mesh_bytes[i];
+        mesh_data_hash *= 0x100000001b3ULL;
+      }
+      mesh_data_changed_ = mesh_data_hash != prev_mesh_data_hash_;
+      prev_mesh_data_hash_ = mesh_data_hash;
 
       const View &view = View::default_get();
       const float4x4 &cur_viewmat = view.viewmat();
@@ -3379,7 +3447,7 @@ class Instance : public DrawEngine {
                                                  "sdf_mesh_data_ssbo");
       mesh_data_ssbo_count_ = mesh_data_count;
     }
-    else if (!mesh_gpu_data_.is_empty()) {
+    else if (mesh_data_changed_ && !mesh_gpu_data_.is_empty()) {
       GPU_storagebuf_update(mesh_data_ssbo_, mesh_gpu_data_.data());
     }
 
@@ -3409,7 +3477,7 @@ class Instance : public DrawEngine {
       }
     }
 
-    Vector<SdfAabbNodeGPU> gpu_nodes = bvh_tree_.build_gpu_nodes(SdfAabbTree::fat_bounds_radius);
+    Vector<SdfAabbNodeGPU> gpu_nodes = bvh_tree_.build_gpu_nodes(0.0f);
     const int bvh_count = math::max(int(gpu_nodes.size()), 1);
     const size_t bvh_buf_size = bvh_count * sizeof(SdfAabbNodeGPU);
 
@@ -3456,17 +3524,17 @@ class Instance : public DrawEngine {
     /* Coarsen the marcher while rendering at quarter-res: precision doesn't
      * matter when pixels are 4x as large, and the relaxed step/epsilon combo
      * converges much faster (helps frame rate while navigating). When we
-     * drop back to full-res, restore the UI-cached values. */
-    if (adaptive_lowres && !adaptive_lowres_active_) {
+     * drop back to full-res, restore the UI-cached values. sync_sdf_settings
+     * runs every frame and clobbers these, so re-apply unconditionally. */
+    if (adaptive_lowres) {
       sdf_max_steps_ = 128;
       sdf_ray_epsilon_ = 0.01f;
-      adaptive_lowres_active_ = true;
     }
-    else if (!adaptive_lowres && adaptive_lowres_active_) {
+    else {
       sdf_max_steps_ = ui_sdf_max_steps_;
       sdf_ray_epsilon_ = ui_sdf_ray_epsilon_;
-      adaptive_lowres_active_ = false;
     }
+    adaptive_lowres_active_ = adaptive_lowres;
 
     /* Textures sized to full viewport — only reallocate on viewport resize */
     int2 tex_size = int2(math::max(int(vp.x * resolution_scale_), 1),
@@ -3834,6 +3902,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
+    GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
 
     bind_ssbos(sh);
 
@@ -3859,6 +3928,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_color_tx_);
+    GPU_texture_image_unbind(gbuf_normal_tx_);
     GPU_shader_unbind();
   }
 
@@ -3875,13 +3945,10 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
-    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
 
     bind_ssbos(sh);
 
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
-    GPU_shader_uniform_1i(sh, "object_count", int(objects_.size()));
-    GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
 
     int dispatch_x = (render_size_.x + 7) / 8;
     int dispatch_y = (render_size_.y + 7) / 8;
@@ -3889,7 +3956,6 @@ class Instance : public DrawEngine {
 
     GPU_texture_image_unbind(gbuf_pos_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
-    GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
   }
 
@@ -4764,6 +4830,7 @@ static const char *sdf_csg_name(int t)
     case SDF_CSG_SHELL: return "Shell";
     case SDF_CSG_PUSH: return "Push";
     case SDF_CSG_AVOID: return "Avoid";
+    case SDF_CSG_PAINT: return "Paint";
     default: return "Unknown";
   }
 }

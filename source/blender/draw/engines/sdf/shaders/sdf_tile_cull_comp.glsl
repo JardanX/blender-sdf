@@ -71,15 +71,19 @@ void main()
   /* Bitonic sort — CSG evaluation requires ascending index order */
   {
     uint n = min(s_tileObjCount, uint(kMaxTileObjects));
+    uint sort_count = 1u;
+    while (sort_count < n) {
+      sort_count <<= 1u;
+    }
 
-    for (uint i = n + uint(local_idx); i < uint(kMaxTileObjects); i += 64u) {
+    for (uint i = n + uint(local_idx); i < sort_count; i += 64u) {
       s_tileObjList[i] = 0x7FFFFFFF;
     }
     barrier();
 
-    for (uint k = 2u; k <= uint(kMaxTileObjects); k <<= 1u) {
+    for (uint k = 2u; k <= sort_count; k <<= 1u) {
       for (uint j = k >> 1u; j > 0u; j >>= 1u) {
-        for (uint t = uint(local_idx); t < uint(kMaxTileObjects) / 2u; t += 64u) {
+        for (uint t = uint(local_idx); t < sort_count / 2u; t += 64u) {
           uint block = t / j;
           uint offset = t & (j - 1u);
           uint i = block * 2u * j + offset;

@@ -144,19 +144,19 @@ void main()
       }
       else {
         float prev = scene_dist;
-        scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+        scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
                                 obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
                                 obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
-        float t = csgColorFactor(prev, d, obj.csg_operation, obj.blend_type, obj.blend,
+        float t = csgColorFactor(prev, d, scene_dist, obj.csg_operation, obj.color_blend, obj.clearance,
                                  obj.shell_distance, obj.shell_op);
-        scene_color = mix(scene_color, obj.color.rgb, t);
+        scene_color = blendSDFColor(scene_color, obj.color.rgb, t, obj.color_blend_type);
       }
     }
     else {
       /* Grouped object: combine within group, flush later. */
       if (!grp_has_hit) {
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
-            obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+            obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) {
           grp_dist = d;
           grp_color = obj.color.rgb;
           grp_has_hit = true;
@@ -164,12 +164,12 @@ void main()
       }
       else {
         float prev = grp_dist;
-        grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+        grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
                               obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
                               obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
-        float t = csgColorFactor(prev, d, obj.csg_operation, obj.blend_type, obj.blend,
+        float t = csgColorFactor(prev, d, grp_dist, obj.csg_operation, obj.color_blend, obj.clearance,
                                  obj.shell_distance, obj.shell_op);
-        grp_color = mix(grp_color, obj.color.rgb, t);
+        grp_color = blendSDFColor(grp_color, obj.color.rgb, t, obj.color_blend_type);
       }
     }
   }

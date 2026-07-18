@@ -12,6 +12,7 @@
 
 #include "DNA_collection_types.h"
 #include "DNA_material_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
@@ -22,6 +23,7 @@
 
 #include "BKE_collection.hh"
 #include "BKE_context.hh"
+#include "BKE_idprop.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -1617,6 +1619,29 @@ static bool is_sdf_group_empty(Object *ob)
   return sdf->sdf_type == SDF_TYPE_GROUP;
 }
 
+static void sdf_group_owned_helpers_delete(Main *bmain, Object *group)
+{
+  Vector<Object *> helpers;
+  for (Object &candidate : bmain->objects) {
+    if (candidate.parent != group || !candidate.id.properties ||
+        !IDP_GetPropertyFromGroup(candidate.id.properties, "sdf_mirror_internal"))
+    {
+      continue;
+    }
+    helpers.append(&candidate);
+  }
+  for (Object *helper : helpers) {
+    for (ModifierData &md : group->modifiers) {
+      if (md.type == eModifierType_SDFMirror &&
+          reinterpret_cast<SDFMirrorModifierData &>(md).mirror_object == helper)
+      {
+        reinterpret_cast<SDFMirrorModifierData &>(md).mirror_object = nullptr;
+      }
+    }
+    BKE_id_delete(bmain, helper);
+  }
+}
+
 static bool is_sdf_stack_object(const Object *ob)
 {
   return ob && (ob->type == OB_SDF || (ob->type == OB_MESH && ob->is_sdf));
@@ -2044,12 +2069,13 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
         /* Delete old group if now empty */
         bool still_has_children = false;
         for (Object &check : bmain->objects) {
-          if (&check != ob && check.parent == old_group) {
+          if (&check != ob && check.parent == old_group && is_sdf_stack_object(&check)) {
             still_has_children = true;
             break;
           }
         }
         if (!still_has_children) {
+          sdf_group_owned_helpers_delete(bmain, old_group);
           ed::object::base_free_and_unlink(bmain, scene, old_group);
         }
       }
@@ -2082,12 +2108,13 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       /* Delete old group if now empty */
       bool still_has_children = false;
       for (Object &check : bmain->objects) {
-        if (&check != ob && check.parent == old_group) {
+        if (&check != ob && check.parent == old_group && is_sdf_stack_object(&check)) {
           still_has_children = true;
           break;
         }
       }
       if (!still_has_children) {
+        sdf_group_owned_helpers_delete(bmain, old_group);
         ed::object::base_free_and_unlink(bmain, scene, old_group);
       }
       continue;
@@ -2127,7 +2154,7 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       }
       bool has_children = false;
       for (Object &child_iter : bmain->objects) {
-        if (child_iter.parent == &ob_iter) {
+        if (child_iter.parent == &ob_iter && is_sdf_stack_object(&child_iter)) {
           has_children = true;
           break;
         }
@@ -2137,6 +2164,7 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       }
     }
     for (Object *grp : empty_groups) {
+      sdf_group_owned_helpers_delete(bmain, grp);
       ed::object::base_free_and_unlink(bmain, scene, grp);
     }
   }

@@ -3433,7 +3433,6 @@ static Object *convert_mesh_to_sdf(Base &base,
   Object *newob = get_object_for_conversion(base, info, r_new_base);
   BKE_sdf_object_settings_ensure(*newob);
   newob->is_sdf = true;
-  newob->sdf_normal_mode = RNA_enum_get(info.op_props, "mesh_sdf_normals");
   if (newob->sdf_index <= 0) {
     newob->sdf_index = BKE_sdf_next_index(info.bmain);
   }
@@ -4658,9 +4657,6 @@ static void object_convert_ui(bContext * /*C*/, wmOperator *op)
     layout.prop(op->ptr, "offset", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     layout.prop(op->ptr, "faces", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
-  else if (target == OB_SDF) {
-    layout.prop(op->ptr, "mesh_sdf_normals", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  }
 }
 
 void OBJECT_OT_convert(wmOperatorType *ot)
@@ -4702,25 +4698,6 @@ void OBJECT_OT_convert(wmOperatorType *ot)
 
   RNA_def_int(ot->srna, "thickness", 5, 1, 100, "Thickness", "", 1, 100);
   RNA_def_boolean(ot->srna, "faces", true, "Export Faces", "Export faces as filled strokes");
-  static const EnumPropertyItem mesh_sdf_normal_items[] = {
-      {SDF_MESH_NORMAL_SHARP,
-       "SHARP",
-       0,
-       "Sharp",
-       "Use geometric triangle normals for faceted shading"},
-      {SDF_MESH_NORMAL_SMOOTH,
-       "SMOOTH",
-       0,
-       "Smooth",
-       "Interpolate evaluated split corner normals"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-  RNA_def_enum(ot->srna,
-               "mesh_sdf_normals",
-               mesh_sdf_normal_items,
-               SDF_MESH_NORMAL_SMOOTH,
-               "Mesh Normals",
-               "Analytic surface normal mode for mesh SDF shading");
   RNA_def_float_distance(ot->srna,
                          "offset",
                          0.01f,
@@ -4770,29 +4747,6 @@ static void object_add_sync_rigid_body(Main *bmain, Object *object_src, Object *
   }
 }
 
-/** Resolve actual new SDF data for a duplicated object.
- * Before copy_object_set_idnew() remaps, ob_new->data may still point to the
- * source SDF. Follow id.newid to find the actual new copy. For linked
- * duplicates (no data copy), returns the shared SDF and sets is_linked. */
-static SDF *sdf_resolve_new_data(Object *object_src, Object *object_new, bool *r_is_linked)
-{
-  *r_is_linked = false;
-  if (!object_new->data) {
-    return nullptr;
-  }
-  ID *new_data_id = static_cast<ID *>(object_new->data);
-  SDF *sdf_src = id_cast<SDF *>(object_src->data);
-
-  if (new_data_id == &sdf_src->id) {
-    if (sdf_src->id.newid) {
-      return id_cast<SDF *>(sdf_src->id.newid);
-    }
-    *r_is_linked = true;
-    return sdf_src;
-  }
-  return id_cast<SDF *>(new_data_id);
-}
-
 /* MATHOPS: Removed — old SDFGroup sync (replaced by parent-child groups) */
 
 /** Create new mirror empties for duplicated SDF objects. */
@@ -4806,13 +4760,6 @@ static void object_add_sync_sdf_mirrors(Main *bmain,
       !ob_src->data)
   {
     return;
-  }
-  if (ob_new->type == OB_SDF) {
-    bool is_linked = false;
-    SDF *sdf = sdf_resolve_new_data(ob_src, ob_new, &is_linked);
-    if (!sdf || is_linked) {
-      return;
-    }
   }
   for (ModifierData &md : ob_new->modifiers) {
     if (md.type != eModifierType_SDFMirror) {

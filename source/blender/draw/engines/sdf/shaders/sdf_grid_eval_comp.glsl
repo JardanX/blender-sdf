@@ -142,7 +142,7 @@ void main()
         if (obj.csg_operation == 0) { scene_dist = d; }
       }
       else {
-        scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+        scene_dist = combineCSG(scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
                                 obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
                                 obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
@@ -150,13 +150,13 @@ void main()
     else {
       if (!grp_has_hit) {
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
-            obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+            obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) {
           grp_dist = d;
           grp_has_hit = true;
         }
       }
       else {
-        grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+        grp_dist = combineCSG(grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
                               obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top,
                               obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }

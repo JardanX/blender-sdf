@@ -23,6 +23,9 @@
     .blend = 0.1f, \
     .blend_type = 1, /* SDF_BLEND_SMOOTH */ \
     .csg_operation = 0, \
+    .clearance = 0.0f, \
+    .color_blend = 0.1f, \
+    .color_blend_type = 0, \
     .shell_distance = 0.2f, \
     .shell_mode = 0, \
     .shell_op = 0, \

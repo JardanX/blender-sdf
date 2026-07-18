@@ -461,6 +461,13 @@ static void rna_Object_sdf_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, &ob->id);
 }
 
+static bool rna_Object_sdf_runtime_valid_get(PointerRNA *ptr)
+{
+  const Object *ob = reinterpret_cast<const Object *>(ptr->owner_id);
+  SDFMeshRuntimeSnapshot snapshot;
+  return BKE_sdf_mesh_runtime_snapshot(*ob, snapshot);
+}
+
 static void rna_Object_sdf_enable_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
 {
   Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
@@ -2345,21 +2352,17 @@ static void rna_LightLinking_collection_update(Main *bmain, Scene * /*scene*/, P
 
 namespace blender {
 
-static const EnumPropertyItem rna_enum_object_sdf_normal_items[] = {
-    {SDF_MESH_NORMAL_SHARP, "SHARP", 0, "Sharp", "Use geometric triangle normals"},
-    {SDF_MESH_NORMAL_SMOOTH,
-     "SMOOTH",
-     0,
-     "Smooth",
-     "Interpolate the mesh's split corner normals"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 static const EnumPropertyItem rna_enum_object_sdf_blend_type_items[] = {
     {SDF_BLEND_LINEAR, "LINEAR", ICON_SDF_BLEND_LINEAR, "Linear", "Hard union/difference"},
     {SDF_BLEND_SMOOTH, "SMOOTH", ICON_SDF_BLEND_SMOOTH, "Smooth", "Smooth blend"},
     {SDF_BLEND_CHAMFER, "CHAMFER", ICON_SDF_BLEND_CHAMFER, "Chamfer", "Chamfer blend"},
     {SDF_BLEND_ROUND, "ROUND", ICON_SDF_BLEND_ROUND, "Round", "Spherical round blend"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_object_sdf_color_blend_type_items[] = {
+    {SDF_COLOR_BLEND_RGB, "RGB", 0, "RGB", "Blend display colors in RGB space"},
+    {SDF_COLOR_BLEND_HUE, "HUE", 0, "Hue", "Blend hues through the color wheel"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2374,6 +2377,7 @@ static const EnumPropertyItem rna_enum_object_sdf_csg_items[] = {
     {SDF_CSG_SHELL, "SHELL", ICON_SDF_CSG_EXTRUDE, "Shell", "Shell/extrusion operation"},
     {SDF_CSG_PUSH, "PUSH", ICON_SDF_CSG_PUSH, "Push", "Subtract while keeping this object visible"},
     {SDF_CSG_AVOID, "AVOID", ICON_SDF_CSG_AVOID, "Avoid", "Carve this object by other objects"},
+    {SDF_CSG_PAINT, "PAINT", ICON_COLOR, "Paint", "Keep the field shape and paint this SDF color"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3088,10 +3092,11 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "SDF", "Render this Mesh as an analytic SDF");
   RNA_def_property_update(prop, 0, "rna_Object_sdf_enable_update");
 
-  prop = RNA_def_property(srna, "sdf_normal_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_object_sdf_normal_items);
-  RNA_def_property_ui_text(prop, "Normals", "Analytic mesh surface normal mode");
-  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+  prop = RNA_def_property(srna, "sdf_runtime_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Object_sdf_runtime_valid_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "SDF Runtime Valid", "Whether the evaluated Mesh has a valid SDF payload");
 
   prop = RNA_def_property(srna, "sdf_index", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "sdf_index");
@@ -3102,6 +3107,25 @@ static void rna_def_object(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sdf_csg_operation", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_object_sdf_csg_items);
   RNA_def_property_ui_text(prop, "Operation", "Boolean operation in the SDF composition stack");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_clearance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_clearance");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Clearance", "Space kept between this operand and the field");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_color_blend", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_color_blend");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Color Blend", "Color transition width independent of geometry");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_color_blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_sdf_color_blend_type_items);
+  RNA_def_property_ui_text(prop, "Color Blend Type", "Color interpolation method");
   RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
 
   prop = RNA_def_property(srna, "sdf_blend", PROP_FLOAT, PROP_NONE);
