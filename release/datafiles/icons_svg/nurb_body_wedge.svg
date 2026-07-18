@@ -1,8 +1,0 @@
-<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
-  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="120">
-    <path d="M330 540l520-260 430 260v560L850 1320 330 1100z"/>
-    <path d="M330 540l520 780"/>
-    <path d="M850 280v1040"/>
-    <path d="M850 280l430 820"/>
-  </g>
-</svg>

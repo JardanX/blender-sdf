@@ -828,28 +828,6 @@ class VIEW3D_HT_header(Header):
         layout.template_header_3D_mode()
 
         # Contains buttons like Mode, Pivot, Layer, Mesh Select Mode...
-        if object_mode == 'OBJECT':
-            select_mode = context.tool_settings.nurb_body_select_mode
-            row = layout.row(align=True)
-            row.operator(
-                "object.nurb_body_select_mode",
-                text="",
-                icon='EDGESEL',
-                depress=(select_mode == 'EDGE'),
-            ).mode = 'EDGE'
-            row.operator(
-                "object.nurb_body_select_mode",
-                text="",
-                icon='FACESEL',
-                depress=(select_mode == 'FACE'),
-            ).mode = 'FACE'
-            row.operator(
-                "object.nurb_body_select_mode",
-                text="",
-                icon='OBJECT_DATAMODE',
-                depress=(select_mode == 'OBJECT'),
-            ).mode = 'OBJECT'
-
         if obj:
             # Particle edit
             if object_mode == 'PARTICLE_EDIT':
@@ -2549,22 +2527,6 @@ class VIEW3D_MT_sdf_add(Menu):
         layout.operator("object.sdf_add", text="SDF Polygon", icon='SDF_POLYGON').type = 'POLYGON'
 
 
-class VIEW3D_MT_nurb_body_add(Menu):
-    bl_idname = "VIEW3D_MT_nurb_body_add"
-    bl_label = "NURB Body"
-    bl_options = {'SEARCH_ON_KEY_PRESS'}
-
-    def draw(self, _context):
-        layout = self.layout
-        layout.operator_context = 'EXEC_REGION_WIN'
-        layout.operator("object.nurb_body_add", text="NURB Box", icon='NURB_BODY_BOX').type = 'BOX'
-        layout.operator("object.nurb_body_add", text="NURB Sphere", icon='NURB_BODY_SPHERE').type = 'SPHERE'
-        layout.operator("object.nurb_body_add", text="NURB Cylinder", icon='NURB_BODY_CYLINDER').type = 'CYLINDER'
-        layout.operator("object.nurb_body_add", text="NURB Cone", icon='NURB_BODY_CONE').type = 'CONE'
-        layout.operator("object.nurb_body_add", text="NURB Torus", icon='NURB_BODY_TORUS').type = 'TORUS'
-        layout.operator("object.nurb_body_add", text="NURB Wedge", icon='NURB_BODY_WEDGE').type = 'WEDGE'
-
-
 class VIEW3D_MT_volume_add(Menu):
     bl_idname = "VIEW3D_MT_volume_add"
     bl_label = "Volume"
@@ -2654,7 +2616,6 @@ class VIEW3D_MT_add(Menu):
         layout.operator_context = 'EXEC_REGION_WIN'
 
         layout.menu("VIEW3D_MT_sdf_add", icon='OUTLINER_OB_SDF')
-        layout.menu("VIEW3D_MT_nurb_body_add", icon='OUTLINER_OB_NURB_BODY')
 
         layout.separator()
 
@@ -7082,24 +7043,6 @@ class VIEW3D_PT_overlay_sdf(Panel):
         col.prop(overlay, "sdf_outline_opacity", text="Line Opacity")
 
 
-class VIEW3D_PT_overlay_nurb_body(Panel):
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'HEADER'
-    bl_parent_id = "VIEW3D_PT_overlay"
-    bl_label = "NURB Body"
-
-    def draw(self, context):
-        layout = self.layout
-        view = context.space_data
-        overlay = view.overlay
-        display_all = overlay.show_overlays
-
-        col = layout.column()
-        col.active = display_all
-
-        col.prop(overlay, "nurb_body_line_thickness", text="Line Thickness")
-
-
 class VIEW3D_PT_overlay_viewer_node(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -9159,7 +9102,6 @@ classes = (
     VIEW3D_MT_curve_add,
     VIEW3D_MT_surface_add,
     VIEW3D_MT_sdf_add,
-    VIEW3D_MT_nurb_body_add,
     TOPBAR_MT_edit_curve_add,
     TOPBAR_MT_edit_armature_add,
     VIEW3D_MT_armature_add,
@@ -9327,7 +9269,6 @@ classes = (
     VIEW3D_PT_overlay_object,
     VIEW3D_PT_overlay_geometry,
     VIEW3D_PT_overlay_sdf,
-    VIEW3D_PT_overlay_nurb_body,
     VIEW3D_PT_overlay_viewer_node,
     VIEW3D_PT_overlay_motion_tracking,
     VIEW3D_PT_overlay_edit_mesh,

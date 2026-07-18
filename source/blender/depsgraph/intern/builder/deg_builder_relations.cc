@@ -566,7 +566,6 @@ void DepsgraphRelationBuilder::build_id(ID *id)
     case ID_GD_LEGACY:
     case ID_GP:
     case ID_SF:
-    case ID_NB:
       build_object_data_geometry_datablock(id);
       break;
     case ID_SPK:
@@ -994,7 +993,6 @@ void DepsgraphRelationBuilder::build_object_data(Object *object)
     case OB_POINTCLOUD:
     case OB_VOLUME:
     case OB_SDF:
-    case OB_NURB_BODY:
     case OB_GREASE_PENCIL: {
       build_object_data_geometry(object);
       /* TODO(sergey): Only for until we support granular
@@ -2792,8 +2790,6 @@ void DepsgraphRelationBuilder::build_object_data_geometry_datablock(ID *obdata)
     case ID_PT:
       break;
     case ID_SF:
-      break;
-    case ID_NB:
       break;
     case ID_VO: {
       Volume *volume = id_cast<Volume *>(obdata);

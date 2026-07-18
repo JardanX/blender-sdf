@@ -22,7 +22,6 @@
 #include "DNA_mesh_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_modifier_types.h"
-#include "DNA_nurb_body_types.h"
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
@@ -169,7 +168,6 @@ static void get_element_operation_type(
       case ID_PT:
       case ID_VO:
       case ID_SF:
-      case ID_NB:
       case ID_GP:
         is_standard_id = true;
         break;
@@ -325,12 +323,6 @@ static void unlink_material_fn(bContext * /*C*/,
       SDF *sdf = id_cast<SDF *>(tsep->id);
       totcol = sdf->totcol;
       matar = sdf->mat;
-      break;
-    }
-    case ID_NB: {
-      NurbBody *body = id_cast<NurbBody *>(tsep->id);
-      totcol = body->totcol;
-      matar = body->mat;
       break;
     }
     default:

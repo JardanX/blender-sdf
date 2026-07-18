@@ -1106,13 +1106,6 @@ static wmOperatorStatus object_select_all_exec(bContext *C, wmOperator *op)
   ViewLayer *view_layer = CTX_data_view_layer(C);
   View3D *v3d = CTX_wm_view3d(C);
   int action = RNA_enum_get(op->ptr, "action");
-  bool nurb_body_edge_select_handled = false;
-  if (nurb_body_select_all_edges_from_context(C, action, &nurb_body_edge_select_handled)) {
-    return OPERATOR_FINISHED;
-  }
-  if (nurb_body_edge_select_handled) {
-    return OPERATOR_CANCELLED;
-  }
 
   bool any_visible = false;
 

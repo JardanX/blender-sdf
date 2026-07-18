@@ -616,7 +616,6 @@ NodeType geometry_tag_to_component(const ID *id)
         case OB_VOLUME:
         case OB_GREASE_PENCIL:
         case OB_SDF:
-        case OB_NURB_BODY:
           return NodeType::GEOMETRY;
         case OB_ARMATURE:
           return NodeType::EVAL_POSE;
@@ -632,7 +631,6 @@ NodeType geometry_tag_to_component(const ID *id)
     case ID_VO:
     case ID_GR:
     case ID_SF:
-    case ID_NB:
       return NodeType::GEOMETRY;
     case ID_PA: /* Particles */
       return NodeType::UNDEFINED;
