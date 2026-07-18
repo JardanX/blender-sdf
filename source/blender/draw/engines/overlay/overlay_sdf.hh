@@ -279,9 +279,13 @@ class Sdfs : Overlay {
       if (entries_[ei].sorted_index < 0) {
         entries_[ei].sorted_index = si;
       }
+      /* Use the per-object entry index (not the per-sub-object sorted index) so all
+       * CSG/array parts of one SDF object share an outline id. Otherwise the
+       * per-pixel winner flips across a blended surface at low res and the outline
+       * is drawn on every internal seam (a grid). Only the silhouette remains. */
       uint32_t color_id = entries_[ei].outline_packed_id >> 14u;
       uint32_t new_packed = (color_id << 14u) | SDF_STRICT_DEPTH_OUTLINE_ID_FLAG |
-                            (uint32_t(si + 1) & 0x1FFFu);
+                            (uint32_t(ei + 1) & 0x1FFFu);
       outline_table[si] = new_packed;
       select_table_[si] = entries_[ei].select_id;
     }
@@ -325,6 +329,13 @@ class Sdfs : Overlay {
     gpu::Texture *depth_tx = sdf::sdf_depth_texture_get();
     gpu::Texture *gbuf_tx = sdf::sdf_gbuf_color_texture_get();
     if (!depth_tx || !gbuf_tx) {
+      return;
+    }
+
+    /* Adaptive low-res navigation renders the G-buffer at quarter resolution; an
+     * outline traced from it is blocky, so suppress it until the view is idle
+     * again. Static resolution scaling keeps uv_scale at 1, so it is unaffected. */
+    if (sdf::sdf_uv_scale_get().x < 0.99f) {
       return;
     }
     if (!fullscreen_batch_) {

@@ -233,7 +233,6 @@ enum ShaderIndex {
   SH_SHADE_COMP,
   SH_BLIT,
   SH_FXAA,
-  SH_SHARPEN,
   SH_COUNT,
 };
 
@@ -248,7 +247,6 @@ static constexpr const char *s_shader_info_names[SH_COUNT] = {
     "sdf_shade_comp",
     "sdf_blit",
     "sdf_fxaa",
-    "sdf_sharpen",
 };
 
 static gpu::StaticShader s_shaders[SH_COUNT];
@@ -306,7 +304,6 @@ class Instance : public DrawEngine {
   gpu::Shader *shade_comp_sh() { return sdf_shader_get(SH_SHADE_COMP); }
   gpu::Shader *blit_sh() { return sdf_shader_get(SH_BLIT); }
   gpu::Shader *fxaa_sh() { return sdf_shader_get(SH_FXAA); }
-  gpu::Shader *sharpen_sh() { return sdf_shader_get(SH_SHARPEN); }
 
   gpu::Texture *comp_color_tx_ = nullptr;
   gpu::Texture *comp_depth_tx_ = nullptr;
@@ -315,9 +312,6 @@ class Instance : public DrawEngine {
   gpu::Texture *gbuf_normal_tx_ = nullptr;
   gpu::Texture *march_color_tx_ = nullptr;
   gpu::FrameBuffer *march_fb_ = nullptr;
-  gpu::Texture *sharpen_color_tx_ = nullptr;
-  gpu::FrameBuffer *sharpen_fb_ = nullptr;
-  int2 sharpen_size_ = int2(0);
   int2 render_size_ = int2(0);
   int2 prev_render_size_ = int2(0);
   int2 texture_size_ = int2(0);
@@ -325,9 +319,6 @@ class Instance : public DrawEngine {
   int2 fxaa_size_ = int2(0);
   float resolution_scale_ = 1.0f;
   bool adaptive_resolution_ = false;
-  int upscale_quality_ = 3;
-  bool sharpen_enabled_ = false;
-  float sharpen_sharpness_ = 0.5f;
   bool scene_changed_ = false;
   bool view_changed_ = false;
   bool mesh_changed_ = false;
@@ -2727,10 +2718,6 @@ class Instance : public DrawEngine {
     GPU_debug_group_end();
     PROF_END();
 
-    GPU_debug_group_begin("SDF Sharpen");
-    draw_sharpen();
-    GPU_debug_group_end();
-
     PROF_START("FXAA");
     GPU_debug_group_begin("SDF FXAA");
     draw_fxaa();
@@ -2846,13 +2833,9 @@ class Instance : public DrawEngine {
     resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
     adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
     use_frustum_cull_ = s.sdf_frustum_cull != 0;
-    upscale_quality_ = s.sdf_upscale_quality;
-    sharpen_enabled_ = s.sdf_upscale_sharpen != 0;
-    sharpen_sharpness_ = s.sdf_upscale_sharpness;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
-    /* First post-process target is shared by FXAA and sharpening. */
-    if (!new_fxaa && !sharpen_enabled_) {
+    if (!new_fxaa && fxaa_enabled_) {
       if (march_color_tx_) {
         GPU_texture_free(march_color_tx_);
         march_color_tx_ = nullptr;
@@ -2862,18 +2845,6 @@ class Instance : public DrawEngine {
         march_fb_ = nullptr;
       }
       fxaa_size_ = int2(0);
-    }
-    /* Second target only needed when both passes are chained. */
-    if (!(new_fxaa && sharpen_enabled_)) {
-      if (sharpen_color_tx_) {
-        GPU_texture_free(sharpen_color_tx_);
-        sharpen_color_tx_ = nullptr;
-      }
-      if (sharpen_fb_) {
-        GPU_framebuffer_free(sharpen_fb_);
-        sharpen_fb_ = nullptr;
-      }
-      sharpen_size_ = int2(0);
     }
     fxaa_enabled_ = new_fxaa;
   }
@@ -3704,7 +3675,7 @@ class Instance : public DrawEngine {
     if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
       GPU_framebuffer_bind(dfbl->depth_only_fb);
     }
-    else if (fxaa_enabled_ || sharpen_enabled_) {
+    else if (fxaa_enabled_) {
       ensure_fxaa_target();
       GPU_framebuffer_bind(march_fb_);
       float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -3722,7 +3693,6 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(blit_sh());
     GPU_shader_uniform_1i(blit_sh(), "debug_bvh_views", debug_bvh_views_);
-    GPU_shader_uniform_1i(blit_sh(), "upscale_quality", upscale_quality_);
 
     float bg[3] = {0.0f, 0.0f, 0.0f};
     if (draw_ctx_->scene && draw_ctx_->v3d) {
@@ -3733,27 +3703,13 @@ class Instance : public DrawEngine {
     float uv_sc[2] = {float(render_size_.x) / float(texture_size_.x),
                        float(render_size_.y) / float(texture_size_.y)};
     GPU_shader_uniform_2fv(blit_sh(), "uv_scale", uv_sc);
-    GPU_shader_uniform_2iv(blit_sh(), "src_size", &render_size_.x);
-    GPU_shader_uniform_2iv(blit_sh(), "tex_size", &texture_size_.x);
-    GPU_shader_uniform_2iv(blit_sh(), "out_size", &viewport_size_.x);
 
-    /* Linear filtering only used by the bilinear path; other modes texelFetch. */
-    bool linear_color = (upscale_quality_ == 1);
     int color_slot = GPU_shader_get_sampler_binding(blit_sh(), "color_tx");
-    GPU_texture_filter_mode(comp_color_tx_, linear_color);
+    GPU_texture_filter_mode(comp_color_tx_, true);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh(), "depth_tx");
     GPU_texture_filter_mode(comp_depth_tx_, false);
     GPU_texture_bind(comp_depth_tx_, depth_slot);
-    int gn_slot = GPU_shader_get_sampler_binding(blit_sh(), "gbuf_normal_tx");
-    GPU_texture_filter_mode(gbuf_normal_tx_, false);
-    GPU_texture_bind(gbuf_normal_tx_, gn_slot);
-    int gp_slot = GPU_shader_get_sampler_binding(blit_sh(), "gbuf_pos_tx");
-    GPU_texture_filter_mode(gbuf_pos_tx_, false);
-    GPU_texture_bind(gbuf_pos_tx_, gp_slot);
-    int gc_slot = GPU_shader_get_sampler_binding(blit_sh(), "gbuf_color_tx");
-    GPU_texture_filter_mode(gbuf_color_tx_, false);
-    GPU_texture_bind(gbuf_color_tx_, gc_slot);
 
     if (fullscreen_batch_ == nullptr) {
       fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
@@ -3763,87 +3719,7 @@ class Instance : public DrawEngine {
 
     GPU_texture_unbind(comp_color_tx_);
     GPU_texture_unbind(comp_depth_tx_);
-    GPU_texture_unbind(gbuf_normal_tx_);
-    GPU_texture_unbind(gbuf_pos_tx_);
-    GPU_texture_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
-  }
-
-  /* Contrast-adaptive sharpen post-process */
-
-  void ensure_sharpen_target()
-  {
-    const int2 vp = int2(draw_ctx_->viewport_size_get());
-    if (sharpen_color_tx_ != nullptr && sharpen_size_ == vp) {
-      return;
-    }
-
-    if (sharpen_color_tx_) {
-      GPU_texture_free(sharpen_color_tx_);
-      sharpen_color_tx_ = nullptr;
-    }
-    if (sharpen_fb_) {
-      GPU_framebuffer_free(sharpen_fb_);
-      sharpen_fb_ = nullptr;
-    }
-
-    sharpen_size_ = vp;
-
-    eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
-    sharpen_color_tx_ = GPU_texture_create_2d(
-        "sdf_sharpen_color", vp.x, vp.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
-
-    sharpen_fb_ = GPU_framebuffer_create("sdf_sharpen_fb");
-    GPU_framebuffer_texture_attach(sharpen_fb_, sharpen_color_tx_, 0, 0);
-  }
-
-  void draw_sharpen()
-  {
-    if (!sharpen_enabled_ || sharpen_sh() == nullptr || march_color_tx_ == nullptr) {
-      return;
-    }
-    if (draw_ctx_->is_depth() || (draw_ctx_->v3d && draw_ctx_->v3d->shading.type == OB_RENDER)) {
-      return;
-    }
-
-    /* Chain into the FXAA input when both are enabled, else straight to screen. */
-    if (fxaa_enabled_) {
-      ensure_sharpen_target();
-      GPU_framebuffer_bind(sharpen_fb_);
-      float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-      GPU_framebuffer_clear_color(sharpen_fb_, clear_color);
-    }
-    else {
-      DefaultFramebufferList *dfbl = draw_ctx_->viewport_framebuffer_list_get();
-      GPU_framebuffer_bind(dfbl->default_fb);
-    }
-
-    GPU_depth_test(GPU_DEPTH_NONE);
-    GPU_depth_mask(false);
-    GPU_blend(GPU_BLEND_ALPHA);
-    GPU_face_culling(GPU_CULL_NONE);
-    GPU_stencil_test(GPU_STENCIL_NONE);
-
-    GPU_shader_bind(sharpen_sh());
-    GPU_shader_uniform_1f(sharpen_sh(), "sharpness", sharpen_sharpness_);
-    GPU_shader_uniform_2iv(sharpen_sh(), "tex_size", &viewport_size_.x);
-
-    int color_slot = GPU_shader_get_sampler_binding(sharpen_sh(), "color_tx");
-    GPU_texture_filter_mode(march_color_tx_, false);
-    GPU_texture_bind(march_color_tx_, color_slot);
-
-    if (fullscreen_batch_ == nullptr) {
-      fullscreen_batch_ = GPU_batch_create_procedural(GPU_PRIM_TRIS, 3);
-    }
-    GPU_batch_set_shader(fullscreen_batch_, sharpen_sh());
-    GPU_batch_draw(fullscreen_batch_);
-
-    GPU_texture_unbind(march_color_tx_);
-    GPU_shader_unbind();
-
-    GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-    GPU_depth_mask(true);
-    GPU_blend(GPU_BLEND_NONE);
   }
 
   /* FXAA post-process */
@@ -3897,10 +3773,9 @@ class Instance : public DrawEngine {
 
     GPU_shader_bind(fxaa_sh());
 
-    gpu::Texture *fxaa_input = sharpen_enabled_ ? sharpen_color_tx_ : march_color_tx_;
     int color_slot = GPU_shader_get_sampler_binding(fxaa_sh(), "color_tx");
-    GPU_texture_filter_mode(fxaa_input, true);
-    GPU_texture_bind(fxaa_input, color_slot);
+    GPU_texture_filter_mode(march_color_tx_, true);
+    GPU_texture_bind(march_color_tx_, color_slot);
 
     float2 rcp = float2(1.0f / float(viewport_size_.x), 1.0f / float(viewport_size_.y));
     GPU_shader_uniform_2fv(fxaa_sh(), "rcpFrame", rcp);
@@ -3911,7 +3786,7 @@ class Instance : public DrawEngine {
     GPU_batch_set_shader(fullscreen_batch_, fxaa_sh());
     GPU_batch_draw(fullscreen_batch_);
 
-    GPU_texture_unbind(fxaa_input);
+    GPU_texture_unbind(march_color_tx_);
     GPU_shader_unbind();
 
     GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
@@ -3966,12 +3841,6 @@ class Instance : public DrawEngine {
     }
     if (march_fb_) {
       GPU_framebuffer_free(march_fb_);
-    }
-    if (sharpen_color_tx_) {
-      GPU_texture_free(sharpen_color_tx_);
-    }
-    if (sharpen_fb_) {
-      GPU_framebuffer_free(sharpen_fb_);
     }
     if (matcap_tx_) {
       GPU_texture_free(matcap_tx_);

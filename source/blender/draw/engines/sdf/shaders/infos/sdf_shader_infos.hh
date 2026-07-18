@@ -254,36 +254,13 @@ GPU_SHADER_CREATE_INFO(sdf_blit)
 DO_STATIC_COMPILATION()
 SAMPLER(0, sampler2D, color_tx)
 SAMPLER(1, sampler2D, depth_tx)
-SAMPLER(2, sampler2D, gbuf_normal_tx)
-SAMPLER(3, sampler2D, gbuf_pos_tx)
-SAMPLER(4, sampler2D, gbuf_color_tx)
 PUSH_CONSTANT(int, debug_bvh_views)
-PUSH_CONSTANT(int, upscale_quality)
 PUSH_CONSTANT(float3, bg_color)
 PUSH_CONSTANT(float2, uv_scale)
-PUSH_CONSTANT(int2, src_size)
-PUSH_CONSTANT(int2, tex_size)
-PUSH_CONSTANT(int2, out_size)
 FRAGMENT_OUT(0, float4, out_color)
 DEPTH_WRITE(DepthWrite::ANY)
 ADDITIONAL_INFO(gpu_fullscreen)
 FRAGMENT_SOURCE("sdf_blit_frag.glsl")
-GPU_SHADER_CREATE_END()
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name SDF Sharpen (contrast-adaptive sharpening post pass)
- * \{ */
-
-GPU_SHADER_CREATE_INFO(sdf_sharpen)
-DO_STATIC_COMPILATION()
-SAMPLER(0, sampler2D, color_tx)
-PUSH_CONSTANT(float, sharpness)
-PUSH_CONSTANT(int2, tex_size)
-FRAGMENT_OUT(0, float4, out_color)
-ADDITIONAL_INFO(gpu_fullscreen)
-FRAGMENT_SOURCE("sdf_sharpen_frag.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */

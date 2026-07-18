@@ -622,9 +622,9 @@ struct View3DShading {
   char sdf_adaptive_resolution = 0;
   char sdf_frustum_cull = 1;
   char sdf_fd_normals = 0;
-  /* Upscale algorithm for low-res render: 0 nearest, 1 bilinear, 2 bicubic, 3 edge-aware. */
-  char sdf_upscale_quality = 3;
-  char sdf_upscale_sharpen = 0;
+  /* Deprecated: upscaling is bilinear-only. Kept as tombstones for .blend compat. */
+  char sdf_upscale_quality = 4;
+  char sdf_upscale_sharpen = 1;
 
   int sdf_max_steps = 128;
   float sdf_ray_epsilon = 0.005f;
