@@ -2714,47 +2714,28 @@ Reworked the SDF shape/scale model and the array feature, and fixed picking to m
 
 Changes are additive: `sdf.size` is unchanged, so the addon keeps working. For the addon team: new optional named shape props (`cone_radius_top`, etc.); array blend is now always smooth (`blend_type` ignored); array `rotation_offset` ignored.
 
-## Low-Res Render Upscaling — Edge-Aware (JBU) + Sharpening (2026-06-20)
+## Low-Res Render Upscaling — Bilinear + Outline Fix (2026-06-20)
 
-Added selectable upscaling quality for the low-res SDF render, replacing the previous nearest-neighbor blit. The engine already rendered at `sdf_resolution_scale` and stretched the result in the blit; this adds proper Nearest / Bilinear / Bicubic / Edge-Aware filters plus an optional contrast-adaptive sharpening pass.
+The low-res SDF render (`sdf_resolution_scale`) is upscaled to the viewport with **bilinear** filtering in the blit. An earlier iteration added selectable Nearest / Bicubic / Edge-Aware (JBU) / FSR-EASU modes + a CAS/RCAS sharpen pass + soft-coverage silhouette AA; these were removed in favor of plain bilinear (cleaner, and the fancier methods didn't help flat-shaded CSG content). The `sdf_upscale_*` DNA fields are kept as inert tombstones for .blend compat.
 
-### What & why
+### Outline fix
 
-- **Edge-aware (joint bilateral) upsample** is the default. It weights low-res color taps by spatial distance, surface plane distance (`gbuf_pos`), normal similarity (`gbuf_normal`), and a hard object-ID gate (`gbuf_color.w`), so color does not bleed across silhouettes or material boundaries — the failure mode of plain bilinear on an implicit surface. No new G-buffers were needed; all guides already existed.
-- **Sharpening** is AMD CAS / FSR-RCAS style: a 3×3 contrast-adaptive unsharp limited to the local min/max to avoid halos. Runs as a full-res post pass between blit and FXAA, with a `sdf_upscale_sharpness` slider.
-- Temporal upscaling (FSR2/DLSS-style) was scoped out: the engine has no motion vectors, history, or jitter. Spatial edge-aware was the correct first target.
-
-### New Files
-
-| File | Purpose |
-|------|---------|
-| `draw/engines/sdf/shaders/sdf_sharpen_frag.glsl` | Contrast-adaptive sharpening (CAS/RCAS) post pass |
+The always-on SDF object outline (Blender's selection outline, fed by `sdf_outline_prepass`) gridded across faces at low res: each sub-object/array-copy got a distinct outline id (`si+1`), so the per-pixel CSG "winner" flipped across a blended surface and Blender drew an outline on every internal seam. Fixed by giving all parts of one SDF object the same outline id (entry index `ei+1`), so only the true silhouette is outlined. The outline is also suppressed during adaptive (quarter-res) navigation.
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `makesdna/DNA_view3d_types.h` | `View3DShading`: `sdf_upscale_quality` (char enum), `sdf_upscale_sharpen` (char), `sdf_upscale_sharpness` (float) |
-| `makesrna/intern/rna_space.cc` | RNA enum + bool + float props for the three fields |
-| `scripts/startup/bl_ui/properties_render.py` | Upscale quality dropdown + sharpen toggle + sharpness slider |
-| `draw/engines/sdf/shaders/sdf_blit_frag.glsl` | Rewritten: nearest / bilinear / bicubic (Catmull-Rom) / edge-aware (JBU) modes; validity from `gbuf_pos.w`; debug views fall back to nearest; short-circuits to direct fetch at 100% scale |
-| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_blit` gains `gbuf_normal/pos/color` samplers + `upscale_quality`, `src_size`, `tex_size` push constants; new `sdf_sharpen` create-info |
-| `draw/engines/sdf/sdf_engine.cc` | `SH_SHARPEN` shader, `draw_sharpen()` + `ensure_sharpen_target()`, blit binds guide buffers + new uniforms, post chain blit → sharpen → FXAA with a second intermediate when both enabled, settings sync, destructor cleanup |
-| `draw/CMakeLists.txt` | Register `sdf_sharpen_frag.glsl` |
-| `blenloader/intern/versioning_500.cc`, `BKE_blender_version.h` | Default existing files/startup to edge-aware + sharpness 0.5; subversion bumped to 38 |
-
-### Post-process chain
-
-`blit (upscale) → [sharpen] → [FXAA] → viewport`. The blit renders to the shared intermediate (`march_*`) when either post pass is active; a second target (`sharpen_*`) is allocated only when sharpen and FXAA are both enabled.
-
-### Notes / limits
-
-- Object-ID gate relies on `gbuf_color.w` holding `original_index` as float16 — exact only up to ~2048 objects.
-- Thin features below one low-res texel still cannot be recovered by any spatial filter; keep `sdf_resolution_scale` ≥ ~67% for fine detail.
+| `draw/engines/sdf/shaders/sdf_blit_frag.glsl` | Plain bilinear upscale (color linear-filtered, depth point-sampled, hard background discard) |
+| `draw/engines/overlay/overlay_sdf.hh` | Outline id keyed per SDF object (`ei`) not per sub-object (`si`) → silhouette-only, no internal grid; outline suppressed during adaptive low-res nav |
+| `makesdna/DNA_view3d_types.h` | `sdf_upscale_quality` / `sdf_upscale_sharpen` / `sdf_upscale_sharpness` kept as deprecated tombstones |
+| `makesrna/intern/rna_space.cc`, `scripts/startup/bl_ui/properties_render.py` | Removed upscale-quality / sharpen / sharpness RNA props + UI |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh`, `sdf_engine.cc`, `draw/CMakeLists.txt` | Removed EASU/edge-aware/bicubic shader code, the `sdf_sharpen` pass/shader, and the upscale-quality enum plumbing |
+| `blenloader/intern/versioning_500.cc`, `BKE_blender_version.h` | Subversion 39; versioning block now writes the inert tombstone fields |
 
 ### MathOPS addon (separate repo — not edited here)
 
-No addon impact: changes are viewport-shading settings only; no `SDF` struct or RNA fields the addon uses were touched.
+No addon impact: viewport-shading changes only.
 
 ---
 
