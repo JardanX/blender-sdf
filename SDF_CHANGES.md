@@ -2952,3 +2952,17 @@ so the silhouette no longer self-occludes either.
 | `draw/engines/overlay/shaders/overlay_outline_prepass_vert.glsl` | Removed the 1e-3 clip-space Z bias to let the SDF outline prepass win at the true intersection line. |
 | `draw/engines/overlay/overlay_sdf.hh`, `draw/engines/sdf/sdf_engine.{cc,h}` | BBox Grid debug overlay + its debug-state plumbing removed. |
 | `makesrna/intern/rna_space.cc`, `draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Per-tile / BBox Grid debug enum entries + their GLSL branches and `tile_heat[]` scratch removed. |
+
+---
+
+## Mesh-to-SDF Outline Inclusion (2026-07-19)
+
+OB_MESH mesh-to-SDF objects (objects with `BKE_sdf_object_is_enabled(*ob)` true) were excluded from the always-on SDF overlay outline: `overlay_sdf.hh::object_sync` returned immediately on `ob->type != OB_SDF`, so mesh-to-SDF objects never got an `SdfEntry`, never entered the `outline_table` / `select_table_`, and the always-on black silhouette (`color_id == 2u` in `overlay_outline_detect_frag.glsl`) was never produced for them — even though the SDF trace shader evaluates `SDF_TYPE_MESH` and writes the G-buffer correctly.
+
+Fix: extend `object_sync` to accept OB_MESH mesh-to-SDF objects alongside native OB_SDF. For mesh-to-SDF the per-entry index (`sdf_index`) comes from `ob->sdf_index` (set up by `BKE_sdf_object_settings_ensure`) and the fallback AABB comes from `BKE_sdf_mesh_runtime_snapshot` (local-space mesh AABB via `SDFMeshPayload::bounds_min/max`). The `SdfEntry::sdf_data` pointer is left null for mesh-to-SDF; `draw_line` array-modifier expansion now reads those bounds from `sel->bb_min`/`bb_max` when `sel->sdf_data == nullptr` instead of dereferencing a null SDF data-block.
+
+The selection priority issue (a basic triangle mesh behind an intersecting SDF stealing the pick) was already fixed by the earlier mesh-to-SDF commit — `view3d_select.cc::ed_object_select_pick` calls `sdf::sdf_object_at_pixel` (engine reads the G-buffer, which includes OB_MESH via `s_sorted_object_ptrs`), compares `sdf_hit_depth <= gpu_hit_depth`, and only lets the SDF override the GPU mesh pick when it is actually closer. So the CPU+GPU depth reconciler was already wired; this commit only fills the missing always-on outline.
+
+| File | Change |
+|------|--------|
+| `draw/engines/overlay/overlay_sdf.hh` | `object_sync` accepts OB_MESH mesh-to-SDF via `BKE_sdf_object_is_enabled`; uses `ob->sdf_index` + `BKE_sdf_mesh_runtime_snapshot` bounds; `draw_line` array block reads entry bounds when `sdf_data == nullptr`. Added `BKE_sdf.hh` include. |

@@ -20,6 +20,8 @@
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 
+#include "BKE_sdf.hh"
+
 #include "GPU_batch.hh"
 #include "GPU_shader.hh"
 #include "GPU_state.hh"
@@ -170,22 +172,27 @@ class Sdfs : Overlay {
     if (!enabled_) {
       return;
     }
-    if (ob_ref.object->type != OB_SDF) {
+    const Object *ob = ob_ref.object;
+    const bool is_native_sdf = (ob->type == OB_SDF);
+    const bool is_mesh_to_sdf = (ob->type == OB_MESH && BKE_sdf_object_is_enabled(*ob));
+    if (!is_native_sdf && !is_mesh_to_sdf) {
       return;
     }
 
-    const SDF *sdf_data = reinterpret_cast<const SDF *>(ob_ref.object->data);
-    if (!sdf_data) {
-      return;
+    const SDF *sdf_data = nullptr;
+    if (is_native_sdf) {
+      sdf_data = reinterpret_cast<const SDF *>(ob->data);
+      if (!sdf_data) {
+        return;
+      }
+      /* Group empties have no geometry — skip bbox/outline. */
+      if (sdf_data->sdf_type == SDF_TYPE_GROUP) {
+        return;
+      }
     }
 
-    /* Group empties have no geometry — skip bbox/outline */
-    if (sdf_data->sdf_type == SDF_TYPE_GROUP) {
-      return;
-    }
-
-    const bool is_select = (ob_ref.object->base_flag & BASE_SELECTED) != 0;
-    const bool is_active = (ob_ref.object == state.object_active);
+    const bool is_select = (ob->base_flag & BASE_SELECTED) != 0;
+    const bool is_active = (ob == state.object_active);
 
     uint outline_color_id = 2u;
     if (is_select && is_active) {
@@ -200,7 +207,10 @@ class Sdfs : Overlay {
 
     const select::ID sel_id = res.select_id(ob_ref);
 
-    int idx = sdf_data->sdf_index;
+    /* Native OB_SDF stores its render id on the SDF data-block; an OB_MESH
+     * mesh-to-SDF stores it on the Object itself (sdf_index), set up by
+     * BKE_sdf_object_settings_ensure. */
+    int idx = is_native_sdf ? sdf_data->sdf_index : ob->sdf_index;
     if (idx > max_sdf_index_) {
       max_sdf_index_ = idx;
     }
@@ -208,11 +218,15 @@ class Sdfs : Overlay {
       has_selected_ = true;
     }
 
-    float4x4 obmat = float4x4(ob_ref.object->object_to_world());
+    float4x4 obmat = float4x4(ob->object_to_world());
 
-    /* Store polygon point bounds for BB (other types computed from engine data). */
+    /* Per-entry fallback AABB in object-local space, used by draw_line when the
+     * engine-side sdf_object_bbox_get is not yet available (e.g. profiling or
+     * occluded frames) and as the array-modifier base dimensions. */
     float3 poly_min(0), poly_max(0);
-    if (sdf_data->sdf_type == SDF_TYPE_POLYGON && sdf_data->totpolygon >= 3) {
+    if (is_native_sdf && sdf_data->sdf_type == SDF_TYPE_POLYGON &&
+        sdf_data->totpolygon >= 3)
+    {
       poly_min = float3(1e30f);
       poly_max = float3(-1e30f);
       for (const SDFPolygonPoint *pt =
@@ -227,7 +241,16 @@ class Sdfs : Overlay {
       poly_min.z = -sdf_data->size[2];
       poly_max.z = sdf_data->size[2];
     }
-    entries_.append({idx, -1, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data, ob_ref.object});
+    else if (is_mesh_to_sdf) {
+      SDFMeshRuntimeSnapshot snapshot;
+      if (BKE_sdf_mesh_runtime_snapshot(*ob, snapshot) && snapshot.payload) {
+        poly_min = float3(snapshot.payload->bounds_min);
+        poly_max = float3(snapshot.payload->bounds_max);
+      }
+    }
+    /* sdf_data stays null for mesh-to-SDF; draw_line treats a null sdf_data as
+     * "use entry bounds" so no extra flag is needed. */
+    entries_.append({idx, -1, packed_id, sel_id.get(), obmat, poly_min, poly_max, sdf_data, ob});
   }
 
   void end_sync(Resources &res, const State & /*state*/) final
@@ -502,7 +525,12 @@ class Sdfs : Overlay {
 
           if (m.array_type == MOD_SDF_ARRAY_LINEAR) {
             float3 dimensions;
-            if (sel->sdf_data->sdf_type == SDF_TYPE_MESH) {
+            if (sel->sdf_data == nullptr) {
+              /* OB_MESH mesh-to-SDF: no SDF data-block; the entry already
+               * carries the runtime mesh AABB in local space. */
+              dimensions = (sel->bb_max - sel->bb_min) * scl;
+            }
+            else if (sel->sdf_data->sdf_type == SDF_TYPE_MESH) {
               dimensions = (float3(sel->sdf_data->mesh_bounds_max) -
                             float3(sel->sdf_data->mesh_bounds_min)) *
                            scl;
