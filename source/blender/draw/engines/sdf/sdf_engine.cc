@@ -3951,26 +3951,10 @@ float2 sdf_uv_scale_get()
                 float(s_render_size.y) / float(s_texture_size.y));
 }
 
-/* Debug: near-surface points from last bbox computation. */
-static Vector<float3> s_bbox_debug_points;
-static float4x4 s_bbox_debug_rot;
-static float3 s_bbox_debug_pos;
-
-void sdf_bbox_debug_points_get(const float3 **pts, int *count,
-                               float4x4 *rot, float3 *pos)
-{
-  *pts = s_bbox_debug_points.data();
-  *count = int(s_bbox_debug_points.size());
-  *rot = s_bbox_debug_rot;
-  *pos = s_bbox_debug_pos;
-}
-
 bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
                          float3 &out_min, float3 &out_max,
                          float4x4 &out_rot, float3 &out_pos)
 {
-  s_bbox_debug_points.clear();
-
   /* Find the GPU object closest to hint_pos among those with matching index. */
   int best = -1;
   float best_dist = 1e30f;
@@ -4082,9 +4066,6 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
       float3 bb_min(1e30f), bb_max(-1e30f);
       bool found = false;
 
-      s_bbox_debug_rot = rot;
-      s_bbox_debug_pos = pos;
-
       for (int iz = 0; iz <= RES; iz++) {
         for (int iy = 0; iy <= RES; iy++) {
           for (int ix = 0; ix <= RES; ix++) {
@@ -4093,7 +4074,6 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
             if (d >= 0.0f && d < threshold) {
               bb_min = math::min(bb_min, lp);
               bb_max = math::max(bb_max, lp);
-              s_bbox_debug_points.append(lp);
               found = true;
             }
           }

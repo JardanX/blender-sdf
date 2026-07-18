@@ -94,7 +94,6 @@ class Sdfs : Overlay {
   const SelectionType selection_type_;
   bool show_bbox_ = true;
   bool show_ngon_ = true;
-  bool show_bbox_grid_ = false;
 
   /* Per-SDF object data collected during object_sync. */
   struct SdfEntry {
@@ -157,7 +156,6 @@ class Sdfs : Overlay {
                  !(state.v3d->overlay.flag & V3D_OVERLAY_HIDE_SDF_BBOX);
     show_ngon_ = state.v3d && !state.hide_overlays &&
                  !(state.v3d->overlay.flag & V3D_OVERLAY_HIDE_SDF_NGON);
-    show_bbox_grid_ = state.v3d && (state.v3d->shading.sdf_bvh_debug_view == 6);
   }
 
   void object_sync(Manager & /*manager*/,
@@ -381,7 +379,7 @@ class Sdfs : Overlay {
 
   void draw_line(Framebuffer &framebuffer, Manager & /*manager*/, View & /*view*/) final
   {
-    if (!enabled_ || (!show_bbox_ && !show_bbox_grid_)) {
+    if (!enabled_ || !show_bbox_) {
       return;
     }
 
@@ -621,29 +619,6 @@ class Sdfs : Overlay {
     immEnd();
 
     immUnbindProgram();
-
-    if (show_bbox_grid_) {
-      const float3 *dbg_pts;
-      int dbg_count;
-      float4x4 dbg_rot;
-      float3 dbg_pos;
-      sdf::sdf_bbox_debug_points_get(&dbg_pts, &dbg_count, &dbg_rot, &dbg_pos);
-      if (dbg_count > 0) {
-        GPU_point_size(4.0f);
-        uint dbg_attr = GPU_vertformat_attr_add_legacy(
-            immVertexFormat(), "pos", GPU_COMP_F32, 3, GPU_FETCH_FLOAT);
-        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-        immUniformColor4f(0.0f, 1.0f, 1.0f, 0.9f);
-        immBegin(GPU_PRIM_POINTS, dbg_count);
-        for (int di = 0; di < dbg_count; di++) {
-          float4 rp = dbg_rot * float4(dbg_pts[di], 1.0f);
-          float3 wp = float3(rp.x, rp.y, rp.z) + dbg_pos;
-          immVertex3fv(dbg_attr, wp);
-        }
-        immEnd();
-        immUnbindProgram();
-      }
-    }
 
     GPU_line_smooth(false);
     GPU_blend(GPU_BLEND_NONE);
