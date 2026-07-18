@@ -124,7 +124,7 @@ _SDF_PRESETS = {
 
 _SDF_UNVERSIONED_DEFAULTS = {
     'sdf_resolution_scale': (0.0, 100.0),
-    'sdf_max_steps': (0, 512),
+    'sdf_max_steps': (0, 1024),
     'sdf_ray_epsilon': (0.0, 0.001),
     'sdf_over_relaxation': (0.0, 1.5),
     'sdf_cone_aperture': (0.0, 0.5),
@@ -218,6 +218,7 @@ class RENDER_PT_proximity_raymarcher(Panel):
 
         row = layout.row(align=True)
         row.alignment = 'EXPAND'
+        row.label(text="Preset:")
         row.operator_menu_enum(
             "sdf.raymarcher_preset",
             "preset",
@@ -589,8 +590,8 @@ classes = (
     RENDER_PT_color_management_advanced,
 )
 
-def _sdf_apply_medium_defaults():
-    """Apply Medium preset to viewports that don't match any preset."""
+def _sdf_apply_high_defaults():
+    """Apply High preset to viewports that don't match any preset."""
     for wm in bpy.data.window_managers:
         for window in wm.windows:
             for area in window.screen.areas:
@@ -601,17 +602,17 @@ def _sdf_apply_medium_defaults():
                             if not shading.sdf_frustum_cull:
                                 shading.sdf_frustum_cull = True
                             if not any(_matches_preset(shading, k) for k in _SDF_PRESETS):
-                                for attr, val in _SDF_PRESETS['MEDIUM'].items():
+                                for attr, val in _SDF_PRESETS['HIGH'].items():
                                     setattr(shading, attr, val)
 
 
 @bpy.app.handlers.persistent
 def _sdf_load_post_handler(_):
-    _sdf_apply_medium_defaults()
+    _sdf_apply_high_defaults()
 
 
 bpy.app.handlers.load_post.append(_sdf_load_post_handler)
-bpy.app.timers.register(_sdf_apply_medium_defaults, first_interval=0.1)
+bpy.app.timers.register(_sdf_apply_high_defaults, first_interval=0.1)
 
 
 if __name__ == "__main__":  # only for live edit.
