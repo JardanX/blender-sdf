@@ -500,6 +500,12 @@ static const EnumPropertyItem rna_enum_sdf_blend_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_color_blend_type_items[] = {
+    {SDF_COLOR_BLEND_RGB, "RGB", 0, "RGB", "Blend display colors in RGB space"},
+    {SDF_COLOR_BLEND_HUE, "HUE", 0, "Hue", "Blend hues through the color wheel"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_csg_items[] = {
     {SDF_CSG_UNION, "UNION", ICON_SDF_CSG_UNION, "Union", "Boolean union"},
     {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
@@ -514,7 +520,8 @@ static const EnumPropertyItem rna_enum_sdf_csg_items[] = {
      "AVOID",
      ICON_SDF_CSG_AVOID,
      "Avoid",
-     "Object is carved by all other objects in the scene"},
+      "Object is carved by all other objects in the scene"},
+    {SDF_CSG_PAINT, "PAINT", ICON_COLOR, "Paint", "Keep the field shape and paint this SDF color"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -959,6 +966,25 @@ static void rna_def_sdf(BlenderRNA *brna)
   prop = RNA_def_property(srna, "csg_operation", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_sdf_csg_items);
   RNA_def_property_ui_text(prop, "CSG Operation", "Boolean operation type");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "clearance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "clearance");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Clearance", "Space kept between this operand and the field");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "color_blend", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "color_blend");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Color Blend", "Color transition width independent of geometry");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "color_blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_sdf_color_blend_type_items);
+  RNA_def_property_ui_text(prop, "Color Blend Type", "Color interpolation method");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   /* Chamfer/Round Smoothness */

@@ -35,8 +35,8 @@ shared float4 s_coneHitPos;
 #include "draw_view_lib.glsl"
 #include "sdf_lib.glsl"
 
-#define kAabbTreeStackSize 16
-#define kMaxBitfieldBits 128
+#define kAabbTreeStackSize 64
+#define kMaxBitfieldBits 256
 #define kBitfieldWords (kMaxBitfieldBits / 32)
 
 /* Per-ray bitfield: set during ray setup, marks objects whose AABB the ray intersects. */
@@ -118,7 +118,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
 
         if (!grp_has_hit) {
           if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
-              obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+               obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) {
             grp_dist = d;
             grp_color = obj.color.rgb * grp_tint;
             grp_winner_id = float(obj.original_index);
@@ -128,7 +128,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
         else {
           float prev = grp_dist;
           grp_dist = combineCSG(
-              grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+              grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
               obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
           if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
             if (-d > prev) { grp_winner_id = float(obj.original_index); }
@@ -186,7 +186,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
       else {
         float prev = scene_dist;
         scene_dist = combineCSG(
-            scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend,
+            scene_dist, grp_dist, grp.csg_operation, grp.blend_type, grp.blend, grp.clearance,
             grp.shell_distance, grp.shell_mode, grp.shell_op,
             grp.shell_blend_top, grp.shell_blend_bottom,
             grp.chamfer_k2, grp.chamfer_k3, grp.chamfer_k4, grp.chamfer_k5, grp.flip_blend, grp.flip_blend_end);
@@ -237,8 +237,9 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     float ungrouped_skip_thresh = object_aabbs[i].max_group_blend;
     int ungrouped_op = objects[i].csg_operation;
     bool ungrouped_must_eval = scene_dist < 1e9f &&
-                               (ungrouped_op == SDF_CSG_OP_INTERSECT ||
-                                ungrouped_op == SDF_CSG_OP_SUBTRACT);
+                                (ungrouped_op == SDF_CSG_OP_INTERSECT ||
+                                 ungrouped_op == SDF_CSG_OP_SUBTRACT ||
+                                 ungrouped_op == SDF_CSG_OP_PUSH);
 
     SDFObjectGPU obj = objects[i];
     float d;
@@ -260,7 +261,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
 
     if (scene_dist >= 1e9f) {
       if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
-          obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+           obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) {
         scene_dist = d;
         out_color = obj.color.rgb;
         out_obj_id = float(obj.original_index);
@@ -269,7 +270,7 @@ float evalSceneBVH(float3 world_pos, out float3 out_color, out float out_aabb_sk
     else {
       float prev = scene_dist;
       scene_dist = combineCSG(
-          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+          scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
           obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
         if (-d > prev) { out_obj_id = float(obj.original_index); }
@@ -371,7 +372,8 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
     float da = point_aabb_dist(world_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
     int tile_skip_op = obj.csg_operation;
     bool tile_must_eval = (tile_skip_op == SDF_CSG_OP_INTERSECT ||
-                           tile_skip_op == SDF_CSG_OP_SUBTRACT) &&
+                           tile_skip_op == SDF_CSG_OP_SUBTRACT ||
+                           tile_skip_op == SDF_CSG_OP_PUSH) &&
                           ((gid >= 0 && grp_has_hit && gid == cur_group) ||
                            (gid < 0 && scene_dist < 1e9f));
 
@@ -405,7 +407,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
       else {
         float prev = scene_dist;
         scene_dist = combineCSG(
-            scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
           if (-d > prev) { out_obj_id = float(obj.original_index); }
@@ -441,7 +443,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
     else {
       if (!grp_has_hit) {
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
-            obj.csg_operation != SDF_CSG_OP_INTERSECT) {
+             obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) {
           grp_dist = d;
           grp_winner_id = float(obj.original_index);
           grp_has_hit = true;
@@ -450,7 +452,7 @@ float evalSceneTile(float3 world_pos, out float out_aabb_skip, out float out_obj
       else {
         float prev = grp_dist;
         grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         if (obj.csg_operation == SDF_CSG_OP_SUBTRACT) {
           if (-d > prev) { grp_winner_id = float(obj.original_index); }
@@ -840,20 +842,23 @@ void main()
        * SDF evals. Eliminates cone march tile-boundary position artifacts. */
       {
         float eps_snap = sdf_ray_epsilon * 0.5f;
+        float snapped_obj_id = cur_obj_id;
 #ifdef USE_TILE_CULLING
-        float d0 = evalSceneDistTile(hit_pos);
+        float snap_aabb, snap_step_factor;
+        float d0 = evalSceneTile(hit_pos, snap_aabb, snapped_obj_id, snap_step_factor);
         float d1 = evalSceneDistTile(hit_pos + ray_dir * eps_snap);
 #else
-        float d0 = evalSceneDistBVH(hit_pos);
+        float3 snap_color;
+        float snap_aabb;
+        float d0 = evalSceneBVH(hit_pos, snap_color, snap_aabb, snapped_obj_id);
         float d1 = evalSceneDistBVH(hit_pos + ray_dir * eps_snap);
 #endif
         /* Sign-preserving cosine so exit-surface snap heads forward, not backward. */
         float cos_raw = (d0 - d1) / eps_snap;
         float cos_est = (cos_raw >= 0.0f ? 1.0f : -1.0f) * clamp(abs(cos_raw), 0.1f, 1.0f);
         hit_pos += ray_dir * d0 / cos_est;
+        hit_obj_id = snapped_obj_id;
       }
-
-      hit_obj_id = cur_obj_id;
       break;
     }
 

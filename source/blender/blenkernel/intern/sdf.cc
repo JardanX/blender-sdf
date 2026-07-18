@@ -249,13 +249,15 @@ int BKE_sdf_next_index(Main *bmain)
 
 void BKE_sdf_object_settings_ensure(Object &object)
 {
-  if (object.sdf_settings_version > 0) {
+  if (object.sdf_settings_version >= 2) {
     return;
   }
-  object.sdf_normal_mode = SDF_MESH_NORMAL_SMOOTH;
   object.sdf_csg_operation = SDF_CSG_UNION;
   object.sdf_blend = 0.1f;
   object.sdf_blend_type = SDF_BLEND_SMOOTH;
+  object.sdf_clearance = 0.0f;
+  object.sdf_color_blend = 0.1f;
+  object.sdf_color_blend_type = SDF_COLOR_BLEND_RGB;
   object.sdf_shell_distance = 0.2f;
   object.sdf_shell_mode = SDF_SHELL_NORMAL;
   object.sdf_shell_op = SDF_SHELL_OP_UNION;
@@ -265,7 +267,7 @@ void BKE_sdf_object_settings_ensure(Object &object)
   object.sdf_chamfer_k3 = 0.01f;
   object.sdf_chamfer_k4 = 0.01f;
   object.sdf_chamfer_k5 = 0.01f;
-  object.sdf_settings_version = 1;
+  object.sdf_settings_version = 2;
 }
 
 void BKE_sdf_reindex_all(Main *bmain)

@@ -19,6 +19,7 @@ tabs_attr_infos = (
     ("show_properties_world", "World", 'WORLD'),
     ("show_properties_collection", "Collection", 'GROUP'),
     ("show_properties_object", "Object", 'OBJECT_DATA'),
+    ("show_properties_sdf", "SDF", 'SDF_DATA'),
     ("show_properties_modifiers", "Modifiers", 'MODIFIER'),
     ("show_properties_effects", "Effects", 'SHADERFX'),
     ("show_properties_particles", "Particles", 'PARTICLES'),

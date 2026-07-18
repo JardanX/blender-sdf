@@ -18,7 +18,7 @@ void main()
 
   float obj_id_f = texture(sdf_gbuf_color_tx, sdf_uv).a;
   int obj_id = int(obj_id_f + 0.5f);
-  if (obj_id < 0) {
+  if (obj_id < 0 || obj_id >= outline_id_count) {
     discard;
     return;
   }

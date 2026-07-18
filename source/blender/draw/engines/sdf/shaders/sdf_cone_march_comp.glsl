@@ -60,25 +60,20 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
     float da = point_aabb_dist(eval_pos, obj.orig_bbox_min.xyz, obj.orig_bbox_max.xyz);
 
     int obj_op = obj.csg_operation;
-    bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT) &&
+    bool must_eval = (obj_op == SDF_CSG_OP_INTERSECT || obj_op == SDF_CSG_OP_SUBTRACT ||
+                      obj_op == SDF_CSG_OP_PUSH) &&
                      ((gid >= 0 && grp_has_hit && gid == cur_group) ||
                       (gid < 0 && scene_dist < 1e9f));
 
     float d;
-    if (da > aabb.max_group_blend) {
-      if (!must_eval) {
-        out_aabb_skip = min(out_aabb_skip, da);
-        cur_group = gid;
-        continue;
-      }
-      d = da;
+    if (da > aabb.max_group_blend && !must_eval) {
+      out_aabb_skip = min(out_aabb_skip, da);
       cur_group = gid;
+      continue;
     }
-    else {
-      float3 lp = (obj.inverse_matrix * float4(eval_pos - obj.position.xyz, 1.0f)).xyz;
-      d = evalPrimitive(lp, obj);
-      cur_group = gid;
-    }
+    float3 lp = (obj.inverse_matrix * float4(eval_pos - obj.position.xyz, 1.0f)).xyz;
+    d = evalPrimitive(lp, obj);
+    cur_group = gid;
 
     if (gid < 0) {
       if (scene_dist >= 1e9f) {
@@ -86,17 +81,17 @@ float evalSceneCone(float3 world_pos, int tile_count, int base_offset, out float
       }
       else {
         scene_dist = combineCSG(
-            scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            scene_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
     }
     else {
       if (!grp_has_hit) {
-        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL && obj.csg_operation != SDF_CSG_OP_INTERSECT) { grp_dist = d; grp_has_hit = true; }
+        if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL && obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) { grp_dist = d; grp_has_hit = true; }
       }
       else {
         grp_dist = combineCSG(
-            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend,
+            grp_dist, d, obj.csg_operation, obj.blend_type, obj.blend, obj.clearance,
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
       }
     }

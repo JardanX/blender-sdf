@@ -509,12 +509,14 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
       ob_ref, in_edit_mode, in_paint_mode, in_sculpt_mode);
   const bool needs_prepass = object_needs_prepass(ob_ref, in_paint_mode);
   SDFMeshRuntimeSnapshot sdf_snapshot;
-  /* OB_MESH + Live-Mesh-to-SDF is rendered by the SDF engine; skip the face-wireframe overlay
-   * in Object Mode since it would draw unoccluded through the SDF surface from inside. */
-  const bool sdf_mesh_live =
-      ob_ref.object->type == OB_MESH && in_object_mode &&
-      BKE_sdf_mesh_runtime_snapshot(*ob_ref.object, sdf_snapshot);
-  const bool suppress_sdf_mesh_selection = resources.is_selection() && sdf_mesh_live;
+  /* OB_MESH + Live-Mesh-to-SDF is rendered by the SDF engine. */
+  const bool sdf_mesh_enabled = ob_ref.object->type == OB_MESH &&
+                                BKE_sdf_object_is_enabled(*ob_ref.object);
+  const bool sdf_mesh_live = sdf_mesh_enabled &&
+                             BKE_sdf_mesh_runtime_snapshot(*ob_ref.object, sdf_snapshot);
+  const bool suppress_sdf_mesh_selection = resources.is_selection() && in_object_mode &&
+                                           sdf_mesh_live;
+  const bool suppress_sdf_mesh_surface = sdf_mesh_live;
 
   OverlayLayer &layer = object_is_in_front(ob_ref.object, state) ? infront : regular;
 
@@ -523,7 +525,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
   /* MATHOPS: Removed NURB Body overlay. */
   // layer.nurb_bodies.object_sync(manager, ob_ref, resources, state);
 
-  if (needs_prepass && !suppress_sdf_mesh_selection) {
+  if (needs_prepass && !suppress_sdf_mesh_selection && !suppress_sdf_mesh_surface) {
     layer.prepass.object_sync(manager, ob_ref, resources, state);
   }
 
@@ -609,10 +611,8 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
     }
   }
 
-  /* Wireframe shading keeps Live-Mesh-to-SDF wires for explicit inspection. */
-  const bool allow_sdf_mesh_wire = state.is_wireframe_mode;
   if ((state.is_wireframe_mode || !state.hide_overlays) && !suppress_sdf_mesh_selection &&
-      (!sdf_mesh_live || allow_sdf_mesh_wire)) {
+      !sdf_mesh_live) {
     layer.wireframe.object_sync_ex(
         manager, ob_ref, resources, state, in_edit_paint_mode, in_edit_mode);
   }
@@ -666,7 +666,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
     origins.object_sync(manager, ob_ref, resources, state);
 
     const bool outline_object = object_is_selected(ob_ref);
-    if (outline_object && !in_edit_paint_mode) {
+    if (outline_object && !in_edit_paint_mode && !sdf_mesh_live) {
       outline.object_sync(manager, ob_ref, resources, state);
     }
 

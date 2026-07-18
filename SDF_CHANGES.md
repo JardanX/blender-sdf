@@ -8,12 +8,16 @@
 Push and Avoid retain their physical blend controls while keeping hard color ownership. Their new
 Clearance setting expands the subtraction side of the operation before the retained operand is composed,
 leaving a controlled gap.
-Shell color now covers the full shell operand, including cap surfaces, independently of its geometry blend.
+Shell color now follows actual shell ownership: with zero Color Blend only surface regions altered by the
+shell are colored; Color Blend softly expands that ownership transition. This avoids unstable raw-SDF
+sign tests while preserving cap coloring where the shell actually contributes to the composed field.
 
 Paint is a geometry-preserving CSG operation: it applies the operand color where its SDF covers the
 existing field without changing the field distance. Every SDF operand and group now has independent
 Color Blend amount and method controls. RGB keeps conventional interpolation; Hue blends through the
 color wheel, so blue-to-yellow transitions pass through green.
+Color blend radius is included in object frustum, BVH, and tile bounds, preventing a color transition
+from being clipped at an operand's geometric AABB.
 
 | File | Change |
 |------|--------|
@@ -93,9 +97,17 @@ mesh component overlays while the SDF result remains visible.
   sheared transforms use a singular-value conservative step bound. Sign uses angle-weighted vertex
   and manifold edge pseudonormals.
 - Mesh shading barycentrically interpolates Blender's evaluated split corner normals, so sharp edges
-  and smooth faces can coexist. Color resolve reuses each exact distance query's winning triangle and
-  propagates its split normal through the actual CSG operator derivatives, including smooth mesh-mesh
-  blend bands. Domain-modified, shell, and mixed generated regions retain the geometric fallback.
+  and smooth faces can coexist. Each corner is transformed and normalized before interpolation,
+  matching Blender under non-uniform object transforms. Each exact mesh query returns both its
+  geometric field normal and split shading normal without a second BVH traversal; native analytic
+  operands evaluate an axis-central world-space field gradient. Geometric derivatives and
+  gradient-magnitude-scaled shading vectors remain separate through the CSG chain; the same
+  closed-form hard and smooth partials compose both, including Mesh-SDF/native-SDF blend bands. The
+  final split normal uses continuous hemisphere reflection against the composed field gradient and
+  is normalized only after all CSG. A valid geometric gradient remains available when split shading
+  contributions cancel; singular CSG gradients select a deterministic exact-field branch instead
+  of switching to camera-dependent screen-space reconstruction.
+  Equal-distance edge ties are deterministic instead of depending on the nearest-triangle hint.
 - Workbench suppresses the conventional shaded Mesh only while a valid live payload is available.
   Object Mode suppresses standard Mesh selection IDs and resolves SDF picking from the rendered
   G-buffer, while Edit Mode component selection remains unchanged.
@@ -117,9 +129,9 @@ the winning feature normal and stop immediately on an exact surface hit; the sce
 proxies between syncs and updates only changed bounds.
 - Blend operators short-circuit to their exact min/max result outside the blend band, avoiding
   smooth, chamfer, and round arithmetic for non-overlapping samples.
-- Valid live Mesh-SDF objects no longer draw the source mesh surface, wireframe, depth prepass, or
-  edit overlay on top of the SDF result; edit selection IDs remain available through the selection
-  pass.
+- Valid live Mesh-SDF objects no longer draw the source mesh surface, object wireframe, or depth
+  prepass on top of the SDF result. Edit Mode still draws Blender's face, edge, and vertex component
+  overlays and selection IDs over the live SDF preview.
 - Source mesh normals are used directly for non-blended surface hits, avoiding a geometric
   screen-space fallback that could make Blender-smooth meshes appear faceted.
 - Mesh nearest queries defer feature-pseudonormal decoding until the final winning triangle, while

@@ -252,6 +252,11 @@ static float object_sdf_blend_get(const Object *ob)
   return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->blend : ob->sdf_blend;
 }
 
+static float object_sdf_color_blend_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->color_blend : ob->sdf_color_blend;
+}
+
 static float object_sdf_shell_distance_get(const Object *ob)
 {
   return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->shell_distance :
@@ -545,7 +550,7 @@ static SDFValueAdjustData *sdf_value_init(bContext *C,
   return data;
 }
 
-/* B key: blend (non-shell) or direction-detect top/bottom (shell) */
+/* B key: blend, color blend for Paint, or shell edges. */
 
 static void sdf_write_blend(Object *ob, float v)
 {
@@ -554,6 +559,16 @@ static void sdf_write_blend(Object *ob, float v)
   }
   else {
     ob->sdf_blend = v;
+  }
+}
+
+static void sdf_write_color_blend(Object *ob, float v)
+{
+  if (ob->type == OB_SDF) {
+    id_cast<SDF *>(ob->data)->color_blend = v;
+  }
+  else {
+    ob->sdf_color_blend = v;
   }
 }
 
@@ -594,7 +609,11 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
     return OPERATOR_CANCELLED;
   }
   bool is_shell = object_sdf_csg_operation_get(ob) == SDF_CSG_SHELL;
+  bool is_paint = object_sdf_csg_operation_get(ob) == SDF_CSG_PAINT;
 
+  if (is_paint) {
+    return sdf_value_modal_common(C, op, event, sdf_write_color_blend, sdf_write_color_blend);
+  }
   if (!is_shell) {
     return sdf_value_modal_common(C, op, event, sdf_write_blend, sdf_write_blend);
   }
@@ -654,11 +673,16 @@ static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C, wmOperator *op, con
 {
   Object *ob = CTX_data_active_object(C);
   bool is_shell = object_sdf_csg_operation_get(ob) == SDF_CSG_SHELL;
+  bool is_paint = object_sdf_csg_operation_get(ob) == SDF_CSG_PAINT;
 
   SDFValueAdjustData *data;
   if (is_shell) {
     data = sdf_value_init(C, event, ob, 0.0f, 1.0f, 1.0f, 1.0f, "Move to select");
     data->locked = false;
+  }
+  else if (is_paint) {
+    data = sdf_value_init(
+        C, event, ob, object_sdf_color_blend_get(ob), 0.3f, 0.7f, 1.0f, "Color Blend");
   }
   else {
     data = sdf_value_init(
@@ -685,6 +709,9 @@ static void sdf_blend_adjust_cancel(bContext *C, wmOperator *op)
           sdf_write_shell_bottom(ob, data->init_value);
         }
       }
+      else if (object_sdf_csg_operation_get(ob) == SDF_CSG_PAINT) {
+        sdf_write_color_blend(ob, data->init_value);
+      }
       else {
         sdf_write_blend(ob, data->init_value);
       }
@@ -698,7 +725,7 @@ static void sdf_blend_adjust_cancel(bContext *C, wmOperator *op)
 void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot)
 {
   ot->name = "Adjust SDF Blend";
-  ot->description = "Interactively adjust blend (shell: move right=top, up=bottom)";
+  ot->description = "Adjust blend, Paint color blend, or shell edges";
   ot->idname = "OBJECT_OT_sdf_blend_adjust";
 
   ot->invoke = sdf_blend_adjust_invoke;

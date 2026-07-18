@@ -317,8 +317,25 @@ def _sdf_order(ob):
 def _is_first_sdf_operand(context, ob):
     group = ob.parent if _is_sdf_group(ob.parent) else None
     candidates = []
-    for candidate in context.scene.objects:
-        if not _is_sdf_object(candidate):
+    depsgraph = context.evaluated_depsgraph_get()
+
+    def is_rendered(candidate):
+        if not candidate.visible_get(view_layer=context.view_layer):
+            return False
+        if candidate.type == 'MESH':
+            return candidate.evaluated_get(depsgraph).sdf_runtime_valid
+        if not _is_sdf_group(candidate):
+            return True
+        return any(
+            context.view_layer.objects.get(child.name) == child and
+            _is_sdf_object(child) and
+            not _is_sdf_group(child) and
+            is_rendered(child)
+            for child in candidate.children
+        )
+
+    for candidate in context.view_layer.objects:
+        if not _is_sdf_object(candidate) or not is_rendered(candidate):
             continue
         candidate_group = candidate.parent if _is_sdf_group(candidate.parent) else None
         if group is not None and candidate_group == group and not _is_sdf_group(candidate):
@@ -360,7 +377,7 @@ class SDF_MT_csg_pie(Menu):
         prop = prefix + "csg_operation"
         pie.prop_enum(target, prop, value='UNION')       # W
         pie.prop_enum(target, prop, value='SUBTRACT')    # E
-        pie.separator()                                           # S (skip)
+        pie.prop_enum(target, prop, value='PAINT')       # S
         pie.separator()                                           # N (skip)
         pie.prop_enum(target, prop, value='INTERSECT')   # NW
         pie.prop_enum(target, prop, value='SHELL')       # NE
@@ -513,7 +530,6 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         elif t == 'BOX':
             col.prop(sdf, "size", text="Dimensions")
         elif t == 'MESH':
-            col.prop(sdf, "mesh_normal_mode")
             col.label(text=f"{sdf.mesh_vertex_count:,} vertices")
             col.label(text=f"{sdf.mesh_triangle_count:,} triangles")
 
@@ -881,6 +897,9 @@ def _draw_sdf_operation(layout, target, prefix, is_forced_union):
     shell_blend_top_prop = prefix + "shell_blend_top"
     shell_blend_bottom_prop = prefix + "shell_blend_bottom"
     blend_prop = prefix + "blend"
+    clearance_prop = prefix + "clearance"
+    color_blend_prop = prefix + "color_blend"
+    color_blend_type_prop = prefix + "color_blend_type"
     flip_blend_prop = prefix + "flip_blend"
     flip_blend_end_prop = prefix + "flip_blend_end"
 
@@ -894,15 +913,16 @@ def _draw_sdf_operation(layout, target, prefix, is_forced_union):
         layout.label(text="First in stack - forced to Union", icon='INFO')
         return
 
-    layout.separator()
-    layout.label(text="Blend Type")
-    grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
-    grid.scale_y = 1.4
-    for item in target.bl_rna.properties[blend_type_prop].enum_items:
-        grid.prop_enum(target, blend_type_prop, item.identifier, text="")
-
-    is_shell = getattr(target, csg_prop) == 'SHELL'
+    csg_operation = getattr(target, csg_prop)
+    is_shell = csg_operation == 'SHELL'
     blend_type = getattr(target, blend_type_prop)
+    if csg_operation != 'PAINT':
+        layout.separator()
+        layout.label(text="Blend Type")
+        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+        grid.scale_y = 1.4
+        for item in target.bl_rna.properties[blend_type_prop].enum_items:
+            grid.prop_enum(target, blend_type_prop, item.identifier, text="")
     if is_shell:
         row = layout.row(align=True)
         row.prop(target, shell_distance_prop, text="Distance")
@@ -914,7 +934,18 @@ def _draw_sdf_operation(layout, target, prefix, is_forced_union):
         row = layout.row(align=True)
         row.prop(target, shell_mode_prop, expand=True)
 
-    if blend_type == 'LINEAR':
+    if csg_operation in {'PUSH', 'AVOID'}:
+        row = layout.row(align=True)
+        row.prop(target, clearance_prop, text="Distance")
+        row.prop(target, blend_prop, text="Blend Amount")
+
+    layout.separator()
+    layout.label(text="Color Blend")
+    row = layout.row(align=True)
+    row.prop(target, color_blend_prop, text="Amount")
+    row.prop(target, color_blend_type_prop, text="")
+
+    if blend_type == 'LINEAR' or csg_operation == 'PAINT':
         return
 
     col = layout.column(align=True)
@@ -1000,7 +1031,6 @@ class SDF_PT_mesh_settings(SDFMeshButtonsPanel, Panel):
         layout.prop(ob, "is_sdf", text="Enable")
         if not ob.is_sdf:
             return
-        layout.prop(ob, "sdf_normal_mode")
         layout.prop(ob, "sdf_index")
         layout.prop(ob, "color")
 
@@ -1066,6 +1096,15 @@ def _sdf_group_cleanup_deferred():
             if not has_children:
                 to_delete.append(ob)
         for ob in to_delete:
+            helpers = [
+                child for child in ob.children
+                if child.get("sdf_mirror_internal") is not None
+            ]
+            for helper in helpers:
+                for modifier in ob.modifiers:
+                    if modifier.type == 'SDF_MIRROR' and modifier.mirror_object == helper:
+                        modifier.mirror_object = None
+                bpy.data.objects.remove(helper, do_unlink=True)
             bpy.data.objects.remove(ob, do_unlink=True)
     except Exception:
         pass
