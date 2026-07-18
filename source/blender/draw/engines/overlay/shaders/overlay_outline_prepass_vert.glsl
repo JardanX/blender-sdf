@@ -40,8 +40,11 @@ void main()
 
   gl_Position = drw_point_world_to_homogenous(world_pos);
 
-  /* Small bias to always be on top of the geom. */
-  gl_Position.z -= 1e-3f;
+  /* No Z-bias: writing the exact scene depth lets the SDF outline prepass (which
+   * writes its true sdf depth) win at the real intersection, so the outline ends
+   * exactly on the geometry edge instead of being offset by the previous 1e-3
+   * clip-space bias. The resolve occlusion check tolerates float precision via
+   * its existing 3/8388608 epsilon, so this no longer self-occludes either. */
 
   /* ID 0 is nothing (background) */
   interp.ob_id = uint(drw_resource_id() + 1);

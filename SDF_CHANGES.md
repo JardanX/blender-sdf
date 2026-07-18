@@ -2845,3 +2845,77 @@ The SDF (strict-depth) overlay outline now always renders the thin "xray-style" 
 | `source/blender/makesdna/DNA_view3d_types.h` | `View3DShading` defaults now match High: `sdf_max_steps = 1024`, `sdf_ray_epsilon = 0.001f` |
 | `source/blender/blenloader/intern/versioning_500.cc` | Migrated legacy default SDF profile to High (100%/adaptive off/1024/0.001); extended `old_default_sdf_profile` detection to also match the prior 128/0.005 Medium values |
 | `source/blender/draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Hoisted `is_strict_depth_outline` computation; apply X-ray-style edge thinning whenever the outline is strict-depth (SDF); refactor strict-depth occlusion into shared `strict_depth_outline_occluded_at` helper used by `visible_outline_id` and `main()` |
+
+---
+
+## Fix: SDF Inside-View Step Bands (2026-07-18)
+
+When the camera was inside the SDF volume, the rendered interior showed stepped banding — visible ray-marcher steps become obvious on concave views, and screen-space normals reconstructed from that stepped position G-buffer lifted it directly into shading.
+
+Root cause was the trace pass's surface snap formula in `sdf_trace_comp.glsl`. The snap cosine is `(d0 - d1) / eps`, which equals `-dot(gradient, ray_dir)`. For a normal front-face hit, the gradient points along the ray, so `cos_raw` is positive; the existing `clamp(cos_raw, 0.1, 1.0)` is fine. But for an **exit-face** hit (camera inside the SDF marching out through the back wall) the dot product flips: `cos_raw` is negative, and the old clamp forced it back to `+0.1`. That changed the sign of `d0 / cos_est`, so the snap projected hit positions **backward, into the solid**, instead of forward onto the exit surface. Each pixel's hit then landed at a distance biased by its last ray-march step, producing a position buffer with visible steps, which the screen-space normal pass faithfully lifted into shading.
+
+Fix: preserve the cosine's sign. Magnitude is still clamped to `[0.1, 1.0]` for grazing-angle stability, but the sign is kept so both front and exit snaps now project in the correct forward direction onto the surface. Front-face behavior is unchanged; exit-face snaps now converge to the actual exit surface, giving a clean position buffer and smooth reconstructed normals.
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Surface snap cosine now sign-preserving: `sign(cos_raw) * clamp(abs(cos_raw), 0.1, 1.0)`. Fixes step-banded shading when camera is inside an SDF volume. |
+
+---
+
+## SDF Debug Cleanup + Outline Intersection Fix (2026-07-18)
+
+Two cleanups plus one outline bug fix.
+
+### Debug cleanup
+
+Removed the per-tile ("Shape Count per Tile" / "Step Count per Tile") and
+"BBox Grid" debug views from the SDF Ray Marcher panel and their supporting
+implementation. Kept the per-pixel "Shape Count", per-pixel "Step Count", and
+"Cone Heatmap" debug views; FD normals, the sparse-brick grid overlay, and the
+profile frame operator are untouched.
+
+- `makesrna/intern/rna_space.cc`: dropped enum items `SHAPE_COUNT_TILE` (2),
+  `STEP_COUNT_TILE` (4), and `BBOX_GRID` (6) from `sdf_bvh_debug_view_items`.
+- `draw/engines/sdf/shaders/sdf_trace_comp.glsl`: dropped the `debug_bvh_views == 2`
+  and `== 4` branches in both the TILE_CULLING and non-TILE_CULLING code paths
+  (the per-tile reduction using `s_tileObjList[]` / `tile_heat[]` as a scratch
+  reduction buffer), and removed the now-unused `shared float tile_heat[]`
+  declaration.
+- `overlay/overlay_sdf.hh`: removed the `show_bbox_grid_` member, its
+  `begin_sync` assignment from `shading.sdf_bvh_debug_view == 6`, the
+  `&& show_bbox_grid_` clause on `draw_line()` entry, and the cyan debug-point
+  render block at the end of `draw_line()` that called
+  `sdf_bbox_debug_points_get`.
+- `draw/engines/sdf/sdf_engine.{h,cc}`: deleted the
+  `sdf_bbox_debug_points_get` function + header declaration, the
+  `s_bbox_debug_points` / `_rot` / `_pos` static state, the
+  `s_bbox_debug_points.clear()` prologue, and the per-cell
+  `s_bbox_debug_points.append()` inside the CPU bbox search loop.
+
+### Outline intersection fix (mesh selected vs. SDF)
+
+When a selected mesh was intersected by / occluded by an SDF, the selection
+outline was offset from the real mesh-vs-SDF intersection line by up to a
+clip-space epsilon (visible as a small gap / shift). Root cause: the mesh
+outline prepass vertex shader applied `gl_Position.z -= 1e-3f` ("Small bias
+to always be on top of the geom"). Then when the SDF outline prepass fragment
+shader ran afterwards with `GPU_DEPTH_LESS_EQUAL` against the prepass depth
+buffer, the SDF only overwrote mesh-owned pixels when its true `sdf_depth` was
+strictly less than the biased mesh outline depth — pushing the SDF-vs-mesh
+ownership boundary away from the real geometry intersection by ~1e-3 worth of
+NDC depth (which becomes many pixels at distance).
+
+Removing the vertex `1e-3` bias makes the mesh outline write its true scene
+depth, matching the value the main scene render wrote into `scene_depth_tx`.
+Now both the mesh outline and the SDF outline prepass store their true surface
+depth, so the front-most surface wins the prepass pixel exactly at the
+geometry intersection — for single selection, multi selection, and the
+mutually-outlined case where both an SDF and a mesh are selected. The resolve
+shader already tolerates float precision via its existing 3/8388608 epsilon,
+so the silhouette no longer self-occludes either.
+
+| File | Change |
+|------|--------|
+| `draw/engines/overlay/shaders/overlay_outline_prepass_vert.glsl` | Removed the 1e-3 clip-space Z bias to let the SDF outline prepass win at the true intersection line. |
+| `draw/engines/overlay/overlay_sdf.hh`, `draw/engines/sdf/sdf_engine.{cc,h}` | BBox Grid debug overlay + its debug-state plumbing removed. |
+| `makesrna/intern/rna_space.cc`, `draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Per-tile / BBox Grid debug enum entries + their GLSL branches and `tile_heat[]` scratch removed. |

@@ -50,10 +50,6 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
                          float3 &out_min, float3 &out_max,
                          float4x4 &out_rot, float3 &out_pos);
 
-/* Debug: get near-surface grid points from last bbox computation. */
-void sdf_bbox_debug_points_get(const float3 **pts, int *count,
-                               float4x4 *rot, float3 *pos);
-
 /* Free static shader cache (call on application exit). */
 void sdf_shaders_free();
 
