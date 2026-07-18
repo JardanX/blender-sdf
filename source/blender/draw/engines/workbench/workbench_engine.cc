@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "BLI_rect.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 
 #include "DNA_fluid_types.h"
+#include "DNA_sdf_types.h"
 
 #include "BKE_editmesh.hh"
 #include "BKE_material.hh"
@@ -15,6 +17,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_particle.h"
 #include "BKE_report.hh"
+#include "BKE_sdf.hh"
 
 #include "DEG_depsgraph_query.hh"
 
@@ -25,6 +28,7 @@
 #include "BLT_translation.hh"
 
 #include "GPU_context.hh"
+#include "GPU_capabilities.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "RE_engine.h"
@@ -73,6 +77,28 @@ class Instance : public DrawEngine {
   uint64_t depsgraph_last_update_ = 0;
 
   const char *hair_buffer_overflow_error_ = nullptr;
+  Set<const void *> sdf_mesh_payloads_;
+  size_t sdf_mesh_record_count_ = 0;
+
+  bool reserve_sdf_mesh_payload(const void *key,
+                                const int vertex_count,
+                                const int triangle_count,
+                                const int bvh_node_count)
+  {
+    if (sdf_mesh_payloads_.contains(key)) {
+      return true;
+    }
+    const size_t record_count = size_t(vertex_count) + size_t(triangle_count) * 3 +
+                                size_t(bvh_node_count) * 2;
+    if ((sdf_mesh_record_count_ + record_count) * sizeof(uint4) >
+        GPU_max_storage_buffer_size())
+    {
+      return false;
+    }
+    sdf_mesh_payloads_.add(key);
+    sdf_mesh_record_count_ += record_count;
+    return true;
+  }
 
  public:
   const DRWContext *draw_ctx = nullptr;
@@ -126,6 +152,8 @@ class Instance : public DrawEngine {
     anti_aliasing_ps_.sync(scene_state_, resources_);
 
     hair_buffer_overflow_error_ = nullptr;
+    sdf_mesh_payloads_.clear();
+    sdf_mesh_record_count_ = 0;
   }
 
   void end_sync() final
@@ -172,6 +200,28 @@ class Instance : public DrawEngine {
     bool is_object_data_visible = (DRW_object_visibility_in_active_context(ob) &
                                    OB_VISIBLE_SELF) &&
                                   (ob->dt >= OB_SOLID || draw_ctx->is_scene_render());
+
+    if (ob->type == OB_SDF) {
+      const SDF *sdf = id_cast<const SDF *>(ob->data);
+      if (sdf && sdf->sdf_type == SDF_TYPE_MESH && sdf->mesh_vertex_count > 0 &&
+          sdf->mesh_triangle_count > 0 && sdf->mesh_bvh_node_count > 0 &&
+          sdf->mesh_vertices && sdf->mesh_triangles && sdf->mesh_bvh_nodes)
+      {
+        reserve_sdf_mesh_payload(
+            sdf, sdf->mesh_vertex_count, sdf->mesh_triangle_count, sdf->mesh_bvh_node_count);
+      }
+    }
+    else if (ob->type == OB_MESH && !draw_ctx->is_scene_render()) {
+      SDFMeshRuntimeSnapshot snapshot;
+      if (BKE_sdf_mesh_runtime_snapshot(*ob, snapshot) &&
+          reserve_sdf_mesh_payload(snapshot.payload.get(),
+                                   snapshot.payload->vertex_count,
+                                   snapshot.payload->triangle_count,
+                                   snapshot.payload->bvh_node_count))
+      {
+        is_object_data_visible = false;
+      }
+    }
 
     if (!(ob->base_flag & BASE_FROM_DUPLI)) {
       ModifierData *md = BKE_modifiers_findby_type(ob, eModifierType_Fluid);

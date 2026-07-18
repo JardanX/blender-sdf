@@ -19,6 +19,7 @@
 #include "GPU_texture.hh"
 
 #include "sdf_shader_shared.hh"
+#include "sdf_engine_api.hh"
 
 #include "DRW_render.hh"
 
@@ -40,7 +41,6 @@ const Object *const *sdf_sorted_object_ptrs_get(int *out_count);
 
 gpu::Texture *sdf_depth_texture_get();
 gpu::Texture *sdf_gbuf_color_texture_get();
-
 float2 sdf_uv_scale_get();
 
 /* Get local-space bbox + rotation/position for an SDF object.

@@ -178,6 +178,7 @@ void ED_buttons_visible_tabs_menu(bContext *C, ui::Layout *layout, void * /*arg*
       "show_properties_output",      "show_properties_view_layer",
       "show_properties_scene",       "show_properties_world",
       "show_properties_collection",  "show_properties_object",
+      "show_properties_sdf",
       "show_properties_modifiers",   "show_properties_effects",
       "show_properties_particles",   "show_properties_physics",
       "show_properties_constraints", "show_properties_data",
@@ -232,6 +233,7 @@ Vector<eSpaceButtons_Context> ED_buttons_tabs_list(const SpaceProperties *sbuts,
   add_spacer();
 
   add_tab(BCONTEXT_OBJECT);
+  add_tab(BCONTEXT_SDF);
   add_tab(BCONTEXT_MODIFIER);
   add_tab(BCONTEXT_SHADERFX);
   add_tab(BCONTEXT_PARTICLE);
@@ -271,6 +273,8 @@ static const char *buttons_main_region_context_string(const short mainb)
       return "collection";
     case BCONTEXT_OBJECT:
       return "object";
+    case BCONTEXT_SDF:
+      return "sdf";
     case BCONTEXT_DATA:
       return "data";
     case BCONTEXT_MATERIAL:
@@ -788,6 +792,7 @@ static void buttons_area_listener(const wmSpaceTypeListenerParams *params)
           else {
             buttons_area_redraw(area, BCONTEXT_MODIFIER);
           }
+          buttons_area_redraw(area, BCONTEXT_SDF);
           buttons_area_redraw(area, BCONTEXT_PHYSICS);
           break;
         case ND_CONSTRAINT:
@@ -805,6 +810,7 @@ static void buttons_area_listener(const wmSpaceTypeListenerParams *params)
           break;
         case ND_DRAW:
           buttons_area_redraw(area, BCONTEXT_OBJECT);
+          buttons_area_redraw(area, BCONTEXT_SDF);
           buttons_area_redraw(area, BCONTEXT_DATA);
           buttons_area_redraw(area, BCONTEXT_PHYSICS);
           /* Needed to refresh context path when changing active particle system index. */

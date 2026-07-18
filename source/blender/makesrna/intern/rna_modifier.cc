@@ -16,6 +16,7 @@
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 
 #include "BLI_math_rotation.h"
 
@@ -440,7 +441,6 @@ const EnumPropertyItem rna_enum_object_modifier_type_items[] = {
      "Soft Body",
      "Simulate soft deformable objects"},
     {eModifierType_Surface, "SURFACE", ICON_MODIFIER, "Surface", ""},
-
     RNA_ENUM_ITEM_HEADING(N_("SDF"), nullptr),
     {eModifierType_SDFMirror, "SDF_MIRROR", ICON_MOD_MIRROR, "Mirror", "Mirror SDF across axes"},
     {eModifierType_SDFTwist,
@@ -989,7 +989,16 @@ static std::optional<std::string> rna_Modifier_path(const PointerRNA *ptr)
 
 static void rna_Modifier_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
-  DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+  int recalc = ID_RECALC_GEOMETRY;
+  if (GS(ptr->owner_id->name) == ID_OB) {
+    const Object *ob = reinterpret_cast<const Object *>(ptr->owner_id);
+    const ModifierData *md = static_cast<const ModifierData *>(ptr->data);
+    const ModifierTypeInfo *mti = BKE_modifier_get_info(ModifierType(md->type));
+    if (ob->type == OB_MESH && ob->is_sdf && (mti->flags & eModifierTypeFlag_AcceptsSDF)) {
+      recalc = ID_RECALC_SYNC_TO_EVAL;
+    }
+  }
+  DEG_id_tag_update(ptr->owner_id, recalc);
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
 }
 

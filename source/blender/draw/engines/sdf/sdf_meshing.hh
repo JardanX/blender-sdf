@@ -10,8 +10,6 @@
 
 namespace blender::draw::sdf {
 
-int sdf_object_count_get();
-
 /**
  * Returns empty string on success, or an error description on failure.
  */

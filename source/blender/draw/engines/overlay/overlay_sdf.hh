@@ -52,6 +52,10 @@ static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max
   float3 sz(sdf->size[0], sdf->size[1], sdf->size[2]);
   float3 ext = sz;
   switch (sdf->sdf_type) {
+    case SDF_TYPE_MESH:
+      out_min = float3(sdf->mesh_bounds_min);
+      out_max = float3(sdf->mesh_bounds_max);
+      return;
     case SDF_TYPE_CONE: {
       float r = math::max(sz.x, sz.z);
       ext = float3(r, r, sz.y);
@@ -439,7 +443,6 @@ class Sdfs : Overlay {
     copies.append({rot, obj_pos});
 
     if (sel->object) {
-      float4x4 inv_rot = math::transpose(rot);
       for (const ModifierData &md : sel->object->modifiers) {
         if (!(md.mode & eModifierMode_Realtime)) {
           continue;
@@ -447,11 +450,6 @@ class Sdfs : Overlay {
         if (md.type == eModifierType_SDFMirror) {
           const auto &m = reinterpret_cast<const SDFMirrorModifierData &>(md);
           float offset = m.offset_distance;
-          float3 world_org(0);
-          if (m.mirror_object) {
-            world_org = float3(m.mirror_object->object_to_world()[3]) - obj_pos;
-          }
-          float3 local_org = float3(inv_rot * float4(world_org, 0.0f));
 
           auto do_mirror = [&](int axis_idx) {
             float3 mirror_pos = m.mirror_object ?
@@ -503,9 +501,17 @@ class Sdfs : Overlay {
           }
 
           if (m.array_type == MOD_SDF_ARRAY_LINEAR) {
-            float3 dimensions(sel->sdf_data->size[0] * scl.x * 2.0f,
-                              sel->sdf_data->size[1] * scl.y * 2.0f,
-                              sel->sdf_data->size[2] * scl.z * 2.0f);
+            float3 dimensions;
+            if (sel->sdf_data->sdf_type == SDF_TYPE_MESH) {
+              dimensions = (float3(sel->sdf_data->mesh_bounds_max) -
+                            float3(sel->sdf_data->mesh_bounds_min)) *
+                           scl;
+            }
+            else {
+              dimensions = float3(sel->sdf_data->size[0] * scl.x * 2.0f,
+                                  sel->sdf_data->size[1] * scl.y * 2.0f,
+                                  sel->sdf_data->size[2] * scl.z * 2.0f);
+            }
             float3 local_off(0.0f);
             if (m.use_relative_offset) {
               local_off += float3(m.relative_offset[0], m.relative_offset[1],

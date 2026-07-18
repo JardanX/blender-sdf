@@ -21,6 +21,8 @@
  * and DFS stack usage ≈ depth + 2. */
 #define BVH_MAX_STACK 64
 
+#include "sdf_mesh_lib.glsl"
+
 /** Decode an integer packed via intBitsToFloat in a BVH node field. */
 int bvh_decode_int(float encoded)
 {
@@ -1675,82 +1677,115 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
    * coordinate transform so the geometry stretches/squishes. */
   float3 r = obj.sdf_size.xyz;
   float bevel = obj.sdf_size.w;
-  local_pos /= obj.obj_scale.xyz;
   float dist;
 
 #ifdef SDF_BENCH_BOX_ONLY
-  return sdBox(local_pos, r) - bevel;
+  return sdBox(local_pos / obj.obj_scale.xyz, r) - bevel;
 #endif
 
-  if (obj.sdf_type == 1) { /* SPHERE / ELLIPSOID */
-    dist = (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f)
-           ? sdSphere(local_pos, r.x) : sdEllipsoid(local_pos, r);
+  if (obj.sdf_type == SDF_GPU_TYPE_MESH) { /* TRIANGLE MESH */
+    dist = sdTriangleMesh(local_pos, obj);
   }
-  else if (obj.sdf_type == 2) { /* CYLINDER */
-    dist = sdCylinder(local_pos, r);
-  }
-  else if (obj.sdf_type == 3) { /* CONE / FRUSTUM */
-    dist = sdConeFrustum(local_pos, r.x, r.z, r.y);
-  }
-  else if (obj.sdf_type == 4) { /* CAPSULE */
-    dist = sdCapsule(local_pos, r);
-  }
-  else if (obj.sdf_type == 5) { /* TORUS */
-    dist = (obj.box_modes.w != 0)
-           ? sdCappedTorus(local_pos, obj.box_corners.xy, r.x, r.y)
-           : sdTorus(local_pos, float2(r.x, r.y));
-  }
-  else if (obj.sdf_type == 6) { /* NGON */
-    int sides = obj.box_modes.z;
-    float corner = obj.box_corners.x;
-    float star = obj.box_corners.y;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    int edgeMode = obj.box_modes.y;
-    if ((corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f) {
-      dist = sdAdvancedNgon(local_pos, r.x, r.z, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z, star);
+  else {
+    local_pos /= obj.obj_scale.xyz;
+    if (obj.sdf_type == SDF_GPU_TYPE_SPHERE) { /* SPHERE / ELLIPSOID */
+      dist = (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f) ?
+                 sdSphere(local_pos, r.x) :
+                 sdEllipsoid(local_pos, r);
     }
-    else {
-      float d2d = sdRegularPolygon2D(local_pos.xy, r.x, sides);
-      float dz = abs(local_pos.z) - r.z;
-      float2 dd = float2(d2d, dz);
-      dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    else if (obj.sdf_type == SDF_GPU_TYPE_CYLINDER) { /* CYLINDER */
+      dist = sdCylinder(local_pos, r);
     }
-  }
-  else if (obj.sdf_type == 7) { /* POLYGON */
-    int ps = obj.polygon_point_start;
-    int pc = obj.polygon_point_count;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    int edgeMode = obj.box_modes.y;
-    if (pc >= 3) {
-      if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f || obj.box_corners.x > 0.001f) {
-        dist = sdAdvancedPolygon(local_pos, r.z, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z);
+    else if (obj.sdf_type == SDF_GPU_TYPE_CONE) { /* CONE / FRUSTUM */
+      dist = sdConeFrustum(local_pos, r.x, r.z, r.y);
+    }
+    else if (obj.sdf_type == SDF_GPU_TYPE_CAPSULE) { /* CAPSULE */
+      dist = sdCapsule(local_pos, r);
+    }
+    else if (obj.sdf_type == SDF_GPU_TYPE_TORUS) { /* TORUS */
+      dist = (obj.box_modes.w != 0) ?
+                 sdCappedTorus(local_pos, obj.box_corners.xy, r.x, r.y) :
+                 sdTorus(local_pos, float2(r.x, r.y));
+    }
+    else if (obj.sdf_type == SDF_GPU_TYPE_NGON) { /* NGON */
+      int sides = obj.box_modes.z;
+      float corner = obj.box_corners.x;
+      float star = obj.box_corners.y;
+      float edgeTop = obj.box_edges.x;
+      float edgeBot = obj.box_edges.y;
+      float tapTop = obj.box_edges.z;
+      float tapBot = obj.box_edges.w;
+      int edgeMode = obj.box_modes.y;
+      if ((corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f) {
+        dist = sdAdvancedNgon(local_pos,
+                              r.x,
+                              r.z,
+                              sides,
+                              corner,
+                              edgeTop,
+                              edgeBot,
+                              tapTop,
+                              tapBot,
+                              edgeMode,
+                              r.z,
+                              star);
       }
       else {
-        float d2d = sdPolygon2D(local_pos.xy, ps, pc);
+        float d2d = sdRegularPolygon2D(local_pos.xy, r.x, sides);
         float dz = abs(local_pos.z) - r.z;
         float2 dd = float2(d2d, dz);
         dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
       }
     }
-    else { dist = 1e10f; }
-  }
-  else { /* BOX (default) */
-    float4 corners = obj.box_corners;
-    float edgeTop = obj.box_edges.x;
-    float edgeBot = obj.box_edges.y;
-    float tapTop = obj.box_edges.z;
-    float tapBot = obj.box_edges.w;
-    if ((corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot + tapTop + tapBot) > 0.001f) {
-      dist = sdAdvancedBox(local_pos, r, corners, edgeTop, edgeBot, tapTop, tapBot, obj.box_modes.x, obj.box_modes.y, r.z);
+    else if (obj.sdf_type == SDF_GPU_TYPE_POLYGON) { /* POLYGON */
+      int ps = obj.polygon_point_start;
+      int pc = obj.polygon_point_count;
+      float edgeTop = obj.box_edges.x;
+      float edgeBot = obj.box_edges.y;
+      float tapTop = obj.box_edges.z;
+      float tapBot = obj.box_edges.w;
+      int edgeMode = obj.box_modes.y;
+      if (pc >= 3) {
+        if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f ||
+            obj.box_corners.x > 0.001f)
+        {
+          dist = sdAdvancedPolygon(
+              local_pos, r.z, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z);
+        }
+        else {
+          float d2d = sdPolygon2D(local_pos.xy, ps, pc);
+          float dz = abs(local_pos.z) - r.z;
+          float2 dd = float2(d2d, dz);
+          dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+        }
+      }
+      else {
+        dist = 1e10f;
+      }
     }
-    else {
-      dist = sdBox(local_pos, r);
+    else { /* BOX (default) */
+      float4 corners = obj.box_corners;
+      float edgeTop = obj.box_edges.x;
+      float edgeBot = obj.box_edges.y;
+      float tapTop = obj.box_edges.z;
+      float tapBot = obj.box_edges.w;
+      if ((corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot + tapTop +
+           tapBot) > 0.001f)
+      {
+        dist = sdAdvancedBox(local_pos,
+                             r,
+                             corners,
+                             edgeTop,
+                             edgeBot,
+                             tapTop,
+                             tapBot,
+                             obj.box_modes.x,
+                             obj.box_modes.y,
+                             r.z);
+      }
+      else {
+        dist = sdBox(local_pos, r);
+      }
     }
   }
 
@@ -1798,6 +1833,9 @@ float applyDistanceModifiers(float dist, float3 p, SDFObjectGPU obj, int mod_sta
       }
     }
     else if (mtype == SDF_MOD_ROUND) {
+      dist -= smod.params.x;
+    }
+    else if (mtype == SDF_MOD_BEVEL && obj.sdf_type == SDF_GPU_TYPE_MESH) {
       dist -= smod.params.x;
     }
     else if (mtype == SDF_MOD_DISPLACE) {
@@ -1877,8 +1915,9 @@ float evalObjectSDF(SDFObjectGPU obj, float3 p)
   /* All modifiers (mirror, array, twist, etc.) use domain folding — single eval path. */
   float4 dm = applyDomainModifiers(p, obj.modifier_start, obj.modifier_count, obj.inverse_matrix);
   p = dm.xyz;
-  /* evalPrimitiveOnly returns a BASE-space distance; convert to world via min(scale). */
-  float d = evalPrimitiveOnly(obj, p) * obj.obj_scale.w;
+  /* Analytic primitives use a conservative scale; mesh distance is already in object units. */
+  float distance_scale = obj.obj_scale.w;
+  float d = evalPrimitiveOnly(obj, p) * distance_scale;
   d = applyDistanceModifiers(d, p, obj, obj.modifier_start, obj.modifier_count);
   return d * dm.w;
 }
@@ -1931,4 +1970,3 @@ void flushGroupDist(int gid, float grp_dist, inout float scene_dist)
 /** \} */
 
 /** \} */
-

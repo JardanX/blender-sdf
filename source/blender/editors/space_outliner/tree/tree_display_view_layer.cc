@@ -113,10 +113,18 @@ ListBaseT<TreeElement> TreeDisplayViewLayer::build_tree(const TreeSourceData &so
   return tree;
 }
 
-static int sdf_sort_index(Object *ob)
+static bool is_sdf_stack_object(const Object *ob)
+{
+  return ob && (ob->type == OB_SDF || (ob->type == OB_MESH && ob->is_sdf));
+}
+
+static int sdf_sort_index(const Object *ob)
 {
   if (!ob || !ob->data) {
     return 0;
+  }
+  if (ob->type == OB_MESH) {
+    return ob->sdf_index;
   }
   const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
   return sdf->sdf_index;
@@ -146,7 +154,7 @@ void TreeDisplayViewLayer::add_sdf_hierarchy(Main & /*bmain*/,
   /* Mark children of group empties */
   for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
     Object *ob = base.object;
-    if (ob->type != OB_SDF || !ob->parent) {
+    if (!is_sdf_stack_object(ob) || !ob->parent) {
       continue;
     }
     for (Object *grp : group_empties) {
@@ -161,11 +169,10 @@ void TreeDisplayViewLayer::add_sdf_hierarchy(Main & /*bmain*/,
   Vector<std::pair<Object *, Base *>> top_level;
   for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
     Object *ob = base.object;
-    if (ob->type != OB_SDF) {
+    if (!is_sdf_stack_object(ob)) {
       continue;
     }
-    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
-    if (!sdf) {
+    if (!ob->data) {
       continue;
     }
     /* Skip children of groups */
@@ -183,9 +190,9 @@ void TreeDisplayViewLayer::add_sdf_hierarchy(Main & /*bmain*/,
 
   /* Add top-level items; groups expand their children */
   for (auto &[ob, base] : top_level) {
-    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+    const SDF *sdf = ob->type == OB_SDF ? reinterpret_cast<const SDF *>(ob->data) : nullptr;
 
-    if (sdf->sdf_type == SDF_TYPE_GROUP) {
+    if (sdf && sdf->sdf_type == SDF_TYPE_GROUP) {
       TreeElement *te_group = add_element(
           &tree, reinterpret_cast<ID *>(ob), nullptr, parent, TSE_SOME_ID, 0, false);
       if (!te_group) {
@@ -202,10 +209,12 @@ void TreeDisplayViewLayer::add_sdf_hierarchy(Main & /*bmain*/,
       Vector<std::pair<Object *, Base *>> children;
       for (Base &cbase : *BKE_view_layer_object_bases_get(view_layer_)) {
         Object *cob = cbase.object;
-        if (cob->type != OB_SDF || cob->parent != ob) {
+        if (!is_sdf_stack_object(cob) || cob->parent != ob) {
           continue;
         }
-        const SDF *csdf = reinterpret_cast<const SDF *>(cob->data);
+        const SDF *csdf = cob->type == OB_SDF ?
+                              reinterpret_cast<const SDF *>(cob->data) :
+                              nullptr;
         if (csdf && csdf->sdf_type == SDF_TYPE_GROUP) {
           continue;
         }
@@ -249,7 +258,7 @@ void TreeDisplayViewLayer::add_view_layer(Scene &scene,
     /* Show objects in the view layer. */
     BKE_view_layer_synced_ensure(&scene, view_layer_);
     for (Base &base : *BKE_view_layer_object_bases_get(view_layer_)) {
-      if (base.object->type == OB_SDF) {
+      if (is_sdf_stack_object(base.object)) {
         continue;
       }
       if (base.object->type == OB_EMPTY && base.object->id.properties &&
@@ -324,7 +333,7 @@ void TreeDisplayViewLayer::add_layer_collection_objects(ListBaseT<TreeElement> &
 {
   BKE_view_layer_synced_ensure(scene_, view_layer_);
   for (CollectionObject &cob : lc.collection->gobject) {
-    if (cob.ob->type == OB_SDF) {
+    if (is_sdf_stack_object(cob.ob)) {
       continue;
     }
     if (cob.ob->type == OB_EMPTY && cob.ob->id.properties &&

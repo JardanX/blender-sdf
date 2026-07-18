@@ -232,6 +232,15 @@ static bool buttons_context_path_object(ButsContextPath *path)
   return false;
 }
 
+static bool buttons_context_path_sdf(ButsContextPath *path)
+{
+  if (!buttons_context_path_object(path)) {
+    return false;
+  }
+  const Object *ob = static_cast<const Object *>(path->ptr[path->len - 1].data);
+  return ob && ob->type == OB_MESH;
+}
+
 static bool buttons_context_path_data(ButsContextPath *path, int type)
 {
   PointerRNA *ptr = &path->ptr[path->len - 1];
@@ -679,6 +688,9 @@ static bool buttons_context_path(
     case BCONTEXT_PHYSICS:
     case BCONTEXT_CONSTRAINT:
       found = buttons_context_path_object(path);
+      break;
+    case BCONTEXT_SDF:
+      found = buttons_context_path_sdf(path);
       break;
     case BCONTEXT_MODIFIER:
       found = buttons_context_path_modifier(path);

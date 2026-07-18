@@ -228,6 +228,7 @@ set(SRC
   engines/select/select_engine.hh
   engines/select/select_instance.hh
   engines/sdf/sdf_engine.h
+  engines/sdf/sdf_engine_api.hh
   engines/sdf/sdf_bvh.hh
   engines/sdf/sdf_meshing.hh
   engines/sdf/sdf_private.hh
@@ -367,6 +368,7 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_edge_detect_frag.glsl
 
   engines/sdf/shaders/sdf_lib.glsl
+  engines/sdf/shaders/sdf_mesh_lib.glsl
   engines/sdf/shaders/sdf_grad_lib.glsl
   engines/sdf/sdf_shader_shared.hh
 

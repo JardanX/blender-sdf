@@ -10,7 +10,8 @@
 
 COMPUTE_SHADER_CREATE_INFO(sdf_tile_cull_comp)
 
-#include "sdf_lib.glsl"
+#define SDF_CSG_OP_INTERSECT 2
+#define SDF_CSG_OP_PUSH 4
 
 shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];

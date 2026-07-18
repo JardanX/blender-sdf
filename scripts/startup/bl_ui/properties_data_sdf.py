@@ -302,6 +302,37 @@ class VIEW3D_GGT_sdf_polygon(GizmoGroup):
 
 # Pie Menus
 
+def _is_sdf_object(ob):
+    return ob is not None and (ob.type == 'SDF' or (ob.type == 'MESH' and ob.is_sdf))
+
+
+def _is_sdf_group(ob):
+    return ob is not None and ob.type == 'SDF' and ob.data and ob.data.sdf_type == 'GROUP'
+
+
+def _sdf_order(ob):
+    return ob.data.sdf_index if ob.type == 'SDF' else ob.sdf_index
+
+
+def _is_first_sdf_operand(context, ob):
+    group = ob.parent if _is_sdf_group(ob.parent) else None
+    candidates = []
+    for candidate in context.scene.objects:
+        if not _is_sdf_object(candidate):
+            continue
+        candidate_group = candidate.parent if _is_sdf_group(candidate.parent) else None
+        if group is not None and candidate_group == group and not _is_sdf_group(candidate):
+            candidates.append(candidate)
+        elif group is None and candidate_group is None:
+            candidates.append(candidate)
+    return bool(candidates) and min(candidates, key=_sdf_order) == ob
+
+
+def _sdf_composition_target(ob):
+    if ob.type == 'SDF':
+        return ob.data, ""
+    return ob, "sdf_"
+
 class SDF_MT_shape_pie(Menu):
     bl_idname = "SDF_MT_shape_pie"
     bl_label = "Shape"
@@ -325,15 +356,16 @@ class SDF_MT_csg_pie(Menu):
 
     def draw(self, context):
         pie = self.layout.menu_pie()
-        sdf = context.object.data
-        pie.prop_enum(sdf, "csg_operation", value='UNION')       # W
-        pie.prop_enum(sdf, "csg_operation", value='SUBTRACT')    # E
+        target, prefix = _sdf_composition_target(context.object)
+        prop = prefix + "csg_operation"
+        pie.prop_enum(target, prop, value='UNION')       # W
+        pie.prop_enum(target, prop, value='SUBTRACT')    # E
         pie.separator()                                           # S (skip)
         pie.separator()                                           # N (skip)
-        pie.prop_enum(sdf, "csg_operation", value='INTERSECT')   # NW
-        pie.prop_enum(sdf, "csg_operation", value='SHELL')       # NE
-        pie.prop_enum(sdf, "csg_operation", value='PUSH')        # SW
-        pie.prop_enum(sdf, "csg_operation", value='AVOID')       # SE
+        pie.prop_enum(target, prop, value='INTERSECT')   # NW
+        pie.prop_enum(target, prop, value='SHELL')       # NE
+        pie.prop_enum(target, prop, value='PUSH')        # SW
+        pie.prop_enum(target, prop, value='AVOID')       # SE
 
 
 class SDF_MT_main_pie(Menu):
@@ -342,17 +374,22 @@ class SDF_MT_main_pie(Menu):
 
     def draw(self, context):
         pie = self.layout.menu_pie()
-        sdf = context.object.data
-        pie.prop_enum(sdf, "csg_operation", value='UNION')       # W
-        pie.prop_enum(sdf, "csg_operation", value='SUBTRACT')    # E
+        ob = context.object
+        target, prefix = _sdf_composition_target(ob)
+        prop = prefix + "csg_operation"
+        pie.prop_enum(target, prop, value='UNION')       # W
+        pie.prop_enum(target, prop, value='SUBTRACT')    # E
         op = pie.operator("wm.call_menu_pie", text="CSG Operation", icon='MOD_BOOLEAN')  # S
         op.name = "SDF_MT_csg_pie"
-        op = pie.operator("wm.call_menu_pie", text="Shape", icon='MESH_UVSPHERE')        # N
-        op.name = "SDF_MT_shape_pie"
-        pie.prop_enum(sdf, "csg_operation", value='INTERSECT')   # NW
-        pie.prop_enum(sdf, "csg_operation", value='SHELL')       # NE
-        pie.prop_enum(sdf, "csg_operation", value='PUSH')        # SW
-        pie.prop_enum(sdf, "csg_operation", value='AVOID')       # SE
+        if ob.type == 'SDF':
+            op = pie.operator("wm.call_menu_pie", text="Shape", icon='MESH_UVSPHERE')    # N
+            op.name = "SDF_MT_shape_pie"
+        else:
+            pie.separator()
+        pie.prop_enum(target, prop, value='INTERSECT')   # NW
+        pie.prop_enum(target, prop, value='SHELL')       # NE
+        pie.prop_enum(target, prop, value='PUSH')        # SW
+        pie.prop_enum(target, prop, value='AVOID')       # SE
 
 
 class SDF_MT_blend_pie(Menu):
@@ -361,11 +398,12 @@ class SDF_MT_blend_pie(Menu):
 
     def draw(self, context):
         pie = self.layout.menu_pie()
-        sdf = context.object.data
-        pie.prop_enum(sdf, "blend_type", value='LINEAR')
-        pie.prop_enum(sdf, "blend_type", value='SMOOTH')
-        pie.prop_enum(sdf, "blend_type", value='CHAMFER')
-        pie.prop_enum(sdf, "blend_type", value='ROUND')
+        target, prefix = _sdf_composition_target(context.object)
+        prop = prefix + "blend_type"
+        pie.prop_enum(target, prop, value='LINEAR')
+        pie.prop_enum(target, prop, value='SMOOTH')
+        pie.prop_enum(target, prop, value='CHAMFER')
+        pie.prop_enum(target, prop, value='ROUND')
 
 
 class SDF_OT_csg_pie_call(Operator):
@@ -376,7 +414,7 @@ class SDF_OT_csg_pie_call(Operator):
     @classmethod
     def poll(cls, context):
         ob = context.object
-        return ob is not None and ob.type == 'SDF'
+        return _is_sdf_object(ob) and ob.mode == 'OBJECT'
 
     def execute(self, context):
         bpy.ops.wm.call_menu_pie(name="SDF_MT_main_pie")
@@ -391,7 +429,7 @@ class SDF_OT_blend_pie_call(Operator):
     @classmethod
     def poll(cls, context):
         ob = context.object
-        return ob is not None and ob.type == 'SDF'
+        return _is_sdf_object(ob) and ob.mode == 'OBJECT'
 
     def execute(self, context):
         bpy.ops.wm.call_menu_pie(name="SDF_MT_blend_pie")
@@ -443,7 +481,7 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         grid.scale_x = 1.0
         grid.scale_y = 1.6
         for item in sdf.bl_rna.properties["sdf_type"].enum_items:
-            if item.identifier == 'GROUP':
+            if item.identifier in {'GROUP', 'MESH'}:
                 continue
             grid.prop_enum(sdf, "sdf_type", item.identifier, text="")
 
@@ -474,6 +512,10 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
             col.prop(sdf, "ngon_height")
         elif t == 'BOX':
             col.prop(sdf, "size", text="Dimensions")
+        elif t == 'MESH':
+            col.prop(sdf, "mesh_normal_mode")
+            col.label(text=f"{sdf.mesh_vertex_count:,} vertices")
+            col.label(text=f"{sdf.mesh_triangle_count:,} triangles")
 
         layout.separator()
         layout.prop(sdf, "color")
@@ -830,6 +872,96 @@ class SDF_OT_polygon_point_context_menu(Operator):
 
 # Operation Panel
 
+def _draw_sdf_operation(layout, target, prefix, is_forced_union):
+    csg_prop = prefix + "csg_operation"
+    blend_type_prop = prefix + "blend_type"
+    shell_distance_prop = prefix + "shell_distance"
+    shell_mode_prop = prefix + "shell_mode"
+    shell_op_prop = prefix + "shell_op"
+    shell_blend_top_prop = prefix + "shell_blend_top"
+    shell_blend_bottom_prop = prefix + "shell_blend_bottom"
+    blend_prop = prefix + "blend"
+    flip_blend_prop = prefix + "flip_blend"
+    flip_blend_end_prop = prefix + "flip_blend_end"
+
+    layout.label(text="CSG Operation")
+    grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+    grid.scale_y = 1.4
+    grid.enabled = not is_forced_union
+    for item in target.bl_rna.properties[csg_prop].enum_items:
+        grid.prop_enum(target, csg_prop, item.identifier, text="")
+    if is_forced_union:
+        layout.label(text="First in stack - forced to Union", icon='INFO')
+        return
+
+    layout.separator()
+    layout.label(text="Blend Type")
+    grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+    grid.scale_y = 1.4
+    for item in target.bl_rna.properties[blend_type_prop].enum_items:
+        grid.prop_enum(target, blend_type_prop, item.identifier, text="")
+
+    is_shell = getattr(target, csg_prop) == 'SHELL'
+    blend_type = getattr(target, blend_type_prop)
+    if is_shell:
+        row = layout.row(align=True)
+        row.prop(target, shell_distance_prop, text="Distance")
+        sub = row.row(align=True)
+        sub.scale_x = 0.9
+        sub.enabled = getattr(target, shell_mode_prop) != 'AVOID'
+        sub.prop_enum(target, shell_op_prop, 'UNION', text="", icon='ADD')
+        sub.prop_enum(target, shell_op_prop, 'SUBTRACTION', text="", icon='REMOVE')
+        row = layout.row(align=True)
+        row.prop(target, shell_mode_prop, expand=True)
+
+    if blend_type == 'LINEAR':
+        return
+
+    col = layout.column(align=True)
+    col.separator()
+    if is_shell:
+        inward = getattr(target, shell_op_prop) == 'SUBTRACTION'
+        start_flip_on = (not inward) or blend_type == 'ROUND'
+        end_flip_on = inward or blend_type == 'ROUND'
+
+        row = col.row(align=True)
+        row.prop(target, shell_blend_top_prop, text="Start")
+        sub = row.row()
+        sub.enabled = start_flip_on
+        sub.prop(target, flip_blend_prop, text="", icon='UV_SYNC_SELECT', toggle=True)
+
+        row = col.row(align=True)
+        row.prop(target, shell_blend_bottom_prop, text="End")
+        sub = row.row()
+        sub.enabled = end_flip_on
+        sub.prop(target, flip_blend_end_prop, text="", icon='UV_SYNC_SELECT', toggle=True)
+
+        if getattr(target, shell_mode_prop) == 'AVOID':
+            col.prop(target, blend_prop, text="Avoid Blend")
+    else:
+        col.prop(target, blend_prop, text="Blend Strength")
+
+    if blend_type not in {'CHAMFER', 'ROUND'}:
+        return
+
+    col.separator()
+    if is_shell:
+        col.label(text="Smooth Start")
+        row = col.row(align=True)
+        row.prop(target, prefix + "chamfer_k2", text="K2")
+        row.prop(target, prefix + "chamfer_k3", text="K3")
+        col.label(text="Smooth End")
+        row = col.row(align=True)
+        row.prop(target, prefix + "chamfer_k4", text="K4")
+        row.prop(target, prefix + "chamfer_k5", text="K5")
+    else:
+        label = "Smooth Chamfer" if blend_type == 'CHAMFER' else "Smooth Round"
+        col.label(text=label)
+        row = col.row(align=True)
+        row.prop(target, prefix + "chamfer_k2", text="K2")
+        row.prop(target, prefix + "chamfer_k3", text="K3")
+
+
 class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
     bl_label = "Operation"
 
@@ -840,94 +972,51 @@ class DATA_PT_sdf_operation(SDFButtonsPanel, Panel):
     def draw(self, context):
         layout = self.layout
         sdf = context.sdf
-
         ob = context.object
-        is_first_in_scene = (sdf.sdf_index == 0)
-        is_group = (sdf.sdf_type == 'GROUP')
-        is_child = (ob and ob.parent and ob.parent.type == 'SDF')
-        is_first_child = is_child and sdf.sdf_index == 0
-        is_forced_union = (is_first_in_scene and not is_group and not is_child) or is_first_child
-
-        layout.label(text="CSG Operation")
-        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
-        grid.scale_y = 1.4
-        grid.enabled = not is_forced_union
-        for item in sdf.bl_rna.properties["csg_operation"].enum_items:
-            grid.prop_enum(sdf, "csg_operation", item.identifier, text="")
-        if is_forced_union:
-            layout.label(text="First in stack — forced to Union", icon='INFO')
-
-        if not is_forced_union:
-            layout.separator()
-
-            layout.label(text="Blend Type")
-            grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
-            grid.scale_y = 1.4
-            for item in sdf.bl_rna.properties["blend_type"].enum_items:
-                grid.prop_enum(sdf, "blend_type", item.identifier, text="")
-
-            is_shell = (sdf.csg_operation == 'SHELL')
-            bt = sdf.blend_type
-
-            if is_shell:
-                row = layout.row(align=True)
-                row.prop(sdf, "shell_distance", text="Distance")
-                sub = row.row(align=True)
-                sub.scale_x = 0.9
-                sub.enabled = (sdf.shell_mode != 'AVOID')
-                sub.prop_enum(sdf, "shell_op", 'UNION', text="", icon='ADD')
-                sub.prop_enum(sdf, "shell_op", 'SUBTRACTION', text="", icon='REMOVE')
-                row = layout.row(align=True)
-                row.prop(sdf, "shell_mode", expand=True)
-
-            if bt != 'LINEAR':
-                col = layout.column(align=True)
-                col.separator()
-
-                if is_shell:
-                    inward = (sdf.shell_op == 'SUBTRACTION')
-                    start_flip_on = (not inward) or (bt == 'ROUND')
-                    end_flip_on = inward or (bt == 'ROUND')
-
-                    row = col.row(align=True)
-                    row.prop(sdf, "shell_blend_top", text="Start")
-                    sub = row.row()
-                    sub.enabled = start_flip_on
-                    sub.prop(sdf, "flip_blend", text="", icon='UV_SYNC_SELECT', toggle=True)
-
-                    row = col.row(align=True)
-                    row.prop(sdf, "shell_blend_bottom", text="End")
-                    sub = row.row()
-                    sub.enabled = end_flip_on
-                    sub.prop(sdf, "flip_blend_end", text="", icon='UV_SYNC_SELECT', toggle=True)
-
-                    if sdf.shell_mode == 'AVOID':
-                        col.prop(sdf, "blend", text="Avoid Blend")
-                else:
-                    col.prop(sdf, "blend", text="Blend Strength")
-
-                if bt in ('CHAMFER', 'ROUND'):
-                    col.separator()
-                    if is_shell:
-                        col.label(text="Smooth Start")
-                        row = col.row(align=True)
-                        row.prop(sdf, "chamfer_k2", text="K2")
-                        row.prop(sdf, "chamfer_k3", text="K3")
-                        col.label(text="Smooth End")
-                        row = col.row(align=True)
-                        row.prop(sdf, "chamfer_k4", text="K4")
-                        row.prop(sdf, "chamfer_k5", text="K5")
-                    else:
-                        lbl = "Smooth Chamfer" if bt == 'CHAMFER' else "Smooth Round"
-                        col.label(text=lbl)
-                        row = col.row(align=True)
-                        row.prop(sdf, "chamfer_k2", text="K2")
-                        row.prop(sdf, "chamfer_k3", text="K3")
-
-        layout.separator()
+        is_forced_union = bool(ob) and _is_first_sdf_operand(context, ob)
+        _draw_sdf_operation(layout, sdf, "", is_forced_union)
 
 
-# MATHOPS: Removed — SDF modifiers moved to native Blender modifier system
+class SDFMeshButtonsPanel:
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "sdf"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == 'MESH'
+
+
+class SDF_PT_mesh_settings(SDFMeshButtonsPanel, Panel):
+    bl_label = "Mesh to SDF"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        ob = context.object
+
+        layout.prop(ob, "is_sdf", text="Enable")
+        if not ob.is_sdf:
+            return
+        layout.prop(ob, "sdf_normal_mode")
+        layout.prop(ob, "sdf_index")
+        layout.prop(ob, "color")
+
+
+class SDF_PT_mesh_operation(SDFMeshButtonsPanel, Panel):
+    bl_label = "Operation"
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and context.object.is_sdf
+
+    def draw(self, context):
+        layout = self.layout
+        ob = context.object
+        is_forced_union = _is_first_sdf_operand(context, ob)
+        _draw_sdf_operation(layout, ob, "sdf_", is_forced_union)
 
 
 
@@ -952,6 +1041,8 @@ classes = (
     DATA_PT_sdf_group,
     DATA_PT_sdf_operation,
     DATA_PT_sdf_property,
+    SDF_PT_mesh_settings,
+    SDF_PT_mesh_operation,
 )
 
 
@@ -969,7 +1060,7 @@ def _sdf_group_cleanup_deferred():
                 continue
             has_children = False
             for c in ob.children:
-                if c.type == 'SDF':
+                if c.type == 'SDF' or (c.type == 'MESH' and c.is_sdf):
                     has_children = True
                     break
             if not has_children:
