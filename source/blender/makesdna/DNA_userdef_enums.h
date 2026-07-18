@@ -43,7 +43,6 @@ enum eDupli_ID_Flags {
   USER_DUP_SPEAKER = (1 << 19),
   USER_DUP_NTREE = (1 << 20),
   USER_DUP_SDF = (1 << 21),
-  USER_DUP_NURB_BODY = (1 << 22),
 
   USER_DUP_OBDATA = (~0) & ((1 << 24) - 1),
 

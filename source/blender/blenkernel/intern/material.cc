@@ -27,7 +27,6 @@
 #include "DNA_material_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_node_types.h"
-#include "DNA_nurb_body_types.h"
 #include "DNA_object_types.h"
 #include "DNA_particle_types.h"
 #include "DNA_pointcloud_types.h"
@@ -371,10 +370,6 @@ Material ***BKE_object_material_array_p(Object *ob)
     SDF *sdf = id_cast<SDF *>(ob->data);
     return &(sdf->mat);
   }
-  if (ob->type == OB_NURB_BODY) {
-    NurbBody *body = id_cast<NurbBody *>(ob->data);
-    return &(body->mat);
-  }
   return nullptr;
 }
 
@@ -412,10 +407,6 @@ short *BKE_object_material_len_p(Object *ob)
     SDF *sdf = id_cast<SDF *>(ob->data);
     return &(sdf->totcol);
   }
-  if (ob->type == OB_NURB_BODY) {
-    NurbBody *body = id_cast<NurbBody *>(ob->data);
-    return &(body->totcol);
-  }
   return nullptr;
 }
 
@@ -443,8 +434,6 @@ Material ***BKE_id_material_array_p(ID *id)
       return &((id_cast<GreasePencil *>(id))->material_array);
     case ID_SF:
       return &(((SDF *)id)->mat);
-    case ID_NB:
-      return &((id_cast<NurbBody *>(id))->mat);
     default:
       break;
   }
@@ -475,8 +464,6 @@ short *BKE_id_material_len_p(ID *id)
       return &((id_cast<GreasePencil *>(id))->material_array_num);
     case ID_SF:
       return &(((SDF *)id)->totcol);
-    case ID_NB:
-      return &((id_cast<NurbBody *>(id))->totcol);
     default:
       break;
   }
@@ -503,7 +490,6 @@ static void material_data_index_remove_id(ID *id, short index)
     case ID_PT:
     case ID_VO:
     case ID_SF:
-    case ID_NB:
       /* No material indices for these object data types. */
       break;
     default:
@@ -539,8 +525,6 @@ bool BKE_object_material_slot_used(Object *object, short actcol)
     case ID_SF:
       /* SDF objects use a single material per object, always "used". */
       return true;
-    case ID_NB:
-      return true;
     case ID_GP:
       return BKE_grease_pencil_material_index_used(reinterpret_cast<GreasePencil *>(ob_data),
                                                    actcol - 1);
@@ -566,7 +550,6 @@ static void material_data_index_clear_id(ID *id)
     case ID_PT:
     case ID_VO:
     case ID_SF:
-    case ID_NB:
       /* No material indices for these object data types. */
       break;
     default:
@@ -1290,9 +1273,6 @@ void BKE_object_material_remap(Object *ob, const uint *remap)
   }
   else if (ob->type == OB_SDF) {
     /* SDF objects have no per-face material indices to remap. */
-  }
-  else if (ob->type == OB_NURB_BODY) {
-    /* NURB Body objects have no persistent per-face material indices to remap. */
   }
   else {
     /* add support for this object data! */

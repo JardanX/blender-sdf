@@ -196,7 +196,7 @@ class Instance : public DrawEngine {
         this->sculpt_sync(ob_ref, handle, object_state);
         emitter_handle = handle;
       }
-      else if (ELEM(ob->type, OB_MESH, OB_NURB_BODY)) {
+      else if (ob->type == OB_MESH) {
         ResourceHandleRange handle = manager.unique_handle(ob_ref);
         this->mesh_sync(ob_ref, handle, object_state);
         emitter_handle = handle;
@@ -272,10 +272,6 @@ class Instance : public DrawEngine {
     resources_.material_buf.append(material);
     uint material_index = uint(resources_.material_buf.size() - 1);
     uint custom_id = material_index;
-    if (ob_ref.object->type == OB_NURB_BODY && scene_state_.draw_outline) {
-      custom_id |= workbench_disable_object_outline_id;
-    }
-
     if (show_missing_texture && (!texture || !texture->gpu.texture)) {
       texture = &resources_.missing_texture;
     }

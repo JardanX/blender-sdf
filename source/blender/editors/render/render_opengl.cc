@@ -661,7 +661,6 @@ static int gather_frames_to_render_for_id(LibraryIDLinkCallbackData *cb_data)
       break;
     case ID_MB:
     case ID_SF:
-    case ID_NB:
       break;
   }
 

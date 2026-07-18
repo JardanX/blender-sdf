@@ -211,11 +211,6 @@ inline Mesh &DRW_mesh_get_for_drawing(Mesh &mesh)
 
 template<> inline Mesh &DRW_object_get_data_for_drawing(const Object &object)
 {
-  if (object.type == OB_NURB_BODY) {
-    Mesh *mesh = BKE_object_get_evaluated_mesh_no_subsurf_unchecked(&object);
-    BLI_assert(mesh != nullptr);
-    return DRW_mesh_get_for_drawing(*mesh);
-  }
   BLI_assert(object.type == OB_MESH);
   return DRW_mesh_get_for_drawing(*id_cast<Mesh *>(object.data));
 }

@@ -347,8 +347,6 @@ struct Instance : public DrawEngine {
         }
         return mesh_sync(ob, res_handle, select_mode, index_start);
       }
-      case OB_NURB_BODY:
-        return mesh_sync(ob, res_handle, select_mode, index_start);
       case OB_CURVES_LEGACY:
       case OB_SURF:
         break;

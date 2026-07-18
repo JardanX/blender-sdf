@@ -201,7 +201,6 @@ class Outline : Overlay {
       // case OB_GREASE_PENCIL:
       //   GreasePencil::draw_grease_pencil(...);
       //   break;
-      case OB_NURB_BODY:
       case OB_MESH:
         if (state.xray_enabled_and_not_wire) {
           geom = DRW_cache_mesh_edge_detection_get(ob_ref.object, nullptr);

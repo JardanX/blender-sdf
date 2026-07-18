@@ -5,99 +5,13 @@
 
 ---
 
-## NURB Body Object Type (OCCT-backed CAD Modeling)
+## REMOVED: NURB Body Object Type
 
-Added `OB_NURB_BODY = 24` / `ID_NB = 'NB'` as a native Blender object type backed by OpenCASCADE (OCCT 8.0.0). This is the foundation for NURBS/CAD-style analytic solid modeling directly in the viewport — cylinder primitives, boolean operations, edge bevel/fillet/chamfer — targeting a Plasticity-like workflow.
+**Removed in a later cleanup pass.** The `OB_NURB_BODY = 24` / `ID_NB = 'NB'` object type with full OCCT-backed CAD modeling (primitives, boolean ops, bevel/fillet/chamfer, edge selection, edge translate, viewport overlay) has been completely stripped from the codebase.
 
-### New Files
-
-| File | Purpose |
-|------|---------|
-| `makesdna/DNA_nurb_body_types.h` | DNA struct: `NurbBody` with shape params (radius, depth), boolean op linked list (`NurbBodyBooleanOp`), 64-bit edge selection masks, bevel/fillet/chamfer data, generated face provenance keys, tessellation quality, selection mode |
-| `blenkernel/BKE_nurb_body.hh` | BKE API: `BKE_nurb_body_add()`, `BKE_nurb_body_to_mesh()`, edge polyline sampling, data update callback. Defines `NurbBodyEdgePolyline` struct for viewport overlay |
-| `blenkernel/intern/nurb_body.cc` | BKE implementation (~1755 lines OCCT): `IDType_ID_NB` registration, shape evaluation via OCCT BRep primitives, boolean operations (cut/fuse/common), edge bevel/fillet/chamfer (via `BRepFilletAPI_MakeFillet`/`MakeChamfer`), tessellation with `BRepMesh_IncrementalMesh`, mesh extraction with quad optimization, topological workflow and auto-crease, edge polyline sampling for overlay |
-| `editors/object/object_nurb_body.cc` | Operators (~1500 lines): add (cylinder), boolean apply (multi-operand with hide/boundbox toggle), edge select/hover in Object Mode, edge translate (modal with X/Y/Z axis constraint, operator grab), interactive bevel (modal radius drag, C key chamfer toggle, F key fillet reset, undo on escape) |
-| `draw/engines/overlay/overlay_nurb_body.hh` | Viewport overlay: silhouette edge lines from mesh, boolean edge polylines with select/hover/body color coding, line smoothing, depth testing |
-| `makesrna/intern/rna_nurb_body.cc` | Python API: shape properties (primitive, radius, depth), tessellation controls (deflection, angle), shading flags (merge vertices, smooth shading, triangulate, auto-crease), selection mode, materials |
-| `scripts/startup/bl_ui/properties_data_nurb_body.py` | Properties panel UI: Shape (primitive, selection mode, radius, depth), Viewport Tessellation (deflection, angle, triangulate, merge, smooth, auto-crease) |
-
-### Modified Files — Wiring Points
-
-| File | Change |
-|------|--------|
-| `makesdna/DNA_ID.h` | Added `ID_NB` to `FILTER_ID_ALL` macro |
-| `makesdna/DNA_ID_enums.h` | Added `ID_NB = MAKE_ID2('N', 'B')` |
-| `makesdna/DNA_object_types.h` | Added `OB_NURB_BODY = 24`; updated `OB_TYPE_SUPPORT_MATERIAL`, `OB_TYPE_IS_GEOMETRY`, `OB_DATA_SUPPORT_ID_CASE` |
-| `makesdna/DNA_userdef_enums.h` | Added `USER_DUP_NURB_BODY` duplicate flag |
-| `makesdna/DNA_userdef_types.h` | Added `ud->dupflag` bit for NURB body |
-| `blenkernel/BKE_idtype.hh` | Added `FILTER_ID_NB` |
-| `blenkernel/BKE_main.hh` | Added `ListBase nurb_bodies` to `Main` struct |
-| `blenkernel/intern/idtype.cc` | `INIT_TYPE()` + `CASE_IDINDEX()` for `ID_NB` |
-| `blenkernel/intern/main.cc` | Mapped `INDEX_ID_NB` to `bmain.nurb_bodies` |
-| `blenkernel/intern/object.cc` | Object data name/add/type mapping, modifier support, duplicate, boundbox |
-| `blenkernel/intern/object_update.cc` | Added `OB_NURB_BODY` to `BKE_object_data_update()` |
-| `blenkernel/intern/material.cc` | Material array access for `ID_NB` |
-| `blenloader/intern/versioning_userdef.cc` | Set `USER_DUP_NURB_BODY` default |
-| `depsgraph/intern/builder/deg_builder_nodes.cc` | Build evaluation nodes for `ID_NB`/`OB_NURB_BODY` |
-| `depsgraph/intern/builder/deg_builder_relations.cc` | Build dependency relations |
-| `depsgraph/intern/depsgraph_tag.cc` | Tag NURB body data for update |
-| `makesrna/intern/makesrna.cc` | RNA registration for `rna_nurb_body` |
-| `makesrna/intern/rna_ID.cc` | `case ID_NB: return &RNA_NurbBody` in `ID_code_to_RNA_type()` |
-| `makesrna/intern/rna_internal.hh` | `RNA_def_nurb_body()` declaration |
-| `makesrna/intern/rna_main.cc` | `bpy.data.nurb_bodies` collection |
-| `makesrna/intern/rna_main_api.cc` | `.new()` / `.remove()` / `.tag()` API methods |
-| `makesrna/intern/rna_object.cc` | `OB_NURB_BODY` RNA enum for object type |
-| `makesrna/intern/rna_space_api.cc` | Space API notification for NURB body |
-| `draw/engines/overlay/overlay_instance.cc/.hh` | NURB body overlay instance registration |
-| `draw/engines/overlay/overlay_outline.hh` | Outline rendering for `OB_NURB_BODY` |
-| `draw/engines/overlay/overlay_prepass.hh` | Prepass for `OB_NURB_BODY` |
-| `draw/engines/overlay/overlay_wireframe.hh` | Wireframe mode for `OB_NURB_BODY` |
-| `draw/engines/select/select_engine.cc` | Selection engine support |
-| `draw/engines/workbench/workbench_engine.cc` | Workbench engine bypass (no batch cache) |
-| `draw/intern/DRW_render.hh` | Draw type enum for NURB body |
-| `draw/intern/draw_cache.cc` | Batch cache exclusion (`case OB_NURB_BODY: break`) |
-| `editors/interface/interface_icons.cc` | Icon for NURB body type |
-| `editors/interface/templates/interface_template_id.cc` | ID template support |
-| `editors/object/object_ops.cc` | Add operator registration |
-| `editors/render/render_opengl.cc` | OpenGL render support |
-| `editors/space_buttons/buttons_context.cc` | Properties context: `context.nurb_body` |
-| `editors/space_outliner/outliner_draw.cc` | Outliner icon/display |
-| `editors/space_outliner/outliner_select.cc` | Outliner selection |
-| `editors/space_outliner/outliner_tools.cc` | Outliner tools (delete, etc.) |
-| `editors/space_outliner/tree/tree_element_id.cc` | Tree element for `ID_NB` |
-| `editors/space_view3d/view3d_buttons.cc` | View3D object type selector |
-| `scripts/presets/keyconfig/keymap_data/blender_default.py` | Default keymap: add NURB body, select edge, hover, bevel, translate |
-| `scripts/presets/keyconfig/keymap_data/industry_compatible_data.py` | Industry keymap: same operators |
-| `scripts/startup/bl_ui/__init__.py` | Import properties_data_nurb_body |
-| `scripts/startup/bl_ui/properties_workspace.py` | Workspace panel ordering |
-| `scripts/startup/bl_ui/space_view3d.py` | View3D Add menu: "NURB Cylinder" entry |
-| `CMakeLists.txt` (root) | `WITH_OPENCASCADE` option |
-| `build_files/cmake/platform/dependency_targets.cmake` | `bf_deps_optional_opencascade` target |
-| `build_files/cmake/platform/platform_win32.cmake` | OCCT 8.0.0 library discovery (14 modules) |
-| `source/blender/CMakeLists.txt` | Added `DNA_nurb_body_types.h` to `SRC_DNA_INC` |
-| `source/blender/blenkernel/CMakeLists.txt` | Added `nurb_body.cc` |
-| `source/blender/draw/CMakeLists.txt` | Added overlay_nurb_body include |
-| `source/blender/editors/object/CMakeLists.txt` | Added `object_nurb_body.cc` |
-| `source/blender/makesrna/intern/CMakeLists.txt` | Added `rna_nurb_body.cc` |
-| `CLAUDE.md` | Added agent instruction: do not run local builds |
-
-### Feature Details
-
-**Shape evaluation**: `evaluate_shape()` in `nurb_body.cc` builds the OCCT shape tree — base primitive cylinder → body edge blend → boolean operations (with per-op edge blends). Each boolean op stores a snapshot of the operand's world-to-target transform, so operands can be moved/deleted after application.
-
-**Boolean operations**: `NurbBodyBooleanOp` linked list. Three operations — difference (cut), union (fuse), intersect (common). Operands are other selected NURB body objects; the result is stored on the active body. Operands can be hidden or shown as bounding boxes.
-
-**Edge selection**: 64-bit masks (`selected_edges`, `bevel_edges`, `chamfer_edges`) with per-edge data (`bevel_radii[64]`). Selection is per-boolean-op, not global. Hover state tracked independently from selection. The `SELECT_MODE_EDGE`/`FACE`/`OBJECT` toggle controls whether mouse interaction targets edges or uses standard object selection.
-
-**Bevel/Fillet/Chamfer**: Interactive modal operator. Drag mouse horizontally to change radius. Press C to toggle chamfer, F for fillet. Escape reverts. Per-edge bevel radii stored in `bevel_radii[64]`. Both body edges and boolean op cut edges are bevelable independently.
-
-**NURB Body undo**: Confirmed boolean, edge move, bevel, fillet, and chamfer commits push explicit full-barrier undo checkpoints after the NurbBody/Object IDs are tagged. Edge hover and edge selection changes stay out of the geometry undo stream so Ctrl+Z only rolls back the last confirmed modeling operation. Runtime NURB body OCCT/evaluated-shape caches are cleared on undo restore and committed modeling changes so Ctrl+Z cannot display a stale combined bevel/chamfer state. Undo/file restore preserves exact committed surface/output fillet edge keys so rolling back the latest chamfer does not also drop earlier fillet stages.
-
-**Edge translation**: Modal operator for moving boolean op edge positions. X/Y/Z keys constrain to axis. Drag mouse to translate the operand position relative to the target body.
-
-**Viewport rendering**: The overlay engine renders silhouette lines detected from the tessellated mesh (boundary edges + edges between front/back-facing faces). Boolean edge polylines are sampled from OCCT curves and rendered with color coding: black = normal, white = hovered, orange = selected.
-
-**Mesh export**: `BKE_nurb_body_to_mesh()` extracts a Blender mesh from the OCCT shape with quad optimization (merging adjacent triangle pairs into quads), smooth/sharp edge detection via topological continuity analysis, and auto-crease for G0/G1 discontinuity edges.
+All ~60+ files were affected:
+- **Deleted files (7)**: `DNA_nurb_body_types.h`, `BKE_nurb_body.hh`, `intern/nurb_body.cc`, `rna_nurb_body.cc`, `object_nurb_body.cc`, `overlay_nurb_body.hh`, `properties_data_nurb_body.py`
+- **Cleaned references (50+ files)**: DNA enums/structs, BKE includes/cases, RNA definitions/registration, depsgraph, editors (ops, outliner, icons, context), draw engine overlay/workbench/select/cache, blenloader versioning, CMakeLists, Python keymaps/UI panels/documentation
 
 ---
 

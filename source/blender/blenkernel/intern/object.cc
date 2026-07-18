@@ -39,7 +39,6 @@
 #include "DNA_meta_types.h"
 #include "DNA_movieclip_types.h"
 #include "DNA_nla_types.h"
-#include "DNA_nurb_body_types.h"
 #include "DNA_object_fluidsim_types.h"
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
@@ -112,7 +111,6 @@
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
 #include "BKE_node.hh"
-#include "BKE_nurb_body.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_sdf.hh"
@@ -1267,8 +1265,7 @@ bool BKE_object_supports_modifiers(const Object *ob)
               OB_POINTCLOUD,
               OB_VOLUME,
               OB_GREASE_PENCIL,
-              OB_SDF,
-              OB_NURB_BODY);
+              OB_SDF);
 }
 
 bool BKE_object_support_modifier_type_check(const Object *ob, int modifier_type)
@@ -1304,9 +1301,6 @@ bool BKE_object_support_modifier_type_check(const Object *ob, int modifier_type)
   }
   if (ob->type == OB_SDF && (mti->flags & eModifierTypeFlag_AcceptsSDF)) {
     return true;
-  }
-  if (ob->type == OB_NURB_BODY) {
-    return false;
   }
 
   return false;
@@ -1951,8 +1945,6 @@ static const char *get_obdata_defname(int type)
       return DATA_("Text");
     case OB_SDF:
       return DATA_("SDF");
-    case OB_NURB_BODY:
-      return DATA_("NURB Body");
     case OB_CAMERA:
       return DATA_("Camera");
     case OB_LAMP:
@@ -2024,8 +2016,6 @@ void *BKE_object_obdata_add_from_type(Main *bmain, int type, const char *name)
       return BKE_curve_add(bmain, name, OB_FONT);
     case OB_SDF:
       return BKE_sdf_add(bmain, name);
-    case OB_NURB_BODY:
-      return BKE_nurb_body_add(bmain, name);
     case OB_CAMERA:
       return BKE_camera_add(bmain, name);
     case OB_LAMP:
@@ -2064,8 +2054,6 @@ int BKE_object_obdata_to_type(const ID *id)
       return reinterpret_cast<const Curve *>(id)->ob_type;
     case ID_SF:
       return OB_SDF;
-    case ID_NB:
-      return OB_NURB_BODY;
     case ID_LA:
       return OB_LAMP;
     case ID_SPK:
@@ -2512,15 +2500,11 @@ Object *BKE_object_duplicate(Main *bmain,
   if (dupflag == 0) {
     return obn;
   }
-  /* Force data copy for SDF/NURB Body on non-linked (Shift+D) duplicate so params
+  /* Force data copy for SDF on non-linked (Shift+D) duplicate so params
    * are independent; linked (Alt+D) duplicate returns above with dupflag == 0. */
   if (obn->type == OB_SDF) {
     dupflag |= USER_DUP_SDF;
   }
-  if (obn->type == OB_NURB_BODY) {
-    dupflag |= USER_DUP_NURB_BODY;
-  }
-
   if (dupflag & USER_DUP_MAT) {
     for (int i = 0; i < obn->totcol; i++) {
       BKE_id_copy_for_duplicate(bmain, id_cast<ID *>(obn->mat[i]), dupflag, copy_flags);
@@ -2559,11 +2543,6 @@ Object *BKE_object_duplicate(Main *bmain,
       break;
     case OB_SDF:
       if (dupflag & USER_DUP_SDF) {
-        id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
-      }
-      break;
-    case OB_NURB_BODY:
-      if (dupflag & USER_DUP_NURB_BODY) {
         id_new = BKE_id_copy_for_duplicate(bmain, id_old, dupflag, copy_flags);
       }
       break;
@@ -3505,6 +3484,12 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
       const SDF *sdf = id_cast<const SDF *>(ob->data);
       float3 half_size;
       switch (sdf->sdf_type) {
+        case SDF_TYPE_MESH:
+          if (sdf->mesh_triangle_count > 0) {
+            return Bounds<float3>{float3(sdf->mesh_bounds_min),
+                                  float3(sdf->mesh_bounds_max)};
+          }
+          return std::nullopt;
         case SDF_TYPE_CAPSULE: {
           float r = sdf->size[0];
           float cyl_h = std::max(sdf->size[1] - sdf->bevel, 0.0f);
@@ -3526,11 +3511,6 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
           half_size = float3(sdf->size[0], sdf->size[1], sdf->size[2]);
           break;
       }
-      return Bounds<float3>{-half_size, half_size};
-    }
-    case OB_NURB_BODY: {
-      const NurbBody *body = id_cast<const NurbBody *>(ob->data);
-      float3 half_size = {body->depth * 0.5f, body->radius, body->radius};
       return Bounds<float3>{-half_size, half_size};
     }
     case OB_LATTICE:
@@ -4889,8 +4869,7 @@ bool BKE_object_supports_material_slots(Object *ob)
               OB_POINTCLOUD,
               OB_VOLUME,
               OB_GREASE_PENCIL,
-              OB_SDF,
-              OB_NURB_BODY);
+              OB_SDF);
 }
 
 /** \} */
