@@ -628,7 +628,7 @@ struct View3DShading {
 
   int sdf_max_steps = 1024;
   float sdf_ray_epsilon = 0.001f;
-  float sdf_over_relaxation = 1.5f;
+  float sdf_over_relaxation = 1.3f;
   float sdf_cone_aperture = 0.5f;
   int sdf_cone_steps = 32;
   float sdf_resolution_scale = 100.0f;
