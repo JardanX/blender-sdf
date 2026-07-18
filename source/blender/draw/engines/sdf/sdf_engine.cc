@@ -441,9 +441,16 @@ class Instance : public DrawEngine {
   int use_cone_trace_ = 0;
   int sdf_max_steps_ = 128;
   float sdf_ray_epsilon_ = 0.005f;
-  float sdf_over_relaxation_ = 1.5f;
+  float sdf_over_relaxation_ = 1.3f;
   float sdf_cone_aperture_ = 0.5f;
   int sdf_cone_steps_ = 32;
+
+  /* UI-cached marcher values; the dispatched sdf_max_steps_/sdf_ray_epsilon_
+   * are dynamically relaxed while adaptive resolution is rendering at
+   * quarter scale (accuracy doesn't matter at that pixel size). */
+  int ui_sdf_max_steps_ = 128;
+  float ui_sdf_ray_epsilon_ = 0.005f;
+  bool adaptive_lowres_active_ = false;
 
   float4 frustum_planes_[6];
   bool frustum_valid_ = false;
@@ -3052,7 +3059,9 @@ class Instance : public DrawEngine {
     use_cone_trace_ = s.sdf_use_cone_trace ? 1 : 0;
     sdf_max_steps_ = s.sdf_max_steps > 0 ? s.sdf_max_steps : 128;
     sdf_ray_epsilon_ = s.sdf_ray_epsilon > 0.0f ? s.sdf_ray_epsilon : 0.005f;
-    sdf_over_relaxation_ = s.sdf_over_relaxation >= 1.0f ? s.sdf_over_relaxation : 1.5f;
+    ui_sdf_max_steps_ = sdf_max_steps_;
+    ui_sdf_ray_epsilon_ = sdf_ray_epsilon_;
+    sdf_over_relaxation_ = s.sdf_over_relaxation >= 1.0f ? s.sdf_over_relaxation : 1.3f;
     sdf_cone_aperture_ = s.sdf_cone_aperture > 0.0f ? s.sdf_cone_aperture : 0.5f;
     sdf_cone_steps_ = s.sdf_cone_steps > 0 ? s.sdf_cone_steps : 32;
 
@@ -3436,12 +3445,28 @@ class Instance : public DrawEngine {
     /* Stay at low res until idle for 2+ frames (avoids GPU stall on re-grab) */
     float scale = resolution_scale_;
     bool is_interacting = scroll_cooldown_ > 0 || idle_frames_ < 2;
-    if (adaptive_resolution_ && is_interacting) {
+    bool adaptive_lowres = adaptive_resolution_ && is_interacting;
+    if (adaptive_lowres) {
       scale *= 0.25f;
       scale = math::max(scale, 0.1f);
     }
     render_size_ = int2(math::max(int(vp.x * scale), 1),
                         math::max(int(vp.y * scale), 1));
+
+    /* Coarsen the marcher while rendering at quarter-res: precision doesn't
+     * matter when pixels are 4x as large, and the relaxed step/epsilon combo
+     * converges much faster (helps frame rate while navigating). When we
+     * drop back to full-res, restore the UI-cached values. */
+    if (adaptive_lowres && !adaptive_lowres_active_) {
+      sdf_max_steps_ = 128;
+      sdf_ray_epsilon_ = 0.01f;
+      adaptive_lowres_active_ = true;
+    }
+    else if (!adaptive_lowres && adaptive_lowres_active_) {
+      sdf_max_steps_ = ui_sdf_max_steps_;
+      sdf_ray_epsilon_ = ui_sdf_ray_epsilon_;
+      adaptive_lowres_active_ = false;
+    }
 
     /* Textures sized to full viewport — only reallocate on viewport resize */
     int2 tex_size = int2(math::max(int(vp.x * resolution_scale_), 1),

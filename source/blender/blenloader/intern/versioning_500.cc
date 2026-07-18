@@ -4585,8 +4585,9 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
             if (s.sdf_ray_epsilon == 0.0f || s.sdf_ray_epsilon == 0.001f) {
               s.sdf_ray_epsilon = 0.0001f;
             }
-            /* 1.2 was the old wrong fallback value. */
-            if (s.sdf_over_relaxation == 0.0f || s.sdf_over_relaxation == 1.2f) {
+            /* 1.2 and 1.5 were old over-relaxation values; the default is 1.3. */
+            if (s.sdf_over_relaxation == 0.0f || s.sdf_over_relaxation == 1.2f ||
+                s.sdf_over_relaxation == 1.5f) {
               s.sdf_over_relaxation = 1.3f;
             }
             /* 1.25 was the old wrong fallback value. */
@@ -4650,7 +4651,7 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
             s.sdf_frustum_cull = 1;
             s.sdf_max_steps = 1024;
             s.sdf_ray_epsilon = 0.001f;
-            s.sdf_over_relaxation = 1.5f;
+            s.sdf_over_relaxation = 1.3f;
             s.sdf_use_cone_trace = 1;
             s.sdf_cone_aperture = 0.5f;
             s.sdf_cone_steps = 32;

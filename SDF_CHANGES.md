@@ -3,6 +3,25 @@
 > What we changed and why, so you don't have to dig through 30+ files.
 > Base: Blender `v5.0-release` tag.
 
+## CSG Color, Clearance, and Paint
+
+Push and Avoid retain their physical blend controls while keeping hard color ownership. Their new
+Clearance setting expands the subtraction side of the operation before the retained operand is composed,
+leaving a controlled gap.
+Shell color now covers the full shell operand, including cap surfaces, independently of its geometry blend.
+
+Paint is a geometry-preserving CSG operation: it applies the operand color where its SDF covers the
+existing field without changing the field distance. Every SDF operand and group now has independent
+Color Blend amount and method controls. RGB keeps conventional interpolation; Hue blends through the
+color wheel, so blue-to-yellow transitions pass through green.
+
+| File | Change |
+|------|--------|
+| `DNA_sdf_types.h`, `DNA_object_types.h` | Added Paint, clearance, and independent color blend settings. |
+| `sdf_engine.cc`, `sdf_shader_shared.hh` | Upload the new native, Mesh-SDF, and group settings. |
+| `sdf_lib.glsl`, color resolve, trace, cone, grid, DC shaders | Hard Push/Avoid distance rules, clearance, Paint, shell color coverage, and RGB/Hue color blending. |
+| `rna_sdf.cc`, `rna_object.cc`, `properties_data_sdf.py` | Exposed Paint, clearance, and color blending controls. |
+
 ---
 
 ## REMOVED: NURB Body Object Type
@@ -24,8 +43,8 @@ mesh component overlays while the SDF result remains visible.
 
 ### Data and Conversion
 
-- `DNA_object_types.h` and `rna_object.cc`: added persistent enable, sharp/smooth normals, global
-  order, CSG, blend, shell, chamfer, and round settings directly to Object.
+- `DNA_object_types.h` and `rna_object.cc`: added persistent enable, global order, CSG, blend,
+  shell, chamfer, and round settings directly to Object.
 - `DNA_sdf_types.h`: added `SDF_TYPE_MESH`, packed mesh vertices, triangles, pseudonormals, local
   bounds, and threaded BVH nodes. Embedded payload ownership remains supported for snapshot data.
 - `blenkernel/intern/sdf_mesh.cc`: validates closed oriented edge use and connected vertex fans,
@@ -48,6 +67,16 @@ mesh component overlays while the SDF result remains visible.
 - Enabled Mesh-SDF objects move from the normal collection tree into the ordered SDF Outliner
   hierarchy. Native and Mesh-backed SDF operands can be reordered, grouped, and ungrouped together;
   mixed groups propagate group CSG and analytic modifiers to every child.
+- Group-propagated modifiers reuse the same conservative bound expansion as object modifiers, so
+  generated child surfaces remain inside frustum, tile, and scene-BVH culling bounds. Bend uses a
+  radial bound that covers extrema between box corners.
+- Persistent scene-BVH uploads retain each proxy's fat margin, keeping small transforms and
+  deformations inside GPU traversal bounds without forcing a proxy reinsertion every frame.
+- Owned SDF Mirror helper empties are cloned for linked and full duplicates and removed with their
+  owner, including groups deleted automatically after their last SDF child is removed. User-assigned
+  mirror objects are never treated as owned helpers.
+- The forced-Union indicator uses visible objects from the active view layer and checks each
+  evaluated Mesh-SDF payload, matching the stack submitted to viewport rendering.
 
 ### GPU Evaluation
 
@@ -63,10 +92,10 @@ mesh component overlays while the SDF result remains visible.
 - Distance is continuous point-to-triangle distance with exact diagonal non-uniform object scaling;
   sheared transforms use a singular-value conservative step bound. Sign uses angle-weighted vertex
   and manifold edge pseudonormals.
-- Sharp mode resolves the geometric triangle normal. Smooth mode barycentrically interpolates the
-  evaluated mesh's split corner normals. Per-hit source-surface proximity preserves these normals
-  away from CSG transition regions even when smooth blending is configured; domain-modified,
-  shell, offset, and blend-seam regions retain the screen-space normal fallback.
+- Mesh shading barycentrically interpolates Blender's evaluated split corner normals, so sharp edges
+  and smooth faces can coexist. Color resolve reuses each exact distance query's winning triangle and
+  propagates its split normal through the actual CSG operator derivatives, including smooth mesh-mesh
+  blend bands. Domain-modified, shell, and mixed generated regions retain the geometric fallback.
 - Workbench suppresses the conventional shaded Mesh only while a valid live payload is available.
   Object Mode suppresses standard Mesh selection IDs and resolves SDF picking from the rendered
   G-buffer, while Edit Mode component selection remains unchanged.
@@ -77,10 +106,30 @@ mesh component overlays while the SDF result remains visible.
 - Depsgraph copy-on-write restoration discards stale evaluated Mesh geometry after conversion,
   preventing timing-dependent crashes when transformed or duplicated converted SDF objects.
 
-The BVH rebuild runs only when Blender reevaluates Mesh geometry. Composition, blend, shell, normal,
-order, and color edits use lightweight copy-on-write synchronization; live deformation and Edit Mode
-topology changes rebuild the full BVH. Interactive latency still depends on mesh size, viewport
-resolution, ray-march step count, GPU, and CSG complexity.
+The mesh BVH rebuild runs only when Blender reevaluates Mesh geometry. Composition, blend, shell,
+normal, order, and color edits use lightweight copy-on-write synchronization; live deformation and
+Edit Mode topology changes rebuild the full mesh BVH. Interactive latency still depends on mesh size,
+viewport resolution, ray-march step count, GPU, and CSG complexity.
+
+Mesh-SDF shading now uses Blender's evaluated corner-normal cache, preserving per-edge and per-face
+sharpness in one payload instead of a separate SDF smooth/sharp mode. Mesh distance queries reuse
+the winning feature normal and stop immediately on an exact surface hit; the scene AABB tree keeps
+proxies between syncs and updates only changed bounds.
+- Blend operators short-circuit to their exact min/max result outside the blend band, avoiding
+  smooth, chamfer, and round arithmetic for non-overlapping samples.
+- Valid live Mesh-SDF objects no longer draw the source mesh surface, wireframe, depth prepass, or
+  edit overlay on top of the SDF result; edit selection IDs remain available through the selection
+  pass.
+- Source mesh normals are used directly for non-blended surface hits, avoiding a geometric
+  screen-space fallback that could make Blender-smooth meshes appear faceted.
+- Mesh nearest queries defer feature-pseudonormal decoding until the final winning triangle, while
+  color resolve supplies exact mesh normals to the normal pass without a second BVH traversal.
+- Tile culling sorts only the next power-of-two covering its real candidate count instead of all 256
+  slots. Group members retain tight child rejection bounds, unmodified off-origin meshes use their
+  true transformed bounds, and unchanged packed mesh arenas skip redundant GPU uploads.
+- Selection uses the final snapped hit owner. Valid live Mesh-SDF objects no longer submit a second
+  source-mesh outline, invalid payloads keep normal Blender selection, current-frame outline tables
+  are bounds-checked, and depth-only viewport queries synchronize a current SDF scene.
 
 ---
 
@@ -2966,3 +3015,39 @@ The selection priority issue (a basic triangle mesh behind an intersecting SDF s
 | File | Change |
 |------|--------|
 | `draw/engines/overlay/overlay_sdf.hh` | `object_sync` accepts OB_MESH mesh-to-SDF via `BKE_sdf_object_is_enabled`; uses `ob->sdf_index` + `BKE_sdf_mesh_runtime_snapshot` bounds; `draw_line` array block reads entry bounds when `sdf_data == nullptr`. Added `BKE_sdf.hh` include. |
+
+---
+
+## Fix: Push CSG Tile Culling (2026-07-18)
+
+Push operands are deliberately expanded to the visible scene bounds so tile culling retains them wherever
+they can affect the accumulated field. The trace, cone-march, and color-resolve passes then incorrectly
+discarded those operands against their original local AABBs. Tile culling also omitted earlier operands
+whose projected bounds did not overlap a Push or Avoid tile, despite both operations requiring the
+accumulated field within their operand bounds. This produced discontinuous fields and surface artifacts.
+
+Push now joins intersect and subtract as a mandatory exact evaluation after an accumulated field exists.
+Groups containing a Push child receive the same scene-bound expansion. Earlier operands are retained and
+evaluated exactly only within each later Push/Avoid operand bound, preserving normal culling elsewhere.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Keep expanded Push operands in exact trace evaluation. |
+| `draw/engines/sdf/shaders/sdf_cone_march_comp.glsl` | Evaluate required Push operands exactly rather than substituting their AABB distance. |
+| `draw/engines/sdf/shaders/sdf_color_resolve_comp.glsl` | Match Push evaluation with the trace result during color resolution. |
+| `draw/engines/sdf/sdf_engine.cc` | Expand groups containing a Push child to the visible scene bounds; retain preceding fields inside later Push/Avoid bounds. |
+---
+
+## Adaptive-Res Coarsening + Over-Relaxation Default to 1.3 (2026-07-19)
+
+Two related tweaks targeting smoother navigation and a more numerically stable marcher default.
+
+- **Adaptive-res coarsening**: when `sdf_adaptive_resolution` is on and the viewport is interacting (low-res quarter-scale render), the marcher now dispatches with `sdf_max_steps = 128` and `sdf_ray_epsilon = 0.01` regardless of the UI values. At 4x pixel size, precision doesn't matter and the relaxed step/epsilon combo converges much faster, helping frame rate while navigating. When the view returns to idle (full-res), the engine restores the UI-cached `sdf_max_steps` / `sdf_ray_epsilon`. The swap happens in `ensure_compute_targets` where the adaptive-lowres state is already known; engine caches `ui_sdf_max_steps_` / `ui_sdf_ray_epsilon_` from `sync_sdf_settings` to restore from.
+- **Over-relaxation default**: dropped from 1.5 to 1.3 (more numerically stable for steep SDF gradients). Migrated DNA default, engine fallback, legacy-zero fallback table, all three preset tables, and the file versioning block (old 0.0 / 1.2 / 1.5 files now snap to 1.3).
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Added `ui_sdf_max_steps_` / `ui_sdf_ray_epsilon_` cache + `adaptive_lowres_active_` flag; `sync_sdf_settings` populates the ui cache and falls back to 1.3; `ensure_compute_targets` swaps to 128/0.01 while adaptive-lowres is active and restores on idle. Default `sdf_over_relaxation_` 1.3. |
+| `makesdna/DNA_view3d_types.h` | `View3DShading::sdf_over_relaxation` default 1.3. |
+| `source/blender/blenloader/intern/versioning_500.cc` | Old-default SDF profile now migrates over-relaxation 0.0/1.2/1.5 -> 1.3; preset-migration block writes 1.3. |
+| `scripts/startup/bl_ui/properties_render.py` | Preset + legacy-zero tables updated to relx 1.3. |
