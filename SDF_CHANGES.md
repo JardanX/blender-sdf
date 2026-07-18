@@ -15,6 +15,56 @@ All ~60+ files were affected:
 
 ---
 
+## Live Analytic Mesh to SDF
+
+Added a non-voxel Mesh to SDF modifier and an Object > Convert > SDF shortcut. The object remains a
+normal Mesh with its editable source data and Blender modifier stack. Object Mode renders the final
+evaluated mesh through the SDF engine; Edit Mode retains Blender's mesh component overlays while the
+SDF result remains visible.
+
+### Data and Conversion
+
+- `DNA_modifier_types.h` and `MOD_mesh_to_sdf.cc`: added the single-instance live conversion
+  marker, sharp/smooth normal settings, modifier UI, and runtime lifetime hooks.
+- `DNA_sdf_types.h`: added `SDF_TYPE_MESH`, packed mesh vertices, triangles, pseudonormals, local
+  bounds, and BVH nodes. Embedded payload ownership remains supported for existing snapshot data.
+- `blenkernel/intern/sdf_mesh.cc`: validates manifold edge use, canonicalizes globally reversed
+  winding while preserving nested cavity orientation, rejects degenerate triangles, packs
+  octahedral normals, and builds the parallel 16-bin SAH BVH with four-triangle leaves.
+- `mesh_data_update.cc`: rebuilds an immutable runtime payload after Blender finishes evaluating the
+  normal Mesh modifier stack. Payloads are generated caches, not serialized or stored in undo.
+- `editors/object/object_add.cc`: Object > Convert > SDF now adds the live modifier without changing
+  the object type, replacing its Mesh datablock, or removing modifiers.
+- Invalid/open evaluated meshes show a modifier error and fall back to conventional Mesh display.
+
+### GPU Evaluation
+
+- Triangle vertices, attributes, and BVH nodes are deduplicated per immutable payload and uploaded
+  in a single packed SSBO arena.
+- Every SDF evaluation path uses branch-and-bound nearest-triangle traversal, including trace, cone
+  march, color resolve, Dual Contouring grid evaluation, and DC vertex color.
+- Distance is continuous point-to-triangle distance with exact diagonal non-uniform object scaling;
+  sheared transforms use a singular-value conservative step bound. Sign uses angle-weighted vertex
+  and manifold edge pseudonormals.
+- Sharp mode resolves the geometric triangle normal. Smooth mode barycentrically interpolates the
+  evaluated mesh's split corner normals. Deformed and smooth-CSG regions retain the screen-space
+  normal fallback.
+- Workbench suppresses the conventional shaded Mesh only while a valid live payload is available;
+  standard Mesh selection and Edit Mode overlays remain active.
+- Mesh payloads are capability-checked against the backend storage-buffer limit and retained safely
+  across depsgraph updates through reference-counted modifier runtime data.
+- Dual Contouring evaluates objects beyond its local 1024-bit culling mask directly, and profiling
+  readback is bounded independently of scene object count.
+- Depsgraph copy-on-write restoration discards stale evaluated Mesh geometry after conversion,
+  preventing timing-dependent crashes when transformed or duplicated converted SDF objects.
+
+The BVH rebuild runs when Blender reevaluates object geometry, not on transform-only updates. Live
+deformation and Edit Mode changes therefore rebuild the full BVH. Interactive latency depends on
+mesh size, viewport resolution, ray-march step count, GPU, and CSG complexity; million-triangle
+updates and exact-distance queries are not guaranteed to complete in a fixed few-millisecond budget.
+
+---
+
 Moved SDF modifiers from custom system (on SDF data block) to Blender's native modifier system (on Object). SDF objects now have a standard Modifier Properties tab (wrench icon). Each SDF modifier is a native `eModifierType` with `eModifierTypeFlag_AcceptsSDF` — SDF modifiers only appear on SDF objects, mesh modifiers only on meshes.
 
 ### New Files
@@ -2791,6 +2841,7 @@ The SDF (strict-depth) overlay outline now always renders the thin "xray-style" 
 
 | File | Change |
 |------|--------|
-| `scripts/startup/bl_ui/properties_render.py` | New preset values; legacy-zero fallback table aligned to new Medium; preset selector converted to `operator_menu_enum` dropdown showing current preset name; added `_current_preset_label` helper; preset enum descriptions refreshed |
-| `source/blender/blenloader/intern/versioning_500.cc` | Migrated legacy default SDF profile to new Medium (100%/adaptive on/512/0.001); extended `old_default_sdf_profile` detection to also match the prior 128/0.005 Medium values |
+| `scripts/startup/bl_ui/properties_render.py` | New preset values; legacy-zero fallback table aligned to High; preset selector converted to `operator_menu_enum` dropdown with "Preset:" label showing current preset name; added `_current_preset_label` helper; load_post/timer handler now applies High (renamed `_sdf_apply_high_defaults`); preset enum descriptions refreshed |
+| `source/blender/makesdna/DNA_view3d_types.h` | `View3DShading` defaults now match High: `sdf_max_steps = 1024`, `sdf_ray_epsilon = 0.001f` |
+| `source/blender/blenloader/intern/versioning_500.cc` | Migrated legacy default SDF profile to High (100%/adaptive off/1024/0.001); extended `old_default_sdf_profile` detection to also match the prior 128/0.005 Medium values |
 | `source/blender/draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Hoisted `is_strict_depth_outline` computation; apply X-ray-style edge thinning whenever the outline is strict-depth (SDF); refactor strict-depth occlusion into shared `strict_depth_outline_occluded_at` helper used by `visible_outline_id` and `main()` |
