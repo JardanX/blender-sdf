@@ -4646,9 +4646,9 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
                s.sdf_cone_steps == 64);
           if (old_default_sdf_profile) {
             s.sdf_resolution_scale = 100.0f;
-            s.sdf_adaptive_resolution = 1;
+            s.sdf_adaptive_resolution = 0;
             s.sdf_frustum_cull = 1;
-            s.sdf_max_steps = 512;
+            s.sdf_max_steps = 1024;
             s.sdf_ray_epsilon = 0.001f;
             s.sdf_over_relaxation = 1.5f;
             s.sdf_use_cone_trace = 1;
