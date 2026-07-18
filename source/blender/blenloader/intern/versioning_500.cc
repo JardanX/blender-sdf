@@ -4634,9 +4634,10 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
           View3DShading &s = v3d->shading;
           const bool old_default_sdf_profile =
               (s.sdf_resolution_scale == 0.0f || s.sdf_resolution_scale == 100.0f) &&
-              (s.sdf_max_steps == 0 || s.sdf_max_steps == 100 || s.sdf_max_steps == 256) &&
+              (s.sdf_max_steps == 0 || s.sdf_max_steps == 100 || s.sdf_max_steps == 128 ||
+               s.sdf_max_steps == 256) &&
               (s.sdf_ray_epsilon == 0.0f || s.sdf_ray_epsilon == 0.001f ||
-               s.sdf_ray_epsilon == 0.0001f) &&
+               s.sdf_ray_epsilon == 0.005f || s.sdf_ray_epsilon == 0.0001f) &&
               (s.sdf_over_relaxation == 0.0f || s.sdf_over_relaxation == 1.2f ||
                s.sdf_over_relaxation == 1.3f || s.sdf_over_relaxation == 1.5f) &&
               (s.sdf_cone_aperture == 0.0f || s.sdf_cone_aperture == 0.5f ||
@@ -4645,10 +4646,10 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
                s.sdf_cone_steps == 64);
           if (old_default_sdf_profile) {
             s.sdf_resolution_scale = 100.0f;
-            s.sdf_adaptive_resolution = 0;
+            s.sdf_adaptive_resolution = 1;
             s.sdf_frustum_cull = 1;
-            s.sdf_max_steps = 128;
-            s.sdf_ray_epsilon = 0.005f;
+            s.sdf_max_steps = 512;
+            s.sdf_ray_epsilon = 0.001f;
             s.sdf_over_relaxation = 1.5f;
             s.sdf_use_cone_trace = 1;
             s.sdf_cone_aperture = 0.5f;

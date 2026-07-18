@@ -38,20 +38,25 @@ bool has_edge(uint id, float2 uv, uint ref, uint &ref_col, float2 &depth_uv)
   return (id != ref);
 }
 
+bool strict_depth_outline_occluded_at(float2 uv)
+{
+  float outline_depth = textureLod(outline_depth_tx, uv, 0.0f).r;
+  float scene_depth = textureLod(scene_depth_tx, uv, 0.0f).r;
+
+  /* Strict-depth outlines get a wider tolerance to avoid self-hiding parts of
+   * the silhouette due to depth quantization. */
+  constexpr float epsilon = 3.0f / 8388608.0f;
+  float occlusion_epsilon = max(epsilon * 24.0f, scene_depth * 2.0e-6f);
+  return scene_depth > 0.0f && scene_depth < 1.0f &&
+         outline_depth > scene_depth + occlusion_epsilon;
+}
+
 bool strict_depth_outline_occluded(uint id, float2 uv)
 {
   if ((id & STRICT_DEPTH_OUTLINE_ID_FLAG) == 0u) {
     return false;
   }
-
-  float outline_depth = textureLod(outline_depth_tx, uv, 0.0f).r;
-  float scene_depth = textureLod(scene_depth_tx, uv, 0.0f).r;
-
-  /* Keep this in sync with the strict-depth occlusion test in main(). */
-  constexpr float epsilon = 3.0f / 8388608.0f;
-  float occlusion_epsilon = max(epsilon * 24.0f, scene_depth * 2.0e-6f);
-  return scene_depth > 0.0f && scene_depth < 1.0f &&
-         outline_depth > scene_depth + occlusion_epsilon;
+  return strict_depth_outline_occluded_at(uv);
 }
 
 uint visible_outline_id(uint id, float2 uv)
@@ -266,13 +271,17 @@ void main()
     }
   }
 
-  if (is_xray_wires) {
-    /* Don't inflate the wire outlines too much. */
+  /* WATCH: keep in sync with outline_id_tx of the pre-pass. Computed after the
+   * has_edge() calls, which may promote ref_col from a neighbour's packed id when the
+   * center pixel is background. */
+  bool is_strict_depth_outline = (ref_col & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u;
+
+  /* SDF (strict-depth) outlines render the thin "xray-style" silhouette whether or not
+   * X-ray is enabled, since they discard instead of fading behind occluders. */
+  if (is_xray_wires || is_strict_depth_outline) {
     has_edge_neg_x = has_edge_neg_y = false;
   }
 
-  /* WATCH: Keep in sync with outline_id_tx of the pre-pass. */
-  bool is_strict_depth_outline = (ref_col & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u;
   uint color_id = ref_col >> 14u;
   if (ref_col == 0u) {
     frag_color = float4(0.0f);
@@ -290,22 +299,22 @@ void main()
     frag_color = theme.colors.transform;
   }
 
+  /* Avoid bad cases of Z-fighting for occlusion only. */
+  constexpr float epsilon = 3.0f / 8388608.0f;
   float ref_depth = textureLod(outline_depth_tx, depth_uv, 0.0f).r;
   float scene_depth = textureLod(scene_depth_tx, depth_uv, 0.0f).r;
-
-  /* Avoid bad cases of Z-fighting for occlusion only. Strict-depth outlines discard when
-   * occluded, so they need a wider tolerance to avoid self-hiding parts of the silhouette. */
-  constexpr float epsilon = 3.0f / 8388608.0f;
-  float occlusion_epsilon = is_strict_depth_outline ? max(epsilon * 24.0f,
-                                                          scene_depth * 2.0e-6f) :
-                                                      epsilon;
-  bool occluded = (scene_depth > 0.0f && scene_depth < 1.0f &&
-                   ref_depth > scene_depth + occlusion_epsilon);
-  if (is_strict_depth_outline && occluded) {
-    gpu_discard_fragment();
-    return;
+  bool occluded;
+  if (is_strict_depth_outline) {
+    occluded = strict_depth_outline_occluded_at(depth_uv);
+    if (occluded) {
+      gpu_discard_fragment();
+      return;
+    }
   }
-
+  else {
+    occluded = (scene_depth > 0.0f && scene_depth < 1.0f &&
+                ref_depth > scene_depth + epsilon);
+  }
   float occlusion_alpha = is_strict_depth_outline ? 0.0f : alpha_occlu;
 
   /* NOTE: We never set alpha to 1.0 to avoid Anti-aliasing destroying the line. */
