@@ -17,51 +17,70 @@ All ~60+ files were affected:
 
 ## Live Analytic Mesh to SDF
 
-Added a non-voxel Mesh to SDF modifier and an Object > Convert > SDF shortcut. The object remains a
-normal Mesh with its editable source data and Blender modifier stack. Object Mode renders the final
-evaluated mesh through the SDF engine; Edit Mode retains Blender's mesh component overlays while the
-SDF result remains visible.
+Added dynamic non-voxel Mesh-SDF rendering through `Object.is_sdf` and an Object > Convert > SDF
+shortcut. The object remains a normal Mesh with editable source data and a standard Blender modifier
+stack. Object Mode renders the final evaluated mesh through the SDF engine; Edit Mode retains normal
+mesh component overlays while the SDF result remains visible.
 
 ### Data and Conversion
 
-- `DNA_modifier_types.h` and `MOD_mesh_to_sdf.cc`: added the single-instance live conversion
-  marker, sharp/smooth normal settings, modifier UI, and runtime lifetime hooks.
+- `DNA_object_types.h` and `rna_object.cc`: added persistent enable, sharp/smooth normals, global
+  order, CSG, blend, shell, chamfer, and round settings directly to Object.
 - `DNA_sdf_types.h`: added `SDF_TYPE_MESH`, packed mesh vertices, triangles, pseudonormals, local
-  bounds, and BVH nodes. Embedded payload ownership remains supported for existing snapshot data.
-- `blenkernel/intern/sdf_mesh.cc`: validates manifold edge use, canonicalizes globally reversed
-  winding while preserving nested cavity orientation, rejects degenerate triangles, packs
-  octahedral normals, and builds the parallel 16-bin SAH BVH with four-triangle leaves.
+  bounds, and threaded BVH nodes. Embedded payload ownership remains supported for snapshot data.
+- `blenkernel/intern/sdf_mesh.cc`: validates closed oriented edge use and connected vertex fans,
+  rejects non-finite coordinates, mixed component winding, and degenerate triangles, packs
+  octahedral normals, and builds a parallel 16-bin SAH BVH with four-triangle leaves.
+- Edge pseudonormals are derived from the final oriented triangulation, so tessellation diagonals
+  receive the sum of both incident triangle normals instead of an inconsistent face fallback.
 - `mesh_data_update.cc`: rebuilds an immutable runtime payload after Blender finishes evaluating the
-  normal Mesh modifier stack. Payloads are generated caches, not serialized or stored in undo.
-- `editors/object/object_add.cc`: Object > Convert > SDF now adds the live modifier without changing
+  normal Mesh modifier stack. Edit Mode materializes Blender's lazy BMesh wrapper before the rebuild,
+  keeping the evaluated SDF preview live while component overlays remain selectable. The
+  reference-counted payload lives on `ObjectRuntime`; it is generated cache data, not serialized or
+  stored in undo.
+- `editors/object/object_add.cc`: Object > Convert > SDF enables the Object setting without changing
   the object type, replacing its Mesh datablock, or removing modifiers.
-- Invalid/open evaluated meshes show a modifier error and fall back to conventional Mesh display.
+- Flagged Mesh objects accept native SDF modifiers in the standard Modifier tab. Mesh evaluation
+  skips these analytic modifiers and the SDF engine applies them after the evaluated triangle field.
+- A dedicated SDF Properties context beside Object Properties is available for every Mesh and owns
+  the Mesh-to-SDF enable, normal, order, color, and composition settings. Its operation and blend
+  controls reuse the native SDF icon grids and layout.
+- Enabled Mesh-SDF objects move from the normal collection tree into the ordered SDF Outliner
+  hierarchy. Native and Mesh-backed SDF operands can be reordered, grouped, and ungrouped together;
+  mixed groups propagate group CSG and analytic modifiers to every child.
 
 ### GPU Evaluation
 
 - Triangle vertices, attributes, and BVH nodes are deduplicated per immutable payload and uploaded
   in a single packed SSBO arena.
-- Every SDF evaluation path uses branch-and-bound nearest-triangle traversal, including trace, cone
-  march, color resolve, Dual Contouring grid evaluation, and DC vertex color.
+- Every SDF evaluation path uses exact branch-and-bound nearest-triangle queries, including trace,
+  cone march, color resolve, Dual Contouring grid evaluation, and DC vertex color.
+- BVH nodes are flattened in depth-first order with forward escape links. Exact nearest queries are
+  stackless and seed traversal from a per-ray nearest-triangle hint cache, avoiding a 64-entry local
+  traversal stack and sharply reducing repeated work across ray-march steps for all CSG modes.
+- Embedded payloads using the older child-index layout are validated and converted to threaded nodes
+  during blend read.
 - Distance is continuous point-to-triangle distance with exact diagonal non-uniform object scaling;
   sheared transforms use a singular-value conservative step bound. Sign uses angle-weighted vertex
   and manifold edge pseudonormals.
 - Sharp mode resolves the geometric triangle normal. Smooth mode barycentrically interpolates the
-  evaluated mesh's split corner normals. Deformed and smooth-CSG regions retain the screen-space
-  normal fallback.
-- Workbench suppresses the conventional shaded Mesh only while a valid live payload is available;
-  standard Mesh selection and Edit Mode overlays remain active.
+  evaluated mesh's split corner normals. Per-hit source-surface proximity preserves these normals
+  away from CSG transition regions even when smooth blending is configured; domain-modified,
+  shell, offset, and blend-seam regions retain the screen-space normal fallback.
+- Workbench suppresses the conventional shaded Mesh only while a valid live payload is available.
+  Object Mode suppresses standard Mesh selection IDs and resolves SDF picking from the rendered
+  G-buffer, while Edit Mode component selection remains unchanged.
 - Mesh payloads are capability-checked against the backend storage-buffer limit and retained safely
-  across depsgraph updates through reference-counted modifier runtime data.
+  across depsgraph updates through reference-counted Object runtime data.
 - Dual Contouring evaluates objects beyond its local 1024-bit culling mask directly, and profiling
   readback is bounded independently of scene object count.
 - Depsgraph copy-on-write restoration discards stale evaluated Mesh geometry after conversion,
   preventing timing-dependent crashes when transformed or duplicated converted SDF objects.
 
-The BVH rebuild runs when Blender reevaluates object geometry, not on transform-only updates. Live
-deformation and Edit Mode changes therefore rebuild the full BVH. Interactive latency depends on
-mesh size, viewport resolution, ray-march step count, GPU, and CSG complexity; million-triangle
-updates and exact-distance queries are not guaranteed to complete in a fixed few-millisecond budget.
+The BVH rebuild runs only when Blender reevaluates Mesh geometry. Composition, blend, shell, normal,
+order, and color edits use lightweight copy-on-write synchronization; live deformation and Edit Mode
+topology changes rebuild the full BVH. Interactive latency still depends on mesh size, viewport
+resolution, ray-march step count, GPU, and CSG complexity.
 
 ---
 
@@ -2859,6 +2878,20 @@ Fix: preserve the cosine's sign. Magnitude is still clamped to `[0.1, 1.0]` for 
 | File | Change |
 |------|--------|
 | `source/blender/draw/engines/sdf/shaders/sdf_trace_comp.glsl` | Surface snap cosine now sign-preserving: `sign(cos_raw) * clamp(abs(cos_raw), 0.1, 1.0)`. Fixes step-banded shading when camera is inside an SDF volume. |
+
+---
+
+## Fix: Mesh Wireframe Overlay Leaks Through SDF Inside View (2026-07-18)
+
+After fixing the inside-view normal step bands, the user still saw view-dependent lines crossing the SDF interior that looked like the conventional mesh triangle wireframe. Symptom only reproduced for OB_MESH objects carrying a Live-Mesh-to-SDF modifier (rendered by the SDF engine but typed OB_MESH), when the camera was inside the SDF volume.
+
+Root cause: when an OB_MESH has a Live-Mesh-to-SDF payload, the SDF engine renders its surface and Workbench suppresses conventional mesh shading (so no Workbench mesh depth is written). The overlay engine already had a `suppress_sdf_mesh_selection` flag at `overlay_instance.cc` that gated the ID-selection pass — but it was scoped to `resources.is_selection()`, so the **visible on-screen draw** still went through `overlay_wireframe.hh::object_sync_ex`, which draws the mesh's face-wireframe via `DRW_cache_mesh_face_wireframe_get` without any SDF awareness. With Workbench depth also suppressed, those wireframe lines drew unoccluded through the SDF surface — exactly the "normal triangle mesh outline, lines crossing half the screen" symptom when looking out from inside the SDF.
+
+Fix: extract `sdf_mesh_live = (ob->type == OB_MESH && in_object_mode && BKE_sdf_mesh_runtime_snapshot(*ob, snap))` as a single flag. It feeds the existing `suppress_sdf_mesh_selection` (selection pass behaviour unchanged) and additionally gates the visible-draw wireframe overlay call: in non-wireframe shading modes the wireframe overlay is suppressed for `sdf_mesh_live` meshes; in wireframe shading mode it's still drawn so users retain an explicit wireframe inspection tool. Edit Mode edit wires are not affected (handled by `layer.meshes.edit_object_sync`).
+
+| File | Change |
+|------|--------|
+| `source/blender/draw/engines/overlay/overlay_instance.cc` | Extracted `sdf_mesh_live` flag for OB_MESH + Live-Mesh-to-SDF + Object Mode; gates the visible-draw `Wireframe::object_sync_ex` call (skipped unless `state.is_wireframe_mode`), keeping the selection-pass suppression identical to prior behaviour. |
 
 ---
 

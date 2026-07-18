@@ -104,7 +104,7 @@ class OBJECT_MT_modifier_add(ModifierAddMenu, Menu):
             layout.menu("OBJECT_MT_modifier_add_physics")
         if ob_type in {'GREASEPENCIL'}:
             layout.menu("OBJECT_MT_modifier_add_color")
-        if ob_type == 'SDF':
+        if ob_type == 'SDF' or (ob_type == 'MESH' and ob.is_sdf):
             layout.menu("OBJECT_MT_modifier_add_sdf_deform")
             layout.menu("OBJECT_MT_modifier_add_sdf_generate")
 
@@ -294,7 +294,7 @@ class OBJECT_MT_modifier_add_color(ModifierAddMenu, Menu):
 
 
 class OBJECT_MT_modifier_add_sdf_deform(ModifierAddMenu, Menu):
-    bl_label = "Deform"
+    bl_label = "SDF Deform"
     bl_options = {'SEARCH_ON_KEY_PRESS'}
 
     def draw(self, context):
@@ -305,7 +305,7 @@ class OBJECT_MT_modifier_add_sdf_deform(ModifierAddMenu, Menu):
 
 
 class OBJECT_MT_modifier_add_sdf_generate(ModifierAddMenu, Menu):
-    bl_label = "Generate"
+    bl_label = "SDF Generate"
     bl_options = {'SEARCH_ON_KEY_PRESS'}
 
     def draw(self, context):

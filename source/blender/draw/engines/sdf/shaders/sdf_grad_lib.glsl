@@ -664,25 +664,25 @@ float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
   float3 r = obj.sdf_size.xyz;
   float4 dg;
 
-  if (obj.sdf_type == 1) {
+  if (obj.sdf_type == SDF_GPU_TYPE_SPHERE) {
     dg = (abs(r.x - r.y) < 0.0001f && abs(r.x - r.z) < 0.0001f)
          ? sdgSphere(local_pos, r.x) : sdgEllipsoid(local_pos, r);
   }
-  else if (obj.sdf_type == 2) {
+  else if (obj.sdf_type == SDF_GPU_TYPE_CYLINDER) {
     dg = sdgCylinder(local_pos, r);
   }
-  else if (obj.sdf_type == 3) {
+  else if (obj.sdf_type == SDF_GPU_TYPE_CONE) {
     dg = sdgConeFrustum(local_pos, r.x, r.z, r.y);
   }
-  else if (obj.sdf_type == 4) {
+  else if (obj.sdf_type == SDF_GPU_TYPE_CAPSULE) {
     dg = sdgCapsule(local_pos, r);
   }
-  else if (obj.sdf_type == 5) {
+  else if (obj.sdf_type == SDF_GPU_TYPE_TORUS) {
     dg = (obj.box_modes.w != 0)
          ? sdgCappedTorus(local_pos, obj.box_corners.xy, r.x, r.y)
          : sdgTorus(local_pos, float2(r.x, r.y));
   }
-  else if (obj.sdf_type == 6 || obj.sdf_type == 7) {
+  else if (obj.sdf_type == SDF_GPU_TYPE_NGON || obj.sdf_type == SDF_GPU_TYPE_POLYGON) {
     float eps = 0.0005f;
     float dx = evalPrimitiveOnly(obj, local_pos + float3(eps, 0.0f, 0.0f));
     float dy = evalPrimitiveOnly(obj, local_pos + float3(0.0f, eps, 0.0f));

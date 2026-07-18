@@ -88,6 +88,23 @@ namespace blender::ed::object {
 
 /* SDF Add */
 
+static const EnumPropertyItem sdf_add_type_items[] = {
+    {SDF_TYPE_BOX, "BOX", ICON_SDF_CUBE, "Cube", "Cube SDF primitive"},
+    {SDF_TYPE_SPHERE, "SPHERE", ICON_SDF_SPHERE, "Sphere", "Sphere SDF primitive"},
+    {SDF_TYPE_CYLINDER,
+     "CYLINDER",
+     ICON_SDF_CYLINDER,
+     "Cylinder",
+     "Cylinder SDF primitive"},
+    {SDF_TYPE_CONE, "CONE", ICON_SDF_CONE, "Cone", "Cone SDF primitive"},
+    {SDF_TYPE_CAPSULE, "CAPSULE", ICON_SDF_CAPSULE, "Capsule", "Capsule SDF primitive"},
+    {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
+    {SDF_TYPE_NGON, "NGON", ICON_SDF_NGON, "N-Gon", "Regular polygon prism"},
+    {SDF_TYPE_POLYGON, "POLYGON", ICON_SDF_POLYGON, "Polygon", "Arbitrary polygon prism"},
+    {SDF_TYPE_GROUP, "GROUP", ICON_DOT, "Group", "SDF group container"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const char *sdf_type_name(int type)
 {
   switch (type) {
@@ -186,13 +203,84 @@ void OBJECT_OT_sdf_add(wmOperatorType *ot)
 
   RNA_def_enum(ot->srna,
                "type",
-               rna_enum_sdf_type_items,
+               sdf_add_type_items,
                SDF_TYPE_BOX,
                "Type",
                "SDF primitive type");
 }
 
 /* SDF CSG / Blend Cycle Operators */
+
+static bool object_has_sdf_settings(const Object *ob)
+{
+  return ob && ((ob->type == OB_SDF && ob->data) || BKE_sdf_object_is_enabled(*ob));
+}
+
+static ID *object_sdf_settings_id(Object *ob)
+{
+  return ob->type == OB_SDF ? static_cast<ID *>(ob->data) : &ob->id;
+}
+
+static int object_sdf_csg_operation_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->csg_operation :
+                              ob->sdf_csg_operation;
+}
+
+static void object_sdf_csg_operation_set(Object *ob, const int value)
+{
+  if (ob->type == OB_SDF) {
+    id_cast<SDF *>(ob->data)->csg_operation = value;
+  }
+  else {
+    ob->sdf_csg_operation = value;
+  }
+}
+
+static void object_sdf_blend_type_set(Object *ob, const int value)
+{
+  if (ob->type == OB_SDF) {
+    id_cast<SDF *>(ob->data)->blend_type = value;
+  }
+  else {
+    ob->sdf_blend_type = value;
+  }
+}
+
+static float object_sdf_blend_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->blend : ob->sdf_blend;
+}
+
+static float object_sdf_shell_distance_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->shell_distance :
+                              ob->sdf_shell_distance;
+}
+
+static float object_sdf_shell_top_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->shell_blend_top :
+                              ob->sdf_shell_blend_top;
+}
+
+static float object_sdf_shell_bottom_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->shell_blend_bottom :
+                              ob->sdf_shell_blend_bottom;
+}
+
+static int object_sdf_shell_mode_get(const Object *ob)
+{
+  return ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->shell_mode : ob->sdf_shell_mode;
+}
+
+static void object_sdf_tag_update(bContext *C, Object *ob)
+{
+  DEG_id_tag_update(object_sdf_settings_id(ob),
+                    ob->type == OB_SDF ? ID_RECALC_GEOMETRY : ID_RECALC_SYNC_TO_EVAL);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+}
 
 static wmOperatorStatus object_sdf_set_csg_exec(bContext *C, wmOperator *op)
 {
@@ -202,14 +290,12 @@ static wmOperatorStatus object_sdf_set_csg_exec(bContext *C, wmOperator *op)
   const int csg_op = RNA_int_get(op->ptr, "csg_operation");
 
   Object *ob = (Object *)BKE_libblock_find_name(bmain, ID_OB, ob_name);
-  if (!ob || ob->type != OB_SDF || !ob->data) {
+  if (!object_has_sdf_settings(ob)) {
     return OPERATOR_CANCELLED;
   }
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  sdf->csg_operation = csg_op;
+  object_sdf_csg_operation_set(ob, csg_op);
 
-  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  object_sdf_tag_update(C, ob);
   return OPERATOR_FINISHED;
 }
 
@@ -233,14 +319,12 @@ static wmOperatorStatus object_sdf_set_blend_exec(bContext *C, wmOperator *op)
   const int blend_type = RNA_int_get(op->ptr, "blend_type");
 
   Object *ob = (Object *)BKE_libblock_find_name(bmain, ID_OB, ob_name);
-  if (!ob || ob->type != OB_SDF || !ob->data) {
+  if (!object_has_sdf_settings(ob)) {
     return OPERATOR_CANCELLED;
   }
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  sdf->blend_type = blend_type;
+  object_sdf_blend_type_set(ob, blend_type);
 
-  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  object_sdf_tag_update(C, ob);
   return OPERATOR_FINISHED;
 }
 
@@ -277,6 +361,7 @@ struct SDFValueAdjustData {
   bool locked;
   bool is_horizontal;
   float init_other;
+  float init_other2;
 };
 
 static void sdf_value_adjust_draw(const bContext * /*C*/, ARegion *region, void *userdata)
@@ -337,17 +422,16 @@ static void sdf_draw_cleanup(ARegion *region, void *draw_handle, bContext *C)
 static bool sdf_blend_adjust_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
-  return ob && ob->type == OB_SDF && ob->data && CTX_wm_region_view3d(C);
+  return object_has_sdf_settings(ob) && ob->mode == OB_MODE_OBJECT && CTX_wm_region_view3d(C);
 }
 
 static bool sdf_shell_distance_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
-  if (!ob || ob->type != OB_SDF || !ob->data || !CTX_wm_region_view3d(C)) {
+  if (!object_has_sdf_settings(ob) || ob->mode != OB_MODE_OBJECT || !CTX_wm_region_view3d(C)) {
     return false;
   }
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  return sdf->csg_operation == SDF_CSG_SHELL;
+  return object_sdf_csg_operation_get(ob) == SDF_CSG_SHELL;
 }
 
 static void sdf_value_update_header(bContext *C, SDFValueAdjustData *data)
@@ -366,27 +450,24 @@ static void sdf_value_update_header(bContext *C, SDFValueAdjustData *data)
 /* Shared single-value modal (locked direction, X-axis controls value) */
 
 static wmOperatorStatus sdf_value_modal_common(bContext *C,
-                                                 wmOperator *op,
-                                                 const wmEvent *event,
-                                                 void (*write_fn)(SDF *, float),
-                                                 void (*restore_fn)(SDF *, float))
+                                                  wmOperator *op,
+                                                  const wmEvent *event,
+                                                  void (*write_fn)(Object *, float),
+                                                  void (*restore_fn)(Object *, float))
 {
   SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
-  if (!ob || ob->type != OB_SDF || !ob->data) {
+  if (!object_has_sdf_settings(ob)) {
     sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     op->customdata = nullptr;
     return OPERATOR_CANCELLED;
   }
-  SDF *sdf = id_cast<SDF *>(ob->data);
-
   if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
       (event->type == RIGHTMOUSE && event->val == KM_PRESS))
   {
-    restore_fn(sdf, data->init_value);
-    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+    restore_fn(ob, data->init_value);
+    object_sdf_tag_update(C, ob);
     sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     return OPERATOR_CANCELLED;
@@ -396,9 +477,8 @@ static wmOperatorStatus sdf_value_modal_common(bContext *C,
       (event->type == EVT_RETKEY && event->val == KM_PRESS) ||
       (event->type == EVT_PADENTER && event->val == KM_PRESS))
   {
-    write_fn(sdf, data->current_value);
-    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+    write_fn(ob, data->current_value);
+    object_sdf_tag_update(C, ob);
     sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     return OPERATOR_FINISHED;
@@ -426,9 +506,8 @@ static wmOperatorStatus sdf_value_modal_common(bContext *C,
   data->mval_x = mx;
   data->mval_y = float(event->mval[1]);
 
-  write_fn(sdf, data->current_value);
-  DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  write_fn(ob, data->current_value);
+  object_sdf_tag_update(C, ob);
   ED_region_tag_redraw(data->region);
 
   sdf_value_update_header(C, data);
@@ -454,6 +533,7 @@ static SDFValueAdjustData *sdf_value_init(bContext *C,
   data->locked = true;
   data->is_horizontal = true;
   data->init_other = 0.0f;
+  data->init_other2 = 0.0f;
   data->ob = ob;
   data->region = region;
   data->line_r = r;
@@ -467,22 +547,53 @@ static SDFValueAdjustData *sdf_value_init(bContext *C,
 
 /* B key: blend (non-shell) or direction-detect top/bottom (shell) */
 
-static void sdf_write_blend(SDF *sdf, float v) { sdf->blend = v; }
-static void sdf_write_shell_top(SDF *sdf, float v) { sdf->shell_blend_top = v; }
-static void sdf_write_shell_bottom(SDF *sdf, float v) { sdf->shell_blend_bottom = v; }
+static void sdf_write_blend(Object *ob, float v)
+{
+  if (ob->type == OB_SDF) {
+    id_cast<SDF *>(ob->data)->blend = v;
+  }
+  else {
+    ob->sdf_blend = v;
+  }
+}
+
+static void sdf_write_shell_top(Object *ob, float v)
+{
+  if (object_sdf_shell_mode_get(ob) == SDF_SHELL_NORMAL) {
+    v = min_ff(v, object_sdf_shell_distance_get(ob));
+  }
+  if (ob->type == OB_SDF) {
+    id_cast<SDF *>(ob->data)->shell_blend_top = v;
+  }
+  else {
+    ob->sdf_shell_blend_top = v;
+  }
+}
+
+static void sdf_write_shell_bottom(Object *ob, float v)
+{
+  if (object_sdf_shell_mode_get(ob) == SDF_SHELL_NORMAL) {
+    v = min_ff(v, object_sdf_shell_distance_get(ob));
+  }
+  if (ob->type == OB_SDF) {
+    id_cast<SDF *>(ob->data)->shell_blend_bottom = v;
+  }
+  else {
+    ob->sdf_shell_blend_bottom = v;
+  }
+}
 
 static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
-  if (!ob || ob->type != OB_SDF || !ob->data) {
+  if (!object_has_sdf_settings(ob)) {
     sdf_draw_cleanup(data->region, data->draw_handle, C);
     MEM_delete(data);
     op->customdata = nullptr;
     return OPERATOR_CANCELLED;
   }
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  bool is_shell = (sdf->csg_operation == SDF_CSG_SHELL);
+  bool is_shell = object_sdf_csg_operation_get(ob) == SDF_CSG_SHELL;
 
   if (!is_shell) {
     return sdf_value_modal_common(C, op, event, sdf_write_blend, sdf_write_blend);
@@ -498,17 +609,17 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
       data->locked = true;
       if (dx >= dy) {
         data->is_horizontal = true;
-        data->init_value = sdf->shell_blend_top;
-        data->current_value = sdf->shell_blend_top;
-        data->init_other = sdf->shell_blend_bottom;
+        data->init_value = object_sdf_shell_top_get(ob);
+        data->current_value = object_sdf_shell_top_get(ob);
+        data->init_other = object_sdf_shell_bottom_get(ob);
         data->label = "Shell Top";
         data->line_r = 1.0f; data->line_g = 0.3f; data->line_b = 0.3f;
       }
       else {
         data->is_horizontal = false;
-        data->init_value = sdf->shell_blend_bottom;
-        data->current_value = sdf->shell_blend_bottom;
-        data->init_other = sdf->shell_blend_top;
+        data->init_value = object_sdf_shell_bottom_get(ob);
+        data->current_value = object_sdf_shell_bottom_get(ob);
+        data->init_other = object_sdf_shell_top_get(ob);
         data->label = "Shell Bottom";
         data->line_r = 0.3f; data->line_g = 0.6f; data->line_b = 1.0f;
       }
@@ -542,8 +653,7 @@ static wmOperatorStatus sdf_blend_adjust_modal(bContext *C, wmOperator *op, cons
 static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   Object *ob = CTX_data_active_object(C);
-  SDF *sdf = id_cast<SDF *>(ob->data);
-  bool is_shell = (sdf->csg_operation == SDF_CSG_SHELL);
+  bool is_shell = object_sdf_csg_operation_get(ob) == SDF_CSG_SHELL;
 
   SDFValueAdjustData *data;
   if (is_shell) {
@@ -551,7 +661,8 @@ static wmOperatorStatus sdf_blend_adjust_invoke(bContext *C, wmOperator *op, con
     data->locked = false;
   }
   else {
-    data = sdf_value_init(C, event, ob, sdf->blend, 1.0f, 0.65f, 0.0f, "Blend");
+    data = sdf_value_init(
+        C, event, ob, object_sdf_blend_get(ob), 1.0f, 0.65f, 0.0f, "Blend");
   }
 
   op->customdata = data;
@@ -564,22 +675,20 @@ static void sdf_blend_adjust_cancel(bContext *C, wmOperator *op)
 {
   SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
-  if (ob && ob->type == OB_SDF && ob->data) {
-    SDF *sdf = id_cast<SDF *>(ob->data);
+  if (object_has_sdf_settings(ob)) {
     if (data->locked) {
-      if (sdf->csg_operation == SDF_CSG_SHELL) {
+      if (object_sdf_csg_operation_get(ob) == SDF_CSG_SHELL) {
         if (data->is_horizontal) {
-          sdf->shell_blend_top = data->init_value;
+          sdf_write_shell_top(ob, data->init_value);
         }
         else {
-          sdf->shell_blend_bottom = data->init_value;
+          sdf_write_shell_bottom(ob, data->init_value);
         }
       }
       else {
-        sdf->blend = data->init_value;
+        sdf_write_blend(ob, data->init_value);
       }
-      DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+      object_sdf_tag_update(C, ob);
     }
   }
   sdf_draw_cleanup(data->region, data->draw_handle, C);
@@ -602,20 +711,60 @@ void OBJECT_OT_sdf_blend_adjust(wmOperatorType *ot)
 
 /* D key: shell_distance (only for shell objects) */
 
-static void sdf_write_distance(SDF *sdf, float v) { sdf->shell_distance = v; }
+static void sdf_write_distance(Object *ob, float v)
+{
+  if (ob->type == OB_SDF) {
+    SDF *sdf = id_cast<SDF *>(ob->data);
+    sdf->shell_distance = v;
+    if (sdf->shell_mode == SDF_SHELL_NORMAL) {
+      sdf->shell_blend_top = min_ff(sdf->shell_blend_top, v);
+      sdf->shell_blend_bottom = min_ff(sdf->shell_blend_bottom, v);
+    }
+  }
+  else {
+    ob->sdf_shell_distance = v;
+    if (ob->sdf_shell_mode == SDF_SHELL_NORMAL) {
+      ob->sdf_shell_blend_top = min_ff(ob->sdf_shell_blend_top, v);
+      ob->sdf_shell_blend_bottom = min_ff(ob->sdf_shell_blend_bottom, v);
+    }
+  }
+}
 
 static wmOperatorStatus sdf_shell_distance_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  if ((event->type == EVT_ESCKEY && event->val == KM_PRESS) ||
+      (event->type == RIGHTMOUSE && event->val == KM_PRESS))
+  {
+    SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
+    Object *ob = CTX_data_active_object(C);
+    if (object_has_sdf_settings(ob)) {
+      sdf_write_distance(ob, data->init_value);
+      sdf_write_shell_top(ob, data->init_other);
+      sdf_write_shell_bottom(ob, data->init_other2);
+      object_sdf_tag_update(C, ob);
+    }
+    sdf_draw_cleanup(data->region, data->draw_handle, C);
+    MEM_delete(data);
+    op->customdata = nullptr;
+    return OPERATOR_CANCELLED;
+  }
   return sdf_value_modal_common(C, op, event, sdf_write_distance, sdf_write_distance);
 }
 
 static wmOperatorStatus sdf_shell_distance_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   Object *ob = CTX_data_active_object(C);
-  SDF *sdf = id_cast<SDF *>(ob->data);
 
-  SDFValueAdjustData *data = sdf_value_init(
-      C, event, ob, sdf->shell_distance, 0.3f, 1.0f, 0.3f, "Distance");
+  SDFValueAdjustData *data = sdf_value_init(C,
+                                            event,
+                                            ob,
+                                            object_sdf_shell_distance_get(ob),
+                                            0.3f,
+                                            1.0f,
+                                            0.3f,
+                                            "Distance");
+  data->init_other = object_sdf_shell_top_get(ob);
+  data->init_other2 = object_sdf_shell_bottom_get(ob);
   op->customdata = data;
 
   WM_event_add_modal_handler(C, op);
@@ -627,11 +776,11 @@ static void sdf_shell_distance_cancel(bContext *C, wmOperator *op)
 {
   SDFValueAdjustData *data = static_cast<SDFValueAdjustData *>(op->customdata);
   Object *ob = CTX_data_active_object(C);
-  if (ob && ob->type == OB_SDF && ob->data) {
-    SDF *sdf = id_cast<SDF *>(ob->data);
-    sdf->shell_distance = data->init_value;
-    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  if (object_has_sdf_settings(ob)) {
+    sdf_write_distance(ob, data->init_value);
+    sdf_write_shell_top(ob, data->init_other);
+    sdf_write_shell_bottom(ob, data->init_other2);
+    object_sdf_tag_update(C, ob);
   }
   sdf_draw_cleanup(data->region, data->draw_handle, C);
   MEM_delete(data);

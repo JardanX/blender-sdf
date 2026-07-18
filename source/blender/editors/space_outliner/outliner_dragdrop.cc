@@ -1166,7 +1166,7 @@ static bool collection_drop_init(bContext *C, wmDrag *drag, const int xy[2], Col
   /* SDF objects belong in SDF Groups, not collections. */
   if (GS(id->name) == ID_OB) {
     Object *ob = (Object *)id;
-    if (ob->type == OB_SDF) {
+    if (ob->type == OB_SDF || (ob->type == OB_MESH && ob->is_sdf)) {
       return false;
     }
   }
@@ -1617,6 +1617,42 @@ static bool is_sdf_group_empty(Object *ob)
   return sdf->sdf_type == SDF_TYPE_GROUP;
 }
 
+static bool is_sdf_stack_object(const Object *ob)
+{
+  return ob && (ob->type == OB_SDF || (ob->type == OB_MESH && ob->is_sdf));
+}
+
+static int sdf_stack_index_get(const Object *ob)
+{
+  if (ob->type == OB_MESH) {
+    return ob->sdf_index;
+  }
+  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+  return sdf ? sdf->sdf_index : 0;
+}
+
+static void sdf_stack_index_set(Object *ob, const int index)
+{
+  if (ob->type == OB_MESH) {
+    ob->sdf_index = index;
+    return;
+  }
+  SDF *sdf = reinterpret_cast<SDF *>(ob->data);
+  if (sdf) {
+    sdf->sdf_index = index;
+  }
+}
+
+static void sdf_stack_index_tag_update(Object *ob)
+{
+  if (ob->type == OB_SDF) {
+    DEG_id_tag_update(static_cast<ID *>(ob->data), ID_RECALC_GEOMETRY);
+  }
+  else {
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+}
+
 static SDFDropTarget sdf_group_drop_find(bContext *C, const int xy[2])
 {
   SDFDropTarget result = {nullptr, nullptr, TE_INSERT_INTO, false};
@@ -1631,7 +1667,7 @@ static SDFDropTarget sdf_group_drop_find(bContext *C, const int xy[2])
 
   /* Drop on non-SDF element (e.g. Scene Collection) — ungroup target */
   if (!tselem->id || GS(tselem->id->name) != ID_OB ||
-      ((Object *)tselem->id)->type != OB_SDF)
+      !is_sdf_stack_object((Object *)tselem->id))
   {
     result.insert_type = TE_INSERT_AFTER;
     return result;
@@ -1696,7 +1732,7 @@ static bool sdf_group_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
     return false;
   }
   Object *ob = (Object *)drag_id->id;
-  if (ob->type != OB_SDF) {
+  if (!is_sdf_stack_object(ob)) {
     if (changed) {
       ED_region_tag_redraw_no_rebuild(region);
     }
@@ -1796,14 +1832,13 @@ static void sdf_reindex_siblings(Scene *scene,
   Vector<Object *> siblings;
   for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
     Object *ob = base.object;
-    if (ob->type != OB_SDF || !ob->data) {
+    if (!is_sdf_stack_object(ob) || !ob->data) {
       continue;
     }
-    const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
     if (parent_filter) {
       /* Inside a group: children of this group (not sub-groups) */
       if (ob->parent != parent_filter) continue;
-      if (sdf->sdf_type == SDF_TYPE_GROUP) continue;
+      if (is_sdf_group_empty(ob)) continue;
     }
     else {
       /* Top level: groups + ungrouped SDFs (not children of groups) */
@@ -1814,9 +1849,7 @@ static void sdf_reindex_siblings(Scene *scene,
   }
 
   std::sort(siblings.begin(), siblings.end(), [](Object *a, Object *b) {
-    const SDF *sa = reinterpret_cast<const SDF *>(a->data);
-    const SDF *sb = reinterpret_cast<const SDF *>(b->data);
-    return sa->sdf_index < sb->sdf_index;
+    return sdf_stack_index_get(a) < sdf_stack_index_get(b);
   });
 
   /* Remove drag from list */
@@ -1843,24 +1876,21 @@ static void sdf_reindex_siblings(Scene *scene,
    * Find max sdf_index in scene to avoid collisions. */
   int max_idx = 0;
   for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
-    if (base.object->type == OB_SDF && base.object->data) {
-      const SDF *s = reinterpret_cast<const SDF *>(base.object->data);
+    if (is_sdf_stack_object(base.object) && base.object->data) {
       /* Only count objects NOT in this sibling set */
       bool in_set = false;
       for (Object *sib : siblings) {
         if (sib == base.object) { in_set = true; break; }
       }
       if (!in_set) {
-        max_idx = std::max(max_idx, s->sdf_index + 1);
+        max_idx = std::max(max_idx, sdf_stack_index_get(base.object) + 1);
       }
     }
   }
 
   for (int i = 0; i < int(siblings.size()); i++) {
-    SDF *sdf = reinterpret_cast<SDF *>(siblings[i]->data);
-    sdf->sdf_index = max_idx + i;
-    DEG_id_tag_update(&sdf->id, ID_RECALC_GEOMETRY);
-    DEG_id_tag_update(&siblings[i]->id, ID_RECALC_TRANSFORM | ID_RECALC_GEOMETRY);
+    sdf_stack_index_set(siblings[i], max_idx + i);
+    sdf_stack_index_tag_update(siblings[i]);
   }
 }
 
@@ -1913,7 +1943,7 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
     }
 
     Object *ob = (Object *)drag_id.id;
-    if (ob->type != OB_SDF || !ob->data) {
+    if (!is_sdf_stack_object(ob) || !ob->data) {
       continue;
     }
 
@@ -1941,11 +1971,11 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       grp_sdf->blend = 0.0f;
 
       /* Group takes the target's position; children get 0, 1 */
-      SDF *target_sdf = reinterpret_cast<SDF *>(target.target_ob->data);
-      SDF *drag_sdf = reinterpret_cast<SDF *>(ob->data);
-      grp_sdf->sdf_index = target_sdf->sdf_index;
-      target_sdf->sdf_index = 0;
-      drag_sdf->sdf_index = 1;
+      grp_sdf->sdf_index = sdf_stack_index_get(target.target_ob);
+      sdf_stack_index_set(target.target_ob, 0);
+      sdf_stack_index_set(ob, 1);
+      sdf_stack_index_tag_update(target.target_ob);
+      sdf_stack_index_tag_update(ob);
 
       Object *grp_ob = BKE_object_add_only_object(bmain, OB_SDF, "SDF Group");
       grp_ob->data = &grp_sdf->id;
@@ -2044,13 +2074,10 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
       ob->loc[1] = world_loc[1];
       ob->loc[2] = world_loc[2];
 
-      SDF *sdf = reinterpret_cast<SDF *>(ob->data);
-      if (sdf) {
-        sdf->sdf_index = grp_idx + 1;
-      }
+      sdf_stack_index_set(ob, grp_idx + 1);
 
       DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
-      DEG_id_tag_update(static_cast<ID *>(ob->data), ID_RECALC_GEOMETRY);
+      sdf_stack_index_tag_update(ob);
 
       /* Delete old group if now empty */
       bool still_has_children = false;
@@ -2086,6 +2113,7 @@ static wmOperatorStatus sdf_group_drop_invoke(bContext *C,
         ob->loc[2] = world_loc[2] - grp_loc[2];
       }
       DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+      sdf_reindex_siblings(scene, view_layer, ob, nullptr, false, target.group_empty);
       continue;
     }
   }

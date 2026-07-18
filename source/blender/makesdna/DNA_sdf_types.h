@@ -38,8 +38,20 @@ typedef enum eSDFType {
   SDF_TYPE_TORUS = 5,
   SDF_TYPE_NGON = 6,
   SDF_TYPE_POLYGON = 7,
+  SDF_TYPE_MESH = 8,
   SDF_TYPE_GROUP = 100,
 } eSDFType;
+
+typedef enum eSDFMeshNormalMode {
+  SDF_MESH_NORMAL_SHARP = 0,
+  SDF_MESH_NORMAL_SMOOTH = 1,
+} eSDFMeshNormalMode;
+
+enum {
+  SDF_MESH_FLAG_CLOSED = (1 << 0),
+  SDF_MESH_FLAG_ORIENTED = (1 << 1),
+  SDF_MESH_FLAG_THREADED_BVH = (1 << 2),
+};
 
 /* Box corner/edge blend mode */
 typedef enum eSDFBoxMode {
@@ -140,6 +152,27 @@ typedef struct SDFModifier {
   struct Object *mirror_ob;
 } SDFModifier;
 
+typedef struct SDFMeshVertex {
+  float co[3];
+  unsigned int pseudonormal;
+} SDFMeshVertex;
+
+typedef struct SDFMeshTriangle {
+  unsigned int vertices[3];
+  int material_index;
+  unsigned int corner_normals[3];
+  unsigned int _pad0;
+  unsigned int edge_normals[3];
+  unsigned int _pad1;
+} SDFMeshTriangle;
+
+typedef struct SDFMeshBVHNode {
+  float bounds_min[3];
+  int child_or_first;
+  float bounds_max[3];
+  int child_or_count;
+} SDFMeshBVHNode;
+
 typedef struct SDF {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(SDF)
@@ -205,6 +238,18 @@ typedef struct SDF {
   ListBase modifiers = {}; /* SDFModifier */
   int totmodifier = 0;
   char _pad3[4] = {};
+
+  SDFMeshVertex *mesh_vertices = nullptr;
+  SDFMeshTriangle *mesh_triangles = nullptr;
+  SDFMeshBVHNode *mesh_bvh_nodes = nullptr;
+  int mesh_vertex_count = 0;
+  int mesh_triangle_count = 0;
+  int mesh_bvh_node_count = 0;
+  int mesh_normal_mode = 0; /* eSDFMeshNormalMode */
+  float mesh_bounds_min[3] = {};
+  int mesh_flags = 0;
+  float mesh_bounds_max[3] = {};
+  int mesh_data_version = 0;
 
   struct Material **mat = nullptr;
   short totcol = 0;

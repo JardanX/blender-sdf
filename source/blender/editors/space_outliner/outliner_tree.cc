@@ -583,7 +583,7 @@ static void outliner_sort(ListBaseT<TreeElement> *lb)
         GS(first_tselem->id->name) == ID_OB)
     {
       Object *first_ob = (Object *)first_tselem->id;
-      if (first_ob->type == OB_SDF) {
+      if (first_ob->type == OB_SDF || (first_ob->type == OB_MESH && first_ob->is_sdf)) {
         for (TreeElement &te_iter : *lb) {
           outliner_sort(&te_iter.subtree);
         }
@@ -679,7 +679,7 @@ static void outliner_collections_children_sort(ListBaseT<TreeElement> *lb)
         GS(first_tselem->id->name) == ID_OB)
     {
       Object *first_ob = (Object *)first_tselem->id;
-      if (first_ob->type == OB_SDF) {
+      if (first_ob->type == OB_SDF || (first_ob->type == OB_MESH && first_ob->is_sdf)) {
         for (TreeElement &te_iter : *lb) {
           outliner_collections_children_sort(&te_iter.subtree);
         }

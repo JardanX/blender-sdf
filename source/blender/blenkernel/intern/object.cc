@@ -284,6 +284,11 @@ static void object_copy_data(Main *bmain,
       ob_dst->lightprobe_cache->shared = false;
     }
   }
+  if (bmain && BKE_sdf_object_is_enabled(*ob_dst) &&
+      !(flag & LIB_ID_COPY_SET_COPIED_ON_WRITE))
+  {
+    ob_dst->sdf_index = BKE_sdf_next_index(bmain);
+  }
 }
 
 static void object_free_data(ID *id)
@@ -1282,6 +1287,9 @@ bool BKE_object_support_modifier_type_check(const Object *ob, int modifier_type)
   }
   if (ob->type == OB_VOLUME) {
     return mti->modify_geometry_set != nullptr;
+  }
+  if (ob->type == OB_MESH && ob->is_sdf && (mti->flags & eModifierTypeFlag_AcceptsSDF)) {
+    return true;
   }
   if (ELEM(ob->type, OB_MESH, OB_CURVES_LEGACY, OB_SURF, OB_FONT, OB_LATTICE)) {
     if (ob->type == OB_LATTICE && (mti->flags & eModifierTypeFlag_AcceptsVertexCosOnly) == 0) {
@@ -4893,6 +4901,7 @@ void BKE_object_runtime_reset_on_copy(Object *object, const int /*flag*/)
   runtime->pose_backup = nullptr;
   runtime->object_as_temp_curve = nullptr;
   runtime->geometry_set_eval = nullptr;
+  runtime->sdf_mesh.reset();
   runtime->contained_geometry_types = 0;
   runtime->sculpt_session = nullptr;
 

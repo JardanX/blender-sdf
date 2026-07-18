@@ -13,6 +13,7 @@
 #include "DNA_lightprobe_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_types.h"
 
 #include "BLI_math_rotation.h"
 
@@ -313,6 +314,7 @@ const EnumPropertyItem rna_enum_object_axis_items[] = {
 #  include "BKE_object_deform.h"
 #  include "BKE_particle.h"
 #  include "BKE_scene.hh"
+#  include "BKE_sdf.hh"
 
 #  include "DEG_depsgraph.hh"
 #  include "DEG_depsgraph_build.hh"
@@ -435,6 +437,61 @@ void rna_Object_internal_update_data_impl(PointerRNA *ptr)
 void rna_Object_internal_update_data(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   rna_Object_internal_update_data_impl(ptr);
+}
+
+static void rna_Object_sdf_normalize(Object &ob)
+{
+  if (ob.sdf_csg_operation == SDF_CSG_SHELL) {
+    if (ob.sdf_shell_mode == SDF_SHELL_AVOID) {
+      ob.sdf_shell_op = SDF_SHELL_OP_UNION;
+    }
+    if (ob.sdf_shell_mode == SDF_SHELL_NORMAL) {
+      ob.sdf_shell_blend_top = std::min(ob.sdf_shell_blend_top, ob.sdf_shell_distance);
+      ob.sdf_shell_blend_bottom = std::min(ob.sdf_shell_blend_bottom,
+                                           ob.sdf_shell_distance);
+    }
+  }
+}
+
+static void rna_Object_sdf_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  rna_Object_sdf_normalize(*ob);
+  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, &ob->id);
+}
+
+static void rna_Object_sdf_enable_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  if (ob->type != OB_MESH) {
+    ob->is_sdf = false;
+    return;
+  }
+  if (ob->is_sdf) {
+    BKE_sdf_object_settings_ensure(*ob);
+    if (ob->sdf_index <= 0) {
+      ob->sdf_index = BKE_sdf_next_index(bmain);
+    }
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  }
+  else {
+    ob->sdf_index = 0;
+    BKE_sdf_mesh_runtime_clear(*ob);
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, &ob->id);
+  WM_main_add_notifier(NC_SCENE | ND_LAYER_CONTENT, nullptr);
+}
+
+static void rna_Object_sdf_index_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  if (BKE_sdf_object_is_enabled(*ob)) {
+    BKE_sdf_reindex_all(bmain);
+    WM_main_add_notifier(NC_OBJECT | ND_DRAW, &ob->id);
+    WM_main_add_notifier(NC_SCENE | ND_LAYER_CONTENT, nullptr);
+  }
 }
 
 void rna_Object_internal_update_data_dependency(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
@@ -2288,6 +2345,54 @@ static void rna_LightLinking_collection_update(Main *bmain, Scene * /*scene*/, P
 
 namespace blender {
 
+static const EnumPropertyItem rna_enum_object_sdf_normal_items[] = {
+    {SDF_MESH_NORMAL_SHARP, "SHARP", 0, "Sharp", "Use geometric triangle normals"},
+    {SDF_MESH_NORMAL_SMOOTH,
+     "SMOOTH",
+     0,
+     "Smooth",
+     "Interpolate the mesh's split corner normals"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_object_sdf_blend_type_items[] = {
+    {SDF_BLEND_LINEAR, "LINEAR", ICON_SDF_BLEND_LINEAR, "Linear", "Hard union/difference"},
+    {SDF_BLEND_SMOOTH, "SMOOTH", ICON_SDF_BLEND_SMOOTH, "Smooth", "Smooth blend"},
+    {SDF_BLEND_CHAMFER, "CHAMFER", ICON_SDF_BLEND_CHAMFER, "Chamfer", "Chamfer blend"},
+    {SDF_BLEND_ROUND, "ROUND", ICON_SDF_BLEND_ROUND, "Round", "Spherical round blend"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_object_sdf_csg_items[] = {
+    {SDF_CSG_UNION, "UNION", ICON_SDF_CSG_UNION, "Union", "Boolean union"},
+    {SDF_CSG_SUBTRACT, "SUBTRACT", ICON_SDF_CSG_SUBTRACT, "Subtract", "Boolean subtraction"},
+    {SDF_CSG_INTERSECT,
+     "INTERSECT",
+     ICON_SDF_CSG_INTERSECT,
+     "Intersect",
+     "Boolean intersection"},
+    {SDF_CSG_SHELL, "SHELL", ICON_SDF_CSG_EXTRUDE, "Shell", "Shell/extrusion operation"},
+    {SDF_CSG_PUSH, "PUSH", ICON_SDF_CSG_PUSH, "Push", "Subtract while keeping this object visible"},
+    {SDF_CSG_AVOID, "AVOID", ICON_SDF_CSG_AVOID, "Avoid", "Carve this object by other objects"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_object_sdf_shell_mode_items[] = {
+    {SDF_SHELL_NORMAL, "NORMAL", 0, "Normal", "Standard shell operation"},
+    {SDF_SHELL_AVOID, "AVOID", 0, "Avoid", "Shell avoids the base surface"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_object_sdf_shell_op_items[] = {
+    {SDF_SHELL_OP_UNION, "UNION", 0, "Union", "Add the shell to the SDF field"},
+    {SDF_SHELL_OP_SUBTRACTION,
+     "SUBTRACTION",
+     0,
+     "Subtraction",
+     "Subtract the shell from the SDF field"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_vertex_group(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2977,6 +3082,108 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_override_clear_flag(prop, PROPOVERRIDE_OVERRIDABLE_LIBRARY);
   RNA_def_property_ui_text(prop, "Type", "Type of object");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
+
+  prop = RNA_def_property(srna, "is_sdf", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "is_sdf", 1);
+  RNA_def_property_ui_text(prop, "SDF", "Render this Mesh as an analytic SDF");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_enable_update");
+
+  prop = RNA_def_property(srna, "sdf_normal_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_sdf_normal_items);
+  RNA_def_property_ui_text(prop, "Normals", "Analytic mesh surface normal mode");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_index");
+  RNA_def_property_range(prop, 1, 10000);
+  RNA_def_property_ui_text(prop, "Order", "Global order in the SDF composition stack");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_index_update");
+
+  prop = RNA_def_property(srna, "sdf_csg_operation", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_sdf_csg_items);
+  RNA_def_property_ui_text(prop, "Operation", "Boolean operation in the SDF composition stack");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_blend", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_blend");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend", "Blend amount for SDF composition");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_sdf_blend_type_items);
+  RNA_def_property_ui_text(prop, "Blend Type", "Blend function used for SDF composition");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_shell_distance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_shell_distance");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Shell Distance", "Offset distance for the shell operation");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_shell_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_sdf_shell_mode_items);
+  RNA_def_property_ui_text(prop, "Shell Mode", "Shell sub-operation mode");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_shell_op", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_sdf_shell_op_items);
+  RNA_def_property_ui_text(prop, "Shell Operation", "Whether the shell adds or subtracts");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_shell_blend_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_shell_blend_top");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend Top", "Blend amount for the outer shell edge");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_shell_blend_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_shell_blend_bottom");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Blend Bottom", "Blend amount for the inner shell edge");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_chamfer_k2", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_chamfer_k2");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Smoothness 1", "Smooth the first chamfer or round edge");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_chamfer_k3", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_chamfer_k3");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "Smoothness 2", "Smooth the second chamfer or round edge");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_chamfer_k4", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_chamfer_k4");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "End Smoothness 1", "Smooth the first shell end edge");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_chamfer_k5", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_chamfer_k5");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.01f, 3);
+  RNA_def_property_ui_text(prop, "End Smoothness 2", "Smooth the second shell end edge");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_flip_blend", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_flip_blend", 1);
+  RNA_def_property_ui_text(prop, "Flip Blend", "Flip the round blend direction");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
+  prop = RNA_def_property(srna, "sdf_flip_blend_end", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_flip_blend_end", 1);
+  RNA_def_property_ui_text(prop, "Flip End", "Flip the round shell-end blend direction");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
 
   prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "mode");

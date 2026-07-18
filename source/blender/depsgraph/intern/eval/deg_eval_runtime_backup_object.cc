@@ -130,6 +130,10 @@ void ObjectRuntimeBackup::restore_to_object(Object *object)
       object->data = object->runtime->data_eval;
     }
   }
+  else if (object->type == OB_SDF) {
+    object->data = data_orig;
+    BKE_object_free_derived_caches(object);
+  }
 
   if (light_linking_runtime) {
     /* Lazily allocate light linking on the evaluated object for the cases when the object is only

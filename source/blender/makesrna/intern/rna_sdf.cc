@@ -27,6 +27,11 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
     {SDF_TYPE_TORUS, "TORUS", ICON_SDF_TORUS, "Torus", "Torus SDF primitive"},
     {SDF_TYPE_NGON, "NGON", ICON_SDF_NGON, "N-Gon", "Regular polygon prism SDF primitive"},
     {SDF_TYPE_POLYGON, "POLYGON", ICON_SDF_POLYGON, "Polygon", "Arbitrary polygon prism SDF primitive"},
+    {SDF_TYPE_MESH,
+     "MESH",
+     ICON_OUTLINER_OB_MESH,
+     "Mesh",
+     "Non-voxel triangle mesh signed distance field"},
     {SDF_TYPE_GROUP, "GROUP", ICON_DOT, "Group", "SDF group container"},
     {0, nullptr, 0, nullptr, nullptr},
 };
@@ -94,6 +99,10 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   SDF *sdf = (SDF *)ptr->owner_id;
 
+  if (sdf->sdf_type != SDF_TYPE_MESH) {
+    BKE_sdf_mesh_clear(sdf);
+  }
+
   switch (sdf->sdf_type) {
     case SDF_TYPE_CAPSULE:
       sdf->size[0] = 0.5f;
@@ -123,6 +132,8 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
       if (BLI_listbase_is_empty(&sdf->polygon_points)) {
         BKE_sdf_polygon_init_triangle(sdf);
       }
+      break;
+    case SDF_TYPE_MESH:
       break;
     default:
       sdf->size[0] = 1.0f;
@@ -525,6 +536,16 @@ static const EnumPropertyItem rna_enum_sdf_box_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_sdf_mesh_normal_items[] = {
+    {SDF_MESH_NORMAL_SHARP, "SHARP", 0, "Sharp", "Use geometric triangle normals"},
+    {SDF_MESH_NORMAL_SMOOTH,
+     "SMOOTH",
+     0,
+     "Smooth",
+     "Interpolate the converted mesh's split corner normals"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_sdf_bend_axis_items[] = {
     {0, "X", 0, "X", "Bend along X axis"},
     {1, "Y", 0, "Y", "Bend along Y axis"},
@@ -810,6 +831,22 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.001f, 5.0f, 1.0f, 3);
   RNA_def_property_ui_text(prop, "Size", "Size in each axis");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "mesh_normal_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mesh_normal_mode");
+  RNA_def_property_enum_items(prop, rna_enum_sdf_mesh_normal_items);
+  RNA_def_property_ui_text(prop, "Normals", "Analytic mesh surface normal mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "mesh_vertex_count", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "mesh_vertex_count");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Vertices", "Number of embedded mesh vertices");
+
+  prop = RNA_def_property(srna, "mesh_triangle_count", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "mesh_triangle_count");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Triangles", "Number of embedded mesh triangles");
 
   /* Named per-primitive shape aliases onto size[] (object scale is the only scale) */
   prop = RNA_def_property(srna, "sphere_radius", PROP_FLOAT, PROP_DISTANCE);

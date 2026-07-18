@@ -6,6 +6,8 @@
  * \ingroup spview3d
  */
 
+#include <algorithm>
+#include <bit>
 #include <cfloat>
 #include <cstring>
 #include <optional>
@@ -32,6 +34,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_bits.h"
 #include "BLI_math_geom.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_string_utf8.h"
@@ -56,6 +59,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_sdf.hh"
 #include "BKE_tracking.hh"
 #include "BKE_workspace.hh"
 
@@ -87,6 +91,8 @@
 
 #include "GPU_matrix.hh"
 #include "GPU_select.hh"
+
+#include "sdf_engine_api.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
@@ -578,6 +584,10 @@ static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
   const float *sz = sdf->size;
   float ext[3] = {sz[0], sz[1], sz[2]};
   switch (sdf->sdf_type) {
+    case SDF_TYPE_MESH:
+      copy_v3_v3(r_min, sdf->mesh_bounds_min);
+      copy_v3_v3(r_max, sdf->mesh_bounds_max);
+      return;
     case SDF_TYPE_CONE:
       ext[0] = ext[1] = max_ff(sz[0], sz[2]);
       ext[2] = sz[1];
@@ -617,6 +627,35 @@ static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
   r_max[0] = ext[0];  r_max[1] = ext[1];  r_max[2] = ext[2];
 }
 
+static bool object_sdf_local_extents(const Object *ob, float r_min[3], float r_max[3])
+{
+  if (ob->type == OB_SDF && ob->data) {
+    sdf_local_extents(id_cast<const SDF *>(ob->data), r_min, r_max);
+    return true;
+  }
+  if (!BKE_sdf_object_is_enabled(*ob)) {
+    return false;
+  }
+
+  SDFMeshRuntimeSnapshot snapshot;
+  if (BKE_sdf_mesh_runtime_snapshot(*ob, snapshot)) {
+    copy_v3_v3(r_min, snapshot.payload->bounds_min);
+    copy_v3_v3(r_max, snapshot.payload->bounds_max);
+    return true;
+  }
+  if (const std::optional<Bounds<float3>> bounds = BKE_object_boundbox_get(ob)) {
+    copy_v3_v3(r_min, bounds->min);
+    copy_v3_v3(r_max, bounds->max);
+    return true;
+  }
+  return false;
+}
+
+static bool object_is_sdf_rendered(const Object *ob)
+{
+  return ob->type == OB_SDF || BKE_sdf_object_is_enabled(*ob);
+}
+
 /**
  * Expand local-space SDF extents to cover its modifiers (array, mirror, …) so
  * picking matches where the geometry renders. Works in object-local (pre-scale)
@@ -625,10 +664,10 @@ static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
  */
 static void sdf_expand_local_extents_for_modifiers(const Object *ob,
                                                     const float scale[3],
+                                                    const float base_dimensions[3],
                                                     float bb_min[3],
                                                     float bb_max[3])
 {
-  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
   for (const ModifierData *md = static_cast<const ModifierData *>(ob->modifiers.first); md;
        md = md->next)
   {
@@ -651,7 +690,7 @@ static void sdf_expand_local_extents_for_modifiers(const Object *ob,
           for (int i = 0; i < 3; i++) {
             float off = 0.0f;
             if (am->use_relative_offset) {
-              off += am->relative_offset[i] * (sdf->size[i] * 2.0f);
+              off += am->relative_offset[i] * base_dimensions[i];
             }
             if (am->use_constant_offset) {
               off += am->constant_offset[i] / max_ff(scale[i], 1e-6f);
@@ -723,13 +762,12 @@ static bool sdf_bb_project_to_screen(const ARegion *region,
                                      int *r_count,
                                      rcti *r_screen_rect)
 {
-  const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
-  if (!sdf) {
+  float bb_min[3], bb_max[3];
+  if (!object_sdf_local_extents(ob, bb_min, bb_max)) {
     return false;
   }
-
-  float bb_min[3], bb_max[3];
-  sdf_local_extents(sdf, bb_min, bb_max);
+  const float base_dimensions[3] = {
+      bb_max[0] - bb_min[0], bb_max[1] - bb_min[1], bb_max[2] - bb_min[2]};
 
   const float4x4 &obmat = ob->object_to_world();
   float scale[3] = {
@@ -739,7 +777,7 @@ static bool sdf_bb_project_to_screen(const ARegion *region,
   };
 
   /* Expand by bevel (world units) in local space. */
-  float bevel = sdf->bevel;
+  float bevel = ob->type == OB_SDF ? id_cast<const SDF *>(ob->data)->bevel : 0.0f;
   for (int i = 0; i < 3; i++) {
     float b = bevel / max_ff(scale[i], 1e-6f);
     bb_min[i] -= b;
@@ -747,7 +785,7 @@ static bool sdf_bb_project_to_screen(const ARegion *region,
   }
 
   /* Expand for modifiers so arrayed/mirrored geometry is selectable. */
-  sdf_expand_local_extents_for_modifiers(ob, scale, bb_min, bb_max);
+  sdf_expand_local_extents_for_modifiers(ob, scale, base_dimensions, bb_min, bb_max);
   int count = 0;
   float smin[2] = {FLT_MAX, FLT_MAX};
   float smax[2] = {-FLT_MAX, -FLT_MAX};
@@ -787,6 +825,123 @@ static bool sdf_bb_project_to_screen(const ARegion *region,
   return true;
 }
 
+static bool sdf_mesh_ray_aabb_intersect(const float3 ray_origin,
+                                        const float3 ray_direction,
+                                        const SDFMeshBVHNode &node,
+                                        const float max_distance)
+{
+  float near_distance = 0.0f;
+  float far_distance = max_distance;
+  for (int axis = 0; axis < 3; axis++) {
+    if (fabsf(ray_direction[axis]) < 1e-20f) {
+      if (ray_origin[axis] < node.bounds_min[axis] ||
+          ray_origin[axis] > node.bounds_max[axis])
+      {
+        return false;
+      }
+      continue;
+    }
+    const float inv_direction = 1.0f / ray_direction[axis];
+    float first = (node.bounds_min[axis] - ray_origin[axis]) * inv_direction;
+    float last = (node.bounds_max[axis] - ray_origin[axis]) * inv_direction;
+    if (first > last) {
+      std::swap(first, last);
+    }
+    near_distance = max_ff(near_distance, first);
+    far_distance = min_ff(far_distance, last);
+    if (near_distance > far_distance) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool sdf_mesh_ray_triangle_intersect(const float3 ray_origin,
+                                            const float3 ray_direction,
+                                            const float3 a,
+                                            const float3 b,
+                                            const float3 c,
+                                            float &r_distance)
+{
+  const float3 edge_ab = b - a;
+  const float3 edge_ac = c - a;
+  const float3 p = math::cross(ray_direction, edge_ac);
+  const float determinant = math::dot(edge_ab, p);
+  if (fabsf(determinant) < 1e-12f) {
+    return false;
+  }
+  const float inv_determinant = 1.0f / determinant;
+  const float3 origin_to_a = ray_origin - a;
+  const float u = math::dot(origin_to_a, p) * inv_determinant;
+  if (u < 0.0f || u > 1.0f) {
+    return false;
+  }
+  const float3 q = math::cross(origin_to_a, edge_ab);
+  const float v = math::dot(ray_direction, q) * inv_determinant;
+  if (v < 0.0f || u + v > 1.0f) {
+    return false;
+  }
+  const float distance = math::dot(edge_ac, q) * inv_determinant;
+  if (distance < 0.0f) {
+    return false;
+  }
+  r_distance = distance;
+  return true;
+}
+
+static bool sdf_mesh_ray_hit(const Object &ob,
+                             const float3 ray_origin_world,
+                             const float3 ray_direction_world,
+                             float &r_distance)
+{
+  SDFMeshRuntimeSnapshot snapshot;
+  if (!BKE_sdf_mesh_runtime_snapshot(ob, snapshot)) {
+    return false;
+  }
+  const SDFMeshPayload &payload = *snapshot.payload;
+  if (payload.bvh_node_count <= 0) {
+    return false;
+  }
+
+  const float4x4 inverse = math::invert(ob.object_to_world());
+  const float3 ray_origin = math::transform_point(inverse, ray_origin_world);
+  const float3 ray_direction = math::transform_direction(inverse, ray_direction_world);
+
+  float best_distance = FLT_MAX;
+  int node_index = 0;
+  while (node_index < payload.bvh_node_count) {
+    const SDFMeshBVHNode &node = payload.bvh_nodes[node_index];
+    if (!sdf_mesh_ray_aabb_intersect(ray_origin, ray_direction, node, best_distance)) {
+      node_index = node.child_or_first >= 0 ? node.child_or_first : node_index + 1;
+      continue;
+    }
+    if (node.child_or_first < 0) {
+      const int first = -node.child_or_first - 1;
+      for (int i = 0; i < node.child_or_count; i++) {
+        const SDFMeshTriangle &triangle = payload.triangles[first + i];
+        float distance;
+        if (sdf_mesh_ray_triangle_intersect(ray_origin,
+                                            ray_direction,
+                                            float3(payload.vertices[triangle.vertices[0]].co),
+                                            float3(payload.vertices[triangle.vertices[1]].co),
+                                            float3(payload.vertices[triangle.vertices[2]].co),
+                                            distance) &&
+            distance < best_distance)
+        {
+          best_distance = distance;
+        }
+      }
+    }
+    node_index++;
+  }
+
+  if (best_distance == FLT_MAX) {
+    return false;
+  }
+  r_distance = best_distance;
+  return true;
+}
+
 static bool do_lasso_select_objects(const ViewContext *vc,
                                     const Span<int2> mcoords,
                                     const eSelectOp sel_op)
@@ -803,7 +958,7 @@ static bool do_lasso_select_objects(const ViewContext *vc,
       const bool is_select = base.flag & BASE_SELECTED;
       bool is_inside = false;
 
-      if (base.object->type == OB_SDF) {
+      if (object_is_sdf_rendered(base.object)) {
         /* SDF: test any projected BB corner inside lasso. */
         float corners[8][2];
         int count;
@@ -3040,13 +3195,66 @@ static bool ed_object_select_pick(bContext *C,
                                                           nullptr) :
                                  nullptr;
 
+      const Object *sdf_hit_object = nullptr;
+      float sdf_hit_depth;
+      if (draw::sdf::sdf_object_at_pixel(int2(mval[0], mval[1]),
+                                         int2(vc.region->winx, vc.region->winy),
+                                         vc.region,
+                                         &sdf_hit_object,
+                                         &sdf_hit_depth))
+      {
+        float gpu_hit_depth = 1.0f;
+        for (int i = 0; i < gpu->hits; i++) {
+          const uint32_t encoded_depth = gpu->buffer.storage[i].depth;
+          const float depth = gpu->do_nearest ?
+                                  float(encoded_depth >> 8u) / float(0x00FFFFFFu) :
+                                  std::bit_cast<float>(encoded_depth);
+          gpu_hit_depth = min_ff(gpu_hit_depth, depth);
+        }
+        if (sdf_hit_depth <= gpu_hit_depth) {
+          Object *original = DEG_get_original(const_cast<Object *>(sdf_hit_object));
+          Base *sdf_base = BKE_view_layer_base_find(view_layer, original);
+          if (sdf_base && BASE_SELECTABLE(v3d, sdf_base)) {
+            basact = sdf_base;
+          }
+        }
+      }
+
       /* SDF fallback: no GPU geometry, test screen-space bounding rect. */
       if (basact == nullptr) {
         const float mval_fl[2] = {float(mval[0]), float(mval[1])};
-        float best_depth = FLT_MAX;
         BKE_view_layer_synced_ensure(scene, view_layer);
+        float ray_origin[3], ray_direction[3];
+        const bool has_ray = ED_view3d_win_to_ray_clipped(vc.depsgraph,
+                                                          vc.region,
+                                                          vc.v3d,
+                                                          mval_fl,
+                                                          ray_origin,
+                                                          ray_direction,
+                                                          true);
+        float best_depth = FLT_MAX;
+        if (has_ray) {
+          for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+            if (!BKE_sdf_object_is_enabled(*base.object) || !BASE_SELECTABLE(v3d, &base)) {
+              continue;
+            }
+            const Object *ob_eval = DEG_get_evaluated(vc.depsgraph, base.object);
+            float depth;
+            if (ob_eval && sdf_mesh_ray_hit(
+                               *ob_eval, float3(ray_origin), float3(ray_direction), depth) &&
+                depth < best_depth)
+            {
+              best_depth = depth;
+              basact = &base;
+            }
+          }
+        }
+
+        best_depth = FLT_MAX;
         for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
-          if (base.object->type != OB_SDF || !BASE_SELECTABLE(v3d, &base)) {
+          if (basact != nullptr || base.object->type != OB_SDF ||
+              !BASE_SELECTABLE(v3d, &base))
+          {
             continue;
           }
           rcti sr;
@@ -4683,7 +4891,7 @@ static bool do_object_box_select(bContext *C,
 
   /* SDF objects: math fallback (no GPU geometry in select engine). */
   for (Base &base : *object_bases) {
-    if (base.object->type == OB_SDF && BASE_SELECTABLE(v3d, &base)) {
+    if (object_is_sdf_rendered(base.object) && BASE_SELECTABLE(v3d, &base)) {
       rcti sr;
       float corners[8][2];
       int count;
@@ -5832,7 +6040,7 @@ static bool object_circle_select(const ViewContext *vc,
     if (BASE_SELECTABLE(v3d, &base) && ((base.flag & BASE_SELECTED) != select_flag)) {
       bool hit = false;
 
-      if (base.object->type == OB_SDF) {
+      if (object_is_sdf_rendered(base.object)) {
         /* SDF: test circle against projected BB (AABB-circle intersection). */
         float corners[8][2];
         int count;

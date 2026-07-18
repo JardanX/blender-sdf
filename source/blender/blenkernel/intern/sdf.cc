@@ -9,6 +9,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_material_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 
@@ -36,7 +37,17 @@
 
 #include "BLO_read_write.hh"
 
+#include "DEG_depsgraph.hh"
+
 namespace blender {
+
+template<typename T> static void sdf_array_free(T *&data)
+{
+  if (data != nullptr) {
+    MEM_delete_void(static_cast<void *>(data));
+    data = nullptr;
+  }
+}
 
 static void sdf_init_data(ID *id)
 {
@@ -59,6 +70,9 @@ static void sdf_copy_data(Main *bmain,
   const SDF *sdf_src = (const SDF *)id_src;
 
   sdf_dst->mat = MEM_dupalloc(sdf_src->mat);
+  sdf_dst->mesh_vertices = MEM_dupalloc(sdf_src->mesh_vertices);
+  sdf_dst->mesh_triangles = MEM_dupalloc(sdf_src->mesh_triangles);
+  sdf_dst->mesh_bvh_nodes = MEM_dupalloc(sdf_src->mesh_bvh_nodes);
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
   BLI_duplicatelist(&sdf_dst->polygon_points, &sdf_src->polygon_points);
   sdf_dst->runtime = new bke::SDFRuntime();
@@ -77,6 +91,9 @@ static void sdf_free_data(ID *id)
   BKE_animdata_free(&sdf->id, false);
   BLI_freelistN(&sdf->modifiers);
   BLI_freelistN(&sdf->polygon_points);
+  sdf_array_free(sdf->mesh_vertices);
+  sdf_array_free(sdf->mesh_triangles);
+  sdf_array_free(sdf->mesh_bvh_nodes);
   MEM_SAFE_DELETE(sdf->mat);
   if (sdf->runtime && sdf->runtime->proxy_batch) {
     GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
@@ -102,6 +119,9 @@ static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
   writer->write_id_struct(id_address, sdf);
   BKE_id_blend_write(writer, &sdf->id);
   BLO_write_pointer_array(writer, sdf->totcol, sdf->mat);
+  writer->write_struct_array(sdf->mesh_vertex_count, sdf->mesh_vertices);
+  writer->write_struct_array(sdf->mesh_triangle_count, sdf->mesh_triangles);
+  writer->write_struct_array(sdf->mesh_bvh_node_count, sdf->mesh_bvh_nodes);
   writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFModifier>(), &sdf->modifiers);
   writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFPolygonPoint>(), &sdf->polygon_points);
 }
@@ -111,8 +131,18 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
   SDF *sdf = (SDF *)id;
 
   BLO_read_pointer_array(reader, sdf->totcol, (void **)&sdf->mat);
+  BLO_read_struct_array(
+      reader, SDFMeshVertex, sdf->mesh_vertex_count, &sdf->mesh_vertices);
+  BLO_read_struct_array(
+      reader, SDFMeshTriangle, sdf->mesh_triangle_count, &sdf->mesh_triangles);
+  BLO_read_struct_array(
+      reader, SDFMeshBVHNode, sdf->mesh_bvh_node_count, &sdf->mesh_bvh_nodes);
   BLO_read_struct_list(reader, SDFModifier, &sdf->modifiers);
   BLO_read_struct_list(reader, SDFPolygonPoint, &sdf->polygon_points);
+
+  if (sdf->mesh_bvh_node_count > 0 && !BKE_sdf_mesh_bvh_make_stackless(sdf)) {
+    BKE_sdf_mesh_clear(sdf);
+  }
 
   if (sdf->chamfer_k4 == 0.0f) { sdf->chamfer_k4 = 0.01f; }
   if (sdf->chamfer_k5 == 0.0f) { sdf->chamfer_k5 = 0.01f; }
@@ -157,6 +187,20 @@ SDF *BKE_sdf_add(Main *bmain, const char *name)
   return sdf;
 }
 
+void BKE_sdf_mesh_clear(SDF *sdf)
+{
+  sdf_array_free(sdf->mesh_vertices);
+  sdf_array_free(sdf->mesh_triangles);
+  sdf_array_free(sdf->mesh_bvh_nodes);
+  sdf->mesh_vertex_count = 0;
+  sdf->mesh_triangle_count = 0;
+  sdf->mesh_bvh_node_count = 0;
+  zero_v3(sdf->mesh_bounds_min);
+  zero_v3(sdf->mesh_bounds_max);
+  sdf->mesh_flags = 0;
+  sdf->mesh_data_version++;
+}
+
 void BKE_sdf_data_update(Depsgraph * /*depsgraph*/, Scene * /*scene*/, Object * /*ob*/) {}
 
 static const char *sdf_modifier_type_name(int type)
@@ -195,29 +239,65 @@ int BKE_sdf_next_index(Main *bmain)
       max_idx = sdf.sdf_index;
     }
   }
+  for (Object &object : bmain->objects) {
+    if (BKE_sdf_object_is_enabled(object)) {
+      max_idx = std::max(max_idx, object.sdf_index);
+    }
+  }
   return max_idx + 1;
+}
+
+void BKE_sdf_object_settings_ensure(Object &object)
+{
+  if (object.sdf_settings_version > 0) {
+    return;
+  }
+  object.sdf_normal_mode = SDF_MESH_NORMAL_SMOOTH;
+  object.sdf_csg_operation = SDF_CSG_UNION;
+  object.sdf_blend = 0.1f;
+  object.sdf_blend_type = SDF_BLEND_SMOOTH;
+  object.sdf_shell_distance = 0.2f;
+  object.sdf_shell_mode = SDF_SHELL_NORMAL;
+  object.sdf_shell_op = SDF_SHELL_OP_UNION;
+  object.sdf_shell_blend_top = 0.1f;
+  object.sdf_shell_blend_bottom = 0.1f;
+  object.sdf_chamfer_k2 = 0.01f;
+  object.sdf_chamfer_k3 = 0.01f;
+  object.sdf_chamfer_k4 = 0.01f;
+  object.sdf_chamfer_k5 = 0.01f;
+  object.sdf_settings_version = 1;
 }
 
 void BKE_sdf_reindex_all(Main *bmain)
 {
-  /* Collect all SDFs, sort by current index, reassign 1-based */
-  int count = BLI_listbase_count(&bmain->sdfs);
-  if (count == 0) {
+  struct SDFIndexEntry {
+    int *index;
+    ID *id;
+    bool is_object;
+  };
+
+  Vector<SDFIndexEntry> entries;
+  for (SDF &sdf : bmain->sdfs) {
+    entries.append({&sdf.sdf_index, &sdf.id, false});
+  }
+  for (Object &object : bmain->objects) {
+    if (BKE_sdf_object_is_enabled(object)) {
+      entries.append({&object.sdf_index, &object.id, true});
+    }
+  }
+  if (entries.is_empty()) {
     return;
   }
 
-  Vector<SDF *> all_sdfs(count);
-  int i = 0;
-  for (SDF &sdf : bmain->sdfs) {
-    all_sdfs[i++] = &sdf;
-  }
-
-  std::stable_sort(all_sdfs.begin(), all_sdfs.end(), [](const SDF *a, const SDF *b) {
-    return a->sdf_index < b->sdf_index;
+  std::stable_sort(entries.begin(), entries.end(), [](const SDFIndexEntry &a,
+                                                       const SDFIndexEntry &b) {
+    return *a.index < *b.index;
   });
 
-  for (int idx = 0; idx < count; idx++) {
-    all_sdfs[idx]->sdf_index = idx + 1;
+  for (const int i : entries.index_range()) {
+    *entries[i].index = i + 1;
+    DEG_id_tag_update(entries[i].id,
+                      entries[i].is_object ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
   }
 }
 

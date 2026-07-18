@@ -6,6 +6,17 @@
 
 #include "GPU_shader_shared_utils.hh"
 
+#define SDF_GPU_TYPE_BOX 0
+#define SDF_GPU_TYPE_SPHERE 1
+#define SDF_GPU_TYPE_CYLINDER 2
+#define SDF_GPU_TYPE_CONE 3
+#define SDF_GPU_TYPE_CAPSULE 4
+#define SDF_GPU_TYPE_TORUS 5
+#define SDF_GPU_TYPE_NGON 6
+#define SDF_GPU_TYPE_POLYGON 7
+#define SDF_GPU_TYPE_MESH 8
+#define SDF_GPU_TYPE_GROUP 100
+
 struct [[host_shared]] SDFObjectGPU {
   float4x4 inverse_matrix;
   float4 position;
@@ -44,8 +55,15 @@ struct [[host_shared]] SDFObjectGPU {
   int4 box_modes;
   float4 orig_bbox_min;
   float4 orig_bbox_max;
+  float4 mesh_bounds_min;
+  float4 mesh_bounds_max;
+  /* vertex start, triangle start, triangle count, BVH node start. */
+  int4 mesh_data;
+  /* normal mode, flags, node count, data version. */
+  int4 mesh_settings;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFObjectGPU, 16)
+BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 400, "SDFObjectGPU size mismatch")
 
 struct [[host_shared]] SDFObjectAABB {
   float4 bbox_min;
@@ -101,6 +119,15 @@ struct [[host_shared]] BVHNodeGPU {
   float4 max_and_right;
 };
 BLI_STATIC_ASSERT_ALIGN(BVHNodeGPU, 16)
+BLI_STATIC_ASSERT(sizeof(BVHNodeGPU) == 32, "BVHNodeGPU size mismatch")
+
+struct [[host_shared]] SDFMeshTriangleGPU {
+  uint4 vertices_and_material;
+  uint4 corner_normals;
+  uint4 edge_normals;
+};
+BLI_STATIC_ASSERT_ALIGN(SDFMeshTriangleGPU, 16)
+BLI_STATIC_ASSERT(sizeof(SDFMeshTriangleGPU) == 48, "SDFMeshTriangleGPU size mismatch")
 
 struct [[host_shared]] SdfAabbNodeGPU {
   float4 bounds_min;

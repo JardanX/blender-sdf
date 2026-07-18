@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "BLI_array.hh"
@@ -29,6 +30,7 @@ struct SculptSession;
 namespace bke {
 
 struct GeometrySet;
+struct SDFMeshObjectRuntime;
 
 struct ObjectRuntime {
   /** Final transformation matrices with constraints & animsys applied. */
@@ -142,6 +144,8 @@ struct ObjectRuntime {
   uint64_t last_update_transform = 0;
   uint64_t last_update_geometry = 0;
   uint64_t last_update_shading = 0;
+
+  std::shared_ptr<SDFMeshObjectRuntime> sdf_mesh;
 
   /* Runtime data used by mesh painting modes (Sculpt, Vertex, Weight). */
   /* TODO: Rename the struct and the variable to better indicate its wider usage */

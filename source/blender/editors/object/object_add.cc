@@ -2468,6 +2468,12 @@ void base_free_and_unlink_no_indirect_check(Main *bmain, Scene *scene, Object *o
   BKE_scene_collections_object_remove(bmain, scene, ob, true);
 }
 
+static bool object_is_sdf_mirror_internal(const Object *ob)
+{
+  return ob && ob->type == OB_EMPTY && ob->id.properties &&
+         IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal");
+}
+
 static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
@@ -2495,9 +2501,7 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
     }
 
     /* SDF mirror empties are managed by the mirror modifier. */
-    if (ob->type == OB_EMPTY && ob->id.properties &&
-        IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal"))
-    {
+    if (object_is_sdf_mirror_internal(ob)) {
       continue;
     }
 
@@ -2541,12 +2545,11 @@ static wmOperatorStatus object_delete_exec(bContext *C, wmOperator *op)
 
   if (tagged_count > 0) {
     for (Object &del_ob : bmain->objects) {
-      if ((del_ob.id.tag & ID_TAG_DOIT) && del_ob.type == OB_SDF) {
-        if (!del_ob.data) continue;
+      if (del_ob.id.tag & ID_TAG_DOIT) {
         for (ModifierData &md : del_ob.modifiers) {
           if (md.type == eModifierType_SDFMirror) {
             auto &m = reinterpret_cast<SDFMirrorModifierData &>(md);
-            if (m.mirror_object) {
+            if (object_is_sdf_mirror_internal(m.mirror_object)) {
               m.mirror_object->id.tag |= ID_TAG_DOIT;
             }
           }
@@ -2593,9 +2596,7 @@ static wmOperatorStatus object_delete_invoke(bContext *C,
   /* If all selected objects are protected SDF mirror empties, cancel silently. */
   bool has_deletable = false;
   CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
-    if (!(ob->type == OB_EMPTY && ob->id.properties &&
-          IDP_GetPropertyFromGroup(ob->id.properties, "sdf_mirror_internal")))
-    {
+    if (!object_is_sdf_mirror_internal(ob)) {
       has_deletable = true;
       break;
     }
@@ -3059,6 +3060,11 @@ static const EnumPropertyItem convert_target_items[] = {
      ICON_OUTLINER_OB_GREASEPENCIL,
      "Grease Pencil",
      "Grease Pencil from Curve or Mesh objects"},
+    {OB_SDF,
+     "SDF",
+     ICON_OUTLINER_OB_SDF,
+     "SDF",
+     "Display the live evaluated mesh as an analytic signed distance field"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3079,6 +3085,7 @@ static const EnumPropertyItem *convert_target_itemf(bContext *C,
   RNA_enum_items_add_value(&item, &totitem, convert_target_items, OB_CURVES);
   RNA_enum_items_add_value(&item, &totitem, convert_target_items, OB_POINTCLOUD);
   RNA_enum_items_add_value(&item, &totitem, convert_target_items, OB_GREASE_PENCIL);
+  RNA_enum_items_add_value(&item, &totitem, convert_target_items, OB_SDF);
 
   RNA_enum_item_end(&item, &totitem);
 
@@ -3417,6 +3424,24 @@ static Object *convert_mesh_to_mesh(Base &base, ObjectConversionInfo &info, Base
   return newob;
 }
 
+static Object *convert_mesh_to_sdf(Base &base,
+                                   ObjectConversionInfo &info,
+                                   Base **r_new_base)
+{
+  Object *ob = base.object;
+  ob->flag |= OB_DONE;
+  Object *newob = get_object_for_conversion(base, info, r_new_base);
+  BKE_sdf_object_settings_ensure(*newob);
+  newob->is_sdf = true;
+  newob->sdf_normal_mode = RNA_enum_get(info.op_props, "mesh_sdf_normals");
+  if (newob->sdf_index <= 0) {
+    newob->sdf_index = BKE_sdf_next_index(info.bmain);
+  }
+  DEG_id_tag_update(&newob->id, ID_RECALC_GEOMETRY);
+
+  return newob;
+}
+
 static int mesh_to_grease_pencil_add_material(Main &bmain,
                                               Object &ob_grease_pencil,
                                               const StringRefNull name,
@@ -3675,6 +3700,8 @@ static Object *convert_mesh(Base &base,
       return convert_mesh_to_mesh(base, info, r_new_base);
     case OB_GREASE_PENCIL:
       return convert_mesh_to_grease_pencil(base, info, r_new_base);
+    case OB_SDF:
+      return convert_mesh_to_sdf(base, info, r_new_base);
     default:
       /* Current logic does convert mesh to mesh for any other target types. This would change
        * after other types of conversion are designed and implemented. */
@@ -4432,7 +4459,7 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
        * so that will be for later.
        * But at the very least, do not do that with linked IDs! */
       if ((!BKE_id_is_editable(bmain, &ob->id) ||
-           (ob->data && !BKE_id_is_editable(bmain, ob->data))) &&
+           (target != OB_SDF && ob->data && !BKE_id_is_editable(bmain, ob->data))) &&
           !keep_original)
       {
         keep_original = true;
@@ -4450,6 +4477,8 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
     BKE_scene_graph_update_tagged(depsgraph, bmain);
     scene->customdata_mask = customdata_mask_prev;
   }
+
+  info.keep_original = keep_original;
 
   bool mball_converted = false;
   int incompatible_count = 0;
@@ -4529,7 +4558,9 @@ static wmOperatorStatus object_convert_exec(bContext *C, wmOperator *op)
        * It is not enough to tag only geometry and rely on the curve parenting relations because
        * this relation is lost when curve is converted to mesh. */
       DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY | ID_RECALC_TRANSFORM);
-      ob->data->tag &= ~ID_TAG_DOIT; /* flag not to convert this datablock again */
+      if (target != OB_SDF) {
+        ob->data->tag &= ~ID_TAG_DOIT; /* flag not to convert this datablock again */
+      }
     }
   }
 
@@ -4627,6 +4658,9 @@ static void object_convert_ui(bContext * /*C*/, wmOperator *op)
     layout.prop(op->ptr, "offset", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     layout.prop(op->ptr, "faces", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
+  else if (target == OB_SDF) {
+    layout.prop(op->ptr, "mesh_sdf_normals", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
 }
 
 void OBJECT_OT_convert(wmOperatorType *ot)
@@ -4668,6 +4702,25 @@ void OBJECT_OT_convert(wmOperatorType *ot)
 
   RNA_def_int(ot->srna, "thickness", 5, 1, 100, "Thickness", "", 1, 100);
   RNA_def_boolean(ot->srna, "faces", true, "Export Faces", "Export faces as filled strokes");
+  static const EnumPropertyItem mesh_sdf_normal_items[] = {
+      {SDF_MESH_NORMAL_SHARP,
+       "SHARP",
+       0,
+       "Sharp",
+       "Use geometric triangle normals for faceted shading"},
+      {SDF_MESH_NORMAL_SMOOTH,
+       "SMOOTH",
+       0,
+       "Smooth",
+       "Interpolate evaluated split corner normals"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  RNA_def_enum(ot->srna,
+               "mesh_sdf_normals",
+               mesh_sdf_normal_items,
+               SDF_MESH_NORMAL_SMOOTH,
+               "Mesh Normals",
+               "Analytic surface normal mode for mesh SDF shading");
   RNA_def_float_distance(ot->srna,
                          "offset",
                          0.01f,
@@ -4749,13 +4802,17 @@ static void object_add_sync_sdf_mirrors(Main *bmain,
                                         Object *ob_src,
                                         Object *ob_new)
 {
-  if (ob_new->type != OB_SDF || !ob_new->data || !ob_src->data) {
+  if ((ob_new->type != OB_SDF && !BKE_sdf_object_is_enabled(*ob_new)) || !ob_new->data ||
+      !ob_src->data)
+  {
     return;
   }
-  bool is_linked = false;
-  SDF *sdf = sdf_resolve_new_data(ob_src, ob_new, &is_linked);
-  if (!sdf || is_linked) {
-    return;
+  if (ob_new->type == OB_SDF) {
+    bool is_linked = false;
+    SDF *sdf = sdf_resolve_new_data(ob_src, ob_new, &is_linked);
+    if (!sdf || is_linked) {
+      return;
+    }
   }
   for (ModifierData &md : ob_new->modifiers) {
     if (md.type != eModifierType_SDFMirror) {
@@ -4766,6 +4823,9 @@ static void object_add_sync_sdf_mirrors(Main *bmain,
       continue;
     }
     Object *old_empty = m.mirror_object;
+    if (!object_is_sdf_mirror_internal(old_empty)) {
+      continue;
+    }
 
     char name[MAX_ID_NAME - 2];
     SNPRINTF(name, "%s_Mirror", ob_new->id.name + 2);

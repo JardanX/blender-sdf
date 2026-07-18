@@ -46,7 +46,9 @@ void main()
 
       if (node.shape_index >= 0) {
         int si = node.shape_index;
-        obj_bits[si >> 5] |= (1u << (si & 31));
+        if (si < 1024) {
+          obj_bits[si >> 5] |= (1u << (si & 31));
+        }
       }
       else {
         if (node.child_a >= 0 && sp < 63) { stack[sp++] = node.child_a; }
@@ -81,7 +83,7 @@ void main()
 
   for (int i = 0; i < object_count; i++) {
     /* Skip if not flagged by BVH cull */
-    if ((obj_bits[i >> 5] & (1u << (i & 31))) == 0u) {
+    if (i < 1024 && (obj_bits[i >> 5] & (1u << (i & 31))) == 0u) {
       int gid_obj = objects[i].group_id;
       if (gid_obj != cur_group && grp_has_hit) {
         if (cur_group >= 0 && groups[cur_group].modifier_count > 0) {

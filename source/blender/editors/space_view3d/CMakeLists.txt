@@ -5,6 +5,7 @@
 set(INC
   ../asset
   ../include
+  ../../draw/engines/sdf
   ../../makesrna
   ../../modifiers
   ../../../../intern/mantaflow/extern
