@@ -13,11 +13,10 @@ Key modifications from upstream Blender:
 - **SDF draw engine** — full GPU ray-marching renderer at `draw/engines/sdf/` (BVH, cone marching, shading, meshing, FXAA)
 - **Metaball removal** — SDF replaces metaballs; runtime code deleted, DNA kept as tombstones for .blend compat
 - **EEVEE removal** — entire render engine deleted (~297 files)
+- **NURB Body removal** — OCCT-backed CAD object type completely stripped
 - **Feature culling** — grease pencil, sound editor, VSE, movie clip UI removed (libraries kept compiled for deps)
 
 All changes are tracked in `SDF_CHANGES.md` at the repo root — consult it before modifying any SDF-related code.
-
-NURB Body bevel/boolean work has a task tracker in `NURB_BODY_TODO.md` -- update it when fixing or verifying NURB Body edge selection, bevel, chamfer, or viewport performance issues.
 
 ## Building
 

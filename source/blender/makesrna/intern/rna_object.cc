@@ -215,7 +215,6 @@ const EnumPropertyItem rna_enum_object_type_items[] = {
     {OB_POINTCLOUD, "POINTCLOUD", ICON_OUTLINER_OB_POINTCLOUD, "Point Cloud", ""},
     {OB_VOLUME, "VOLUME", ICON_OUTLINER_OB_VOLUME, "Volume", ""},
     {OB_SDF, "SDF", ICON_SDF_CUBE, "SDF", ""},
-    {OB_NURB_BODY, "NURB_BODY", ICON_OUTLINER_OB_NURB_BODY, "NURB Body", ""},
     {OB_GREASE_PENCIL, "GREASEPENCIL", ICON_OUTLINER_OB_GREASEPENCIL, "Grease Pencil", ""},
     RNA_ENUM_ITEM_SEPR,
     {OB_ARMATURE, "ARMATURE", ICON_OUTLINER_OB_ARMATURE, "Armature", ""},
@@ -600,8 +599,6 @@ static StructRNA *rna_Object_data_typef(PointerRNA *ptr)
       return RNA_PointCloud;
     case OB_VOLUME:
       return RNA_Volume;
-    case OB_NURB_BODY:
-      return RNA_NurbBody;
     default:
       return RNA_ID;
   }

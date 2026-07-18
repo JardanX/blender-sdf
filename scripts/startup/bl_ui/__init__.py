@@ -31,7 +31,6 @@ _modules = [
     "properties_data_lattice",
     "properties_data_mesh",
     "properties_data_modifier",
-    "properties_data_nurb_body",
     "properties_data_pointcloud",
     "properties_data_shaderfx",
     "properties_data_lightprobe",

@@ -64,7 +64,6 @@ set(DEFSRC
   rna_modifier.cc
   rna_movieclip.cc
   rna_nla.cc
-  rna_nurb_body.cc
   rna_node_socket.cc
   rna_node_tree_interface.cc
   rna_nodetree.cc

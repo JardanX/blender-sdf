@@ -38,7 +38,6 @@ set(SRC
   object_modes.cc
   object_modifier.cc
   object_multires_modifier.cc
-  object_nurb_body.cc
   object_ops.cc
   object_random.cc
   object_relations.cc

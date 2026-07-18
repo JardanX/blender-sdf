@@ -13,7 +13,6 @@
 #include "DNA_layer_types.h"
 #include "DNA_light_types.h"
 #include "DNA_lightprobe_types.h"
-#include "DNA_nurb_body_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_sdf_types.h"
@@ -2469,24 +2468,6 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
           return ICON_SDF_CUBE;
       }
     }
-    if (ob->type == OB_NURB_BODY && ob->data) {
-      const NurbBody *body = id_cast<NurbBody *>(const_cast<ID *>(ob->data));
-      switch (body->primitive) {
-        case NURB_BODY_PRIMITIVE_BOX:
-          return ICON_NURB_BODY_BOX;
-        case NURB_BODY_PRIMITIVE_SPHERE:
-          return ICON_NURB_BODY_SPHERE;
-        case NURB_BODY_PRIMITIVE_CONE:
-          return ICON_NURB_BODY_CONE;
-        case NURB_BODY_PRIMITIVE_TORUS:
-          return ICON_NURB_BODY_TORUS;
-        case NURB_BODY_PRIMITIVE_WEDGE:
-          return ICON_NURB_BODY_WEDGE;
-        case NURB_BODY_PRIMITIVE_CYLINDER:
-        default:
-          return ICON_NURB_BODY_CYLINDER;
-      }
-    }
     return ui::icon_from_object_type(ob);
   }
 
@@ -2568,8 +2549,6 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       return ICON_OUTLINER_DATA_VOLUME;
     case ID_SF:
       return ICON_SDF_DATA;
-    case ID_NB:
-      return ICON_NURB_BODY_DATA;
     case ID_LI:
       if (id->tag & ID_TAG_MISSING) {
         return ICON_LIBRARY_DATA_BROKEN;

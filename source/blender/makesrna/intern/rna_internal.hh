@@ -181,7 +181,6 @@ void RNA_def_mesh(BlenderRNA *brna);
 
 void RNA_def_modifier(BlenderRNA *brna);
 void RNA_def_nla(BlenderRNA *brna);
-void RNA_def_nurb_body(BlenderRNA *brna);
 void RNA_def_nodetree(BlenderRNA *brna);
 void RNA_def_node_socket_subtypes(BlenderRNA *brna);
 void RNA_def_node_tree_interface(BlenderRNA *brna);
@@ -558,7 +557,6 @@ void RNA_def_main_hair_curves(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_pointclouds(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_volumes(BlenderRNA *brna, PropertyRNA *cprop);
 void RNA_def_main_sdfs(BlenderRNA *brna, PropertyRNA *cprop);
-void RNA_def_main_nurb_bodies(BlenderRNA *brna, PropertyRNA *cprop);
 
 /* ID Properties */
 
