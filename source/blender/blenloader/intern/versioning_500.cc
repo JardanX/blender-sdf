@@ -4669,7 +4669,8 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
             continue;
           }
           View3D *v3d = reinterpret_cast<View3D *>(&sl);
-          v3d->shading.sdf_upscale_quality = 3;
+          v3d->shading.sdf_upscale_quality = 4;
+          v3d->shading.sdf_upscale_sharpen = 1;
           v3d->shading.sdf_upscale_sharpness = 0.5f;
         }
       }
