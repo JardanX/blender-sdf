@@ -2764,3 +2764,33 @@ Shift+D (non-linked duplicate) shared the SDF data-block, so edits to one copy a
 | File | Change |
 |------|--------|
 | `blenkernel/intern/object.cc` | Force `USER_DUP_SDF` on non-linked duplicate of `OB_SDF` |
+
+---
+
+## Preset UI Dropdown, Medium/High Rebalance, SDF Outline Always-Thin (2026-07-18)
+
+Preset selector in the Render Properties > SDF Ray Marcher panel is now a single dropdown (`sdf.raymarcher_preset` exposed via `UILayout.operator_menu_enum`) instead of three side-by-side buttons. The dropdown label reflects the active preset ("Low" / "Medium" / "High") and falls back to "Custom" when the current shading values do not match any preset.
+
+New preset values:
+
+| Field | Low | Medium | High |
+|------|-----|--------|------|
+| `sdf_resolution_scale` | 50% | 100% | 100% |
+| `sdf_adaptive_resolution` | on | on | off |
+| `sdf_frustum_cull` | on | on | on |
+| `sdf_max_steps` | 100 | 512 | 1024 |
+| `sdf_ray_epsilon` | 0.001 | 0.001 | 0.001 |
+| `sdf_over_relaxation` | 1.5 | 1.5 | 1.5 |
+| `sdf_use_cone_trace` | on | on | on |
+| `sdf_cone_aperture` | 0.5 | 0.5 | 0.5 |
+| `sdf_cone_steps` | 32 | 32 | 32 |
+
+The Low preset is unchanged. Medium now runs full-resolution adaptive at 512 steps (was 128, fixed-res, 0.005 epsilon); High caps at 1024 steps (was 512) at full fixed resolution. Versioning at `versioning_500.cc` now migrates files matching the legacy default profile (extended the detection list to include the prior 128/0.005 Medium values) to the new Medium preset, and `_sdf_apply_medium_defaults` continues to coerce any non-matching shading into Medium on load.
+
+The SDF (strict-depth) overlay outline now always renders the thin "xray-style" silhouette, not only when X-ray is enabled. Previously, only `is_xray_wires` reduced the negative-direction edge samples (`has_edge_neg_x = has_edge_neg_y = false`), producing a Thicker/busier outline outside X-ray. Strict-depth outlines now trigger that same thinning whether or not X-ray is on, matching the look users see in X-ray mode. The strict-depth occlusion test in `overlay_outline_detect_frag.glsl` is now shared via a single `strict_depth_outline_occluded_at(float2 uv)` helper (the per-id `strict_depth_outline_occluded` wrapper and `main()` both use it), removing the previous "keep in sync" duplicate block.
+
+| File | Change |
+|------|--------|
+| `scripts/startup/bl_ui/properties_render.py` | New preset values; legacy-zero fallback table aligned to new Medium; preset selector converted to `operator_menu_enum` dropdown showing current preset name; added `_current_preset_label` helper; preset enum descriptions refreshed |
+| `source/blender/blenloader/intern/versioning_500.cc` | Migrated legacy default SDF profile to new Medium (100%/adaptive on/512/0.001); extended `old_default_sdf_profile` detection to also match the prior 128/0.005 Medium values |
+| `source/blender/draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Hoisted `is_strict_depth_outline` computation; apply X-ray-style edge thinning whenever the outline is strict-depth (SDF); refactor strict-depth occlusion into shared `strict_depth_outline_occluded_at` helper used by `visible_outline_id` and `main()` |

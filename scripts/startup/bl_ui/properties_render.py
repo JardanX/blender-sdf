@@ -99,10 +99,10 @@ _SDF_PRESETS = {
     },
     'MEDIUM': {
         'sdf_resolution_scale': 100.0,
-        'sdf_adaptive_resolution': False,
+        'sdf_adaptive_resolution': True,
         'sdf_frustum_cull': True,
-        'sdf_max_steps': 128,
-        'sdf_ray_epsilon': 0.005,
+        'sdf_max_steps': 512,
+        'sdf_ray_epsilon': 0.001,
         'sdf_over_relaxation': 1.5,
         'sdf_use_cone_trace': True,
         'sdf_cone_aperture': 0.5,
@@ -112,8 +112,8 @@ _SDF_PRESETS = {
         'sdf_resolution_scale': 100.0,
         'sdf_adaptive_resolution': False,
         'sdf_frustum_cull': True,
-        'sdf_max_steps': 512,
-        'sdf_ray_epsilon': 0.0001,
+        'sdf_max_steps': 1024,
+        'sdf_ray_epsilon': 0.001,
         'sdf_over_relaxation': 1.5,
         'sdf_use_cone_trace': True,
         'sdf_cone_aperture': 0.5,
@@ -124,8 +124,8 @@ _SDF_PRESETS = {
 
 _SDF_UNVERSIONED_DEFAULTS = {
     'sdf_resolution_scale': (0.0, 100.0),
-    'sdf_max_steps': (0, 128),
-    'sdf_ray_epsilon': (0.0, 0.005),
+    'sdf_max_steps': (0, 512),
+    'sdf_ray_epsilon': (0.0, 0.001),
     'sdf_over_relaxation': (0.0, 1.5),
     'sdf_cone_aperture': (0.0, 0.5),
     'sdf_cone_steps': (0, 32),
@@ -151,6 +151,13 @@ def _matches_preset(shading, preset_key):
     return True
 
 
+def _current_preset_label(shading):
+    for key in ('LOW', 'MEDIUM', 'HIGH'):
+        if _matches_preset(shading, key):
+            return key.title()
+    return "Custom"
+
+
 class SDF_OT_raymarcher_preset(Operator):
     bl_idname = "sdf.raymarcher_preset"
     bl_label = "SDF Ray Marcher Preset"
@@ -159,8 +166,8 @@ class SDF_OT_raymarcher_preset(Operator):
     preset: EnumProperty(
         items=[
             ('LOW', "Low", "Fast viewport: 50% resolution, adaptive, 100 steps"),
-            ('MEDIUM', "Medium", "Balanced: full resolution, 128 steps, 0.005 epsilon"),
-            ('HIGH', "High", "Maximum quality: full resolution, 512 steps, 0.0001 epsilon"),
+            ('MEDIUM', "Medium", "Balanced: full resolution, adaptive, 512 steps, 0.001 epsilon"),
+            ('HIGH', "High", "Maximum quality: full resolution, 1024 steps, 0.001 epsilon"),
         ],
     )
 
@@ -210,19 +217,17 @@ class RENDER_PT_proximity_raymarcher(Panel):
             return
 
         row = layout.row(align=True)
-        for key, label in (('LOW', "Low"), ('MEDIUM', "Medium"), ('HIGH', "High")):
-            sub = row.row(align=True)
-            sub.operator("sdf.raymarcher_preset", text=label,
-                         depress=_matches_preset(shading, key)).preset = key
+        row.alignment = 'EXPAND'
+        row.operator_menu_enum(
+            "sdf.raymarcher_preset",
+            "preset",
+            text=_current_preset_label(shading),
+            icon="DOWNARROW_HLT",
+        )
 
         col = layout.column()
         col.prop(shading, "sdf_resolution_scale", slider=True)
         col.prop(shading, "sdf_adaptive_resolution")
-        col.prop(shading, "sdf_upscale_quality")
-        col.prop(shading, "sdf_upscale_sharpen")
-        sub = col.column()
-        sub.active = shading.sdf_upscale_sharpen
-        sub.prop(shading, "sdf_upscale_sharpness", slider=True)
         col.prop(shading, "sdf_frustum_cull")
         col.prop(shading, "sdf_max_steps")
         col.prop(shading, "sdf_ray_epsilon")
