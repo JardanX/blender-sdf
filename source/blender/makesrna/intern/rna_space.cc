@@ -4901,11 +4901,8 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   static const EnumPropertyItem sdf_bvh_debug_view_items[] = {
       {0, "NONE", 0, "None", "No debug view"},
       {1, "SHAPE_COUNT", 0, "Shape Count", "Number of shapes tested per pixel"},
-      {2, "SHAPE_COUNT_TILE", 0, "Shape Count per Tile", "Maximum number of shapes tested in 8x8 tile"},
       {3, "STEP_COUNT", 0, "Step Count", "Number of march steps per pixel"},
-      {4, "STEP_COUNT_TILE", 0, "Step Count per Tile", "Maximum number of march steps in 8x8 tile"},
       {5, "CONE_HEATMAP", 0, "Cone Heatmap", "Steps saved by cone trace pre-pass (green=many, red=none)"},
-      {6, "BBOX_GRID", 0, "BBox Grid", "Show SDF evaluation grid used for selection bounding box"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

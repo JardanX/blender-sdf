@@ -30,8 +30,6 @@ COMPUTE_SHADER_CREATE_INFO(sdf_trace_comp)
 shared uint s_tileObjCount;
 shared int s_tileObjList[kMaxTileObjects];
 shared float4 s_coneHitPos;
-#else
-shared float tile_heat[kTileSize * kTileSize];
 #endif
 
 #include "draw_view_lib.glsl"
@@ -849,7 +847,9 @@ void main()
         float d0 = evalSceneDistBVH(hit_pos);
         float d1 = evalSceneDistBVH(hit_pos + ray_dir * eps_snap);
 #endif
-        float cos_est = clamp((d0 - d1) / eps_snap, 0.1f, 1.0f);
+        /* Sign-preserving cosine so exit-surface snap heads forward, not backward. */
+        float cos_raw = (d0 - d1) / eps_snap;
+        float cos_est = (cos_raw >= 0.0f ? 1.0f : -1.0f) * clamp(abs(cos_raw), 0.1f, 1.0f);
         hit_pos += ray_dir * d0 / cos_est;
       }
 
@@ -889,46 +889,9 @@ void main()
     imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
-  else if (debug_bvh_views == 2) {
-    s_tileObjList[local_idx] = floatBitsToInt(
-        float(tile_active_obj_count()) / max(float(object_count), 1.0f));
-    barrier();
-    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride) {
-        s_tileObjList[local_idx] = floatBitsToInt(
-            max(intBitsToFloat(s_tileObjList[local_idx]),
-                intBitsToFloat(s_tileObjList[local_idx + int(stride)])));
-      }
-      barrier();
-    }
-    float max_heat = intBitsToFloat(s_tileObjList[0]);
-    imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
-    imageStore(out_depth_img, pixel, float4(0.0f));
-    imageStore(gbuf_pos_img, pixel, float4(0.0));
-    imageStore(gbuf_color_img, pixel, float4(0.0));
-    return;
-  }
   else if (debug_bvh_views == 3) {
     float heat = float(steps_taken) / 128.0f;
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
-    imageStore(out_depth_img, pixel, float4(0.0f));
-    imageStore(gbuf_pos_img, pixel, float4(0.0));
-    imageStore(gbuf_color_img, pixel, float4(0.0));
-    return;
-  }
-  else if (debug_bvh_views == 4) {
-    s_tileObjList[local_idx] = floatBitsToInt(float(steps_taken) / 128.0f);
-    barrier();
-    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride) {
-        s_tileObjList[local_idx] = floatBitsToInt(
-            max(intBitsToFloat(s_tileObjList[local_idx]),
-                intBitsToFloat(s_tileObjList[local_idx + int(stride)])));
-      }
-      barrier();
-    }
-    float max_heat = intBitsToFloat(s_tileObjList[0]);
-    imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
     imageStore(gbuf_color_img, pixel, float4(0.0));
@@ -955,41 +918,9 @@ void main()
     imageStore(gbuf_color_img, pixel, float4(0.0));
     return;
   }
-  else if (debug_bvh_views == 2) {
-    tile_heat[local_idx] = float(g_numNearShapes) / max(float(object_count), 1.0f);
-    barrier();
-    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride) {
-        tile_heat[local_idx] = max(tile_heat[local_idx], tile_heat[local_idx + stride]);
-      }
-      barrier();
-    }
-    float max_heat = tile_heat[0];
-    imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
-    imageStore(out_depth_img, pixel, float4(0.0f));
-    imageStore(gbuf_pos_img, pixel, float4(0.0));
-    imageStore(gbuf_color_img, pixel, float4(0.0));
-    return;
-  }
   else if (debug_bvh_views == 3) {
     float heat = float(steps_taken) / 128.0f;
     imageStore(out_color_img, pixel, float4(heat_color(heat), 1.0f));
-    imageStore(out_depth_img, pixel, float4(0.0f));
-    imageStore(gbuf_pos_img, pixel, float4(0.0));
-    imageStore(gbuf_color_img, pixel, float4(0.0));
-    return;
-  }
-  else if (debug_bvh_views == 4) {
-    tile_heat[local_idx] = float(steps_taken) / 128.0f;
-    barrier();
-    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-      if (uint(local_idx) < stride) {
-        tile_heat[local_idx] = max(tile_heat[local_idx], tile_heat[local_idx + stride]);
-      }
-      barrier();
-    }
-    float max_heat = tile_heat[0];
-    imageStore(out_color_img, pixel, float4(heat_color(max_heat), 1.0f));
     imageStore(out_depth_img, pixel, float4(0.0f));
     imageStore(gbuf_pos_img, pixel, float4(0.0));
     imageStore(gbuf_color_img, pixel, float4(0.0));
