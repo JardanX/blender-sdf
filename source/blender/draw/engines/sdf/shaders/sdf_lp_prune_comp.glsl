@@ -82,36 +82,42 @@ void main()
   int num_nodes = total_num_nodes;
   if (first_lvl == 0) {
     parent_cell_idx = cell_idx / 64;
-    parent_offset = lp_parent_cells_offset[parent_cell_idx];
-    num_nodes = lp_parent_num_active[parent_cell_idx];
+    parent_offset = lp_cell_meta_in[parent_cell_idx].y;
+    num_nodes = lp_cell_meta_in[parent_cell_idx].x;
   }
 
   /* Workgroup scratch allocation: one column of num_nodes entries per lane.
    * Must be reached by every thread in the workgroup (barrier below). */
   int lane = int(gl_LocalInvocationIndex);
   if (lane == 0) {
-    s_tmp_offset = (num_nodes > 1) ? atomicAdd(lp_tmp_count[counter_slot], 64 * num_nodes) : 0;
+    s_tmp_offset = (num_nodes > 1) ? atomicAdd(lp_counters[16 + counter_slot], 64 * num_nodes) : 0;
   }
   barrier();
   int tmp_offset = s_tmp_offset;
 
   if (num_nodes == 0) {
     /* Parent was far field: propagate the constant value. */
-    lp_num_active_out[cell_idx] = 0;
-    lp_cell_value_out[cell_idx] = (first_lvl == 0) ? lp_cell_value_in[parent_cell_idx] : 0.0f;
+    lp_cell_meta_out[cell_idx].x = 0;
+    lp_cell_meta_out[cell_idx].z = (first_lvl == 0) ? lp_cell_meta_in[parent_cell_idx].z :
+                                                      floatBitsToInt(0.0f);
     return;
   }
 
   if (num_nodes == 1) {
     /* Parent reduced to a single node: copy it without evaluating. */
-    int cell_offset = atomicAdd(lp_active_count[counter_slot], 1);
-    lp_num_active_out[cell_idx] = 1;
-    lp_child_cells_offset[cell_idx] = cell_offset;
+    int cell_offset = atomicAdd(lp_counters[counter_slot], 1);
     if (cell_offset < active_capacity) {
-      lp_parents_out[cell_offset] = SDF_LP_INVALID_INDEX;
-      lp_active_out[cell_offset] = lp_active_nodes[parent_offset];
+      lp_cell_meta_out[cell_idx].x = 1;
+      lp_cell_meta_out[cell_idx].y = cell_offset;
+      lp_active_out[cell_offset] = uint2(lp_active_in[parent_offset].x, SDF_LP_INVALID_INDEX);
     }
-    lp_cell_value_out[cell_idx] = (first_lvl == 0) ? lp_cell_value_in[parent_cell_idx] : 0.0f;
+    else {
+      /* List does not fit the pool: trace falls back to the full tree. */
+      lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
+      lp_cell_meta_out[cell_idx].y = 0;
+    }
+    lp_cell_meta_out[cell_idx].z = (first_lvl == 0) ? lp_cell_meta_in[parent_cell_idx].z :
+                                                      floatBitsToInt(0.0f);
     return;
   }
 
@@ -122,7 +128,7 @@ void main()
   int stack_idx = 0;
 
   for (int i = 0; i < num_nodes; i++) {
-    uint active_node = lp_active_nodes[parent_offset + i];
+    uint active_node = lp_active_in[parent_offset + i].x;
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
     float d;
@@ -139,7 +145,8 @@ void main()
       float s = lp_op_sign(op);
       d = s * (min(s * left_val, s * right_val) - lp_kernel(abs(left_val - right_val), k));
 
-      if (abs(left_val - right_val) <= 2.0f * R + k) {
+      /* PAINT's right child carries color, not geometry: never cull it. */
+      if (!lp_op_cullable(op) || abs(left_val - right_val) <= 2.0f * R + k) {
         node_state = LP_NODESTATE_ACTIVE;
       }
       else {
@@ -154,7 +161,8 @@ void main()
       }
     }
     else {
-      d = lp_eval_prim(cell_center, lp_prims[node.idx_in_type]);
+      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
+      d = lp_eval_prim(cell_center, prim);
     }
 
     int my_addr = tmp_offset + 64 * i + lane;
@@ -172,17 +180,19 @@ void main()
 
   /* Far field: the whole cell maps to a constant lower bound. */
   if (abs(d) > 2.0f * R) {
-    lp_num_active_out[cell_idx] = 0;
-    lp_cell_value_out[cell_idx] = sign(d) * (abs(d) - R);
+    lp_cell_meta_out[cell_idx].x = 0;
+    lp_cell_meta_out[cell_idx].z = floatBitsToInt(sign(d) * (abs(d) - R));
     return;
   }
 
   /* ---- Backward pass: propagate inactivity through ancestors and compute
    * the compacted parent/sign information for surviving nodes. ---- */
   int cell_num_active = 0;
+  bool tmp_overflow = false;
   for (int i = num_nodes - 1; i >= 0; i--) {
     int my_addr = tmp_offset + 64 * i + lane;
     if (my_addr >= tmp_capacity) {
+      tmp_overflow = true;
       break;
     }
     uint t = lp_tmp[my_addr];
@@ -191,7 +201,7 @@ void main()
       lp_tmp[my_addr] = lp_tmp_pack(LP_NODESTATE_INACTIVE, false, true, lp_tmp_sign(t), 0xffffu);
     }
     else {
-      uint parent_idx = lp_parents_in[parent_offset + i];
+      uint parent_idx = lp_active_in[parent_offset + i].y;
       uint t_parent = 0u;
       bool has_inactive_ancestors = false;
       if (parent_idx != SDF_LP_INVALID_INDEX) {
@@ -207,7 +217,7 @@ void main()
         cell_num_active++;
       }
 
-      uint old_active = lp_active_nodes[parent_offset + i];
+      uint old_active = lp_active_in[parent_offset + i].x;
       int node_sign = (lp_active_node_sign(old_active) > 0.0f) ? 1 : -1;
       uint new_parent_idx;
       if (parent_idx != SDF_LP_INVALID_INDEX &&
@@ -226,21 +236,22 @@ void main()
   }
 
   /* ---- Emit the compacted active list for this cell. ---- */
-  int cell_offset = atomicAdd(lp_active_count[counter_slot], cell_num_active);
+  int cell_offset = atomicAdd(lp_counters[counter_slot], cell_num_active);
+  bool active_overflow = (cell_offset + cell_num_active > active_capacity);
 
   int out_idx = cell_num_active - 1;
   for (int i = num_nodes - 1; i >= 0; i--) {
     int my_addr = tmp_offset + 64 * i + lane;
     if (my_addr >= tmp_capacity) {
+      tmp_overflow = true;
       break;
     }
     uint t = lp_tmp[my_addr];
-    if (lp_tmp_active_global(t)) {
-      if (out_idx >= 0 && cell_offset + out_idx < active_capacity) {
-        uint old_active = lp_active_nodes[parent_offset + i];
+    if (lp_tmp_active_global(t) && !active_overflow && !tmp_overflow) {
+      if (out_idx >= 0) {
+        uint old_active = lp_active_in[parent_offset + i].x;
         uint node_idx = lp_active_node_index(old_active);
-        lp_active_out[cell_offset + out_idx] = node_idx |
-                                               (lp_tmp_sign(t) ? 0u : SDF_LP_SIGN_BIT);
+        uint node_word = node_idx | (lp_tmp_sign(t) ? 0u : SDF_LP_SIGN_BIT);
         lp_scratch[my_addr] = uint(out_idx);
 
         uint new_parent_old = lp_tmp_parent(t);
@@ -251,13 +262,21 @@ void main()
             new_parent_idx = lp_scratch[paddr];
           }
         }
-        lp_parents_out[cell_offset + out_idx] = new_parent_idx;
+        lp_active_out[cell_offset + out_idx] = uint2(node_word, new_parent_idx);
       }
       out_idx--;
     }
   }
 
-  lp_child_cells_offset[cell_idx] = cell_offset;
-  lp_num_active_out[cell_idx] = cell_num_active;
-  lp_cell_value_out[cell_idx] = 0.0f;
+  if (tmp_overflow || active_overflow) {
+    /* The list did not fit the dynamic pools: the trace pass evaluates the
+     * full tree for this cell (exact, just slower). */
+    lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
+    lp_cell_meta_out[cell_idx].y = 0;
+  }
+  else {
+    lp_cell_meta_out[cell_idx].y = cell_offset;
+    lp_cell_meta_out[cell_idx].x = cell_num_active;
+  }
+  lp_cell_meta_out[cell_idx].z = floatBitsToInt(0.0f);
 }

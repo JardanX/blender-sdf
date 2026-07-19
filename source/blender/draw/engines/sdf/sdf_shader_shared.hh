@@ -167,19 +167,53 @@ BLI_STATIC_ASSERT_ALIGN(SDFShadingDataGPU, 16)
 
 #define SDF_LP_NODETYPE_BINARY 0
 #define SDF_LP_NODETYPE_PRIMITIVE 1
+#define SDF_LP_NODETYPE_OFFSET 2
 
-#define SDF_LP_OP_UNION 0
-#define SDF_LP_OP_SUB 1
-#define SDF_LP_OP_INTER 2
+/* CSG op ids (must match eSDFCSGOperation in DNA_sdf_types.h). SHELL/PUSH/AVOID
+ * never appear in serialized binary ops: the tree builder desugars them into
+ * UNION/SUBTRACT/INTERSECT + OFFSET nodes so the dominance-based culling
+ * applies to them too. Only PAINT stays opaque (geometry = left operand). */
+#define SDF_LP_CSG_UNION 0
+#define SDF_LP_CSG_SUBTRACT 1
+#define SDF_LP_CSG_INTERSECT 2
+#define SDF_LP_CSG_SHELL 3
+#define SDF_LP_CSG_PUSH 4
+#define SDF_LP_CSG_AVOID 5
+#define SDF_LP_CSG_PAINT 6
+
+/* Blend type ids (must match eSDFBlendType in DNA_sdf_types.h). */
+#define SDF_LP_BLEND_LINEAR 0
+#define SDF_LP_BLEND_SMOOTH 1
+#define SDF_LP_BLEND_CHAMFER 2
+#define SDF_LP_BLEND_ROUND 3
+
+/* Binary op packing (SDFLpBinaryOp.op_word):
+ * bit 0     = sign s of the min() form (+1 union, -1 subtract/intersect),
+ * bits 3..1 = SDF_LP_CSG_*,
+ * bits 5..4 = SDF_LP_BLEND_*,
+ * bits 31..6 = float bits of the blend radius k (low 6 mantissa bits cleared).
+ * For LINEAR (or blend <= 0) k is packed as 0. */
+#define SDF_LP_OP_KMASK 0xFFFFFFC0u
 
 /* Invalid parent index marker for SDFLp parent arrays. */
 #define SDF_LP_INVALID_INDEX 0xFFFFFFFFu
 /* Sign bit of an SDFLp active node entry (index in the low 31 bits). */
 #define SDF_LP_SIGN_BIT 0x80000000u
+/* Cell num_active sentinel: the cell's list did not fit the dynamic pools
+ * during pruning; the trace pass evaluates the full tree for these cells.
+ * Always exact geometry — overflow degrades to slower tracing locally. */
+#define SDF_LP_FALLBACK_LIST (-1)
+/* lp_stats slots (indices into the combined lp_counters buffer; slots 1-4 are
+ * the per-level active counters, 9-12 the per-level tmp counters). */
+#define SDF_LP_STAT_ACTIVE_OVERFLOW 14
+#define SDF_LP_STAT_TMP_OVERFLOW 15
 
-/* Basic analytic primitive for the Lipschitz pruning engine. Mirrors the
- * classic engine transform chain: lp = (m * (p - position)) / scale.xyz,
- * d = eval(lp, size.xyz) - size.w, scaled by scale.w. */
+/* Analytic primitive for the Lipschitz pruning engine. Mirrors the classic
+ * engine transform chain: lp = (m * (p - position)) / scale.xyz,
+ * d = eval(lp, size.xyz) - size.w, scaled by scale.w. Advanced variants
+ * (box corner/edge/taper, capped torus, advanced ngon/polygon) carry their
+ * parameters in box_corners/box_edges/box_modes (same layout as
+ * SDFObjectGPU); modifiers are referenced via modifier_start/count. */
 struct [[host_shared]] SDFLpPrimitive {
   /* Rows of the (rotation-only) world-to-local matrix, w components unused. */
   float4 m_row0;
@@ -193,14 +227,50 @@ struct [[host_shared]] SDFLpPrimitive {
   float4 scale;
   /* rgb = albedo, w = sorted object index (for overlays/picking). */
   float4 color;
-  /* SDF_GPU_TYPE_BOX / SPHERE / CYLINDER / CONE. */
+  /* SDF_GPU_TYPE_* (all analytic shapes + MESH). */
   int type;
+  /* NGON: side count. POLYGON: polygon_points start. */
+  int aux0;
+  /* POLYGON: polygon_points count. */
+  int aux1;
+  /* POLYGON: corner rounding radius (0 = sharp corners). */
+  float auxf;
+  /* MESH: vertex start, triangle start, triangle count, BVH node start
+   * (mirrors SDFObjectGPU.mesh_data; unused otherwise). */
+  int4 mesh_data;
+  /* MESH: BVH node count (mirrors SDFObjectGPU.mesh_settings.z). */
+  int mesh_node_count;
   int _pad0;
   int _pad1;
   int _pad2;
+  /* Advanced-variant payload (mirrors SDFObjectGPU.box_corners/box_edges/
+   * box_modes; unused by basic shapes). */
+  float4 box_corners;
+  float4 box_edges;
+  int4 box_modes;
+  /* Range into the shared modifier stack (mirrors SDFObjectGPU). */
+  int modifier_start;
+  int modifier_count;
+  /* Index into the sorted object list (source of this primitive). */
+  int obj_index;
+  int _pad3;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFLpPrimitive, 16)
-BLI_STATIC_ASSERT(sizeof(SDFLpPrimitive) == 128, "SDFLpPrimitive size mismatch")
+BLI_STATIC_ASSERT(sizeof(SDFLpPrimitive) == 224, "SDFLpPrimitive size mismatch")
+
+/* Serialized binary op (kept for reference; the runtime format is the packed
+ * uint produced by lp_pack_binary_op, stored in lp_binary_ops_). param0 is
+ * only used by PAINT (color blend radius); all other parameters are baked
+ * into the tree structure by the builder. (`packed` is a GLSL reserved word,
+ * hence op_word.) */
+struct [[host_shared]] SDFLpBinaryOp {
+  uint op_word;
+  float param0;
+  float param1;
+  float param2;
+};
+BLI_STATIC_ASSERT_ALIGN(SDFLpBinaryOp, 16)
+BLI_STATIC_ASSERT(sizeof(SDFLpBinaryOp) == 16, "SDFLpBinaryOp size mismatch")
 
 struct [[host_shared]] SDFLpNode {
   /* SDF_LP_NODETYPE_*. */

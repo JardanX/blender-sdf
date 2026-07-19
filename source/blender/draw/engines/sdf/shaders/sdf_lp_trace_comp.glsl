@@ -22,26 +22,41 @@ COMPUTE_SHADER_CREATE_INFO(sdf_lp_trace_comp)
 #define LP_SHADING_HEATMAP 1
 #define LP_SHADING_NORMALS 2
 
+int lp_cell_num_active(int cell_idx)
+{
+  return lp_cell_meta[cell_idx].x;
+}
+
+float lp_cell_far_value(int cell_idx)
+{
+  return intBitsToFloat(lp_cell_meta[cell_idx].z);
+}
+
 float lp_sdf(float3 p, int cell_idx, out bool near_field)
 {
   if (culling_enabled == 0) {
     near_field = true;
     return lp_list_eval(p, total_num_nodes, 0);
   }
-  int num_active = lp_cells_num_active[cell_idx];
+  int num_active = lp_cell_num_active(cell_idx);
+  if (num_active == SDF_LP_FALLBACK_LIST) {
+    /* Cell overflowed the dynamic pools during pruning: full tree eval. */
+    near_field = true;
+    return lp_list_eval(p, total_num_nodes, 0);
+  }
   if (num_active == 0) {
     near_field = false;
-    return lp_cell_value[cell_idx];
+    return lp_cell_far_value(cell_idx);
   }
   near_field = true;
-  return lp_list_eval(p, num_active, lp_cells_offset[cell_idx]);
+  return lp_list_eval(p, num_active, lp_cell_meta[cell_idx].y);
 }
 
 float3 lp_grad(float3 p, int cell_idx)
 {
   float h = 5e-4f;
   const float2 k = float2(1.0f, -1.0f);
-  bool nf;
+  bool nf = false;
   return normalize(k.xyy * lp_sdf(p + k.xyy * h, cell_idx, nf) +
                    k.yyx * lp_sdf(p + k.yyx * h, cell_idx, nf) +
                    k.yxy * lp_sdf(p + k.yxy * h, cell_idx, nf) +
@@ -53,12 +68,15 @@ float4 lp_albedo(float3 p, int cell_idx, out float obj_id)
   if (culling_enabled == 0) {
     return lp_list_eval_color(p, total_num_nodes, 0, obj_id);
   }
-  int num_active = lp_cells_num_active[cell_idx];
+  int num_active = lp_cell_num_active(cell_idx);
+  if (num_active == SDF_LP_FALLBACK_LIST) {
+    return lp_list_eval_color(p, total_num_nodes, 0, obj_id);
+  }
   if (num_active == 0) {
     obj_id = -1.0f;
     return float4(0.0f);
   }
-  return lp_list_eval_color(p, num_active, lp_cells_offset[cell_idx], obj_id);
+  return lp_list_eval_color(p, num_active, lp_cell_meta[cell_idx].y, obj_id);
 }
 
 bool lp_bbox_intersect(float3 box_min, float3 box_max, float3 r_o, float3 r_d, out float t_inter)
@@ -153,15 +171,18 @@ void main()
     normal = -ray_dir;
   }
 
-  float obj_id;
+  float obj_id = -1.0f;
   float4 albedo = lp_albedo(hit_pos, hit_cell_idx, obj_id);
 
   float3 out_color = albedo.rgb;
   if (shading_mode == LP_SHADING_HEATMAP) {
     float num_active = 0.0f;
     if (culling_enabled != 0) {
-      /* Divide by 2 to approximate the number of primitives (binary tree). */
-      num_active = float(lp_cells_num_active[hit_cell_idx] + 1) * 0.5f;
+      /* Divide by 2 to approximate the number of primitives (binary tree).
+       * Fallback cells show as the maximum (useful overflow diagnostic). */
+      int cell_count = lp_cell_num_active(hit_cell_idx);
+      num_active = float(cell_count >= 0 ? cell_count : total_num_nodes) + 1.0f;
+      num_active *= 0.5f;
     }
     else {
       num_active = float(total_num_nodes + 1) * 0.5f;
