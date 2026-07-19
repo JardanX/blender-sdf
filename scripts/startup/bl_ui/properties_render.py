@@ -89,6 +89,7 @@ _SDF_PRESETS = {
     'LOW': {
         'sdf_resolution_scale': 50.0,
         'sdf_adaptive_resolution': True,
+        'sdf_adaptive_precision': True,
         'sdf_frustum_cull': True,
         'sdf_max_steps': 100,
         'sdf_ray_epsilon': 0.001,
@@ -100,6 +101,7 @@ _SDF_PRESETS = {
     'MEDIUM': {
         'sdf_resolution_scale': 100.0,
         'sdf_adaptive_resolution': True,
+        'sdf_adaptive_precision': True,
         'sdf_frustum_cull': True,
         'sdf_max_steps': 512,
         'sdf_ray_epsilon': 0.001,
@@ -111,6 +113,7 @@ _SDF_PRESETS = {
     'HIGH': {
         'sdf_resolution_scale': 100.0,
         'sdf_adaptive_resolution': False,
+        'sdf_adaptive_precision': True,
         'sdf_frustum_cull': True,
         'sdf_max_steps': 1024,
         'sdf_ray_epsilon': 0.001,
@@ -229,6 +232,8 @@ class RENDER_PT_proximity_raymarcher(Panel):
         col = layout.column()
         col.prop(shading, "sdf_resolution_scale", slider=True)
         col.prop(shading, "sdf_adaptive_resolution")
+        if shading.sdf_adaptive_resolution:
+            col.prop(shading, "sdf_adaptive_precision")
         col.prop(shading, "sdf_frustum_cull")
         col.prop(shading, "sdf_max_steps")
         col.prop(shading, "sdf_ray_epsilon")

@@ -370,6 +370,9 @@ class Instance : public DrawEngine {
   int2 fxaa_size_ = int2(0);
   float resolution_scale_ = 1.0f;
   bool adaptive_resolution_ = false;
+  /* When true, marcher is relaxed during adaptive low-res. When false, UI
+   * marcher values are used at all times even during low-res navigation. */
+  bool adaptive_precision_ = true;
   bool scene_changed_ = false;
   bool view_changed_ = false;
   bool mesh_changed_ = false;
@@ -3136,6 +3139,7 @@ class Instance : public DrawEngine {
     float scale_pct = s.sdf_resolution_scale;
     resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
     adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
+    adaptive_precision_ = s.sdf_adaptive_precision != 0;
     use_frustum_cull_ = s.sdf_frustum_cull != 0;
 
     bool new_fxaa = (U.sdf_fxaa != 0);
@@ -3525,8 +3529,9 @@ class Instance : public DrawEngine {
      * matter when pixels are 4x as large, and the relaxed step/epsilon combo
      * converges much faster (helps frame rate while navigating). When we
      * drop back to full-res, restore the UI-cached values. sync_sdf_settings
-     * runs every frame and clobbers these, so re-apply unconditionally. */
-    if (adaptive_lowres) {
+     * runs every frame and clobbers these, so re-apply unconditionally. Only
+     * relax when adaptive_precision_ is on; otherwise use UI precision. */
+    if (adaptive_lowres && adaptive_precision_) {
       sdf_max_steps_ = 128;
       sdf_ray_epsilon_ = 0.01f;
     }

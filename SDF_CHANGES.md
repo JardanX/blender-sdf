@@ -3063,3 +3063,79 @@ Two related tweaks targeting smoother navigation and a more numerically stable m
 | `makesdna/DNA_view3d_types.h` | `View3DShading::sdf_over_relaxation` default 1.3. |
 | `source/blender/blenloader/intern/versioning_500.cc` | Old-default SDF profile now migrates over-relaxation 0.0/1.2/1.5 -> 1.3; preset-migration block writes 1.3. |
 | `scripts/startup/bl_ui/properties_render.py` | Preset + legacy-zero tables updated to relx 1.3. |
+
+## Adaptive Precision Toggle + Outline Z-Fight Fix (2026-07-19)
+
+### Adaptive Precision Toggle
+
+The adaptive-resolution marcher coarsening (relaxing `sdf_max_steps` / `sdf_ray_epsilon`
+to 128 / 0.01 during low-res navigation) is now opt-in via a new
+`View3DShading::sdf_adaptive_precision` boolean. When `sdf_adaptive_resolution` is on and
+the viewport is interacting, the engine checks `sdf_adaptive_precision`:
+- **On (default)** — marcher relaxes to 128 steps / 0.01 epsilon for faster low-res frames.
+- **Off** — UI `sdf_max_steps` / `sdf_ray_epsilon` are used at all times even during
+  adaptive low-res navigation (high-precision, lower frame rate).
+
+The previous bug where `sync_sdf_settings()` clobbered the relax values on every frame
+(adaptive-lowres only kicked in for the first transition frame) is also fixed — the
+override is now re-applied unconditionally in `ensure_compute_targets` based on the
+current `adaptive_lowres` state.
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Added `View3DShading::sdf_adaptive_precision` (char, default 1). |
+| `makesrna/intern/rna_space.cc` | Registered matching `sdf_adaptive_precision` RNA property. |
+| `scripts/startup/bl_ui/properties_render.py` | New `sdf_adaptive_precision` checkbox shown under `sdf_adaptive_resolution`; all three preset tables updated. |
+| `source/blender/draw/engines/sdf/sdf_engine.cc` | New `adaptive_precision_` member; `sync_sdf_settings` reads the new DNA flag; `ensure_compute_targets` re-applies the relax override unconditionally each frame gated by `adaptive_precision_`. |
+| `source/blender/blenloader/intern/versioning_500.cc` | Old-default SDF-profile migration block sets `sdf_adaptive_precision = 1`. |
+
+### Outline Z-Fight Fix (Selection vs Always-On Silhouette)
+
+Two distinct shared-silhouette scenarios produce outline fighting:
+
+1. **SDF outline vs mesh outline at a coincident pixel** — the SDF outline prepass runs
+   with `GPU_DEPTH_LESS_EQUAL` against pre-pass depth written earlier by
+   `overlay_outline_prepass_*`. With FP ULP differences between `sdf_depth` (re-projected
+   from the SDF compute pass) and the rasterized `outline_depth_tx`, the LESS_EQUAL test
+   flipped per pixel and per frame, producing a per-pixel flicker along the shared
+   silhouette.
+2. **SDF-vs-SDF shared intersection edge** — the per-pixel CSG winner in
+   `sdf_trace_comp` alternates deterministically between a selected (color_id 1/3) and
+   an unselected (color_id 2) SDF along the shared 3D intersection edge. The detect
+   shader colors each boundary fragment using its own center pixel's `color_id`,
+   producing a noisy orange/black zigzag along the shared edge.
+
+Fixes:
+- `sdf_outline_prepass_frag.glsl`: apply a constant 1e-6 depth bias based on the resolved
+  `color_id` — selected/active outlines pitch depth closer, always-on unselected pitch
+  farther. The selection outline deterministically wins the pre-pass depth test against
+  a coincident mesh selection outline (which was drawn earlier in the same pre-pass).
+  Constant 1e-6 only; no screen-space or camera-dependent bias; the detect-shader
+  occlusion epsilon (~8e-6 minimum) dwarfs it so occlusion tests are unaffected.
+- `overlay_outline_detect_frag.glsl`: for strict-depth (SDF) outlines only, promote the
+  line color to the highest-priority strict-depth `color_id` found in the gathered
+  4-neighbourhood. Priority: active (3) > selected (1) > always-on (2) > other. Non-
+  strict (mesh) neighbor ids are ignored so regular mesh outline colors are unaffected.
+
+Visual result: at any shared silhouette or intersection edge between a selected and an
+unselected SDF, the whole shared edge draws as the selection (orange) color on both sides;
+the unselected always-on black silhouette keeps drawing only on the unselected side of
+the boundary. Adjacent selected+unselected SDF objects now appear "side-by-side",
+matching Blender's standard multi-object outline behavior.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_outline_prepass_frag.glsl` | Bias `gl_FragDepth` closer by 1e-6 for color_id 1/3 (selected/active) and further by 1e-6 for color_id 2 (always-on unselected); also stabilize the per-pixel `obj_id` from the 4-connected depth-coincident g-buffer neighborhood. |
+| `draw/engines/overlay/shaders/overlay_outline_detect_frag.glsl` | Added `sdf_outline_color_priority()`. For strict-depth outlines only, promotes the line color_id to the highest-priority strict-depth color_id among the gathered 4-neighbourhood ids, so shared SDF-SDF silhouettes / intersection edges draw a single consistent color. |
+
+### SDF Bounding Box Default
+
+The selected SDF bounding-box overlay now defaults to hidden. The existing SDF overlay
+checkbox remains available to enable it per viewport. Versioning sets the hide flag for
+existing 5.0 files too, so the new default applies consistently rather than only to newly
+created viewports.
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Added `V3D_OVERLAY_HIDE_SDF_BBOX` to the `View3DOverlay::flag` default. |
+| `source/blender/blenloader/intern/versioning_500.cc` | Sets `V3D_OVERLAY_HIDE_SDF_BBOX` for each existing `SPACE_VIEW3D`. |

@@ -4974,6 +4974,12 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Adaptive Resolution", "Render at quarter resolution during viewport navigation, full resolution when static");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "sdf_adaptive_precision", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_adaptive_precision", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Adaptive Precision", "Coarsen ray marcher (128 steps, 0.01 epsilon) during adaptive low-res; use UI precision otherwise");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
   prop = RNA_def_property(srna, "sdf_frustum_cull", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "sdf_frustum_cull", 1);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
