@@ -633,13 +633,17 @@ struct View3DShading {
   int sdf_cone_steps = 32;
   float sdf_resolution_scale = 100.0f;
   float sdf_upscale_sharpness = 0.5f;
-  char _pad_sdf_up[4] = {};
+  /* When set, the engine relaxes sdf_max_steps/sdf_ray_epsilon to fixed values
+   * (128 / 0.01) during adaptive low-res navigation. When cleared, the UI
+   * marcher values are used at all times. */
+  char sdf_adaptive_precision = 1;
+  char _pad_sdf_up[3] = {};
 };
 
 /** 3D Viewport Overlay settings. */
 struct View3DOverlay {
   int flag = V3D_OVERLAY_VIEWER_ATTRIBUTE | V3D_OVERLAY_SCULPT_SHOW_MASK |
-             V3D_OVERLAY_SCULPT_SHOW_FACE_SETS;
+             V3D_OVERLAY_SCULPT_SHOW_FACE_SETS | V3D_OVERLAY_HIDE_SDF_BBOX;
 
   /** Edit mode settings. */
   int edit_flag = V3D_OVERLAY_EDIT_FACES | V3D_OVERLAY_EDIT_SEAMS | V3D_OVERLAY_EDIT_SHARP |

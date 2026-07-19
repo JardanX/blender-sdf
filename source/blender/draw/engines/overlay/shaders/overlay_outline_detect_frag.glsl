@@ -64,6 +64,19 @@ uint visible_outline_id(uint id, float2 uv)
   return strict_depth_outline_occluded(id, uv) ? 0u : id;
 }
 
+/* Priority of a strict-depth (SDF) outline color_id. Active (3) > selected (1)
+ * > always-on (2) > other. Used to pick a single consistent line color along
+ * shared SDF-SDF silhouettes / intersection edges where the per-pixel CSG
+ * winner alternates between a selected and an unselected SDF (otherwise the
+ * detect shader draws a noisy zigzag of orange/black along that edge). */
+uint sdf_outline_color_priority(uint cid)
+{
+  if (cid == 3u) { return 4u; }
+  if (cid == 1u) { return 3u; }
+  if (cid == 2u) { return 2u; }
+  return 0u;
+}
+
 /* A gather4 + check against ref. */
 bool4 gather_edges(float2 uv, uint ref)
 {
@@ -283,6 +296,36 @@ void main()
   }
 
   uint color_id = ref_col >> 14u;
+
+  /* Strict-depth (SDF) outline: along a shared SDF-SDF silhouette or
+   * intersection edge, the per-pixel CSG winner in sdf_trace_comp alternates
+   * deterministically between a selected (color_id 1/3) and an unselected
+   * (color_id 2) SDF — so each boundary pixel picks its own color, producing a
+   * noisy orange/black zigzag along the shared edge. Promote the line color
+   * to the highest-priority strict-depth color_id present in the gathered
+   * 4-neighbourhood so the whole shared edge draws a single consistent color
+   * (selection beats always-on; active beats selection). Non-strict (mesh)
+   * neighbours are ignored so mesh outline colors are unaffected. */
+  if (is_strict_depth_outline) {
+    uint cur_pri = sdf_outline_color_priority(color_id);
+    if (ids.x != 0u && (ids.x & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u) {
+      uint np = sdf_outline_color_priority(ids.x >> 14u);
+      if (np > cur_pri) { cur_pri = np; color_id = ids.x >> 14u; }
+    }
+    if (ids.y != 0u && (ids.y & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u) {
+      uint np = sdf_outline_color_priority(ids.y >> 14u);
+      if (np > cur_pri) { cur_pri = np; color_id = ids.y >> 14u; }
+    }
+    if (ids.z != 0u && (ids.z & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u) {
+      uint np = sdf_outline_color_priority(ids.z >> 14u);
+      if (np > cur_pri) { cur_pri = np; color_id = ids.z >> 14u; }
+    }
+    if (ids.w != 0u && (ids.w & STRICT_DEPTH_OUTLINE_ID_FLAG) != 0u) {
+      uint np = sdf_outline_color_priority(ids.w >> 14u);
+      if (np > cur_pri) { cur_pri = np; color_id = ids.w >> 14u; }
+    }
+  }
+
   if (ref_col == 0u) {
     frag_color = float4(0.0f);
   }
