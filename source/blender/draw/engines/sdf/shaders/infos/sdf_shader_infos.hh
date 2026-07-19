@@ -287,6 +287,78 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name SDF Lipschitz Pruning Pass (builds per-cell pruned CSG trees)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_lp_prune_comp)
+LOCAL_GROUP_SIZE(4, 4, 4)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
+STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
+STORAGE_BUF(2, read, uint, lp_binary_ops[])
+STORAGE_BUF(3, read, uint, lp_parents_in[])
+STORAGE_BUF(4, write, uint, lp_parents_out[])
+STORAGE_BUF(5, read, uint, lp_active_nodes[])
+STORAGE_BUF(6, write, uint, lp_active_out[])
+STORAGE_BUF(7, read, int, lp_parent_cells_offset[])
+STORAGE_BUF(8, write, int, lp_child_cells_offset[])
+STORAGE_BUF(9, read, int, lp_parent_num_active[])
+STORAGE_BUF(10, write, int, lp_num_active_out[])
+STORAGE_BUF(11, read_write, int, lp_active_count[])
+STORAGE_BUF(12, read, float, lp_cell_value_in[])
+STORAGE_BUF(13, write, float, lp_cell_value_out[])
+STORAGE_BUF(14, read_write, uint, lp_tmp[])
+STORAGE_BUF(15, read_write, uint, lp_scratch[])
+STORAGE_BUF(16, read_write, int, lp_tmp_count[])
+PUSH_CONSTANT(float3, aabb_min)
+PUSH_CONSTANT(float3, aabb_max)
+PUSH_CONSTANT(int, total_num_nodes)
+PUSH_CONSTANT(int, grid_size)
+PUSH_CONSTANT(int, first_lvl)
+PUSH_CONSTANT(int, active_capacity)
+PUSH_CONSTANT(int, tmp_capacity)
+PUSH_CONSTANT(int, counter_slot)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_lp_prune_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Lipschitz Trace (sphere tracing over per-cell pruned trees)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_lp_trace_comp)
+LOCAL_GROUP_SIZE(8, 8)
+DO_STATIC_COMPILATION()
+STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
+STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
+STORAGE_BUF(2, read, uint, lp_binary_ops[])
+STORAGE_BUF(3, read, uint, lp_active_nodes[])
+STORAGE_BUF(4, read, int, lp_cells_offset[])
+STORAGE_BUF(5, read, int, lp_cells_num_active[])
+STORAGE_BUF(6, read, float, lp_cell_value[])
+IMAGE(0, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
+IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_color_img)
+IMAGE(2, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
+PUSH_CONSTANT(float3, aabb_min)
+PUSH_CONSTANT(float3, aabb_max)
+PUSH_CONSTANT(int, grid_size)
+PUSH_CONSTANT(int, total_num_nodes)
+PUSH_CONSTANT(int, culling_enabled)
+PUSH_CONSTANT(int, shading_mode)
+PUSH_CONSTANT(float, viz_max)
+PUSH_CONSTANT(int, max_steps)
+PUSH_CONSTANT(float, ray_epsilon)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(draw_view)
+COMPUTE_SOURCE("sdf_lp_trace_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name SDF Grid Evaluation (samples SDF at 3D grid vertices)
  * \{ */
 

@@ -160,3 +160,56 @@ struct [[host_shared]] SDFShadingDataGPU {
   float4 studio_ambient;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFShadingDataGPU, 16)
+
+/* -------------------------------------------------------------------- */
+/** \name Lipschitz Pruning (per-cell pruned CSG trees)
+ * \{ */
+
+#define SDF_LP_NODETYPE_BINARY 0
+#define SDF_LP_NODETYPE_PRIMITIVE 1
+
+#define SDF_LP_OP_UNION 0
+#define SDF_LP_OP_SUB 1
+#define SDF_LP_OP_INTER 2
+
+/* Invalid parent index marker for SDFLp parent arrays. */
+#define SDF_LP_INVALID_INDEX 0xFFFFFFFFu
+/* Sign bit of an SDFLp active node entry (index in the low 31 bits). */
+#define SDF_LP_SIGN_BIT 0x80000000u
+
+/* Basic analytic primitive for the Lipschitz pruning engine. Mirrors the
+ * classic engine transform chain: lp = (m * (p - position)) / scale.xyz,
+ * d = eval(lp, size.xyz) - size.w, scaled by scale.w. */
+struct [[host_shared]] SDFLpPrimitive {
+  /* Rows of the (rotation-only) world-to-local matrix, w components unused. */
+  float4 m_row0;
+  float4 m_row1;
+  float4 m_row2;
+  /* xyz = world position, w unused. */
+  float4 position;
+  /* xyz = base half-size (pre-subtracted bevel), w = effective bevel. */
+  float4 size;
+  /* xyz = per-axis coordinate scale, w = distance scale (min axis scale). */
+  float4 scale;
+  /* rgb = albedo, w = sorted object index (for overlays/picking). */
+  float4 color;
+  /* SDF_GPU_TYPE_BOX / SPHERE / CYLINDER / CONE. */
+  int type;
+  int _pad0;
+  int _pad1;
+  int _pad2;
+};
+BLI_STATIC_ASSERT_ALIGN(SDFLpPrimitive, 16)
+BLI_STATIC_ASSERT(sizeof(SDFLpPrimitive) == 128, "SDFLpPrimitive size mismatch")
+
+struct [[host_shared]] SDFLpNode {
+  /* SDF_LP_NODETYPE_*. */
+  int type;
+  /* Index into lp_prims or lp_binary_ops depending on type. */
+  int idx_in_type;
+  int _pad0;
+  int _pad1;
+};
+BLI_STATIC_ASSERT_ALIGN(SDFLpNode, 16)
+
+/** \} */

@@ -3139,3 +3139,53 @@ created viewports.
 |------|--------|
 | `makesdna/DNA_view3d_types.h` | Added `V3D_OVERLAY_HIDE_SDF_BBOX` to the `View3DOverlay::flag` default. |
 | `source/blender/blenloader/intern/versioning_500.cc` | Sets `V3D_OVERLAY_HIDE_SDF_BBOX` for each existing `SPACE_VIEW3D`. |
+
+---
+
+## Lipschitz Pruning Engine (alternate SDF renderer)
+
+Added a second SDF ray-marching engine based on hierarchical Lipschitz pruning of the CSG tree
+(Barbier et al., EG 2025). The classic tile/BVH pipeline remains the default (`CLASSIC`); the
+new engine (`LIPSCHITZ`) builds per-cell pruned active-node lists so each ray evaluates only
+the relevant sub-tree per step, and far-field cells return a constant lower bound without any
+tree traversal.
+
+Key features:
+- **Engine mode selector** in the SDF proximity panel: `CLASSIC` (existing) vs. `LIPSCHITZ` (new).
+- **Hierarchical pruning** (configurable log2 grid level 2..8, default 6 = 64³ cells): a GPU
+  compute pass recursively evaluates a Lipschitz criterion at each cell to eliminate dominated
+  branches, producing per-cell active-node lists.
+- **CSG tree serialization**: the scene's flat object list is folded into a post-order binary
+  tree with primitive leaf nodes (box, sphere, cylinder, cone — same limited set as the classic
+  engine). Supported ops: union, subtract, intersect with smooth blend radius.
+- **Per-cell far-field culling**: cells whose center distance exceeds the cell diagonal from every
+  active primitive store only a constant lower bound, giving large empty-space steps.
+- **Alternative trace pass** (`sdf_lp_trace_comp`) that writes the same G-buffer (position, color,
+  normal) as the classic trace, so the existing shade/blit/FXAA passes work unchanged.
+- **Debug shading modes**: `SHADED` (normal studio lighting), `HEATMAP` (per-cell active node
+  count), `NORMALS` (surface normal visualization).
+- **Pruning grid AABB**: automatic (fit to scene bounds) or manual control with min/max vectors.
+- **Recompute toggle**: freeze the pruning grid for static scenes to skip rebuild every frame.
+- **Blend file backward compat** via versioning code (subversion 41).
+
+Limitations vs. the classic engine:
+- Only analytic primitives (box, sphere, cylinder, cone) participate; Mesh-SDF, torus, capsule,
+  and other shapes fall through (treated as empty or full-tree fallback).
+- The CSG tree is rebuilt from sorted objects only; group subtrees with nested group membership
+  may not be fully captured.
+- Pruning is limited to 65535 nodes (the shader packs parent indices into 16 bits).
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Added `sdf_engine_mode`, `sdf_lp_enable_pruning`, `sdf_lp_recompute_pruning`, `sdf_lp_shading_mode`, `sdf_lp_grid_level`, `sdf_lp_colormap_max`, `sdf_lp_aabb_auto`, `sdf_lp_aabb_min`, `sdf_lp_aabb_max` to `View3DShading`. |
+| `makesrna/intern/rna_space.cc` | RNA property definitions for all Lipschitz engine settings with enum items for engine mode and shading mode. |
+| `draw/engines/sdf/sdf_engine.cc` | Full C++ implementation: CSG tree builder (`lp_build_tree`), buffer management (`lp_ensure_grid_buffers`, `lp_upload_tree`), pruning dispatch (`draw_lp_prune`), trace dispatch (`draw_lp_trace`), cleanup, and integration into the draw loop (`end_sync`, `draw`). |
+| `draw/engines/sdf/sdf_shader_shared.hh` | New GPU structs `SDFLpNode`, `SDFLpPrimitive` and associated constants (`SDF_LP_NODETYPE_*`, `SDF_LP_OP_*`, `SDF_LP_SIGN_BIT`, `SDF_LP_INVALID_INDEX`). |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | Shared evaluation library: primitive SDF evaluators, binary op decode/eval, post-order stack-machine traversal. |
+| `draw/engines/sdf/shaders/sdf_lp_prune_comp.glsl` | Pruning compute shader (4×4×4 workgroups): hierarchical cell-based CSG tree pruning with workgroup-local scratch allocation. |
+| `draw/engines/sdf/shaders/sdf_lp_trace_comp.glsl` | Trace compute shader (8×8 workgroups): sphere tracing with per-cell pruned active-node lists and far-field constant lower bounds. |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_lp_prune_comp` and `sdf_lp_trace_comp` shader info declarations (SSBOs, images, push constants). |
+| `draw/engines/sdf/shaders/CMakeLists.txt`, `draw/CMakeLists.txt` | Registered the three new GLSL files. |
+| `scripts/startup/bl_ui/properties_render.py` | UI panel for Lipschitz engine settings under the SDF proximity raymarcher section. |
+| `blenloader/intern/versioning_500.cc` | Versioning for subversion 41: initializes Lipschitz fields to defaults for existing .blend files. |
+| `blenkernel/BKE_blender_version.h` | Bumped `BLENDER_FILE_SUBVERSION` from 40 to 41. |
