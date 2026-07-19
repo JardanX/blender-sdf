@@ -5050,6 +5050,7 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sdf_lp_grid_level", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "sdf_lp_grid_level");
   RNA_def_property_range(prop, 2, 8);
+  RNA_def_property_int_default(prop, 8);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop, "Grid Size (log2)", "Pruning grid resolution per axis: 2=4, 4=16, 6=64, 8=256 cells (rounded up to even)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);

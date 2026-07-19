@@ -649,7 +649,7 @@ struct View3DShading {
   char sdf_lp_aabb_auto = 1;
   char _pad_sdf_lp[3] = {};
   /* Log2 of the pruning grid resolution per axis: 2, 4, 6 or 8 (grid 4..256). */
-  int sdf_lp_grid_level = 6;
+  int sdf_lp_grid_level = 8;
   /* Active node count mapped to the top of the heatmap colormap. */
   int sdf_lp_colormap_max = 25;
   /* Manual pruning grid bounds (used when sdf_lp_aabb_auto is off). */

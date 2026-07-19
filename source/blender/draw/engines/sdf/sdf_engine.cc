@@ -34,6 +34,8 @@
 #include "DNA_view3d_enums.h"
 #include "DNA_view3d_types.h"
 
+#include "CLG_log.h"
+
 #include "ED_view3d.hh"
 
 #include "IMB_imbuf_types.hh"
@@ -85,7 +87,19 @@ static_assert(SDF_GPU_TYPE_POLYGON == SDF_TYPE_POLYGON);
 static_assert(SDF_GPU_TYPE_MESH == SDF_TYPE_MESH);
 static_assert(SDF_GPU_TYPE_GROUP == SDF_TYPE_GROUP);
 
+/* LP binary ops pack DNA CSG ids verbatim (lp_pack_binary_op). */
+static_assert(SDF_LP_CSG_UNION == SDF_CSG_UNION);
+static_assert(SDF_LP_CSG_SUBTRACT == SDF_CSG_SUBTRACT);
+static_assert(SDF_LP_CSG_INTERSECT == SDF_CSG_INTERSECT);
+static_assert(SDF_LP_CSG_PAINT == SDF_CSG_PAINT);
+static_assert(SDF_LP_BLEND_LINEAR == SDF_BLEND_LINEAR);
+static_assert(SDF_LP_BLEND_SMOOTH == SDF_BLEND_SMOOTH);
+static_assert(SDF_LP_BLEND_CHAMFER == SDF_BLEND_CHAMFER);
+static_assert(SDF_LP_BLEND_ROUND == SDF_BLEND_ROUND);
+
 using namespace draw;
+
+static CLG_LogRef LOG = {"draw.sdf"};
 
 /* Static state shared with overlay/selection code */
 static int s_object_count = 0;
@@ -490,25 +504,22 @@ class Instance : public DrawEngine {
   Vector<SDFLpNode> lp_nodes_;
   Vector<SDFLpPrimitive> lp_prims_;
   Vector<uint32_t> lp_binary_ops_;
-  Vector<uint32_t> lp_parents_init_;
-  Vector<uint32_t> lp_active_init_;
+  /* Initial active list: x = active node word (index | sign), y = parent index. */
+  Vector<uint2> lp_active_init_;
 
   gpu::StorageBuf *lp_nodes_ssbo_ = nullptr;
   gpu::StorageBuf *lp_prims_ssbo_ = nullptr;
   gpu::StorageBuf *lp_binary_ops_ssbo_ = nullptr;
-  gpu::StorageBuf *lp_parents_init_ssbo_ = nullptr;
   gpu::StorageBuf *lp_active_init_ssbo_ = nullptr;
 
-  /* Grid buffers (ping-pong between hierarchy levels). */
+  /* Grid buffers (ping-pong between hierarchy levels). Active list entries are
+   * uint2 (node word, parent); cell metadata is int4 (num_active, cell_offset,
+   * float bits of the cell value, unused). */
   gpu::StorageBuf *lp_active_ssbo_[2] = {nullptr, nullptr};
-  gpu::StorageBuf *lp_parents_ssbo_[2] = {nullptr, nullptr};
-  gpu::StorageBuf *lp_num_active_ssbo_[2] = {nullptr, nullptr};
-  gpu::StorageBuf *lp_cell_offset_ssbo_[2] = {nullptr, nullptr};
-  gpu::StorageBuf *lp_cell_value_ssbo_[2] = {nullptr, nullptr};
-  gpu::StorageBuf *lp_active_count_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_cell_meta_ssbo_[2] = {nullptr, nullptr};
+  gpu::StorageBuf *lp_active_count_ssbo_ = nullptr; /* 32 ints: active + tmp counters. */
   gpu::StorageBuf *lp_tmp_ssbo_ = nullptr;
   gpu::StorageBuf *lp_scratch_ssbo_ = nullptr;
-  gpu::StorageBuf *lp_tmp_count_ssbo_ = nullptr;
 
   int lp_grid_size_ = 0; /* Allocated grid resolution per axis (0 = unallocated). */
   int64_t lp_active_capacity_ = 0;
@@ -2844,37 +2855,27 @@ class Instance : public DrawEngine {
   /** \name Lipschitz pruning: CSG tree build, buffers, passes
    * \{ */
 
-  static uint32_t lp_pack_binary_op(float k, int op)
+  static uint32_t lp_pack_binary_op(float k, int op, int blend_type)
   {
-    uint32_t sign = (op == SDF_LP_OP_UNION) ? 1u : 0u;
+    uint32_t sign = (op == SDF_LP_CSG_UNION) ? 1u : 0u;
     uint32_t k_bits;
     memcpy(&k_bits, &k, sizeof(float));
-    k_bits &= ~7u; /* low 3 bits reused for op + sign */
-    return k_bits | (uint32_t(op & 3) << 1) | sign;
-  }
-
-  static int lp_map_csg_op(int csg_operation)
-  {
-    switch (csg_operation) {
-      case SDF_CSG_SUBTRACT:
-        return SDF_LP_OP_SUB;
-      case SDF_CSG_INTERSECT:
-        return SDF_LP_OP_INTER;
-      default:
-        return SDF_LP_OP_UNION;
-    }
+    k_bits &= SDF_LP_OP_KMASK; /* low 6 bits reused for blend type + op + sign */
+    return k_bits | (uint32_t(blend_type & 3) << 4) | (uint32_t(op & 7) << 1) | sign;
   }
 
   static bool lp_object_supported(const SDFObjectGPU &obj)
   {
-    if (obj.modifier_count > 0) {
-      return false;
-    }
     switch (obj.sdf_type) {
       case SDF_GPU_TYPE_BOX:
       case SDF_GPU_TYPE_SPHERE:
       case SDF_GPU_TYPE_CYLINDER:
       case SDF_GPU_TYPE_CONE:
+      case SDF_GPU_TYPE_CAPSULE:
+      case SDF_GPU_TYPE_TORUS:
+      case SDF_GPU_TYPE_NGON:
+      case SDF_GPU_TYPE_POLYGON:
+      case SDF_GPU_TYPE_MESH:
         return true;
       default:
         return false;
@@ -2882,14 +2883,16 @@ class Instance : public DrawEngine {
   }
 
   /* Build the post-order CSG tree (flat fold of the sorted object list, groups
-   * folded as subtrees) from objects_/groups_gpu_. Only basic analytic
-   * primitives participate; unsupported objects are skipped. */
+   * folded as subtrees) from objects_/groups_gpu_. All analytic primitive
+   * types (including advanced variants and objects with modifiers)
+   * participate; only unknown type ids are skipped. SHELL/PUSH/AVOID are
+   * desugared into UNION/SUBTRACT/INTERSECT + OFFSET nodes (see combineCSG in
+   * sdf_lib.glsl); PAINT stays an opaque binary op. */
   void lp_build_tree()
   {
     lp_nodes_.clear();
     lp_prims_.clear();
     lp_binary_ops_.clear();
-    lp_parents_init_.clear();
     lp_active_init_.clear();
 
     const int n = int(objects_.size());
@@ -2902,7 +2905,11 @@ class Instance : public DrawEngine {
       int prim_idx;
       int op;
       float blend;
+      int blend_type;
       int left, right;
+      /* OFFSET nodes: single child + float offset (left/right unused). */
+      int child;
+      float offset;
     };
     Vector<BuildNode> build;
     build.reserve(n * 2);
@@ -2922,18 +2929,209 @@ class Instance : public DrawEngine {
       prim.scale = obj.obj_scale;
       prim.color = float4(obj.color.x, obj.color.y, obj.color.z, float(i));
       prim.type = obj.sdf_type;
+      if (obj.sdf_type == SDF_GPU_TYPE_NGON) {
+        prim.aux0 = obj.box_modes.z;
+      }
+      else if (obj.sdf_type == SDF_GPU_TYPE_POLYGON) {
+        prim.aux0 = obj.polygon_point_start;
+        prim.aux1 = obj.polygon_point_count;
+        prim.auxf = obj.box_corners.x;
+      }
+      if (obj.sdf_type == SDF_GPU_TYPE_MESH) {
+        prim.mesh_data = obj.mesh_data;
+        prim.mesh_node_count = obj.mesh_settings.z;
+      }
+      prim.box_corners = obj.box_corners;
+      prim.box_edges = obj.box_edges;
+      prim.box_modes = obj.box_modes;
+      prim.modifier_start = obj.modifier_start;
+      prim.modifier_count = obj.modifier_count;
+      prim.obj_index = i;
       lp_prims_.append(prim);
-      build.append({SDF_LP_NODETYPE_PRIMITIVE, int(lp_prims_.size()) - 1, 0, 0.0f, -1, -1});
+      build.append(
+          {SDF_LP_NODETYPE_PRIMITIVE, int(lp_prims_.size()) - 1, 0, 0.0f, 0, -1, -1, -1, 0.0f});
       return int(build.size()) - 1;
     };
 
-    auto make_op = [&](int op, float blend, int left, int right) -> int {
-      build.append({SDF_LP_NODETYPE_BINARY, -1, op, blend, left, right});
+    auto make_op = [&](int op, float blend, int blend_type, int left, int right) -> int {
+      build.append({SDF_LP_NODETYPE_BINARY, -1, op, blend, blend_type, left, right, -1, 0.0f});
       return int(build.size()) - 1;
     };
 
-    auto obj_smooth_k = [&](int i) -> float {
-      return (objects_[i].blend_type == SDF_BLEND_SMOOTH) ? objects_[i].blend : 0.0f;
+    auto make_offset = [&](int child, float offset) -> int {
+      build.append({SDF_LP_NODETYPE_OFFSET, -1, 0, 0.0f, 0, -1, -1, child, offset});
+      return int(build.size()) - 1;
+    };
+
+    /* Number of BuildNodes in the subtree rooted at bidx. */
+    auto subtree_size = [&](int bidx) -> int {
+      int count = 0;
+      Vector<int> stack;
+      stack.append(bidx);
+      while (!stack.is_empty()) {
+        const int cur = stack.last();
+        stack.remove_last();
+        count++;
+        if (build[cur].type == SDF_LP_NODETYPE_BINARY) {
+          stack.append(build[cur].left);
+          stack.append(build[cur].right);
+        }
+        else if (build[cur].type == SDF_LP_NODETYPE_OFFSET) {
+          stack.append(build[cur].child);
+        }
+      }
+      return count;
+    };
+
+    /* Deep-copy the subtree rooted at bidx, appending the copies to `build`.
+     * Leaf copies reference the SAME lp_prims_ entry (primitives are not
+     * duplicated). Returns the root of the copy. */
+    auto dup_subtree = [&](int bidx) -> int {
+      const int old_size = int(build.size());
+      Vector<int> copy_of(old_size, -1);
+
+      /* Post-order traversal of the source subtree. */
+      Vector<int> stack;
+      Vector<int> order;
+      stack.append(bidx);
+      while (!stack.is_empty()) {
+        const int cur = stack.last();
+        stack.remove_last();
+        order.append(cur);
+        if (build[cur].type == SDF_LP_NODETYPE_BINARY) {
+          stack.append(build[cur].left);
+          stack.append(build[cur].right);
+        }
+        else if (build[cur].type == SDF_LP_NODETYPE_OFFSET) {
+          stack.append(build[cur].child);
+        }
+      }
+
+      for (int j = int(order.size()) - 1; j >= 0; j--) {
+        const int cur = order[j];
+        BuildNode bn = build[cur];
+        if (bn.type == SDF_LP_NODETYPE_BINARY) {
+          bn.left = copy_of[bn.left];
+          bn.right = copy_of[bn.right];
+        }
+        else if (bn.type == SDF_LP_NODETYPE_OFFSET) {
+          bn.child = copy_of[bn.child];
+        }
+        copy_of[cur] = int(build.size());
+        build.append(bn);
+      }
+      return copy_of[bidx];
+    };
+
+    /* The pruning shader packs tmp state into 16 bits, so the flattened tree
+     * must stay within 65535 nodes. Desugared ops duplicate subtrees; if a
+     * duplication would blow the budget, fall back to a plain UNION for that
+     * op (correct pruning, approximate geometry for that op). */
+    bool dup_overflow_warned = false;
+    auto can_dup = [&](int bidx) -> bool {
+      if (int(build.size()) + subtree_size(bidx) + 8 <= 65535) {
+        return true;
+      }
+      if (!dup_overflow_warned) {
+        dup_overflow_warned = true;
+        CLOG_WARN(&LOG,
+                  "SDF LP tree build: node budget exceeded by CSG desugar, "
+                  "falling back to plain UNION for the affected op(s)");
+      }
+      return false;
+    };
+
+    /* Effective blend params: k rides only on non-LINEAR blend types. */
+    auto blend_k = [](float blend, int blend_type, float &k, int &bt) {
+      bt = blend_type & 3;
+      k = (bt != SDF_BLEND_LINEAR) ? blend : 0.0f;
+    };
+
+    /* Combine accumulated left subtree `acc` (d1) with right operand subtree
+     * `operand` (d2) using the right operand's CSG parameters. Mirrors
+     * combineCSG in sdf_lib.glsl; SHELL/PUSH/AVOID are desugared here. */
+    auto combine = [&](int acc,
+                       int operand,
+                       int csg_operation,
+                       int blend_type,
+                       float blend,
+                       float clearance,
+                       float shell_distance,
+                       int shell_mode,
+                       int shell_op,
+                       float shell_blend_top,
+                       float shell_blend_bottom,
+                       float color_blend) -> int
+    {
+      float k;
+      int bt;
+      switch (csg_operation) {
+        case SDF_CSG_SUBTRACT:
+        case SDF_CSG_INTERSECT:
+        case SDF_CSG_UNION:
+          blend_k(blend, blend_type, k, bt);
+          return make_op(csg_operation, k, bt, acc, operand);
+
+        case SDF_CSG_PAINT:
+          /* Geometry = left operand; color blend radius (NOT blend), LINEAR. */
+          return make_op(SDF_LP_CSG_PAINT, color_blend, SDF_LP_BLEND_LINEAR, acc, operand);
+
+        case SDF_CSG_PUSH: {
+          /* result = min(max(d1, -(d2 - c)), d2) (sdf_lib.glsl:1539-1562). */
+          if (!can_dup(operand)) {
+            return make_op(SDF_LP_CSG_UNION, 0.0f, SDF_LP_BLEND_LINEAR, acc, operand);
+          }
+          blend_k(blend, blend_type, k, bt);
+          int sub = make_op(SDF_LP_CSG_SUBTRACT, k, bt, acc, make_offset(operand, -clearance));
+          return make_op(
+              SDF_LP_CSG_UNION, 0.0f, SDF_LP_BLEND_LINEAR, sub, dup_subtree(operand));
+        }
+
+        case SDF_CSG_AVOID: {
+          /* result = min(d1, max(d2, -(d1 - c))) (sdf_lib.glsl:1563-1584). */
+          if (!can_dup(acc)) {
+            return make_op(SDF_LP_CSG_UNION, 0.0f, SDF_LP_BLEND_LINEAR, acc, operand);
+          }
+          blend_k(blend, blend_type, k, bt);
+          int carved =
+              make_op(SDF_LP_CSG_SUBTRACT, k, bt, operand, make_offset(dup_subtree(acc), -clearance));
+          return make_op(SDF_LP_CSG_UNION, 0.0f, SDF_LP_BLEND_LINEAR, acc, carved);
+        }
+
+        case SDF_CSG_SHELL: {
+          /* Non-flipped forms only (sdf_lib.glsl:1585-1735).
+           * TODO: honor flip_blend/flip_blend_end (swap which operand the
+           * blend applies to); TODO: SHELL_MODE_PUSH/AVOID extra carve. */
+          (void)shell_mode;
+          if (!can_dup(acc)) {
+            return make_op(SDF_LP_CSG_UNION, 0.0f, SDF_LP_BLEND_LINEAR, acc, operand);
+          }
+          const float sd = (shell_op == SDF_SHELL_OP_SUBTRACTION) ? -shell_distance :
+                                                                    shell_distance;
+          const float h = fabsf(sd);
+          float k_top = (blend_type != SDF_BLEND_LINEAR && shell_blend_top > 0.0f) ?
+                            shell_blend_top :
+                            0.0f;
+          float k_bot = (blend_type != SDF_BLEND_LINEAR && shell_blend_bottom > 0.0f) ?
+                            shell_blend_bottom :
+                            0.0f;
+          int bt_top = (k_top > 0.0f) ? (blend_type & 3) : SDF_LP_BLEND_LINEAR;
+          int bt_bot = (k_bot > 0.0f) ? (blend_type & 3) : SDF_LP_BLEND_LINEAR;
+          if (sd < 0.0f) {
+            /* Inward: t = d1 - d2 (top blend); result = t U (d1 + h) (bottom). */
+            int t = make_op(SDF_LP_CSG_SUBTRACT, k_top, bt_top, acc, operand);
+            return make_op(
+                SDF_LP_CSG_UNION, k_bot, bt_bot, t, make_offset(dup_subtree(acc), h));
+          }
+          /* Outward: t = d1 U d2 (top blend); result = t ^ (d1 - h) (bottom). */
+          int t = make_op(SDF_LP_CSG_UNION, k_top, bt_top, acc, operand);
+          return make_op(
+              SDF_LP_CSG_INTERSECT, k_bot, bt_bot, t, make_offset(dup_subtree(acc), -h));
+        }
+
+        default:
+          return make_op(SDF_LP_CSG_UNION, 0.0f, SDF_LP_BLEND_LINEAR, acc, operand);
+      }
     };
 
     /* Fold a group's member range into a subtree. */
@@ -2948,7 +3146,19 @@ class Instance : public DrawEngine {
           acc = operand;
           continue;
         }
-        acc = make_op(lp_map_csg_op(objects_[i].csg_operation), obj_smooth_k(i), acc, operand);
+        const SDFObjectGPU &obj = objects_[i];
+        acc = combine(acc,
+                      operand,
+                      obj.csg_operation,
+                      obj.blend_type,
+                      obj.blend,
+                      obj.clearance,
+                      obj.shell_distance,
+                      obj.shell_mode,
+                      obj.shell_op,
+                      obj.shell_blend_top,
+                      obj.shell_blend_bottom,
+                      obj.color_blend);
       }
       return acc;
     };
@@ -2959,32 +3169,52 @@ class Instance : public DrawEngine {
     while (i < n) {
       const int gi = objects_[i].group_id;
       int operand;
-      int op;
-      float k;
       int consumed;
       if (gi >= 0 && gi < int(groups_gpu_.size()) && i == groups_gpu_[gi].first_object &&
           groups_gpu_[gi].object_count > 0)
       {
         const SDFGroupGPU &grp = groups_gpu_[gi];
         operand = fold_leaves(i, i + grp.object_count);
-        op = lp_map_csg_op(grp.csg_operation);
-        k = (grp.blend_type == SDF_BLEND_SMOOTH) ? grp.blend : 0.0f;
+        if (operand >= 0 && root >= 0) {
+          root = combine(root,
+                         operand,
+                         grp.csg_operation,
+                         grp.blend_type,
+                         grp.blend,
+                         grp.clearance,
+                         grp.shell_distance,
+                         grp.shell_mode,
+                         grp.shell_op,
+                         grp.shell_blend_top,
+                         grp.shell_blend_bottom,
+                         grp.color_blend);
+        }
+        else if (operand >= 0) {
+          root = operand;
+        }
         consumed = grp.object_count;
       }
       else {
         operand = make_leaf(i);
-        op = lp_map_csg_op(objects_[i].csg_operation);
-        k = obj_smooth_k(i);
-        consumed = 1;
-      }
-
-      if (operand >= 0) {
-        if (root < 0) {
+        if (operand >= 0 && root >= 0) {
+          const SDFObjectGPU &obj = objects_[i];
+          root = combine(root,
+                         operand,
+                         obj.csg_operation,
+                         obj.blend_type,
+                         obj.blend,
+                         obj.clearance,
+                         obj.shell_distance,
+                         obj.shell_mode,
+                         obj.shell_op,
+                         obj.shell_blend_top,
+                         obj.shell_blend_bottom,
+                         obj.color_blend);
+        }
+        else if (operand >= 0) {
           root = operand;
         }
-        else {
-          root = make_op(op, k, root, operand);
-        }
+        consumed = 1;
       }
       i += consumed;
     }
@@ -2999,9 +3229,8 @@ class Instance : public DrawEngine {
      * The op word's sign bit (+1 union, -1 sub/inter) combined with the
      * negated right operand yields sub/inter from the common min() form. */
     Vector<int> gpu_of_build(build.size(), -1);
-    lp_parents_init_.resize(build.size());
+    lp_active_init_.resize(build.size());
     lp_nodes_.reserve(build.size());
-    lp_active_init_.reserve(build.size());
 
     Vector<int> stack;
     Vector<bool> stack_sign;
@@ -3022,7 +3251,12 @@ class Instance : public DrawEngine {
         stack.append(build[bidx].left);
         stack_sign.append(false);
         stack.append(build[bidx].right);
-        stack_sign.append(build[bidx].op == SDF_LP_OP_SUB);
+        stack_sign.append(build[bidx].op == SDF_LP_CSG_SUBTRACT);
+      }
+      else if (build[bidx].type == SDF_LP_NODETYPE_OFFSET) {
+        /* Unary pass-through: child inherits the sign unchanged. */
+        stack.append(build[bidx].child);
+        stack_sign.append(sign);
       }
     }
 
@@ -3036,16 +3270,25 @@ class Instance : public DrawEngine {
       gpu_node.type = bn.type;
       if (bn.type == SDF_LP_NODETYPE_BINARY) {
         gpu_node.idx_in_type = int(lp_binary_ops_.size());
-        lp_binary_ops_.append(lp_pack_binary_op(bn.blend, bn.op));
-        lp_parents_init_[gpu_of_build[bn.left]] = uint32_t(self_idx);
-        lp_parents_init_[gpu_of_build[bn.right]] = uint32_t(self_idx);
+        lp_binary_ops_.append(lp_pack_binary_op(bn.blend, bn.op, bn.blend_type));
+        lp_active_init_[gpu_of_build[bn.left]].y = uint32_t(self_idx);
+        lp_active_init_[gpu_of_build[bn.right]].y = uint32_t(self_idx);
+      }
+      else if (bn.type == SDF_LP_NODETYPE_OFFSET) {
+        /* Unary node: idx_in_type carries the float bits of the offset; the
+         * child's parent is this node (same as a binary child), and this
+         * node's own parent is assigned by its parent op as usual. */
+        int offset_bits;
+        memcpy(&offset_bits, &bn.offset, sizeof(float));
+        gpu_node.idx_in_type = offset_bits;
+        lp_active_init_[gpu_of_build[bn.child]].y = uint32_t(self_idx);
       }
       else {
         gpu_node.idx_in_type = bn.prim_idx;
       }
       lp_nodes_.append(gpu_node);
-      lp_parents_init_[self_idx] = SDF_LP_INVALID_INDEX;
-      lp_active_init_.append(uint32_t(self_idx) | (sign ? SDF_LP_SIGN_BIT : 0u));
+      lp_active_init_[self_idx].x = uint32_t(self_idx) | (sign ? SDF_LP_SIGN_BIT : 0u);
+      lp_active_init_[self_idx].y = SDF_LP_INVALID_INDEX;
       gpu_of_build[bidx] = self_idx;
     }
 
@@ -3054,7 +3297,6 @@ class Instance : public DrawEngine {
       lp_nodes_.clear();
       lp_prims_.clear();
       lp_binary_ops_.clear();
-      lp_parents_init_.clear();
       lp_active_init_.clear();
     }
   }
@@ -3064,6 +3306,7 @@ class Instance : public DrawEngine {
     SDFLpNode dummy_node = {};
     SDFLpPrimitive dummy_prim = {};
     uint32_t dummy_u = 0;
+    uint2 dummy_u2 = uint2(0u);
 
     const int64_t num_nodes = math::max(int64_t(lp_nodes_.size()), int64_t(1));
     const int64_t num_prims = math::max(int64_t(lp_prims_.size()), int64_t(1));
@@ -3082,15 +3325,10 @@ class Instance : public DrawEngine {
         num_ops * sizeof(uint32_t),
         lp_binary_ops_.is_empty() ? &dummy_u : lp_binary_ops_.data(),
         GPU_USAGE_DYNAMIC, "sdf_lp_binary_ops");
-    if (lp_parents_init_ssbo_) GPU_storagebuf_free(lp_parents_init_ssbo_);
-    lp_parents_init_ssbo_ = GPU_storagebuf_create_ex(
-        num_nodes * sizeof(uint32_t),
-        lp_parents_init_.is_empty() ? &dummy_u : lp_parents_init_.data(),
-        GPU_USAGE_DYNAMIC, "sdf_lp_parents_init");
     if (lp_active_init_ssbo_) GPU_storagebuf_free(lp_active_init_ssbo_);
     lp_active_init_ssbo_ = GPU_storagebuf_create_ex(
-        num_nodes * sizeof(uint32_t),
-        lp_active_init_.is_empty() ? &dummy_u : lp_active_init_.data(),
+        num_nodes * sizeof(uint2),
+        lp_active_init_.is_empty() ? &dummy_u2 : lp_active_init_.data(),
         GPU_USAGE_DYNAMIC, "sdf_lp_active_init");
   }
 
@@ -3132,20 +3370,11 @@ class Instance : public DrawEngine {
 
     for (int p = 0; p < 2; p++) {
       if (lp_active_ssbo_[p]) GPU_storagebuf_free(lp_active_ssbo_[p]);
-      if (lp_parents_ssbo_[p]) GPU_storagebuf_free(lp_parents_ssbo_[p]);
-      if (lp_num_active_ssbo_[p]) GPU_storagebuf_free(lp_num_active_ssbo_[p]);
-      if (lp_cell_offset_ssbo_[p]) GPU_storagebuf_free(lp_cell_offset_ssbo_[p]);
-      if (lp_cell_value_ssbo_[p]) GPU_storagebuf_free(lp_cell_value_ssbo_[p]);
+      if (lp_cell_meta_ssbo_[p]) GPU_storagebuf_free(lp_cell_meta_ssbo_[p]);
       lp_active_ssbo_[p] = GPU_storagebuf_create_ex(
-          active_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_active");
-      lp_parents_ssbo_[p] = GPU_storagebuf_create_ex(
-          active_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_parents");
-      lp_num_active_ssbo_[p] = GPU_storagebuf_create_ex(
-          new_cells * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_num_active");
-      lp_cell_offset_ssbo_[p] = GPU_storagebuf_create_ex(
-          new_cells * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_cell_offset");
-      lp_cell_value_ssbo_[p] = GPU_storagebuf_create_ex(
-          new_cells * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_cell_value");
+          active_entries * sizeof(uint2), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_active");
+      lp_cell_meta_ssbo_[p] = GPU_storagebuf_create_ex(
+          new_cells * sizeof(int4), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_cell_meta");
     }
     if (lp_tmp_ssbo_) GPU_storagebuf_free(lp_tmp_ssbo_);
     lp_tmp_ssbo_ = GPU_storagebuf_create_ex(
@@ -3155,12 +3384,9 @@ class Instance : public DrawEngine {
         tmp_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_scratch");
 
     if (lp_active_count_ssbo_ == nullptr) {
+      /* [0..15] = active-list counters per level, [16..31] = tmp counters. */
       lp_active_count_ssbo_ = GPU_storagebuf_create_ex(
-          16 * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_active_count");
-    }
-    if (lp_tmp_count_ssbo_ == nullptr) {
-      lp_tmp_count_ssbo_ = GPU_storagebuf_create_ex(
-          16 * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_tmp_count");
+          32 * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_counters");
     }
 
     lp_grid_size_ = new_gs;
@@ -3188,7 +3414,6 @@ class Instance : public DrawEngine {
     }
 
     GPU_storagebuf_clear_to_zero(lp_active_count_ssbo_);
-    GPU_storagebuf_clear_to_zero(lp_tmp_count_ssbo_);
 
     int in_idx = 0;
     int out_idx = 1;
@@ -3201,20 +3426,17 @@ class Instance : public DrawEngine {
       lp_bind_ssbo(sh, "lp_prims", lp_prims_ssbo_);
       lp_bind_ssbo(sh, "lp_nodes", lp_nodes_ssbo_);
       lp_bind_ssbo(sh, "lp_binary_ops", lp_binary_ops_ssbo_);
-      lp_bind_ssbo(sh, "lp_parents_in", first ? lp_parents_init_ssbo_ : lp_parents_ssbo_[in_idx]);
-      lp_bind_ssbo(sh, "lp_parents_out", lp_parents_ssbo_[out_idx]);
-      lp_bind_ssbo(sh, "lp_active_nodes", first ? lp_active_init_ssbo_ : lp_active_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_active_in", first ? lp_active_init_ssbo_ : lp_active_ssbo_[in_idx]);
       lp_bind_ssbo(sh, "lp_active_out", lp_active_ssbo_[out_idx]);
-      lp_bind_ssbo(sh, "lp_parent_cells_offset", lp_cell_offset_ssbo_[in_idx]);
-      lp_bind_ssbo(sh, "lp_child_cells_offset", lp_cell_offset_ssbo_[out_idx]);
-      lp_bind_ssbo(sh, "lp_parent_num_active", lp_num_active_ssbo_[in_idx]);
-      lp_bind_ssbo(sh, "lp_num_active_out", lp_num_active_ssbo_[out_idx]);
-      lp_bind_ssbo(sh, "lp_active_count", lp_active_count_ssbo_);
-      lp_bind_ssbo(sh, "lp_cell_value_in", lp_cell_value_ssbo_[in_idx]);
-      lp_bind_ssbo(sh, "lp_cell_value_out", lp_cell_value_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_cell_meta_in", lp_cell_meta_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_cell_meta_out", lp_cell_meta_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_counters", lp_active_count_ssbo_);
       lp_bind_ssbo(sh, "lp_tmp", lp_tmp_ssbo_);
       lp_bind_ssbo(sh, "lp_scratch", lp_scratch_ssbo_);
-      lp_bind_ssbo(sh, "lp_tmp_count", lp_tmp_count_ssbo_);
+      lp_bind_ssbo(sh, "objects", object_ssbo_);
+      lp_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
+      lp_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
+      lp_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
 
       GPU_shader_uniform_3fv(sh, "aabb_min", lp_aabb_min_);
       GPU_shader_uniform_3fv(sh, "aabb_max", lp_aabb_max_);
@@ -3251,10 +3473,13 @@ class Instance : public DrawEngine {
     lp_bind_ssbo(sh, "lp_prims", lp_prims_ssbo_);
     lp_bind_ssbo(sh, "lp_nodes", lp_nodes_ssbo_);
     lp_bind_ssbo(sh, "lp_binary_ops", lp_binary_ops_ssbo_);
-    lp_bind_ssbo(sh, "lp_active_nodes", culling ? lp_active_ssbo_[lp_final_idx_] : lp_active_init_ssbo_);
-    lp_bind_ssbo(sh, "lp_cells_offset", lp_cell_offset_ssbo_[lp_final_idx_]);
-    lp_bind_ssbo(sh, "lp_cells_num_active", lp_num_active_ssbo_[lp_final_idx_]);
-    lp_bind_ssbo(sh, "lp_cell_value", lp_cell_value_ssbo_[lp_final_idx_]);
+    lp_bind_ssbo(sh, "lp_active_in", culling ? lp_active_ssbo_[lp_final_idx_] :
+                                             lp_active_init_ssbo_);
+    lp_bind_ssbo(sh, "lp_cell_meta", lp_cell_meta_ssbo_[lp_final_idx_]);
+    lp_bind_ssbo(sh, "objects", object_ssbo_);
+    lp_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
+    lp_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
+    lp_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
     GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
@@ -4843,9 +5068,6 @@ class Instance : public DrawEngine {
     if (lp_binary_ops_ssbo_) {
       GPU_storagebuf_free(lp_binary_ops_ssbo_);
     }
-    if (lp_parents_init_ssbo_) {
-      GPU_storagebuf_free(lp_parents_init_ssbo_);
-    }
     if (lp_active_init_ssbo_) {
       GPU_storagebuf_free(lp_active_init_ssbo_);
     }
@@ -4853,17 +5075,8 @@ class Instance : public DrawEngine {
       if (lp_active_ssbo_[i]) {
         GPU_storagebuf_free(lp_active_ssbo_[i]);
       }
-      if (lp_parents_ssbo_[i]) {
-        GPU_storagebuf_free(lp_parents_ssbo_[i]);
-      }
-      if (lp_num_active_ssbo_[i]) {
-        GPU_storagebuf_free(lp_num_active_ssbo_[i]);
-      }
-      if (lp_cell_offset_ssbo_[i]) {
-        GPU_storagebuf_free(lp_cell_offset_ssbo_[i]);
-      }
-      if (lp_cell_value_ssbo_[i]) {
-        GPU_storagebuf_free(lp_cell_value_ssbo_[i]);
+      if (lp_cell_meta_ssbo_[i]) {
+        GPU_storagebuf_free(lp_cell_meta_ssbo_[i]);
       }
     }
     if (lp_active_count_ssbo_) {
@@ -4874,9 +5087,6 @@ class Instance : public DrawEngine {
     }
     if (lp_scratch_ssbo_) {
       GPU_storagebuf_free(lp_scratch_ssbo_);
-    }
-    if (lp_tmp_count_ssbo_) {
-      GPU_storagebuf_free(lp_tmp_count_ssbo_);
     }
 
     if (fullscreen_batch_) {
