@@ -356,6 +356,9 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_color_resolve_comp.glsl
   engines/sdf/shaders/sdf_normal_comp.glsl
   engines/sdf/shaders/sdf_shade_comp.glsl
+  engines/sdf/shaders/sdf_lp_prune_comp.glsl
+  engines/sdf/shaders/sdf_lp_trace_comp.glsl
+  engines/sdf/shaders/sdf_lp_common.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl

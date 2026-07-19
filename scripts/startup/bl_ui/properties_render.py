@@ -219,6 +219,23 @@ class RENDER_PT_proximity_raymarcher(Panel):
             layout.label(text="No 3D Viewport found.")
             return
 
+        layout.prop(shading, "sdf_engine_mode")
+
+        if shading.sdf_engine_mode == 'LIPSCHITZ':
+            col = layout.column()
+            col.prop(shading, "sdf_lp_enable_pruning")
+            col.prop(shading, "sdf_lp_recompute_pruning")
+            col.prop(shading, "sdf_lp_grid_level")
+            col.prop(shading, "sdf_lp_aabb_auto")
+            if not shading.sdf_lp_aabb_auto:
+                col.prop(shading, "sdf_lp_aabb_min")
+                col.prop(shading, "sdf_lp_aabb_max")
+            col.separator()
+            col.prop(shading, "sdf_lp_shading_mode")
+            if shading.sdf_lp_shading_mode == 'HEATMAP':
+                col.prop(shading, "sdf_lp_colormap_max")
+            return
+
         row = layout.row(align=True)
         row.alignment = 'EXPAND'
         row.label(text="Preset:")

@@ -69,6 +69,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace blender::draw::sdf {
@@ -276,6 +277,8 @@ enum ShaderIndex {
   SH_SHADE_COMP,
   SH_BLIT,
   SH_FXAA,
+  SH_LP_PRUNE_COMP,
+  SH_LP_TRACE_COMP,
   SH_COUNT,
 };
 
@@ -290,6 +293,8 @@ static constexpr const char *s_shader_info_names[SH_COUNT] = {
     "sdf_shade_comp",
     "sdf_blit",
     "sdf_fxaa",
+    "sdf_lp_prune_comp",
+    "sdf_lp_trace_comp",
 };
 
 static gpu::StaticShader s_shaders[SH_COUNT];
@@ -355,6 +360,8 @@ class Instance : public DrawEngine {
   gpu::Shader *shade_comp_sh() { return sdf_shader_get(SH_SHADE_COMP); }
   gpu::Shader *blit_sh() { return sdf_shader_get(SH_BLIT); }
   gpu::Shader *fxaa_sh() { return sdf_shader_get(SH_FXAA); }
+  gpu::Shader *lp_prune_sh() { return sdf_shader_get(SH_LP_PRUNE_COMP); }
+  gpu::Shader *lp_trace_sh() { return sdf_shader_get(SH_LP_TRACE_COMP); }
 
   gpu::Texture *comp_color_tx_ = nullptr;
   gpu::Texture *comp_depth_tx_ = nullptr;
@@ -467,6 +474,51 @@ class Instance : public DrawEngine {
   float4 studio_light_spec_[4] = {};
   float3 studio_ambient_ = float3(0.0f);
   gpu::UniformBuf *shading_ubo_ = nullptr;
+
+  /* ---- Lipschitz pruning engine state ---- */
+  int engine_mode_ = 0; /* 0 = classic, 1 = Lipschitz pruning */
+  bool lp_enable_pruning_ = true;
+  bool lp_recompute_pruning_ = true;
+  int lp_shading_mode_ = 0;
+  int lp_grid_level_ = 6;
+  int lp_colormap_max_ = 25;
+  bool lp_aabb_auto_ = true;
+  float3 lp_aabb_min_user_ = float3(-1.0f);
+  float3 lp_aabb_max_user_ = float3(1.0f);
+
+  /* CPU CSG tree (post-order serialized, rebuilt in end_sync). */
+  Vector<SDFLpNode> lp_nodes_;
+  Vector<SDFLpPrimitive> lp_prims_;
+  Vector<uint32_t> lp_binary_ops_;
+  Vector<uint32_t> lp_parents_init_;
+  Vector<uint32_t> lp_active_init_;
+
+  gpu::StorageBuf *lp_nodes_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_prims_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_binary_ops_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_parents_init_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_active_init_ssbo_ = nullptr;
+
+  /* Grid buffers (ping-pong between hierarchy levels). */
+  gpu::StorageBuf *lp_active_ssbo_[2] = {nullptr, nullptr};
+  gpu::StorageBuf *lp_parents_ssbo_[2] = {nullptr, nullptr};
+  gpu::StorageBuf *lp_num_active_ssbo_[2] = {nullptr, nullptr};
+  gpu::StorageBuf *lp_cell_offset_ssbo_[2] = {nullptr, nullptr};
+  gpu::StorageBuf *lp_cell_value_ssbo_[2] = {nullptr, nullptr};
+  gpu::StorageBuf *lp_active_count_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_tmp_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_scratch_ssbo_ = nullptr;
+  gpu::StorageBuf *lp_tmp_count_ssbo_ = nullptr;
+
+  int lp_grid_size_ = 0; /* Allocated grid resolution per axis (0 = unallocated). */
+  int64_t lp_active_capacity_ = 0;
+  int64_t lp_tmp_capacity_ = 0;
+  bool lp_grid_valid_ = false; /* Pruning results match the current tree/grid/AABB. */
+  bool lp_grid_dirty_ = true;
+  int lp_grid_level_built_ = 0; /* Grid level the current results were built with. */
+  int lp_final_idx_ = 0; /* Ping-pong slot holding the final level results. */
+  float3 lp_aabb_min_ = float3(0.0f);
+  float3 lp_aabb_max_ = float3(0.0f);
 
  public:
   Instance() {}
@@ -2780,9 +2832,460 @@ class Instance : public DrawEngine {
       }
     }
 
+    if (engine_mode_ == 1) {
+      lp_build_tree();
+    }
+
     needs_upload_ = true;
 
   }
+
+  /* -------------------------------------------------------------------- */
+  /** \name Lipschitz pruning: CSG tree build, buffers, passes
+   * \{ */
+
+  static uint32_t lp_pack_binary_op(float k, int op)
+  {
+    uint32_t sign = (op == SDF_LP_OP_UNION) ? 1u : 0u;
+    uint32_t k_bits;
+    memcpy(&k_bits, &k, sizeof(float));
+    k_bits &= ~7u; /* low 3 bits reused for op + sign */
+    return k_bits | (uint32_t(op & 3) << 1) | sign;
+  }
+
+  static int lp_map_csg_op(int csg_operation)
+  {
+    switch (csg_operation) {
+      case SDF_CSG_SUBTRACT:
+        return SDF_LP_OP_SUB;
+      case SDF_CSG_INTERSECT:
+        return SDF_LP_OP_INTER;
+      default:
+        return SDF_LP_OP_UNION;
+    }
+  }
+
+  static bool lp_object_supported(const SDFObjectGPU &obj)
+  {
+    if (obj.modifier_count > 0) {
+      return false;
+    }
+    switch (obj.sdf_type) {
+      case SDF_GPU_TYPE_BOX:
+      case SDF_GPU_TYPE_SPHERE:
+      case SDF_GPU_TYPE_CYLINDER:
+      case SDF_GPU_TYPE_CONE:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /* Build the post-order CSG tree (flat fold of the sorted object list, groups
+   * folded as subtrees) from objects_/groups_gpu_. Only basic analytic
+   * primitives participate; unsupported objects are skipped. */
+  void lp_build_tree()
+  {
+    lp_nodes_.clear();
+    lp_prims_.clear();
+    lp_binary_ops_.clear();
+    lp_parents_init_.clear();
+    lp_active_init_.clear();
+
+    const int n = int(objects_.size());
+    if (n == 0) {
+      return;
+    }
+
+    struct BuildNode {
+      int type;
+      int prim_idx;
+      int op;
+      float blend;
+      int left, right;
+    };
+    Vector<BuildNode> build;
+    build.reserve(n * 2);
+
+    auto make_leaf = [&](int i) -> int {
+      const SDFObjectGPU &obj = objects_[i];
+      if (!lp_object_supported(obj)) {
+        return -1;
+      }
+      SDFLpPrimitive prim = {};
+      const float4x4 &im = obj.inverse_matrix;
+      prim.m_row0 = float4(im[0][0], im[1][0], im[2][0], im[3][0]);
+      prim.m_row1 = float4(im[0][1], im[1][1], im[2][1], im[3][1]);
+      prim.m_row2 = float4(im[0][2], im[1][2], im[2][2], im[3][2]);
+      prim.position = obj.position;
+      prim.size = obj.sdf_size;
+      prim.scale = obj.obj_scale;
+      prim.color = float4(obj.color.x, obj.color.y, obj.color.z, float(i));
+      prim.type = obj.sdf_type;
+      lp_prims_.append(prim);
+      build.append({SDF_LP_NODETYPE_PRIMITIVE, int(lp_prims_.size()) - 1, 0, 0.0f, -1, -1});
+      return int(build.size()) - 1;
+    };
+
+    auto make_op = [&](int op, float blend, int left, int right) -> int {
+      build.append({SDF_LP_NODETYPE_BINARY, -1, op, blend, left, right});
+      return int(build.size()) - 1;
+    };
+
+    auto obj_smooth_k = [&](int i) -> float {
+      return (objects_[i].blend_type == SDF_BLEND_SMOOTH) ? objects_[i].blend : 0.0f;
+    };
+
+    /* Fold a group's member range into a subtree. */
+    auto fold_leaves = [&](int begin, int end) -> int {
+      int acc = -1;
+      for (int i = begin; i < end; i++) {
+        int operand = make_leaf(i);
+        if (operand < 0) {
+          continue;
+        }
+        if (acc < 0) {
+          acc = operand;
+          continue;
+        }
+        acc = make_op(lp_map_csg_op(objects_[i].csg_operation), obj_smooth_k(i), acc, operand);
+      }
+      return acc;
+    };
+
+    /* Scene fold: groups as subtrees, ungrouped objects as leaves. */
+    int root = -1;
+    int i = 0;
+    while (i < n) {
+      const int gi = objects_[i].group_id;
+      int operand;
+      int op;
+      float k;
+      int consumed;
+      if (gi >= 0 && gi < int(groups_gpu_.size()) && i == groups_gpu_[gi].first_object &&
+          groups_gpu_[gi].object_count > 0)
+      {
+        const SDFGroupGPU &grp = groups_gpu_[gi];
+        operand = fold_leaves(i, i + grp.object_count);
+        op = lp_map_csg_op(grp.csg_operation);
+        k = (grp.blend_type == SDF_BLEND_SMOOTH) ? grp.blend : 0.0f;
+        consumed = grp.object_count;
+      }
+      else {
+        operand = make_leaf(i);
+        op = lp_map_csg_op(objects_[i].csg_operation);
+        k = obj_smooth_k(i);
+        consumed = 1;
+      }
+
+      if (operand >= 0) {
+        if (root < 0) {
+          root = operand;
+        }
+        else {
+          root = make_op(op, k, root, operand);
+        }
+      }
+      i += consumed;
+    }
+
+    if (root < 0) {
+      return;
+    }
+
+    /* Serialize post-order (left subtree, right subtree, node). Signs are
+     * absolute, not propagated (reference scene.cpp): every node is positive
+     * except the immediate right child of a SUB op, whose output is negated.
+     * The op word's sign bit (+1 union, -1 sub/inter) combined with the
+     * negated right operand yields sub/inter from the common min() form. */
+    Vector<int> gpu_of_build(build.size(), -1);
+    lp_parents_init_.resize(build.size());
+    lp_nodes_.reserve(build.size());
+    lp_active_init_.reserve(build.size());
+
+    Vector<int> stack;
+    Vector<bool> stack_sign;
+    stack.append(root);
+    stack_sign.append(false);
+    Vector<int> order;
+    Vector<bool> order_sign;
+    order.reserve(build.size());
+    order_sign.reserve(build.size());
+    while (!stack.is_empty()) {
+      const int bidx = stack.last();
+      const bool sign = stack_sign.last();
+      stack.remove_last();
+      stack_sign.remove_last();
+      order.append(bidx);
+      order_sign.append(sign);
+      if (build[bidx].type == SDF_LP_NODETYPE_BINARY) {
+        stack.append(build[bidx].left);
+        stack_sign.append(false);
+        stack.append(build[bidx].right);
+        stack_sign.append(build[bidx].op == SDF_LP_OP_SUB);
+      }
+    }
+
+    for (int j = int(order.size()) - 1; j >= 0; j--) {
+      const int bidx = order[j];
+      const bool sign = order_sign[j];
+      const BuildNode &bn = build[bidx];
+      const int self_idx = int(lp_nodes_.size());
+
+      SDFLpNode gpu_node = {};
+      gpu_node.type = bn.type;
+      if (bn.type == SDF_LP_NODETYPE_BINARY) {
+        gpu_node.idx_in_type = int(lp_binary_ops_.size());
+        lp_binary_ops_.append(lp_pack_binary_op(bn.blend, bn.op));
+        lp_parents_init_[gpu_of_build[bn.left]] = uint32_t(self_idx);
+        lp_parents_init_[gpu_of_build[bn.right]] = uint32_t(self_idx);
+      }
+      else {
+        gpu_node.idx_in_type = bn.prim_idx;
+      }
+      lp_nodes_.append(gpu_node);
+      lp_parents_init_[self_idx] = SDF_LP_INVALID_INDEX;
+      lp_active_init_.append(uint32_t(self_idx) | (sign ? SDF_LP_SIGN_BIT : 0u));
+      gpu_of_build[bidx] = self_idx;
+    }
+
+    /* The pruning shader packs parent indices into 16 bits of scratch state. */
+    if (lp_nodes_.size() > 65535) {
+      lp_nodes_.clear();
+      lp_prims_.clear();
+      lp_binary_ops_.clear();
+      lp_parents_init_.clear();
+      lp_active_init_.clear();
+    }
+  }
+
+  void lp_upload_tree()
+  {
+    SDFLpNode dummy_node = {};
+    SDFLpPrimitive dummy_prim = {};
+    uint32_t dummy_u = 0;
+
+    const int64_t num_nodes = math::max(int64_t(lp_nodes_.size()), int64_t(1));
+    const int64_t num_prims = math::max(int64_t(lp_prims_.size()), int64_t(1));
+    const int64_t num_ops = math::max(int64_t(lp_binary_ops_.size()), int64_t(1));
+
+    if (lp_nodes_ssbo_) GPU_storagebuf_free(lp_nodes_ssbo_);
+    lp_nodes_ssbo_ = GPU_storagebuf_create_ex(num_nodes * sizeof(SDFLpNode),
+                                              lp_nodes_.is_empty() ? &dummy_node : lp_nodes_.data(),
+                                              GPU_USAGE_DYNAMIC, "sdf_lp_nodes");
+    if (lp_prims_ssbo_) GPU_storagebuf_free(lp_prims_ssbo_);
+    lp_prims_ssbo_ = GPU_storagebuf_create_ex(num_prims * sizeof(SDFLpPrimitive),
+                                              lp_prims_.is_empty() ? &dummy_prim : lp_prims_.data(),
+                                              GPU_USAGE_DYNAMIC, "sdf_lp_prims");
+    if (lp_binary_ops_ssbo_) GPU_storagebuf_free(lp_binary_ops_ssbo_);
+    lp_binary_ops_ssbo_ = GPU_storagebuf_create_ex(
+        num_ops * sizeof(uint32_t),
+        lp_binary_ops_.is_empty() ? &dummy_u : lp_binary_ops_.data(),
+        GPU_USAGE_DYNAMIC, "sdf_lp_binary_ops");
+    if (lp_parents_init_ssbo_) GPU_storagebuf_free(lp_parents_init_ssbo_);
+    lp_parents_init_ssbo_ = GPU_storagebuf_create_ex(
+        num_nodes * sizeof(uint32_t),
+        lp_parents_init_.is_empty() ? &dummy_u : lp_parents_init_.data(),
+        GPU_USAGE_DYNAMIC, "sdf_lp_parents_init");
+    if (lp_active_init_ssbo_) GPU_storagebuf_free(lp_active_init_ssbo_);
+    lp_active_init_ssbo_ = GPU_storagebuf_create_ex(
+        num_nodes * sizeof(uint32_t),
+        lp_active_init_.is_empty() ? &dummy_u : lp_active_init_.data(),
+        GPU_USAGE_DYNAMIC, "sdf_lp_active_init");
+  }
+
+  /* Ensure grid buffers are allocated for (at least) the given grid level.
+   * Grow-only; invalidates pruning results when anything is reallocated. */
+  void lp_ensure_grid_buffers(int grid_level)
+  {
+    const int gs = 1 << grid_level;
+    const int64_t num_cells = int64_t(gs) * gs * gs;
+    const int64_t num_nodes = math::max(int64_t(lp_nodes_.size()), int64_t(1));
+
+    /* Active list streams: far-field cells store nothing, so a small multiple
+     * of the cell count is plenty for typical scenes; the shader clamps writes
+     * to the capacity as a safety net. */
+    int64_t active_entries = math::max(num_cells * 2, int64_t(1) << 21);
+    active_entries = math::min(active_entries, int64_t(1) << 26);
+
+    /* Scratch is allocated per workgroup and only for non-trivial cells; the
+     * worst case is cells_total * num_nodes, capped at a reasonable bound. */
+    int64_t cells_total = 0;
+    for (int lvl = 2; lvl <= grid_level; lvl += 2) {
+      const int64_t g = int64_t(1) << lvl;
+      cells_total += g * g * g;
+    }
+    int64_t tmp_entries = cells_total * num_nodes;
+    tmp_entries = math::min(tmp_entries, int64_t(1) << 26);
+    tmp_entries = math::max(tmp_entries, int64_t(1) << 16);
+
+    if (lp_active_ssbo_[0] != nullptr && gs <= lp_grid_size_ &&
+        active_entries <= lp_active_capacity_ && tmp_entries <= lp_tmp_capacity_)
+    {
+      return;
+    }
+
+    const int new_gs = math::max(gs, lp_grid_size_);
+    const int64_t new_cells = int64_t(new_gs) * new_gs * new_gs;
+    active_entries = math::max(active_entries, lp_active_capacity_);
+    tmp_entries = math::max(tmp_entries, lp_tmp_capacity_);
+
+    for (int p = 0; p < 2; p++) {
+      if (lp_active_ssbo_[p]) GPU_storagebuf_free(lp_active_ssbo_[p]);
+      if (lp_parents_ssbo_[p]) GPU_storagebuf_free(lp_parents_ssbo_[p]);
+      if (lp_num_active_ssbo_[p]) GPU_storagebuf_free(lp_num_active_ssbo_[p]);
+      if (lp_cell_offset_ssbo_[p]) GPU_storagebuf_free(lp_cell_offset_ssbo_[p]);
+      if (lp_cell_value_ssbo_[p]) GPU_storagebuf_free(lp_cell_value_ssbo_[p]);
+      lp_active_ssbo_[p] = GPU_storagebuf_create_ex(
+          active_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_active");
+      lp_parents_ssbo_[p] = GPU_storagebuf_create_ex(
+          active_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_parents");
+      lp_num_active_ssbo_[p] = GPU_storagebuf_create_ex(
+          new_cells * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_num_active");
+      lp_cell_offset_ssbo_[p] = GPU_storagebuf_create_ex(
+          new_cells * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_cell_offset");
+      lp_cell_value_ssbo_[p] = GPU_storagebuf_create_ex(
+          new_cells * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_cell_value");
+    }
+    if (lp_tmp_ssbo_) GPU_storagebuf_free(lp_tmp_ssbo_);
+    lp_tmp_ssbo_ = GPU_storagebuf_create_ex(
+        tmp_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_tmp");
+    if (lp_scratch_ssbo_) GPU_storagebuf_free(lp_scratch_ssbo_);
+    lp_scratch_ssbo_ = GPU_storagebuf_create_ex(
+        tmp_entries * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_scratch");
+
+    if (lp_active_count_ssbo_ == nullptr) {
+      lp_active_count_ssbo_ = GPU_storagebuf_create_ex(
+          16 * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_active_count");
+    }
+    if (lp_tmp_count_ssbo_ == nullptr) {
+      lp_tmp_count_ssbo_ = GPU_storagebuf_create_ex(
+          16 * sizeof(int32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_lp_tmp_count");
+    }
+
+    lp_grid_size_ = new_gs;
+    lp_active_capacity_ = active_entries;
+    lp_tmp_capacity_ = tmp_entries;
+    lp_grid_valid_ = false;
+  }
+
+  void lp_bind_ssbo(gpu::Shader *sh, const char *name, gpu::StorageBuf *buf)
+  {
+    if (buf == nullptr) {
+      return;
+    }
+    const int slot = GPU_shader_get_ssbo_binding(sh, name);
+    if (slot >= 0) {
+      GPU_storagebuf_bind(buf, slot);
+    }
+  }
+
+  void draw_lp_prune()
+  {
+    gpu::Shader *sh = lp_prune_sh();
+    if (sh == nullptr || lp_nodes_.is_empty()) {
+      return;
+    }
+
+    GPU_storagebuf_clear_to_zero(lp_active_count_ssbo_);
+    GPU_storagebuf_clear_to_zero(lp_tmp_count_ssbo_);
+
+    int in_idx = 0;
+    int out_idx = 1;
+
+    GPU_shader_bind(sh);
+    for (int lvl = 2; lvl <= lp_grid_level_; lvl += 2) {
+      const int cur_gs = 1 << lvl;
+      const bool first = (lvl == 2);
+
+      lp_bind_ssbo(sh, "lp_prims", lp_prims_ssbo_);
+      lp_bind_ssbo(sh, "lp_nodes", lp_nodes_ssbo_);
+      lp_bind_ssbo(sh, "lp_binary_ops", lp_binary_ops_ssbo_);
+      lp_bind_ssbo(sh, "lp_parents_in", first ? lp_parents_init_ssbo_ : lp_parents_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_parents_out", lp_parents_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_active_nodes", first ? lp_active_init_ssbo_ : lp_active_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_active_out", lp_active_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_parent_cells_offset", lp_cell_offset_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_child_cells_offset", lp_cell_offset_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_parent_num_active", lp_num_active_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_num_active_out", lp_num_active_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_active_count", lp_active_count_ssbo_);
+      lp_bind_ssbo(sh, "lp_cell_value_in", lp_cell_value_ssbo_[in_idx]);
+      lp_bind_ssbo(sh, "lp_cell_value_out", lp_cell_value_ssbo_[out_idx]);
+      lp_bind_ssbo(sh, "lp_tmp", lp_tmp_ssbo_);
+      lp_bind_ssbo(sh, "lp_scratch", lp_scratch_ssbo_);
+      lp_bind_ssbo(sh, "lp_tmp_count", lp_tmp_count_ssbo_);
+
+      GPU_shader_uniform_3fv(sh, "aabb_min", lp_aabb_min_);
+      GPU_shader_uniform_3fv(sh, "aabb_max", lp_aabb_max_);
+      GPU_shader_uniform_1i(sh, "total_num_nodes", int(lp_nodes_.size()));
+      GPU_shader_uniform_1i(sh, "grid_size", cur_gs);
+      GPU_shader_uniform_1i(sh, "first_lvl", first ? 1 : 0);
+      GPU_shader_uniform_1i(sh, "active_capacity", int(lp_active_capacity_));
+      GPU_shader_uniform_1i(sh, "tmp_capacity", int(lp_tmp_capacity_));
+      GPU_shader_uniform_1i(sh, "counter_slot", lvl);
+
+      GPU_compute_dispatch(sh, cur_gs / 4, cur_gs / 4, cur_gs / 4);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+
+      std::swap(in_idx, out_idx);
+    }
+    GPU_shader_unbind();
+    lp_final_idx_ = in_idx;
+    lp_grid_valid_ = true;
+    lp_grid_level_built_ = lp_grid_level_;
+  }
+
+  void draw_lp_trace()
+  {
+    gpu::Shader *sh = lp_trace_sh();
+    if (sh == nullptr) {
+      return;
+    }
+
+    lp_ensure_grid_buffers(lp_enable_pruning_ ? lp_grid_level_ : 2);
+    const bool culling = lp_enable_pruning_ && lp_grid_valid_ && !lp_nodes_.is_empty();
+
+    GPU_shader_bind(sh);
+
+    lp_bind_ssbo(sh, "lp_prims", lp_prims_ssbo_);
+    lp_bind_ssbo(sh, "lp_nodes", lp_nodes_ssbo_);
+    lp_bind_ssbo(sh, "lp_binary_ops", lp_binary_ops_ssbo_);
+    lp_bind_ssbo(sh, "lp_active_nodes", culling ? lp_active_ssbo_[lp_final_idx_] : lp_active_init_ssbo_);
+    lp_bind_ssbo(sh, "lp_cells_offset", lp_cell_offset_ssbo_[lp_final_idx_]);
+    lp_bind_ssbo(sh, "lp_cells_num_active", lp_num_active_ssbo_[lp_final_idx_]);
+    lp_bind_ssbo(sh, "lp_cell_value", lp_cell_value_ssbo_[lp_final_idx_]);
+
+    GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
+    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
+    GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
+
+    GPU_shader_uniform_3fv(sh, "aabb_min", lp_aabb_min_);
+    GPU_shader_uniform_3fv(sh, "aabb_max", lp_aabb_max_);
+    GPU_shader_uniform_1i(sh, "grid_size", culling ? (1 << lp_grid_level_) : 1);
+    GPU_shader_uniform_1i(sh, "total_num_nodes", int(lp_nodes_.size()));
+    GPU_shader_uniform_1i(sh, "culling_enabled", culling ? 1 : 0);
+    GPU_shader_uniform_1i(sh, "shading_mode", lp_shading_mode_);
+    GPU_shader_uniform_1f(sh, "viz_max", float(lp_colormap_max_));
+    GPU_shader_uniform_1i(sh, "max_steps", sdf_max_steps_);
+    GPU_shader_uniform_1f(sh, "ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
+
+    View &view = View::default_get();
+    view.matrices_ubo_get().push_update();
+    GPU_uniformbuf_bind(view.matrices_ubo_get(), DRW_VIEW_UBO_SLOT);
+
+    const int dispatch_x = (render_size_.x + 7) / 8;
+    const int dispatch_y = (render_size_.y + 7) / 8;
+    GPU_compute_dispatch(sh, dispatch_x, dispatch_y, 1);
+
+    GPU_texture_image_unbind(gbuf_pos_tx_);
+    GPU_texture_image_unbind(gbuf_color_tx_);
+    GPU_texture_image_unbind(gbuf_normal_tx_);
+    GPU_shader_unbind();
+  }
+
+  /** \} */
 
   void draw(Manager & /*manager*/) final
   {
@@ -2837,6 +3340,15 @@ class Instance : public DrawEngine {
       hash_shading(&sdf_cone_steps_, sizeof(sdf_cone_steps_));
       hash_shading(&use_frustum_cull_, sizeof(use_frustum_cull_));
       hash_shading(&fxaa_enabled_, sizeof(fxaa_enabled_));
+      hash_shading(&engine_mode_, sizeof(engine_mode_));
+      hash_shading(&lp_enable_pruning_, sizeof(lp_enable_pruning_));
+      hash_shading(&lp_recompute_pruning_, sizeof(lp_recompute_pruning_));
+      hash_shading(&lp_shading_mode_, sizeof(lp_shading_mode_));
+      hash_shading(&lp_grid_level_, sizeof(lp_grid_level_));
+      hash_shading(&lp_colormap_max_, sizeof(lp_colormap_max_));
+      hash_shading(&lp_aabb_auto_, sizeof(lp_aabb_auto_));
+      hash_shading(lp_aabb_min_user_, sizeof(lp_aabb_min_user_));
+      hash_shading(lp_aabb_max_user_, sizeof(lp_aabb_max_user_));
       shading_changed = (sh != prev_shading_hash_);
       prev_shading_hash_ = sh;
     }
@@ -2953,62 +3465,136 @@ class Instance : public DrawEngine {
 
     ensure_compute_targets();
 
+    /* Lipschitz pruning: resolve the effective grid AABB and flag the pruning
+     * grid dirty when the scene, grid level, or AABB inputs changed. */
+    if (engine_mode_ == 1) {
+      int lvl = std::clamp(lp_grid_level_, 2, 8);
+      lvl += lvl & 1;
+      lp_grid_level_ = lvl;
+
+      float3 want_min, want_max;
+      if (lp_aabb_auto_) {
+        want_min = scene_min_;
+        want_max = scene_max_;
+        if (!(want_max.x > want_min.x) || !(want_max.y > want_min.y) ||
+            !(want_max.z > want_min.z))
+        {
+          want_min = float3(-1.0f);
+          want_max = float3(1.0f);
+        }
+        else {
+          float3 pad = (want_max - want_min) * 0.001f + float3(1e-4f);
+          want_min -= pad;
+          want_max += pad;
+        }
+      }
+      else {
+        want_min = lp_aabb_min_user_;
+        want_max = lp_aabb_max_user_;
+        /* Guard against degenerate user input. */
+        want_max = math::max(want_max, want_min + float3(1e-4f));
+      }
+
+      if (lvl != lp_grid_level_built_ || want_min != lp_aabb_min_ || want_max != lp_aabb_max_ ||
+          scene_changed_)
+      {
+        lp_grid_dirty_ = true;
+        lp_aabb_min_ = want_min;
+        lp_aabb_max_ = want_max;
+      }
+    }
+
     bool res_changed = (render_size_ != prev_render_size_);
     bool force_compute = (G.debug & G_DEBUG_GPU_SDF) != 0;
     bool need_compute = force_compute || !compute_valid_ || scene_changed_ || view_changed_ ||
                          res_changed || shading_changed;
 
     if (need_compute) {
-      PROF_START("AABB Project");
-      GPU_debug_group_begin("SDF AABB Project");
-      draw_aabb_project();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-      PROF_END();
+      if (engine_mode_ == 1) {
+        /* Lipschitz pruning path: build/refresh the pruning grid, then march
+         * against the per-cell active node lists. Shading reuses the classic
+         * shade pass (lighting forced off for debug modes in draw_shade). */
+        if (lp_enable_pruning_ && !lp_nodes_.is_empty() &&
+            (lp_recompute_pruning_ || lp_grid_dirty_ || !lp_grid_valid_))
+        {
+          PROF_START("LP Prune");
+          GPU_debug_group_begin("SDF LP Prune");
+          lp_ensure_grid_buffers(lp_grid_level_);
+          draw_lp_prune();
+          GPU_debug_group_end();
+          GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+          PROF_END();
+          lp_grid_dirty_ = false;
+        }
 
-      PROF_START("Tile Cull");
-      GPU_debug_group_begin("SDF Tile Cull");
-      draw_tile_cull();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-      PROF_END();
+        PROF_START("LP Trace");
+        GPU_debug_group_begin("SDF LP Trace");
+        draw_lp_trace();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+        PROF_END();
 
-      PROF_START("Cone March");
-      GPU_debug_group_begin("SDF Cone March");
-      draw_cone_march();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-      PROF_END();
+        PROF_START("Shade");
+        GPU_debug_group_begin("SDF Shade");
+        draw_shade();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+        PROF_END();
 
-      PROF_START("Trace");
-      GPU_debug_group_begin("SDF Trace");
-      draw_trace();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
-      PROF_END();
+        compute_valid_ = true;
+      }
+      else {
+        PROF_START("AABB Project");
+        GPU_debug_group_begin("SDF AABB Project");
+        draw_aabb_project();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+        PROF_END();
 
-      PROF_START("Color Resolve");
-      GPU_debug_group_begin("SDF Color Resolve");
-      draw_color_resolve();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
-      PROF_END();
+        PROF_START("Tile Cull");
+        GPU_debug_group_begin("SDF Tile Cull");
+        draw_tile_cull();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+        PROF_END();
 
-      PROF_START("Normal");
-      GPU_debug_group_begin("SDF Normal");
-      draw_normal();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
-      PROF_END();
+        PROF_START("Cone March");
+        GPU_debug_group_begin("SDF Cone March");
+        draw_cone_march();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+        PROF_END();
 
-      PROF_START("Shade");
-      GPU_debug_group_begin("SDF Shade");
-      draw_shade();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-      PROF_END();
+        PROF_START("Trace");
+        GPU_debug_group_begin("SDF Trace");
+        draw_trace();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+        PROF_END();
 
-      compute_valid_ = true;
+        PROF_START("Color Resolve");
+        GPU_debug_group_begin("SDF Color Resolve");
+        draw_color_resolve();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+        PROF_END();
+
+        PROF_START("Normal");
+        GPU_debug_group_begin("SDF Normal");
+        draw_normal();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+        PROF_END();
+
+        PROF_START("Shade");
+        GPU_debug_group_begin("SDF Shade");
+        draw_shade();
+        GPU_debug_group_end();
+        GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+        PROF_END();
+
+        compute_valid_ = true;
+      }
     }
 
     PROF_START("Blit");
@@ -3141,6 +3727,17 @@ class Instance : public DrawEngine {
     adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
     adaptive_precision_ = s.sdf_adaptive_precision != 0;
     use_frustum_cull_ = s.sdf_frustum_cull != 0;
+
+    /* Lipschitz pruning engine settings. */
+    engine_mode_ = (s.sdf_engine_mode == 1) ? 1 : 0;
+    lp_enable_pruning_ = s.sdf_lp_enable_pruning != 0;
+    lp_recompute_pruning_ = s.sdf_lp_recompute_pruning != 0;
+    lp_shading_mode_ = s.sdf_lp_shading_mode;
+    lp_grid_level_ = s.sdf_lp_grid_level >= 2 ? s.sdf_lp_grid_level : 6;
+    lp_colormap_max_ = s.sdf_lp_colormap_max > 0 ? s.sdf_lp_colormap_max : 25;
+    lp_aabb_auto_ = s.sdf_lp_aabb_auto != 0;
+    lp_aabb_min_user_ = float3(s.sdf_lp_aabb_min);
+    lp_aabb_max_user_ = float3(s.sdf_lp_aabb_max);
 
     bool new_fxaa = (U.sdf_fxaa != 0);
     if (!new_fxaa && fxaa_enabled_) {
@@ -3506,6 +4103,10 @@ class Instance : public DrawEngine {
       if (!gpu_nodes.is_empty()) {
         GPU_storagebuf_update(bvh_nodes_ssbo_, gpu_nodes.data());
       }
+    }
+
+    if (engine_mode_ == 1) {
+      lp_upload_tree();
     }
   }
 
@@ -3986,7 +4587,11 @@ class Instance : public DrawEngine {
     int matcap_slot = GPU_shader_get_sampler_binding(sh, "matcap_tx");
     GPU_texture_bind(matcap_tx_, matcap_slot);
 
-    GPU_shader_uniform_1i(sh, "lighting_type", lighting_type_);
+    /* LP debug modes (heatmap/normals) bake the final color into gbuf_color;
+     * force the shade pass to pass-through so lighting is not applied twice. */
+    const int effective_lighting = (engine_mode_ == 1 && lp_shading_mode_ != 0) ? 0 :
+                                                                              lighting_type_;
+    GPU_shader_uniform_1i(sh, "lighting_type", effective_lighting);
     GPU_shader_uniform_1i(sh, "use_specular", use_specular_);
     GPU_shader_uniform_1i(sh, "use_matcap_flip", use_matcap_flip_);
     GPU_shader_uniform_1f(sh, "sdf_ray_epsilon", sdf_ray_epsilon_);
@@ -4227,6 +4832,53 @@ class Instance : public DrawEngine {
     if (shading_ubo_) {
       GPU_uniformbuf_free(shading_ubo_);
     }
+
+    /* Lipschitz pruning buffers */
+    if (lp_nodes_ssbo_) {
+      GPU_storagebuf_free(lp_nodes_ssbo_);
+    }
+    if (lp_prims_ssbo_) {
+      GPU_storagebuf_free(lp_prims_ssbo_);
+    }
+    if (lp_binary_ops_ssbo_) {
+      GPU_storagebuf_free(lp_binary_ops_ssbo_);
+    }
+    if (lp_parents_init_ssbo_) {
+      GPU_storagebuf_free(lp_parents_init_ssbo_);
+    }
+    if (lp_active_init_ssbo_) {
+      GPU_storagebuf_free(lp_active_init_ssbo_);
+    }
+    for (int i = 0; i < 2; i++) {
+      if (lp_active_ssbo_[i]) {
+        GPU_storagebuf_free(lp_active_ssbo_[i]);
+      }
+      if (lp_parents_ssbo_[i]) {
+        GPU_storagebuf_free(lp_parents_ssbo_[i]);
+      }
+      if (lp_num_active_ssbo_[i]) {
+        GPU_storagebuf_free(lp_num_active_ssbo_[i]);
+      }
+      if (lp_cell_offset_ssbo_[i]) {
+        GPU_storagebuf_free(lp_cell_offset_ssbo_[i]);
+      }
+      if (lp_cell_value_ssbo_[i]) {
+        GPU_storagebuf_free(lp_cell_value_ssbo_[i]);
+      }
+    }
+    if (lp_active_count_ssbo_) {
+      GPU_storagebuf_free(lp_active_count_ssbo_);
+    }
+    if (lp_tmp_ssbo_) {
+      GPU_storagebuf_free(lp_tmp_ssbo_);
+    }
+    if (lp_scratch_ssbo_) {
+      GPU_storagebuf_free(lp_scratch_ssbo_);
+    }
+    if (lp_tmp_count_ssbo_) {
+      GPU_storagebuf_free(lp_tmp_count_ssbo_);
+    }
+
     if (fullscreen_batch_) {
       GPU_batch_discard(fullscreen_batch_);
     }

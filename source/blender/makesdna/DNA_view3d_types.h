@@ -638,6 +638,23 @@ struct View3DShading {
    * marcher values are used at all times. */
   char sdf_adaptive_precision = 1;
   char _pad_sdf_up[3] = {};
+
+  /* SDF render engine selection: 0 = classic tile/BVH marcher, 1 = Lipschitz pruning. */
+  char sdf_engine_mode = 0;
+  /* Lipschitz pruning settings (only used when sdf_engine_mode == 1). */
+  char sdf_lp_enable_pruning = 1;
+  char sdf_lp_recompute_pruning = 1;
+  /* 0 = shaded, 1 = active-node-count heatmap, 2 = normals. */
+  char sdf_lp_shading_mode = 0;
+  char sdf_lp_aabb_auto = 1;
+  char _pad_sdf_lp[3] = {};
+  /* Log2 of the pruning grid resolution per axis: 2, 4, 6 or 8 (grid 4..256). */
+  int sdf_lp_grid_level = 6;
+  /* Active node count mapped to the top of the heatmap colormap. */
+  int sdf_lp_colormap_max = 25;
+  /* Manual pruning grid bounds (used when sdf_lp_aabb_auto is off). */
+  float sdf_lp_aabb_min[3] = {-1.0f, -1.0f, -1.0f};
+  float sdf_lp_aabb_max[3] = {1.0f, 1.0f, 1.0f};
 };
 
 /** 3D Viewport Overlay settings. */

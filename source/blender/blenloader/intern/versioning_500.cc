@@ -4681,6 +4681,33 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 41)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          View3DShading &s = v3d->shading;
+          s.sdf_engine_mode = 0;
+          s.sdf_lp_enable_pruning = 1;
+          s.sdf_lp_recompute_pruning = 1;
+          s.sdf_lp_shading_mode = 0;
+          s.sdf_lp_aabb_auto = 1;
+          s.sdf_lp_grid_level = 6;
+          s.sdf_lp_colormap_max = 25;
+          s.sdf_lp_aabb_min[0] = -1.0f;
+          s.sdf_lp_aabb_min[1] = -1.0f;
+          s.sdf_lp_aabb_min[2] = -1.0f;
+          s.sdf_lp_aabb_max[0] = 1.0f;
+          s.sdf_lp_aabb_max[1] = 1.0f;
+          s.sdf_lp_aabb_max[2] = 1.0f;
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

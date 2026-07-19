@@ -5007,6 +5007,79 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop, "SDF Debug Grid", "Debug visualization for the sparse brick grid");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  static const EnumPropertyItem sdf_engine_mode_items[] = {
+      {0, "CLASSIC", 0, "Classic Marcher", "Tile/BVH sphere-tracing engine"},
+      {1, "LIPSCHITZ", 0, "Lipschitz Pruning", "Hierarchical Lipschitz pruning of the CSG tree (per-cell pruned trees)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_engine_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_engine_mode");
+  RNA_def_property_enum_items(prop, sdf_engine_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "SDF Engine", "Ray marching engine used for SDF viewport rendering");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_enable_pruning", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_lp_enable_pruning", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Enable Pruning", "Use per-cell pruned CSG trees while tracing (off = evaluate the full tree)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_recompute_pruning", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_lp_recompute_pruning", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Recompute Pruning", "Rebuild the pruning grid every frame (needed for animated scenes; disable to freeze the grid)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  static const EnumPropertyItem sdf_lp_shading_mode_items[] = {
+      {0, "SHADED", 0, "Shaded", "Shaded with studio lighting"},
+      {1, "HEATMAP", 0, "Heatmap", "Heatmap of the per-cell active node count (pruning efficiency)"},
+      {2, "NORMALS", 0, "Normals", "Visualize surface normals"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "sdf_lp_shading_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sdf_lp_shading_mode");
+  RNA_def_property_enum_items(prop, sdf_lp_shading_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Shading Mode", "Debug shading for the Lipschitz pruning engine");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_grid_level", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_lp_grid_level");
+  RNA_def_property_range(prop, 2, 8);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Grid Size (log2)", "Pruning grid resolution per axis: 2=4, 4=16, 6=64, 8=256 cells (rounded up to even)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_colormap_max", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_lp_colormap_max");
+  RNA_def_property_range(prop, 1, 256);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Colormap Max", "Active node count mapped to the top of the heatmap colormap");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_aabb_auto", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_lp_aabb_auto", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Auto AABB", "Fit the pruning grid bounds to the scene bounding box");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_aabb_min", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_lp_aabb_min");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "AABB Min", "Pruning grid bounds minimum (manual mode)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "sdf_lp_aabb_max", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "sdf_lp_aabb_max");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "AABB Max", "Pruning grid bounds maximum (manual mode)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 }
 
 static void rna_def_space_view3d_overlay(BlenderRNA *brna)
