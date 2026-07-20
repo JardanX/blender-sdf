@@ -2464,6 +2464,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
           return ICON_SDF_NGON;
         case SDF_TYPE_POLYGON:
           return ICON_SDF_POLYGON;
+        case SDF_TYPE_TEXT:
+          return ICON_OUTLINER_OB_FONT;
         default:
           return ICON_SDF_CUBE;
       }

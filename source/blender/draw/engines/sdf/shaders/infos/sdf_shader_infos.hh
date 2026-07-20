@@ -359,6 +359,10 @@ LOCAL_GROUP_SIZE(8, 8)
  * seeds gbuf_color.a with the dominant object id (light lp_list_eval_obj_id
  * fold) for picking; hit color and normals come from the shared classic
  * passes (sdf_color_resolve_comp / sdf_normal_comp). */
+/* Full-tree fallback (SDF_LP_FALLBACK_LIST cells) reads the serialized init
+ * list (lp_active_init), NOT the per-level pool buffer — enables the
+ * lp_list_eval_init/lp_list_eval_obj_id_init variants in sdf_lp_common.glsl. */
+DEFINE_VALUE("SDF_LP_INIT_LIST", "1")
 STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
 STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
 STORAGE_BUF(2, read, uint4, lp_binary_ops[])
@@ -369,6 +373,7 @@ STORAGE_BUF(6, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(7, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(8, read, uint4, mesh_data_buf[])
 STORAGE_BUF(9, read, uint, bake_dist[])
+STORAGE_BUF(10, read, uint, lp_active_init[])
 IMAGE(0, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
 IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_color_img)
 PUSH_CONSTANT(float3, aabb_min)
@@ -457,6 +462,10 @@ PUSH_CONSTANT(float, voxel_size)
 /* Narrow band half-width (4 * voxel_size); distances clamp to +/-band. */
 PUSH_CONSTANT(float, band)
 PUSH_CONSTANT(int, has_colors)
+/* Absolute z of this dispatch's first voxel slice (progressive bake). */
+PUSH_CONSTANT(int, z_offset)
+/* 1 = distance pool only (coarse far-field level; skips bake_nrm/bake_col). */
+PUSH_CONSTANT(int, dist_only)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_mesh_bake_comp.glsl")
 GPU_SHADER_CREATE_END()

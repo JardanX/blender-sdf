@@ -34,6 +34,7 @@
 #include "DNA_meta_types.h"
 #include "DNA_object_force_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_anim_visualization.h"
@@ -46,6 +47,7 @@
 #include "BKE_editmesh.hh"
 #include "BKE_effect.h"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
@@ -722,6 +724,27 @@ static bool editmode_load_free_ex(Main *bmain,
       ED_curve_editfont_free(obedit);
     }
   }
+  else if (obedit->type == OB_SDF) {
+    SDF *sdf = id_cast<SDF *>(obedit->data);
+    if (sdf->sdf_type != SDF_TYPE_TEXT) {
+      return false;
+    }
+    const Curve *cu = BKE_sdf_text_edit_curve_get(sdf);
+    if (cu == nullptr || cu->editfont == nullptr) {
+      return false;
+    }
+
+    if (load_data) {
+      ED_curve_editfont_load(obedit);
+      /* Keep the persistent SDF text state in sync (edit-mode exit,
+       * file-save and render flushes all come through here). */
+      BKE_sdf_text_edit_curve_store(sdf);
+    }
+
+    if (free_data) {
+      BKE_sdf_text_edit_curve_free(sdf);
+    }
+  }
   else if (obedit->type == OB_LATTICE) {
     const Lattice *lt = id_cast<const Lattice *>(obedit->data);
     if (lt->editlatt == nullptr) {
@@ -924,6 +947,18 @@ bool editmode_enter_ex(Main *bmain, Scene *scene, Object *ob, int flag)
     ED_curve_editfont_make(ob);
 
     WM_main_add_notifier(NC_SCENE | ND_MODE | NS_EDITMODE_TEXT, scene);
+  }
+  else if (ob->type == OB_SDF) {
+    /* The SDF text primitive edits its text through a runtime Curve +
+     * EditFont, reusing the regular text editing (TAB to type). */
+    SDF *sdf = id_cast<SDF *>(ob->data);
+    if (sdf->sdf_type == SDF_TYPE_TEXT) {
+      ok = true;
+      BKE_sdf_text_edit_curve_enter(sdf);
+      ED_curve_editfont_make(ob);
+
+      WM_main_add_notifier(NC_SCENE | ND_MODE | NS_EDITMODE_TEXT, scene);
+    }
   }
   /* MATHOPS: Removed — OB_MBALL editmode make */
   else if (ob->type == OB_MBALL) {

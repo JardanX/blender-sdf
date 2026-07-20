@@ -32,6 +32,11 @@ const EnumPropertyItem rna_enum_sdf_type_items[] = {
      ICON_OUTLINER_OB_MESH,
      "Mesh",
      "Non-voxel triangle mesh signed distance field"},
+    {SDF_TYPE_TEXT,
+     "TEXT",
+     ICON_FONT_DATA,
+     "Text",
+     "Analytic text signed distance field (editable like a text object)"},
     {SDF_TYPE_GROUP, "GROUP", ICON_DOT, "Group", "SDF group container"},
     {0, nullptr, 0, nullptr, nullptr},
 };
@@ -60,11 +65,15 @@ extern const EnumPropertyItem rna_enum_sdf_modifier_type_items[] = {
 #  include "BLI_string.h"
 
 #  include "BKE_global.hh"
+#  include "BKE_lib_id.hh"
 #  include "BKE_main.hh"
 #  include "BKE_report.hh"
 #  include "BKE_sdf.hh"
+#  include "BKE_sdf_text.hh"
+#  include "BKE_vfont.hh"
 
 #  include "DNA_object_types.h"
+#  include "DNA_vfont_types.h"
 
 #  include "DEG_depsgraph.hh"
 
@@ -135,6 +144,18 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
       break;
     case SDF_TYPE_MESH:
       break;
+    case SDF_TYPE_TEXT:
+      sdf->size[0] = 1.0f;
+      sdf->size[1] = 1.0f;
+      sdf->size[2] = 0.1f;
+      if (sdf->text == nullptr) {
+        BKE_sdf_text_set(sdf, "Text");
+      }
+      if (sdf->text_font == nullptr) {
+        sdf->text_font = BKE_vfont_builtin_ensure();
+        id_us_plus(&sdf->text_font->id);
+      }
+      break;
     default:
       sdf->size[0] = 1.0f;
       sdf->size[1] = 1.0f;
@@ -143,6 +164,29 @@ static void rna_SDF_type_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   }
 
   rna_SDF_update(bmain, scene, ptr);
+}
+
+static int rna_SDF_text_length(PointerRNA *ptr)
+{
+  SDF *sdf = (SDF *)ptr->owner_id;
+  return sdf->text ? strlen(sdf->text) : 0;
+}
+
+static void rna_SDF_text_get(PointerRNA *ptr, char *value)
+{
+  SDF *sdf = (SDF *)ptr->owner_id;
+  if (sdf->text) {
+    strcpy(value, sdf->text);
+  }
+  else {
+    value[0] = '\0';
+  }
+}
+
+static void rna_SDF_text_set(PointerRNA *ptr, const char *value)
+{
+  SDF *sdf = (SDF *)ptr->owner_id;
+  BKE_sdf_text_set(sdf, value);
 }
 
 static void rna_SDF_modifier_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
@@ -837,6 +881,118 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.001f, FLT_MAX);
   RNA_def_property_ui_range(prop, 0.001f, 5.0f, 1.0f, 3);
   RNA_def_property_ui_text(prop, "Size", "Size in each axis");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  /* Text primitive (SDF_TYPE_TEXT): body, font and layout. Top/bottom bevel
+   * and taper reuse the polygon fields; extrusion depth is size[2]. */
+  prop = RNA_def_property(srna, "text", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(
+      prop, "rna_SDF_text_get", "rna_SDF_text_length", "rna_SDF_text_set");
+  RNA_def_property_ui_text(
+      prop, "Text", "Text body (also editable directly in the 3D viewport with Tab)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_font", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "text_font");
+  RNA_def_property_ui_text(prop, "Font", "Font of the text (falls back to the built-in font)");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_size", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "text_size");
+  RNA_def_property_range(prop, 0.001f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.01f, 10.0f, 1.0f, 3);
+  RNA_def_property_ui_text(prop, "Size", "Font size");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_spacing", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "text_spacing");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Character Spacing", "Spacing between characters");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_linedist", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "text_linedist");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Line Spacing", "Spacing between lines");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_shear", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "text_shear");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Shear", "Italic shear of the text");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  static const EnumPropertyItem prop_text_align_x_items[] = {
+      {CU_ALIGN_X_LEFT, "LEFT", ICON_ALIGN_LEFT, "Left", "Align text to the left"},
+      {CU_ALIGN_X_MIDDLE, "CENTER", ICON_ALIGN_CENTER, "Center", "Center text"},
+      {CU_ALIGN_X_RIGHT, "RIGHT", ICON_ALIGN_RIGHT, "Right", "Align text to the right"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "text_align_x", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "text_align_x");
+  RNA_def_property_enum_items(prop, prop_text_align_x_items);
+  RNA_def_property_ui_text(prop, "Horizontal Alignment", "Text horizontal alignment");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  static const EnumPropertyItem prop_text_align_y_items[] = {
+      {CU_ALIGN_Y_TOP, "TOP", ICON_ALIGN_TOP, "Top", "Align text to the top"},
+      {CU_ALIGN_Y_TOP_BASELINE,
+       "TOP_BASELINE",
+       ICON_ALIGN_TOP,
+       "Top Baseline",
+       "Align text to the top line's baseline"},
+      {CU_ALIGN_Y_CENTER, "CENTER", ICON_ALIGN_MIDDLE, "Middle", "Align text to the middle"},
+      {CU_ALIGN_Y_BOTTOM_BASELINE,
+       "BOTTOM_BASELINE",
+       ICON_ALIGN_BOTTOM,
+       "Bottom Baseline",
+       "Align text to the bottom line's baseline"},
+      {CU_ALIGN_Y_BOTTOM, "BOTTOM", ICON_ALIGN_BOTTOM, "Bottom", "Align text to the bottom"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "text_align_y", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "text_align_y");
+  RNA_def_property_enum_items(prop, prop_text_align_y_items);
+  RNA_def_property_ui_text(prop, "Vertical Alignment", "Text vertical alignment");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_thickness", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "text_thickness");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.1f, 3);
+  RNA_def_property_ui_text(
+      prop, "Thickness", "Outline stroke width of the glyphs (0 = filled glyphs)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_corner", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "text_corner");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 0.5f, 0.1f, 3);
+  RNA_def_property_ui_text(prop, "Corner Bevel", "Rounding radius at glyph outline corners");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_bevel_top", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_edge_top");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Top Bevel", "Bevel of the outline at the top cap (factor of the depth)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_bevel_bottom", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_edge_bottom");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Bottom Bevel", "Bevel of the outline at the bottom cap (factor of the depth)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "text_taper", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "polygon_taper");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Taper", "Scale the outline towards the top (positive) or bottom (negative)");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
   prop = RNA_def_property(srna, "mesh_normal_mode", PROP_ENUM, PROP_NONE);

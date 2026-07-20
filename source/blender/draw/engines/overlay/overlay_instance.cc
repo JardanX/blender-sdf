@@ -604,6 +604,12 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
       case OB_FONT:
         layer.text.edit_object_sync(manager, ob_ref, resources, state);
         break;
+      case OB_SDF:
+        /* SDF text primitive: same cursor/selection overlay as text objects. */
+        if (id_cast<const SDF *>(ob_ref.object->data)->sdf_type == SDF_TYPE_TEXT) {
+          layer.text.edit_object_sync(manager, ob_ref, resources, state);
+        }
+        break;
       /* MATHOPS: Removed — Grease Pencil overlay */
       // case OB_GREASE_PENCIL:
       //   layer.grease_pencil.edit_object_sync(manager, ob_ref, resources, state);
@@ -1106,6 +1112,9 @@ bool Instance::object_is_edit_mode(const Object *object)
       case OB_LATTICE:
         return state.ctx_mode == CTX_MODE_EDIT_LATTICE;
       case OB_FONT:
+        return state.ctx_mode == CTX_MODE_EDIT_TEXT;
+      case OB_SDF:
+        /* SDF text primitive reuses the text editing mode. */
         return state.ctx_mode == CTX_MODE_EDIT_TEXT;
       case OB_CURVES:
         return state.ctx_mode == CTX_MODE_EDIT_CURVES;

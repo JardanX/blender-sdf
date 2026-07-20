@@ -21,6 +21,7 @@
 #include "DNA_sdf_types.h"
 
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
 
 #include "GPU_batch.hh"
 #include "GPU_shader.hh"
@@ -87,6 +88,16 @@ static inline void sdf_local_bb(const SDF *sdf, float3 &out_min, float3 &out_max
       out_min = float3(mn.x - line_pad, mn.y - line_pad, -sz.z);
       out_max = float3(mx.x + line_pad, mx.y + line_pad, sz.z);
       return;
+    }
+    case SDF_TYPE_TEXT: {
+      float2 tb_min, tb_max;
+      if (BKE_sdf_text_bounds_sdf(sdf, tb_min, tb_max)) {
+        const float pad = sdf->text_thickness * 0.5f + sdf->text_corner + sdf->bevel;
+        out_min = float3(tb_min.x - pad, tb_min.y - pad, -sz.z);
+        out_max = float3(tb_max.x + pad, tb_max.y + pad, sz.z);
+        return;
+      }
+      break;
     }
     default:
       break;

@@ -494,15 +494,16 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         layout = self.layout
         sdf = context.sdf
 
-        grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
-        grid.scale_x = 1.0
-        grid.scale_y = 1.6
-        for item in sdf.bl_rna.properties["sdf_type"].enum_items:
-            if item.identifier in {'GROUP', 'MESH'}:
-                continue
-            grid.prop_enum(sdf, "sdf_type", item.identifier, text="")
+        if sdf.sdf_type != 'TEXT':
+            grid = layout.grid_flow(row_major=True, columns=4, even_columns=True, even_rows=True, align=True)
+            grid.scale_x = 1.0
+            grid.scale_y = 1.6
+            for item in sdf.bl_rna.properties["sdf_type"].enum_items:
+                if item.identifier in {'GROUP', 'MESH', 'TEXT'}:
+                    continue
+                grid.prop_enum(sdf, "sdf_type", item.identifier, text="")
 
-        layout.separator()
+            layout.separator()
 
         layout.use_property_split = True
         layout.use_property_decorate = False
@@ -532,9 +533,54 @@ class DATA_PT_sdf_shape(SDFButtonsPanel, Panel):
         elif t == 'MESH':
             col.label(text=f"{sdf.mesh_vertex_count:,} vertices")
             col.label(text=f"{sdf.mesh_triangle_count:,} triangles")
+        elif t == 'TEXT':
+            col.prop(sdf, "text")
+            col.template_ID(sdf, "text_font", open="font.open", unlink="font.unlink")
 
         layout.separator()
         layout.prop(sdf, "color")
+
+
+class DATA_PT_sdf_text(SDFButtonsPanel, Panel):
+    bl_label = "SDF Text"
+
+    @classmethod
+    def poll(cls, context):
+        sdf = context.sdf
+        return sdf is not None and sdf.sdf_type == 'TEXT'
+
+    def draw(self, context):
+        layout = self.layout
+        sdf = context.sdf
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        col = layout.column(align=True)
+        col.prop(sdf, "text_size", text="Size")
+        col.prop(sdf, "size", index=2, text="Depth")
+        col.prop(sdf, "bevel", text="Rounding")
+
+        layout.separator()
+
+        col = layout.column(align=True)
+        col.prop(sdf, "text_spacing", text="Character Spacing")
+        col.prop(sdf, "text_linedist", text="Line Spacing")
+        col.prop(sdf, "text_shear", text="Shear")
+
+        layout.separator()
+
+        col = layout.column(align=True)
+        col.prop(sdf, "text_align_x", text="Align X")
+        col.prop(sdf, "text_align_y", text="Align Y")
+
+        layout.separator()
+
+        col = layout.column(align=True)
+        col.prop(sdf, "text_thickness", text="Thickness")
+        col.prop(sdf, "text_corner", text="Corner Bevel")
+        col.prop(sdf, "text_bevel_top", text="Top Bevel")
+        col.prop(sdf, "text_bevel_bottom", text="Bottom Bevel")
+        col.prop(sdf, "text_taper", text="Taper")
 
 
 class DATA_PT_sdf_group(SDFButtonsPanel, Panel):
@@ -1069,6 +1115,7 @@ classes = (
     VIEW3D_GGT_sdf_polygon,
     DATA_PT_context_sdf,
     DATA_PT_sdf_shape,
+    DATA_PT_sdf_text,
     DATA_PT_sdf_group,
     DATA_PT_sdf_operation,
     DATA_PT_sdf_property,

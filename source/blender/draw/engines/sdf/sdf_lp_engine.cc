@@ -214,12 +214,19 @@ class LpInstance : public SdfInstanceBase {
     /* Dense per-mesh volume bakes: (re)bake any new/changed mesh payloads
      * into the shared voxel pools before pruning/marching. Self-contained
      * and idempotent; runtime sampling is the SDF_LP_MESH_FLAG_BAKED fast
-     * path. */
+     * path. When the update re-resolved baked object fields (records flipped
+     * to ready or pool ranges reassigned), rebuild the tree: make_leaf
+     * captures those fields into lp_prims_. */
     PROF_START("Mesh Bake");
     GPU_debug_group_begin("SDF LP Mesh Bake");
-    update_mesh_bakes();
+    const bool bake_changed = update_mesh_bakes();
     GPU_debug_group_end();
     PROF_END();
+    if (bake_changed) {
+      lp_build_tree();
+      lp_upload_tree();
+      lp_grid_dirty_ = true;
+    }
 
     /* Lipschitz pruning path: build/refresh the pruning grid when the scene,
      * grid level or AABB changed (smart recompute; see pre_trace_hook), then
@@ -424,6 +431,8 @@ class LpInstance : public SdfInstanceBase {
           prim.box_corners = obj.bake_origin;
           prim.box_edges = obj.bake_params;
           prim.box_modes = obj.bake_grid;
+          prim.coarse_origin = obj.bake_coarse_origin;
+          prim.coarse_grid = obj.bake_coarse_grid;
         }
       }
       if (obj.sdf_type != SDF_GPU_TYPE_MESH ||
@@ -974,8 +983,16 @@ class LpInstance : public SdfInstanceBase {
         gpu_node.idx_in_type = bn.prim_idx;
         /* Primitives are (conservatively) 1-Lipschitz: exact SDFs, with the
          * min-axis scale and taper/displacement corrections already applied
-         * inside the primitive evaluation. */
-        gpu_node.lipschitz = 1.0f;
+         * inside the primitive evaluation. Baked mesh volumes get 1.5: the
+         * trilinear/clamped baked field and its Voronoi sign-flip guard are
+         * not strictly 1-Lipschitz (bounded jumps up to ~band between
+         * cells); the margin keeps the prune far-cell bounds conservative. */
+        const SDFLpPrimitive &leaf_prim = lp_prims_[bn.prim_idx];
+        gpu_node.lipschitz =
+            (leaf_prim.type == SDF_GPU_TYPE_MESH &&
+             (leaf_prim.mesh_flags & SDF_LP_MESH_FLAG_BAKED) != 0) ?
+                1.5f :
+                1.0f;
       }
       lp_nodes_.append(gpu_node);
       lp_active_init_nodes_[self_idx] = uint32_t(self_idx) | (sign ? SDF_LP_SIGN_BIT : 0u);
@@ -1217,6 +1234,7 @@ class LpInstance : public SdfInstanceBase {
     lp_bind_ssbo(sh, "lp_binary_ops", lp_binary_ops_ssbo_);
     lp_bind_ssbo(sh, "lp_active_in", culling ? lp_active_nodes_ssbo_[lp_final_idx_] :
                                               lp_active_init_nodes_ssbo_);
+    lp_bind_ssbo(sh, "lp_active_init", lp_active_init_nodes_ssbo_);
     lp_bind_ssbo(sh, "lp_cell_meta", lp_cell_meta_ssbo_[lp_final_idx_]);
     lp_bind_ssbo(sh, "objects", object_ssbo_);
     lp_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);

@@ -114,6 +114,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
 #include "BKE_paint.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcache.h"
@@ -1744,6 +1745,10 @@ bool BKE_object_is_in_editmode(const Object *ob)
     case OB_SURF:
     case OB_CURVES_LEGACY:
       return (id_cast<Curve *>(ob->data))->editnurb != nullptr;
+    case OB_SDF: {
+      const Curve *cu = BKE_sdf_text_edit_curve_get(id_cast<const SDF *>(ob->data));
+      return cu != nullptr && cu->editfont != nullptr;
+    }
     case OB_CURVES:
     case OB_POINTCLOUD:
     case OB_GREASE_PENCIL:
@@ -1773,6 +1778,10 @@ bool BKE_object_data_is_in_editmode(const Object *ob, const ID *id)
       return (id_cast<const Lattice *>(id))->editlatt != nullptr;
     case ID_AR:
       return (id_cast<const bArmature *>(id))->edbo != nullptr;
+    case ID_SF: {
+      const Curve *cu = BKE_sdf_text_edit_curve_get(id_cast<const SDF *>(id));
+      return cu != nullptr && cu->editfont != nullptr;
+    }
     case ID_CV:
     case ID_PT:
     case ID_GP:
@@ -1812,6 +1821,17 @@ char *BKE_object_data_editmode_flush_ptr_get(ID *id)
       break;
     }
     /* MATHOPS: Removed — Metaball edit mode flush */
+    case ID_SF: {
+      /* SDF text primitive: the flush flag lives on the runtime edit curve's
+       * EditFont (see BKE_sdf_text.hh). */
+      const SDF *sdf = id_cast<const SDF *>(id);
+      if (Curve *cu = BKE_sdf_text_edit_curve_get(sdf)) {
+        if (cu->editfont != nullptr) {
+          return &cu->editfont->needs_flush_to_id;
+        }
+      }
+      return nullptr;
+    }
     case ID_LT: {
       EditLatt *editlatt = (id_cast<Lattice *>(id))->editlatt;
       if (editlatt) {
@@ -3513,6 +3533,19 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
         case SDF_TYPE_CONE: {
           float r = std::max(sdf->size[0], sdf->size[2]);
           half_size = {r, r, sdf->size[1]};
+          break;
+        }
+        case SDF_TYPE_TEXT: {
+          float2 text_min, text_max;
+          /* Read-only layout (const_cast for the non-const vfont API). */
+          if (BKE_sdf_text_bounds(const_cast<Object *>(ob), text_min, text_max)) {
+            const float pad = sdf->text_thickness * 0.5f + sdf->text_corner + sdf->bevel;
+            const float hz = sdf->size[2] + sdf->bevel;
+            return Bounds<float3>{float3(text_min.x - pad, text_min.y - pad, -hz),
+                                  float3(text_max.x + pad, text_max.y + pad, hz)};
+          }
+          /* Empty/missing text: fall back to a unit box. */
+          half_size = float3(sdf->size[0], sdf->size[1], sdf->size[2]);
           break;
         }
         default:

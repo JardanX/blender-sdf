@@ -314,9 +314,9 @@ static Object *editfont_object_from_context(bContext *C)
   ViewLayer *view_layer = CTX_data_view_layer(C);
   BKE_view_layer_synced_ensure(scene, view_layer);
   Object *obedit = BKE_view_layer_edit_object_get(view_layer);
-  if (obedit && obedit->type == OB_FONT) {
-    const Curve *cu = id_cast<Curve *>(obedit->data);
-    const EditFont *ef = cu->editfont;
+  if (obedit && ELEM(obedit->type, OB_FONT, OB_SDF)) {
+    const Curve *cu = ED_curve_editfont_curve_get(obedit);
+    const EditFont *ef = cu ? cu->editfont : nullptr;
     if (ef != nullptr) {
       return obedit;
     }
@@ -349,7 +349,7 @@ static bool font_undosys_step_encode(bContext *C, Main *bmain, UndoStep *us_p)
   FontUndoStep *us = reinterpret_cast<FontUndoStep *>(us_p);
   us->scene_ref.ptr = CTX_data_scene(C);
   us->obedit_ref.ptr = editfont_object_from_context(C);
-  Curve *cu = id_cast<Curve *>(us->obedit_ref.ptr->data);
+  Curve *cu = ED_curve_editfont_curve_get(us->obedit_ref.ptr);
   undofont_from_editfont(&us->data, cu);
   us->step.data_size = us->data.undo_size;
   cu->editfont->needs_flush_to_id = 1;
@@ -372,9 +372,9 @@ static void font_undosys_step_decode(
       CTX_wm_manager(C), us->scene_ref.ptr, &scene, &view_layer);
   ED_undo_object_editmode_restore_helper(scene, view_layer, &obedit, 1, sizeof(Object *));
 
-  Curve *cu = id_cast<Curve *>(obedit->data);
+  Curve *cu = ED_curve_editfont_curve_get(obedit);
   undofont_to_editfont(&us->data, cu);
-  DEG_id_tag_update(&cu->id, ID_RECALC_GEOMETRY);
+  DEG_id_tag_update(static_cast<ID *>(obedit->data), ID_RECALC_GEOMETRY);
 
   ED_undo_object_set_active_or_warn(scene, view_layer, obedit, us_p->name, &LOG);
 

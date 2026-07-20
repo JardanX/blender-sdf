@@ -157,6 +157,7 @@ void OBJECT_OT_volume_add(wmOperatorType *ot);
 /* `object_sdf.cc` */
 
 void OBJECT_OT_sdf_add(wmOperatorType *ot);
+void OBJECT_OT_sdf_text_add(wmOperatorType *ot);
 void OBJECT_OT_sdf_set_csg(wmOperatorType *ot);
 void OBJECT_OT_sdf_set_blend(wmOperatorType *ot);
 void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot);

@@ -84,9 +84,16 @@ struct [[host_shared]] SDFObjectGPU {
   float4 bake_params;
   /* xyz = voxel grid resolution, w = first voxel index in the bake pools. */
   int4 bake_grid;
+  /* Coarse far-field level (unclamped distance out to the scene blend
+   * reach; sampled outside the fine grid so CSG blends of any radius stay
+   * exact). xyz = coarse grid origin, w = coarse voxel size. Zero grid
+   * (bake_coarse_grid.x == 0) when the scene has no blends. */
+  float4 bake_coarse_origin;
+  /* xyz = coarse voxel grid resolution, w = first coarse voxel index. */
+  int4 bake_coarse_grid;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFObjectGPU, 16)
-BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 464, "SDFObjectGPU size mismatch")
+BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 496, "SDFObjectGPU size mismatch")
 
 struct [[host_shared]] SDFObjectAABB {
   float4 bbox_min;
@@ -291,6 +298,10 @@ struct [[host_shared]] SDFLpPrimitive {
   float4 box_corners;
   float4 box_edges;
   int4 box_modes;
+  /* MESH with SDF_LP_MESH_FLAG_BAKED: coarse far-field level (mirrors
+   * SDFObjectGPU.bake_coarse_origin/bake_coarse_grid); zero otherwise. */
+  float4 coarse_origin;
+  int4 coarse_grid;
   /* Range into the shared modifier stack (mirrors SDFObjectGPU). */
   int modifier_start;
   int modifier_count;
@@ -299,7 +310,7 @@ struct [[host_shared]] SDFLpPrimitive {
   int _pad3;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFLpPrimitive, 16)
-BLI_STATIC_ASSERT(sizeof(SDFLpPrimitive) == 224, "SDFLpPrimitive size mismatch")
+BLI_STATIC_ASSERT(sizeof(SDFLpPrimitive) == 256, "SDFLpPrimitive size mismatch")
 
 /* Serialized binary op (kept for reference; the runtime format is the packed
  * uint4 produced by lp_pack_binary_op, stored in lp_binary_ops_). param0 is

@@ -12,6 +12,7 @@
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
 #include "DNA_space_types.h"
+#include "DNA_vfont_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
@@ -36,6 +37,8 @@
 #include "BKE_main.hh"
 #include "BKE_report.hh"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
+#include "BKE_vfont.hh"
 
 #include "BLT_translation.hh"
 
@@ -207,6 +210,45 @@ void OBJECT_OT_sdf_add(wmOperatorType *ot)
                SDF_TYPE_BOX,
                "Type",
                "SDF primitive type");
+}
+
+/* SDF Text Add (kept separate from the primitives: it is a text object with
+ * SDF rendering, edited by typing like a regular text object). */
+
+static wmOperatorStatus object_sdf_text_add_exec(bContext *C, wmOperator *op)
+{
+  ushort local_view_bits;
+  float loc[3], rot[3];
+
+  add_generic_get_opts(C, op, 'Z', loc, rot, nullptr, nullptr, &local_view_bits, nullptr);
+
+  Main *bmain = CTX_data_main(C);
+  Object *ob = add_type(C, OB_SDF, "SDF Text", loc, rot, false, local_view_bits);
+  if (ob && ob->data) {
+    SDF *sdf_data = id_cast<SDF *>(ob->data);
+    sdf_data->sdf_type = SDF_TYPE_TEXT;
+    sdf_data->sdf_index = BKE_sdf_next_index(bmain);
+    /* size[2] is the extrusion half-depth. */
+    sdf_data->size[0] = 1.0f;
+    sdf_data->size[1] = 1.0f;
+    sdf_data->size[2] = 0.1f;
+    BKE_sdf_text_set(sdf_data, "Text");
+    sdf_data->text_font = BKE_vfont_builtin_ensure();
+    id_us_plus(&sdf_data->text_font->id);
+  }
+  return (ob != nullptr) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+void OBJECT_OT_sdf_text_add(wmOperatorType *ot)
+{
+  ot->name = "Add SDF Text";
+  ot->description = "Add an SDF text object to the scene";
+  ot->idname = "OBJECT_OT_sdf_text_add";
+  ot->exec = object_sdf_text_add_exec;
+  ot->poll = ED_operator_objectmode;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  add_generic_props(ot, false);
 }
 
 /* SDF CSG / Blend Cycle Operators */

@@ -442,8 +442,10 @@ void toggleBezierRoot(float t,
   float2 q = u * u * a + 2.0f * u * t * b + t * t * c;
   float2 v = 2.0f * (u * (b - a) + t * (c - b));
   float cr = v.x * (p.y - q.y) - v.y * (p.x - q.x);
-  if (v.y > 0.0f && p.y != c.y && cr > 0.0f) { winding--; }
-  if (v.y < 0.0f && p.y != a.y && cr < 0.0f) { winding++; }
+  /* Sign must match the straight-edge rule: an upward crossing to the right
+   * of p increments the winding (see sdPolygon2D). */
+  if (v.y > 0.0f && p.y != c.y && cr > 0.0f) { winding++; }
+  if (v.y < 0.0f && p.y != a.y && cr < 0.0f) { winding--; }
 }
 
 void toggleBezierWinding(float2 a,
@@ -476,58 +478,63 @@ void toggleBezierWinding(float2 a,
 
 /* ---- Arbitrary polygon 2D SDF (straight + bezier edges) ---- */
 
-float sdPolygon2D(float2 p, int ps, int pc)
+/* The point array is a sequence of contours; each contour starts with a
+ * header entry (arc_bounds.w == -2) holding the padded contour AABB
+ * (vi_edge.xy = min, arc_data.xy = max) and its edge count (arc_bounds.x).
+ * Up close, whole glyph contours are skipped for both distance AND winding
+ * (the winding skip is the big win: bezier winding solves roots per arc).
+ *
+ * For many edges (whole paragraphs) the array instead starts with a BVH
+ * uber-header (arc_bounds.w == -3, arc_data.x = root entry index): internal
+ * node entries (also arc_bounds.w == -3) hold a padded AABB and two child
+ * entry indices (arc_bounds.x/y), leaf entries are plain edges. Traversal
+ * applies the same distance/winding pruning per node, so evaluation is
+ * sub-linear in the edge count. */
+
+float sdPolygon2DBVH(float2 p, int ps, float corner_pad)
 {
   float d = 1e20f;
   int winding = 0;
-  for (int i = 0; i < pc; i++) {
-    float4 ed = polygon_points[ps + i].vi_edge;
-    float4 ab = polygon_points[ps + i].arc_bounds;
-    float2 vi = ed.xy;
+  int stack[64];
+  int sp = 0;
+  stack[sp++] = int(polygon_points[ps].arc_data.x);
+  while (sp > 0) {
+    int ni = stack[--sp];
+    float4 ed = polygon_points[ni].vi_edge;
+    float4 ab = polygon_points[ni].arc_bounds;
 
+    if (ab.w <= -2.5f) {
+      /* Internal node: prune whole subtrees for distance and winding. */
+      float2 cmin = ed.xy;
+      float2 cmax = polygon_points[ni].arc_data.xy;
+      bool need_winding = (cmax.x > p.x) && (p.y >= cmin.y) && (p.y <= cmax.y);
+      float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+      float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+      if (need_winding || box_d < d) {
+        stack[sp++] = int(ab.x);
+        stack[sp++] = int(ab.y);
+      }
+      continue;
+    }
+
+    /* Leaf edge (rounded-path semantics; corner arc work is gated by R). */
+    float4 ad = polygon_points[ni].arc_data;
     if (ab.w < 0.0f) {
-      float4 ad = polygon_points[ps + i].arc_data;
+      /* Quadratic bezier edge. */
+      float2 vi = ed.xy;
       float2 ctrl = ed.zw;
       float2 end_pt = ad.xy;
 
-      /* AABB cull */
-      float2 bmin = min(min(vi, ctrl), end_pt);
-      float2 bmax = max(max(vi, ctrl), end_pt);
-      float2 dbox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
-      float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
-      if (box_d < d) {
+      float2 bmin = min(min(vi, ctrl), end_pt) - float2(corner_pad);
+      float2 bmax = max(max(vi, ctrl), end_pt) + float2(corner_pad);
+      float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+      float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+      if (ebox_d < d) {
         d = min(d, sdBezier2D(vi, ctrl, end_pt, p));
       }
-
       toggleBezierWinding(vi, ctrl, end_pt, p, winding);
+      continue;
     }
-    else {
-      /* Straight segment */
-      float2 e = ed.zw;
-      float2 w = p - vi;
-      float2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0f, 1.0f);
-      d = min(d, length(b));
-
-      /* Winding number (non-zero rule) */
-      float vj_y = vi.y + e.y;
-      float cross_val = e.x * w.y - e.y * w.x;
-      if (vi.y <= p.y && vj_y > p.y && cross_val > 0.0f) { winding++; }
-      if (vi.y > p.y && vj_y <= p.y && cross_val < 0.0f) { winding--; }
-    }
-  }
-  return (winding != 0) ? -d : d;
-}
-
-float sdPolygon2DRounded(float2 p, int ps, int pc)
-{
-  float d = 1e20f;
-  int winding = 0;
-
-  for (int i = 0; i < pc; i++) {
-    float4 ed = polygon_points[ps + i].vi_edge;
-    float4 ad = polygon_points[ps + i].arc_data;
-    float4 ab = polygon_points[ps + i].arc_bounds;
-    if (ab.w < 0.0f) { continue; }
 
     float2 vi = ed.xy, edge = ed.zw;
     float R_signed = ad.x, R = abs(R_signed);
@@ -542,15 +549,20 @@ float sdPolygon2DRounded(float2 p, int ps, int pc)
     float seg_len_sq = dot(seg_dir, seg_dir);
     if (seg_len_sq > 1e-10f) {
       float2 w = p - seg_a;
-      float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
-      d = min(d, length(w - seg_dir * t));
-
+      float2 ebox_min = min(seg_a, seg_b) - float2(corner_pad);
+      float2 ebox_max = max(seg_a, seg_b) + float2(corner_pad);
+      float2 ebox = abs(p - 0.5f * (ebox_min + ebox_max)) - 0.5f * (ebox_max - ebox_min);
+      float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+      if (ebox_d < d) {
+        float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+        d = min(d, length(w - seg_dir * t));
+      }
       float cross_val = seg_dir.x * w.y - seg_dir.y * w.x;
       if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) { winding++; }
       if (seg_a.y > p.y && seg_b.y <= p.y && cross_val < 0.0f) { winding--; }
     }
 
-    /* Arc: distance + winding */
+    /* Corner arc: distance + winding */
     if (R > 0.001f) {
       float2 to_p = p - C;
       float dist_c = length(to_p);
@@ -567,13 +579,11 @@ float sdPolygon2DRounded(float2 p, int ps, int pc)
         d = min(d, min(length(p - ep1), length(p - ep2)));
       }
 
-      /* Arc winding: find crossings of arc with horizontal ray y=p.y, x>p.x */
       float k = (p.y - C.y) / R;
       if (abs(k) < 1.0f) {
         float asin_k = asin(k);
         int dir = (R_signed > 0.0f) ? 1 : -1;
 
-        /* Crossing at θ=asin(k), cos>0 (upward for CCW arc) */
         float th = asin_k;
         float td = th - ang_mid;
         td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
@@ -581,7 +591,6 @@ float sdPolygon2DRounded(float2 p, int ps, int pc)
           winding += dir;
         }
 
-        /* Crossing at θ=π-asin(k), cos<0 (downward for CCW arc) */
         th = 3.1415927f - asin_k;
         td = th - ang_mid;
         td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
@@ -590,6 +599,213 @@ float sdPolygon2DRounded(float2 p, int ps, int pc)
         }
       }
     }
+  }
+  return (winding != 0) ? -d : d;
+}
+
+float sdPolygon2D(float2 p, int ps, int pc, float corner_pad)
+{
+  if (polygon_points[ps].arc_bounds.w <= -2.5f) {
+    return sdPolygon2DBVH(p, ps, corner_pad);
+  }
+  float d = 1e20f;
+  int winding = 0;
+  int i = 0;
+  while (i < pc) {
+    float4 hb = polygon_points[ps + i].arc_bounds;
+    int ec = int(hb.x);
+    float2 cmin = polygon_points[ps + i].vi_edge.xy;
+    float2 cmax = polygon_points[ps + i].arc_data.xy;
+
+    /* Winding contributions need an edge spanning p.y and crossing x > p.x. */
+    bool need_winding = (cmax.x > p.x) && (p.y >= cmin.y) && (p.y <= cmax.y);
+    float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+    float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+    bool need_dist = box_d < d;
+
+    if (need_winding || need_dist) {
+      for (int e = i + 1; e <= i + ec; e++) {
+        float4 ed = polygon_points[ps + e].vi_edge;
+        float4 ab = polygon_points[ps + e].arc_bounds;
+        float2 vi = ed.xy;
+
+        if (ab.w < 0.0f) {
+          float4 ad = polygon_points[ps + e].arc_data;
+          float2 ctrl = ed.zw;
+          float2 end_pt = ad.xy;
+
+          if (need_dist) {
+            /* AABB cull */
+            float2 bmin = min(min(vi, ctrl), end_pt) - float2(corner_pad);
+            float2 bmax = max(max(vi, ctrl), end_pt) + float2(corner_pad);
+            float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              d = min(d, sdBezier2D(vi, ctrl, end_pt, p));
+            }
+          }
+          if (need_winding) {
+            toggleBezierWinding(vi, ctrl, end_pt, p, winding);
+          }
+        }
+        else {
+          /* Straight segment */
+          float2 ev = ed.zw;
+          if (need_dist) {
+            float2 vj = vi + ev;
+            float2 bmin = min(vi, vj) - float2(corner_pad);
+            float2 bmax = max(vi, vj) + float2(corner_pad);
+            float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              float2 w = p - vi;
+              float2 b = w - ev * clamp(dot(w, ev) / dot(ev, ev), 0.0f, 1.0f);
+              d = min(d, length(b));
+            }
+          }
+          if (need_winding) {
+            /* Winding number (non-zero rule) */
+            float2 w = p - vi;
+            float vj_y = vi.y + ev.y;
+            float cross_val = ev.x * w.y - ev.y * w.x;
+            if (vi.y <= p.y && vj_y > p.y && cross_val > 0.0f) { winding++; }
+            if (vi.y > p.y && vj_y <= p.y && cross_val < 0.0f) { winding--; }
+          }
+        }
+      }
+    }
+    i += ec + 1;
+  }
+  return (winding != 0) ? -d : d;
+}
+
+float sdPolygon2DRounded(float2 p, int ps, int pc, float corner_pad)
+{
+  if (polygon_points[ps].arc_bounds.w <= -2.5f) {
+    return sdPolygon2DBVH(p, ps, corner_pad);
+  }
+  float d = 1e20f;
+  int winding = 0;
+
+  int i = 0;
+  while (i < pc) {
+    float4 hb = polygon_points[ps + i].arc_bounds;
+    int ec = int(hb.x);
+    float2 cmin = polygon_points[ps + i].vi_edge.xy;
+    float2 cmax = polygon_points[ps + i].arc_data.xy;
+
+    bool need_winding = (cmax.x > p.x) && (p.y >= cmin.y) && (p.y <= cmax.y);
+    float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+    float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+    bool need_dist = box_d < d;
+
+    if (need_winding || need_dist) {
+      for (int e = i + 1; e <= i + ec; e++) {
+        float4 ed = polygon_points[ps + e].vi_edge;
+        float4 ad = polygon_points[ps + e].arc_data;
+        float4 ab = polygon_points[ps + e].arc_bounds;
+
+        if (ab.w < 0.0f) {
+          /* Quadratic bezier edge: no corner trimming (corner arcs only exist
+           * between straight edges), just distance + winding. */
+          float2 vi = ed.xy;
+          float2 ctrl = ed.zw;
+          float2 end_pt = ad.xy;
+
+          if (need_dist) {
+            float2 bmin = min(min(vi, ctrl), end_pt);
+            float2 bmax = max(max(vi, ctrl), end_pt);
+            float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              d = min(d, sdBezier2D(vi, ctrl, end_pt, p));
+            }
+          }
+          if (need_winding) {
+            toggleBezierWinding(vi, ctrl, end_pt, p, winding);
+          }
+          continue;
+        }
+
+        float2 vi = ed.xy, edge = ed.zw;
+        float R_signed = ad.x, R = abs(R_signed);
+        float2 C = ad.yz;
+        float t_start = ad.w, t_end = ab.x;
+        float ang_mid = ab.y, ang_half = ab.z;
+
+        /* Trimmed edge: distance + winding */
+        float2 seg_a = vi + edge * t_start;
+        float2 seg_b = vi + edge * t_end;
+        float2 seg_dir = seg_b - seg_a;
+        float seg_len_sq = dot(seg_dir, seg_dir);
+        if (seg_len_sq > 1e-10f) {
+          float2 w = p - seg_a;
+          if (need_dist) {
+            float2 ebox_min = min(seg_a, seg_b) - float2(corner_pad);
+            float2 ebox_max = max(seg_a, seg_b) + float2(corner_pad);
+            float2 ebox = abs(p - 0.5f * (ebox_min + ebox_max)) -
+                          0.5f * (ebox_max - ebox_min);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+              d = min(d, length(w - seg_dir * t));
+            }
+          }
+          if (need_winding) {
+            float cross_val = seg_dir.x * w.y - seg_dir.y * w.x;
+            if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) { winding++; }
+            if (seg_a.y > p.y && seg_b.y <= p.y && cross_val < 0.0f) { winding--; }
+          }
+        }
+
+        /* Arc: distance + winding */
+        if (R > 0.001f && (need_dist || need_winding)) {
+          float2 to_p = p - C;
+          float dist_c = length(to_p);
+
+          if (need_dist) {
+            float ang_p = atan(to_p.y, to_p.x);
+            float ang_diff = ang_p - ang_mid;
+            ang_diff -= 6.2831853f * floor((ang_diff + 3.1415927f) / 6.2831853f);
+
+            if (abs(ang_diff) <= ang_half) {
+              d = min(d, abs(dist_c - R));
+            }
+            else {
+              float2 ep1 = C + R * float2(cos(ang_mid - ang_half), sin(ang_mid - ang_half));
+              float2 ep2 = C + R * float2(cos(ang_mid + ang_half), sin(ang_mid + ang_half));
+              d = min(d, min(length(p - ep1), length(p - ep2)));
+            }
+          }
+
+          if (need_winding) {
+            /* Arc winding: find crossings of arc with horizontal ray y=p.y, x>p.x */
+            float k = (p.y - C.y) / R;
+            if (abs(k) < 1.0f) {
+              float asin_k = asin(k);
+              int dir = (R_signed > 0.0f) ? 1 : -1;
+
+              /* Crossing at θ=asin(k), cos>0 (upward for CCW arc) */
+              float th = asin_k;
+              float td = th - ang_mid;
+              td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+              if (abs(td) <= ang_half && C.x + R * cos(th) > p.x) {
+                winding += dir;
+              }
+
+              /* Crossing at θ=π-asin(k), cos<0 (downward for CCW arc) */
+              th = 3.1415927f - asin_k;
+              td = th - ang_mid;
+              td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+              if (abs(td) <= ang_half && C.x + R * cos(th) > p.x) {
+                winding -= dir;
+              }
+            }
+          }
+        }
+      }
+    }
+    i += ec + 1;
   }
 
   return (winding != 0) ? -d : d;
@@ -604,7 +820,9 @@ float sdAdvancedPolygon(float3 p,
                         float tapTop,
                         float tapBot,
                         int edgeMode,
-                        float taperH)
+                        float taperH,
+                        float outline_hw,
+                        float corner_pad)
 {
   float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
   float t = (zn + 1.0f) * 0.5f;
@@ -613,7 +831,12 @@ float sdAdvancedPolygon(float3 p,
   float slope = (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
   float lipschitz = sqrt(1.0f + slope * slope);
 
-  float d2d = sdPolygon2DRounded(p.xy / tapFactor, ps, pc) * tapFactor;
+  float d2d = sdPolygon2DRounded(p.xy / tapFactor, ps, pc, corner_pad) * tapFactor;
+  /* Outline stroke mode (SDF text thickness): abs turns the filled outline
+   * into a stroke of half-width outline_hw. */
+  if (outline_hw > 0.0f) {
+    d2d = abs(d2d) - outline_hw;
+  }
 
   float dz = abs(p.z) - halfH;
   float edgeR = (p.z > 0.0f) ? edgeTop * halfH
@@ -1811,15 +2034,30 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
       float tapTop = obj.box_edges.z;
       float tapBot = obj.box_edges.w;
       int edgeMode = obj.box_modes.y;
+      /* Outline stroke half-width (SDF text thickness; 0 = filled). */
+      float outline_hw = (obj.box_modes.z != 0) ? obj.box_corners.y : 0.0f;
       if (pc >= 3) {
         if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f ||
             obj.box_corners.x > 0.001f)
         {
-          dist = sdAdvancedPolygon(
-              local_pos, r.z, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z);
+          dist = sdAdvancedPolygon(local_pos,
+                                   r.z,
+                                   ps,
+                                   pc,
+                                   edgeTop,
+                                   edgeBot,
+                                   tapTop,
+                                   tapBot,
+                                   edgeMode,
+                                   r.z,
+                                   outline_hw,
+                                   obj.box_corners.x);
         }
         else {
-          float d2d = sdPolygon2D(local_pos.xy, ps, pc);
+          float d2d = sdPolygon2D(local_pos.xy, ps, pc, 0.0f);
+          if (outline_hw > 0.0f) {
+            d2d = abs(d2d) - outline_hw;
+          }
           float dz = abs(local_pos.z) - r.z;
           float2 dd = float2(d2d, dz);
           dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);

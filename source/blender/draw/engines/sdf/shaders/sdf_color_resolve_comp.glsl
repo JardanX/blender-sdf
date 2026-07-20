@@ -70,6 +70,19 @@ bool sdfAnalyticWorldNormals(SDFObjectGPU obj,
                              out float3 geometric_normal)
 {
   float e = max(sdf_ray_epsilon * 0.5f, 1e-4f);
+  if (obj.sdf_type == SDF_GPU_TYPE_MESH &&
+      (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0 &&
+      obj.bake_coarse_grid.x > 0)
+  {
+    /* Blend-zone hits sample the coarse far-field grid; a ray-epsilon-wide
+     * stencil sees its trilinear staircase. Widen the stencil past the
+     * coarse voxel (in world units, min axis scale) so the finite
+     * difference returns the true smooth gradient of the coarse field —
+     * the blend fillet normals are only defined at that scale anyway. */
+    e = max(e, obj.bake_coarse_origin.w * min(min(obj.obj_scale.x, obj.obj_scale.y),
+                                              obj.obj_scale.z) *
+               1.5f);
+  }
   float3 ex = float3(e, 0.0f, 0.0f);
   float3 ey = float3(0.0f, e, 0.0f);
   float3 ez = float3(0.0f, 0.0f, e);
@@ -383,7 +396,6 @@ void main()
       continue;
     }
     float3 lp = (obj.inverse_matrix * float4(eval_pos - obj.position.xyz, 1.0f)).xyz;
-    g_sdf_mesh_last_triangle = -1;
     d = evalPrimitive(lp, obj);
     /* Baked mesh volume: fetch the baked color at the mapped (unscaled) eval
      * position instead of the flat object color. */

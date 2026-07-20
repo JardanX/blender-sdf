@@ -84,6 +84,9 @@ uint sdf_bake_pack_rgba8(float4 c)
 void main()
 {
   int3 voxel = int3(gl_GlobalInvocationID);
+  /* Progressive bake: the manager dispatches one z-slice range per call;
+   * z_offset is the absolute z of this dispatch's first slice. */
+  voxel.z += z_offset;
   int3 res = res_and_base.xyz;
   if (voxel.x >= res.x || voxel.y >= res.y || voxel.z >= res.z) {
     return;
@@ -132,6 +135,14 @@ void main()
   }
 
   int vi = res_and_base.w + voxel.x + res.x * (voxel.y + res.y * voxel.z);
+  if (dist_only != 0) {
+    /* Coarse far-field level: full fp32 distance (1 uint = float bits). The
+     * coarse grid's unclamped field must stay smooth far out — fp16
+     * quantization at blend-reach scale bands wide blend zones. The normal
+     * and color ranges of coarse records are never read at runtime. */
+    bake_dist[vi] = floatBitsToUint(clamp(d, -60000.0f, 60000.0f));
+    return;
+  }
   bake_dist[vi] = sdf_bake_pack_half2(d, 0.0f);
   bake_nrm[2 * vi] = sdf_bake_pack_half2(nrm.x, nrm.y);
   bake_nrm[2 * vi + 1] = sdf_bake_pack_half2(nrm.z, 0.0f);

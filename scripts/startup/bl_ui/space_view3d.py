@@ -2616,6 +2616,7 @@ class VIEW3D_MT_add(Menu):
         layout.operator_context = 'EXEC_REGION_WIN'
 
         layout.menu("VIEW3D_MT_sdf_add", icon='OUTLINER_OB_SDF')
+        layout.operator("object.sdf_text_add", text="SDF Text", icon='OUTLINER_OB_FONT')
 
         layout.separator()
 

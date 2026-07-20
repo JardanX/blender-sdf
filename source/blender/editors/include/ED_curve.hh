@@ -93,6 +93,11 @@ void ED_curve_undosys_type(UndoType *ut);
 
 /* `editfont.cc` */
 
+/**
+ * The Curve holding the #EditFont data for \a ob: the object's data for
+ * text objects, or the runtime edit curve for SDF text objects (BKE_sdf_text.hh).
+ */
+Curve *ED_curve_editfont_curve_get(const Object *ob);
 void ED_curve_editfont_load(Object *obedit);
 void ED_curve_editfont_make(Object *obedit);
 void ED_curve_editfont_free(Object *obedit);

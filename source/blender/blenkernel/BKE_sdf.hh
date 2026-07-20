@@ -28,12 +28,23 @@ struct SDFMeshVertex;
 struct SDFModifier;
 struct SDFPolygonPoint;
 
+struct Curve;
+struct SDFTextContours;
+
 namespace bke {
 
 struct SDFRuntime {
   BMEditMesh *edit_mesh = nullptr;
   void *proxy_batch = nullptr;
   uint64_t proxy_hash = 0;
+  /* Runtime edit-mode text store (#SDF_TYPE_TEXT), see BKE_sdf_text.hh.
+   * Owned by the original SDF; evaluated copies share the pointer. */
+  Curve *text_curve = nullptr;
+  bool text_curve_owned = false;
+  /* Tessellated glyph outline cache (owned by this runtime; rebuilt when the
+   * text state hash changes). */
+  SDFTextContours *text_cache = nullptr;
+  uint64_t text_cache_hash = 0;
 };
 
 }  // namespace bke

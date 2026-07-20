@@ -60,6 +60,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
 #include "BKE_tracking.hh"
 #include "BKE_workspace.hh"
 
@@ -619,6 +620,16 @@ static void sdf_local_extents(const SDF *sdf, float r_min[3], float r_max[3])
       r_min[0] = mn[0]; r_min[1] = mn[1]; r_min[2] = -sz[2];
       r_max[0] = mx[0]; r_max[1] = mx[1]; r_max[2] = sz[2];
       return;
+    }
+    case SDF_TYPE_TEXT: {
+      float2 tb_min, tb_max;
+      if (BKE_sdf_text_bounds_sdf(sdf, tb_min, tb_max)) {
+        const float pad = sdf->text_thickness * 0.5f + sdf->text_corner + sdf->bevel;
+        r_min[0] = tb_min.x - pad; r_min[1] = tb_min.y - pad; r_min[2] = -sz[2];
+        r_max[0] = tb_max.x + pad; r_max[1] = tb_max.y + pad; r_max[2] = sz[2];
+        return;
+      }
+      break;
     }
     default:
       break;
