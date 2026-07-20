@@ -382,50 +382,80 @@ float sdAdvancedNgon(float3 p,
   }
 }
 
-/* ---- Quadratic bezier distance (Inigo Quilez) ---- */
+/* ---- Quadratic bezier distance (exact, robust) ---- */
 
+/* f(t) = (B(t)-p)·B'(t) is cubic; its roots (plus endpoints) are the
+ * candidate closest points. Monotone brackets are found via the roots of f'
+ * (quadratic) and bisected. The closed-form cube-root solver this replaces
+ * was NaN-prone for points on the bezier's evolute (visible as noise around
+ * glyph curves). */
 float sdBezier2D(float2 A, float2 B, float2 C, float2 pos)
 {
-  float2 a = B - A;
-  float2 b = A - 2.0f * B + C;
-  float2 c = a * 2.0f;
-  float2 d = A - pos;
+  float2 u = 2.0f * (B - A);
+  float2 v = A - 2.0f * B + C;
+  float2 p = pos;
 
-  float kk = 1.0f / max(dot(b, b), 1e-12f);
-  float kx = kk * dot(a, b);
-  float ky = kk * (2.0f * dot(a, a) + dot(d, b)) / 3.0f;
-  float kz = kk * dot(d, a);
+  /* Turning points of f(t): roots of f'(t) = qa t^2 + qb t + qc. */
+  float qa = 6.0f * dot(v, v);
+  float qb = 6.0f * dot(u, v);
+  float qc = 2.0f * dot(A - p, v) + dot(u, u);
 
-  float res = 0.0f;
-  float pp = ky - kx * kx;
-  float qq = kx * (2.0f * kx * kx - 3.0f * ky) + kz;
-  float p3 = pp * pp * pp;
-  float q2 = qq * qq;
-  float h = q2 + 4.0f * p3;
-
-  if (h >= 0.0f) {
-    h = sqrt(h);
-    h = (qq < 0.0f) ? h : -h;
-    float x = (h - qq) / 2.0f;
-    float v = sign(x) * pow(abs(x), 1.0f / 3.0f);
-    float t = v - pp / v;
-    t -= (t * (t * t + 3.0f * pp) + qq) / (3.0f * t * t + 3.0f * pp);
-    t = clamp(t - kx, 0.0f, 1.0f);
-    float2 w = d + (c + b * t) * t;
-    res = dot(w, w);
+  float brk[4];
+  brk[0] = 0.0f;
+  int nb = 1;
+  float disc = qb * qb - 4.0f * qa * qc;
+  if (abs(qa) < 1e-12f) {
+    if (abs(qb) > 1e-12f) {
+      float t = -qc / qb;
+      if (t > 0.0f && t < 1.0f) { brk[nb++] = t; }
+    }
   }
-  else {
-    float z = sqrt(-pp);
-    float v = acos(qq / (pp * z * 2.0f)) / 3.0f;
-    float m = cos(v);
-    float n = sin(v) * sqrt(3.0f);
-    float3 t3 = clamp(float3(m + m, -n - m, n - m) * z - kx, 0.0f, 1.0f);
-    float2 qx = d + (c + b * t3.x) * t3.x;
-    float2 qy = d + (c + b * t3.y) * t3.y;
-    res = min(dot(qx, qx), dot(qy, qy));
+  else if (disc > 0.0f) {
+    float s = sqrt(disc);
+    float ta = (-qb - s) / (2.0f * qa);
+    float tb = (-qb + s) / (2.0f * qa);
+    if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+    if (ta > 0.0f && ta < 1.0f) { brk[nb++] = ta; }
+    if (tb > 0.0f && tb < 1.0f) { brk[nb++] = tb; }
+  }
+  brk[nb++] = 1.0f;
+
+  float best = 1e20f;
+  for (int k = 0; k < nb; k++) {
+    float t = brk[k];
+    float2 q = A + (u + v * t) * t - p;
+    best = min(best, dot(q, q));
   }
 
-  return sqrt(res);
+  for (int k = 0; k + 1 < nb; k++) {
+    float lo = brk[k], hi = brk[k + 1];
+    float2 ql = A + (u + v * lo) * lo - p;
+    float flo = dot(ql, u + 2.0f * v * lo);
+    float2 qh = A + (u + v * hi) * hi - p;
+    float fhi = dot(qh, u + 2.0f * v * hi);
+    if (flo * fhi > 0.0f) {
+      continue;
+    }
+    /* f is monotone on this bracket: bisect to the root. */
+    for (int it = 0; it < 24; it++) {
+      float mid = 0.5f * (lo + hi);
+      float2 qm = A + (u + v * mid) * mid - p;
+      float fm = dot(qm, u + 2.0f * v * mid);
+      if (flo * fm <= 0.0f) {
+        hi = mid;
+        fhi = fm;
+      }
+      else {
+        lo = mid;
+        flo = fm;
+      }
+    }
+    float t = 0.5f * (lo + hi);
+    float2 q = A + (u + v * t) * t - p;
+    best = min(best, dot(q, q));
+  }
+
+  return sqrt(best);
 }
 
 /* Bezier winding number helpers */
@@ -491,8 +521,32 @@ void toggleBezierWinding(float2 a,
  * applies the same distance/winding pruning per node, so evaluation is
  * sub-linear in the edge count. */
 
-float sdPolygon2DBVH(float2 p, int ps, float corner_pad)
+float sdPolygon2DBVH(float2 p, int ps, float corner_pad, float grid_slack)
 {
+  /* Coarse far-field grid: used only when the cell value provably cannot
+   * affect any visible surface (grid_slack covers the silhouette band,
+   * bevel/edge/outline/blend/clearance reach); never overestimates the true
+   * distance, so marching stays exact. */
+  if (grid_slack > 0.0f) {
+    float4 ub = polygon_points[ps].arc_bounds;
+    float4 ud = polygon_points[ps].arc_data;
+    float cell = ub.z;
+    float2 gp = (p - ub.xy) / cell;
+    int2 gc = int2(floor(gp));
+    int gres = int(ud.z);
+    if (gc.x >= 0 && gc.y >= 0 && gc.x < gres && gc.y < gres) {
+      int ci = gc.y * gres + gc.x;
+      int ei = int(ud.y) + ci / 12;
+      int cc = ci % 12;
+      float cv = (cc < 4) ? polygon_points[ei].vi_edge[cc] :
+                 (cc < 8) ? polygon_points[ei].arc_data[cc - 4] :
+                            polygon_points[ei].arc_bounds[cc - 8];
+      if (abs(cv) > grid_slack) {
+        return cv;
+      }
+    }
+  }
+
   float d = 1e20f;
   int winding = 0;
   int stack[64];
@@ -603,10 +657,10 @@ float sdPolygon2DBVH(float2 p, int ps, float corner_pad)
   return (winding != 0) ? -d : d;
 }
 
-float sdPolygon2D(float2 p, int ps, int pc, float corner_pad)
+float sdPolygon2D(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
-    return sdPolygon2DBVH(p, ps, corner_pad);
+    return sdPolygon2DBVH(p, ps, corner_pad, grid_slack);
   }
   float d = 1e20f;
   int winding = 0;
@@ -679,10 +733,10 @@ float sdPolygon2D(float2 p, int ps, int pc, float corner_pad)
   return (winding != 0) ? -d : d;
 }
 
-float sdPolygon2DRounded(float2 p, int ps, int pc, float corner_pad)
+float sdPolygon2DRounded(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
-    return sdPolygon2DBVH(p, ps, corner_pad);
+    return sdPolygon2DBVH(p, ps, corner_pad, grid_slack);
   }
   float d = 1e20f;
   int winding = 0;
@@ -822,7 +876,8 @@ float sdAdvancedPolygon(float3 p,
                         int edgeMode,
                         float taperH,
                         float outline_hw,
-                        float corner_pad)
+                        float corner_pad,
+                        float grid_slack)
 {
   float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
   float t = (zn + 1.0f) * 0.5f;
@@ -831,7 +886,7 @@ float sdAdvancedPolygon(float3 p,
   float slope = (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
   float lipschitz = sqrt(1.0f + slope * slope);
 
-  float d2d = sdPolygon2DRounded(p.xy / tapFactor, ps, pc, corner_pad) * tapFactor;
+  float d2d = sdPolygon2DRounded(p.xy / tapFactor, ps, pc, corner_pad, grid_slack) * tapFactor;
   /* Outline stroke mode (SDF text thickness): abs turns the filled outline
    * into a stroke of half-width outline_hw. */
   if (outline_hw > 0.0f) {
@@ -1614,6 +1669,50 @@ float sdCylinder(float3 p, float3 size)
   return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
 }
 
+float sdAdvancedCylinder(float3 p, float3 size,
+                         float edgeTop, float edgeBot,
+                         float tapTop, float tapBot,
+                         int edgeMode, float taperH)
+{
+  float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
+  float t = (zn + 1.0f) * 0.5f;
+  float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
+  float radius = size.x * tapFactor;
+
+  float slope = size.x * (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
+  float lipschitz = sqrt(1.0f + slope * slope);
+
+  float d2d = length(p.xy) - radius;
+  float dz = abs(p.z) - size.z;
+
+  float edgeR = (p.z > 0.0f) ? edgeTop * min(radius, size.z)
+                              : edgeBot * min(radius, size.z);
+
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d2d + edgeR, dz + edgeR);
+      return (min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR) / lipschitz;
+    }
+    else {
+      float base = max(d2d, dz);
+      float cham = (d2d + dz + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) { return dd / lipschitz; }
+      if (d2d <= 0.0f && dz <= 0.0f) { return cham / lipschitz; }
+      if (dz <= -edgeR) { return d2d / lipschitz; }
+      if (d2d <= -edgeR) { return dz / lipschitz; }
+      float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) { return length(float2(d2d, dz + edgeR)) / lipschitz; }
+      if (tc2 >= 1.0f) { return length(float2(d2d + edgeR, dz)) / lipschitz; }
+      return cham / lipschitz;
+    }
+  }
+  else {
+    float2 dd = float2(d2d, dz);
+    return (length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f)) / lipschitz;
+  }
+}
+
 /**
  * Cone frustum SDF: bottom radius rb at z=-h, top radius rt at z=+h.
  * rt = 0 gives a sharp-apex cone. Inigo Quilez two-radius capped cone.
@@ -1633,6 +1732,63 @@ float sdConeFrustum(float3 p, float rb, float rt, float h)
 float sdCone(float3 p, float r, float h)
 {
   return sdConeFrustum(p, r, 0.0f, h);
+}
+
+float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
+                            float edgeTop, float edgeBot, int edgeMode)
+{
+  float2 q = float2(length(p.xy), p.z);
+
+  float2 side_dir = float2(rt - rb, 2.0f * h);
+  float len_dir = max(length(side_dir), 1e-8f);
+  float2 outward_normal = float2(side_dir.y, -side_dir.x) / len_dir;
+
+  float t = clamp(dot(q - float2(rb, -h), side_dir) / dot(side_dir, side_dir), 0.0f, 1.0f);
+  float2 pt_side = float2(rb, -h) + side_dir * t;
+  float2 diff = q - pt_side;
+  float d_side_abs = length(diff);
+  float d_side_sign = dot(diff, outward_normal);
+  bool on_segment = (t > 0.0f && t < 1.0f);
+  float d_side = (on_segment && d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
+
+  float cap_r = (q.y < 0.0f) ? rb : rt;
+  float d_cap_r = q.x - cap_r;
+  float d_cap_z = abs(q.y) - h;
+  float d_cap;
+  if (d_cap_r < 0.0f && d_cap_z < 0.0f) {
+    d_cap = max(d_cap_r, d_cap_z);
+  }
+  else {
+    float2 cap_dd = float2(max(d_cap_r, 0.0f), max(d_cap_z, 0.0f));
+    d_cap = length(cap_dd);
+    if (d_cap_r > 0.0f && d_cap_z < 0.0f) { d_cap = d_cap_r; }
+    if (d_cap_z > 0.0f && d_cap_r < 0.0f) { d_cap = d_cap_z; }
+  }
+
+  float edgeR = (q.y > 0.0f) ? edgeTop * min(cap_r, h) : edgeBot * min(cap_r, h);
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d_side + edgeR, d_cap + edgeR);
+      return min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR;
+    }
+    else {
+      float base = max(d_side, d_cap);
+      float cham = (d_side + d_cap + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) { return dd; }
+      if (d_side <= 0.0f && d_cap <= 0.0f) { return cham; }
+      if (d_cap <= -edgeR) { return d_side; }
+      if (d_side <= -edgeR) { return d_cap; }
+      float tc2 = (-d_side + d_cap + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) { return length(float2(d_side, d_cap + edgeR)); }
+      if (tc2 >= 1.0f) { return length(float2(d_side + edgeR, d_cap)); }
+      return cham;
+    }
+  }
+  else {
+    float2 dd = float2(d_side, d_cap);
+    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+  }
 }
 
 /**
@@ -1983,10 +2139,25 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
                  sdEllipsoid(local_pos, r);
     }
     else if (obj.sdf_type == SDF_GPU_TYPE_CYLINDER) { /* CYLINDER */
-      dist = sdCylinder(local_pos, r);
+      if ((obj.box_edges.x + obj.box_edges.y + obj.box_edges.z + obj.box_edges.w) > 0.001f) {
+        dist = sdAdvancedCylinder(local_pos, r,
+                                  obj.box_edges.x, obj.box_edges.y,
+                                  obj.box_edges.z, obj.box_edges.w,
+                                  obj.box_modes.y, r.z);
+      }
+      else {
+        dist = sdCylinder(local_pos, r);
+      }
     }
     else if (obj.sdf_type == SDF_GPU_TYPE_CONE) { /* CONE / FRUSTUM */
-      dist = sdConeFrustum(local_pos, r.x, r.z, r.y);
+      if ((obj.box_edges.x + obj.box_edges.y) > 0.001f) {
+        dist = sdAdvancedConeFrustum(local_pos, r.x, r.z, r.y,
+                                     obj.box_edges.x, obj.box_edges.y,
+                                     obj.box_modes.y);
+      }
+      else {
+        dist = sdConeFrustum(local_pos, r.x, r.z, r.y);
+      }
     }
     else if (obj.sdf_type == SDF_GPU_TYPE_CAPSULE) { /* CAPSULE */
       dist = sdCapsule(local_pos, r);
@@ -2036,6 +2207,17 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
       int edgeMode = obj.box_modes.y;
       /* Outline stroke half-width (SDF text thickness; 0 = filled). */
       float outline_hw = (obj.box_modes.z != 0) ? obj.box_corners.y : 0.0f;
+      /* Coarse-grid slack: the far-field value is only used beyond this
+       * distance from the outline, so the silhouette, bevels, outline stroke,
+       * blends and clearance surfaces always get the exact evaluation. */
+      float grid_slack = 0.0f;
+      if (pc >= 3 && polygon_points[ps].arc_bounds.w <= -2.5f) {
+        float blend_reach = (obj.blend_type != 0) ? obj.blend : 0.0f;
+        blend_reach = max(blend_reach, obj.max_group_blend);
+        grid_slack = polygon_points[ps].arc_bounds.z * 0.70710678f + obj.box_corners.x +
+                     obj.sdf_size.w + max(edgeTop, edgeBot) * r.z + outline_hw +
+                     blend_reach + abs(obj.clearance);
+      }
       if (pc >= 3) {
         if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f ||
             obj.box_corners.x > 0.001f)
@@ -2051,10 +2233,11 @@ float evalPrimitiveOnly(SDFObjectGPU obj, float3 local_pos)
                                    edgeMode,
                                    r.z,
                                    outline_hw,
-                                   obj.box_corners.x);
+                                   obj.box_corners.x,
+                                   grid_slack);
         }
         else {
-          float d2d = sdPolygon2D(local_pos.xy, ps, pc, 0.0f);
+          float d2d = sdPolygon2D(local_pos.xy, ps, pc, 0.0f, grid_slack);
           if (outline_hw > 0.0f) {
             d2d = abs(d2d) - outline_hw;
           }

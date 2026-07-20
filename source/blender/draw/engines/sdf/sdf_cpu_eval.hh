@@ -52,6 +52,113 @@ inline float sdCylinder(float3 p, float3 size)
          math::length(math::max(float2(d.x, d.y), float2(0.0f)));
 }
 
+inline float sdAdvancedCylinder(float3 p, float3 size,
+                                float edgeTop, float edgeBot,
+                                float tapTop, float tapBot,
+                                int edgeMode, float taperH)
+{
+  float zn = math::clamp(p.z / std::max(taperH, 0.001f), -1.0f, 1.0f);
+  float t = (zn + 1.0f) * 0.5f;
+  float tapFactor = std::max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
+  float radius = size.x * tapFactor;
+
+  float slope = size.x * (tapTop + tapBot) / (2.0f * std::max(taperH, 0.001f));
+  float lipschitz = std::sqrt(1.0f + slope * slope);
+
+  float d2d = math::length(float2(p.x, p.y)) - radius;
+  float dz = fabsf(p.z) - size.z;
+
+  float edgeR = (p.z > 0.0f) ? edgeTop * std::min(radius, size.z)
+                              : edgeBot * std::min(radius, size.z);
+
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d2d + edgeR, dz + edgeR);
+      return (std::min(std::max(dd.x, dd.y), 0.0f) +
+              math::length(math::max(dd, float2(0.0f))) - edgeR) / lipschitz;
+    }
+    else {
+      float base = std::max(d2d, dz);
+      float cham = (d2d + dz + edgeR) * 0.70710678f;
+      float dd = std::max(base, cham);
+      if (dd <= 0.0f) { return dd / lipschitz; }
+      if (d2d <= 0.0f && dz <= 0.0f) { return cham / lipschitz; }
+      if (dz <= -edgeR) { return d2d / lipschitz; }
+      if (d2d <= -edgeR) { return dz / lipschitz; }
+      float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) { return math::length(float2(d2d, dz + edgeR)) / lipschitz; }
+      if (tc2 >= 1.0f) { return math::length(float2(d2d + edgeR, dz)) / lipschitz; }
+      return cham / lipschitz;
+    }
+  }
+  else {
+    float2 dd = float2(d2d, dz);
+    return (math::length(math::max(dd, float2(0.0f))) +
+            std::min(std::max(dd.x, dd.y), 0.0f)) / lipschitz;
+  }
+}
+
+inline float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
+                                   float edgeTop, float edgeBot, int edgeMode)
+{
+  float r = math::length(float2(p.x, p.y));
+  float2 q = float2(r, p.z);
+
+  float2 side_dir = float2(rt - rb, 2.0f * h);
+  float len_dir = std::max(math::length(side_dir), 1e-8f);
+  float2 outward_normal = float2(side_dir.y, -side_dir.x) / len_dir;
+
+  float t = math::clamp(math::dot(q - float2(rb, -h), side_dir) /
+                         math::dot(side_dir, side_dir), 0.0f, 1.0f);
+  float2 pt_side = float2(rb, -h) + side_dir * t;
+  float2 diff = q - pt_side;
+  float d_side_abs = math::length(diff);
+  float d_side_sign = math::dot(diff, outward_normal);
+  bool on_segment = (t > 0.0f && t < 1.0f);
+  float d_side = (on_segment && d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
+
+  float cap_r = (q.y < 0.0f) ? rb : rt;
+  float d_cap_r = q.x - cap_r;
+  float d_cap_z = fabsf(q.y) - h;
+  float d_cap;
+  if (d_cap_r < 0.0f && d_cap_z < 0.0f) {
+    d_cap = std::max(d_cap_r, d_cap_z);
+  }
+  else {
+    float2 cap_dd = float2(std::max(d_cap_r, 0.0f), std::max(d_cap_z, 0.0f));
+    d_cap = math::length(cap_dd);
+    if (d_cap_r > 0.0f && d_cap_z < 0.0f) { d_cap = d_cap_r; }
+    if (d_cap_z > 0.0f && d_cap_r < 0.0f) { d_cap = d_cap_z; }
+  }
+
+  float edgeR = (q.y > 0.0f) ? edgeTop * std::min(cap_r, h) : edgeBot * std::min(cap_r, h);
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d_side + edgeR, d_cap + edgeR);
+      return std::min(std::max(dd.x, dd.y), 0.0f) +
+             math::length(math::max(dd, float2(0.0f))) - edgeR;
+    }
+    else {
+      float base = std::max(d_side, d_cap);
+      float cham = (d_side + d_cap + edgeR) * 0.70710678f;
+      float dd = std::max(base, cham);
+      if (dd <= 0.0f) { return dd; }
+      if (d_side <= 0.0f && d_cap <= 0.0f) { return cham; }
+      if (d_cap <= -edgeR) { return d_side; }
+      if (d_side <= -edgeR) { return d_cap; }
+      float tc2 = (-d_side + d_cap + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) { return math::length(float2(d_side, d_cap + edgeR)); }
+      if (tc2 >= 1.0f) { return math::length(float2(d_side + edgeR, d_cap)); }
+      return cham;
+    }
+  }
+  else {
+    float2 dd = float2(d_side, d_cap);
+    return math::length(math::max(dd, float2(0.0f))) +
+           std::min(std::max(dd.x, dd.y), 0.0f);
+  }
+}
+
 inline float sdConeFrustum(float3 p, float rb, float rt, float h)
 {
   /* Mirror of GLSL sdConeFrustum: bottom radius rb at z=-h, top radius rt at z=+h. */
@@ -103,11 +210,28 @@ inline float evalPrimitive(const SDFObjectGPU &obj, float3 p)
       break;
     }
     case 2: { /* CYLINDER */
-      dist = sdCylinder(p, size);
+      float edgeSum = obj.box_edges.x + obj.box_edges.y + obj.box_edges.z + obj.box_edges.w;
+      if (edgeSum > 0.001f) {
+        dist = sdAdvancedCylinder(p, size,
+                                  obj.box_edges.x, obj.box_edges.y,
+                                  obj.box_edges.z, obj.box_edges.w,
+                                  obj.box_modes.y, size.z);
+      }
+      else {
+        dist = sdCylinder(p, size);
+      }
       break;
     }
     case 3: { /* CONE / FRUSTUM */
-      dist = sdConeFrustum(p, size.x, size.z, size.y);
+      float edgeSum = obj.box_edges.x + obj.box_edges.y;
+      if (edgeSum > 0.001f) {
+        dist = sdAdvancedConeFrustum(p, size.x, size.z, size.y,
+                                     obj.box_edges.x, obj.box_edges.y,
+                                     obj.box_modes.y);
+      }
+      else {
+        dist = sdConeFrustum(p, size.x, size.z, size.y);
+      }
       break;
     }
     case 4: { /* CAPSULE */

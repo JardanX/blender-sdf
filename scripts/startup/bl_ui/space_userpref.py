@@ -933,6 +933,7 @@ class USERPREF_PT_viewport_quality(ViewportPanel, CenterAlignMixIn, Panel):
         col.prop(system, "viewport_aa")
 
         col.prop(system, "sdf_fxaa", text="SDF Anti-Aliasing")
+        col.prop(system, "sdf_smooth_upscale", text="Use SDF Bilinear Filtering")
 
         col = layout.column(heading="Smooth Wires")
         col.prop(system, "use_overlay_smooth_wire", text="Overlay")

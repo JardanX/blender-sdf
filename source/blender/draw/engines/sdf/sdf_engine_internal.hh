@@ -376,6 +376,7 @@ class SdfInstanceBase : public DrawEngine {
   /* When true, marcher is relaxed during adaptive low-res. When false, UI
    * marcher values are used at all times even during low-res navigation. */
   bool adaptive_precision_ = true;
+  bool smooth_upscale_ = true;
   bool scene_changed_ = false;
   bool view_changed_ = false;
   bool mesh_changed_ = false;
@@ -467,10 +468,12 @@ class SdfInstanceBase : public DrawEngine {
     uint64_t revision = 0;
     int voxel_resolution = -1;
     float reach = 0.0f;
-    /* The grid being baked (work_active while incomplete). Flips into
-     * `live` when both levels complete. Always baked into FRESH pool
-     * ranges — never in place, so the live grid is never corrupted
-     * mid-bake. */
+    /* The grid being baked (work_active while incomplete). Swaps into
+     * `live` when both levels complete; the old live grid then rides
+     * along in `work` as the SPARE range, reused by the next rebake whose
+     * layout matches (steady edit streams append nothing to the pools).
+     * Never baked in place over the live range, so the live grid is
+     * never corrupted mid-bake. */
     MeshBakeGrid work;
     uint64_t w_revision = 0;
     int w_setting = -1;
@@ -1593,6 +1596,113 @@ class SdfInstanceBase : public DrawEngine {
         }
       }
       else if (total_edges > 0) {
+        /* Exact 2D SDF of the built contours (straight + quadratic arc
+         * edges), used to bake the coarse far-field grid. Mirrors
+         * sdPolygon2D in sdf_lib.glsl (including its winding rule). */
+        auto eval_d2d_exact = [&](float2 p) -> float {
+          float d = 1e20f;
+          int winding = 0;
+          for (const IngestContour &ct : contours) {
+            const int pc = int(ct.pts.size());
+            for (int i = 0; i < pc; i++) {
+              const int j = (i + 1) % pc;
+              const float2 &a = ct.pts[i];
+              const float2 &c = ct.pts[j];
+              if (ct.is_arc[i]) {
+                const float2 &b = ct.ctrls[i];
+                /* Distance: coarse samples + golden-section refine. */
+                auto quad_pt = [&](float t) -> float2 {
+                  const float u = 1.0f - t;
+                  return a * (u * u) + b * (2.0f * u * t) + c * (t * t);
+                };
+                float best_t = 0.0f, best_d = 1e30f;
+                for (int k = 0; k <= 16; k++) {
+                  const float t = float(k) / 16.0f;
+                  const float dd = math::distance_squared(quad_pt(t), p);
+                  if (dd < best_d) {
+                    best_d = dd;
+                    best_t = t;
+                  }
+                }
+                float lo = math::max(0.0f, best_t - 1.0f / 16.0f);
+                float hi = math::min(1.0f, best_t + 1.0f / 16.0f);
+                for (int it = 0; it < 16; it++) {
+                  const float m1 = lo + (hi - lo) * 0.381966f;
+                  const float m2 = hi - (hi - lo) * 0.381966f;
+                  if (math::distance_squared(quad_pt(m1), p) <
+                      math::distance_squared(quad_pt(m2), p))
+                  {
+                    hi = m2;
+                  }
+                  else {
+                    lo = m1;
+                  }
+                }
+                best_d = math::min(
+                    best_d, math::distance_squared(quad_pt(0.5f * (lo + hi)), p));
+                d = math::min(d, sqrtf(best_d));
+
+                /* Winding: roots of the y-component (same rule as the shader). */
+                const float y0 = math::min(a.y, math::min(b.y, c.y));
+                const float y1 = math::max(a.y, math::max(b.y, c.y));
+                if (p.y < y0 || p.y > y1) {
+                  continue;
+                }
+                const float A = a.y - 2.0f * b.y + c.y;
+                const float B = 2.0f * (b.y - a.y);
+                const float C = a.y - p.y;
+                float roots[2];
+                int nroots = 0;
+                if (fabsf(A) < 1e-4f) {
+                  if (fabsf(B) > 1e-12f) {
+                    roots[nroots++] = -C / B;
+                  }
+                }
+                else {
+                  const float disc = B * B - 4.0f * A * C;
+                  if (disc > 0.0f) {
+                    const float s = sqrtf(disc);
+                    roots[nroots++] = (-B - s) / (2.0f * A);
+                    roots[nroots++] = (-B + s) / (2.0f * A);
+                  }
+                }
+                for (int r = 0; r < nroots; r++) {
+                  const float t = roots[r];
+                  if (t < 0.0f || t > 1.0f) {
+                    continue;
+                  }
+                  const float u = 1.0f - t;
+                  const float2 q = quad_pt(t);
+                  const float2 v = 2.0f * (u * (b - a) + t * (c - b));
+                  const float cr = v.x * (p.y - q.y) - v.y * (p.x - q.x);
+                  if (v.y > 0.0f && p.y != c.y && cr > 0.0f) {
+                    winding++;
+                  }
+                  if (v.y < 0.0f && p.y != a.y && cr < 0.0f) {
+                    winding--;
+                  }
+                }
+              }
+              else {
+                const float2 e = c - a;
+                const float2 w = p - a;
+                const float ee = math::dot(e, e);
+                if (ee > 1e-20f) {
+                  const float2 bq = w - e * math::clamp(math::dot(w, e) / ee, 0.0f, 1.0f);
+                  d = math::min(d, math::length(bq));
+                }
+                const float cross = e.x * w.y - e.y * w.x;
+                if (a.y <= p.y && c.y > p.y && cross > 0.0f) {
+                  winding++;
+                }
+                if (a.y > p.y && c.y <= p.y && cross < 0.0f) {
+                  winding--;
+                }
+              }
+            }
+          }
+          return (winding != 0) ? -d : d;
+        };
         /* 2D edge BVH: node entries (arc_bounds.w == -3) with child indices
          * into the same array; leaves are the edges built above. Node
          * indices are serialized before leaves; the uber-header at
@@ -1624,18 +1734,23 @@ class SdfInstanceBase : public DrawEngine {
         }
 
         std::function<int(int, int)> build = [&](int lo, int hi) -> int {
+          /* Single leaf: no node, reference the leaf directly (a node with two
+           * identical children would double-count its winding). */
+          if (hi - lo == 1) {
+            return -order[lo] - 1;
+          }
           float2 mn(1e30f), mx(-1e30f);
           for (int i = lo; i < hi; i++) {
             mn = math::min(mn, leaf_mn[order[i]]);
-            mx = math.max(mx, leaf_mx[order[i]]);
+            mx = math::max(mx, leaf_mx[order[i]]);
           }
           NodeRec rec;
           rec.mn = mn;
           rec.mx = mx;
           const int count = hi - lo;
-          if (count <= 2) {
+          if (count == 2) {
             rec.left = -order[lo] - 1;
-            rec.right = (count == 2) ? (-order[lo + 1] - 1) : rec.left;
+            rec.right = -order[lo + 1] - 1;
           }
           else {
             const int axis = (mx.x - mn.x) >= (mx.y - mn.y) ? 0 : 1;
@@ -1681,6 +1796,64 @@ class SdfInstanceBase : public DrawEngine {
           polygon_points_.append(*leaf_ptrs[i]);
           gpu_obj.polygon_point_count++;
         }
+
+        /* Coarse far-field grid: conservative signed-distance values on a
+         * 64x64 cell grid (12 values packed per entry). The shader uses the
+         * cell value only when it provably cannot affect any visible surface
+         * (beyond the silhouette + bevel/edge/outline/blend reach), otherwise
+         * it falls back to the exact BVH traversal — quality is untouched,
+         * far-field cost is O(1) regardless of the edge count. */
+        const int GRID_RES = 64;
+        float2 gmn(1e30f), gmx(-1e30f);
+        for (int i = 0; i < total_edges; i++) {
+          gmn = math::min(gmn, leaf_mn[i]);
+          gmx = math::max(gmx, leaf_mx[i]);
+        }
+        gmn -= float2(max_corner + 1e-3f);
+        gmx += float2(max_corner + 1e-3f);
+        const float cell = math::max(gmx.x - gmn.x, gmx.y - gmn.y) / float(GRID_RES);
+        const float half_diag = cell * 0.70710678f;
+        const int grid_first = int(polygon_points_.size());
+        {
+          SDFPolygonPointGPU ge = {};
+          int slot = 0;
+          auto flush = [&]() {
+            if (slot > 0) {
+              polygon_points_.append(ge);
+              gpu_obj.polygon_point_count++;
+              ge = {};
+              slot = 0;
+            }
+          };
+          for (int gy = 0; gy < GRID_RES; gy++) {
+            for (int gx = 0; gx < GRID_RES; gx++) {
+              const float2 p(gmn.x + (float(gx) + 0.5f) * cell,
+                             gmn.y + (float(gy) + 0.5f) * cell);
+              const float dc = eval_d2d_exact(p);
+              const float v = (dc >= 0.0f) ? (dc - half_diag) : (dc + half_diag);
+              if (slot < 4) {
+                ge.vi_edge[slot] = v;
+              }
+              else if (slot < 8) {
+                ge.arc_data[slot - 4] = v;
+              }
+              else {
+                ge.arc_bounds[slot - 8] = v;
+              }
+              if (++slot == 12) {
+                flush();
+              }
+            }
+          }
+          flush();
+        }
+        /* Patch the uber-header with the grid metadata. */
+        polygon_points_[base].arc_data.y = float(grid_first);
+        polygon_points_[base].arc_data.z = float(GRID_RES);
+        polygon_points_[base].arc_data.w = float(GRID_RES);
+        polygon_points_[base].arc_bounds.x = gmn.x;
+        polygon_points_[base].arc_bounds.y = gmn.y;
+        polygon_points_[base].arc_bounds.z = cell;
       }
 
       gpu_obj.box_corners = float4(max_corner, 0.0f, 0.0f, 0.0f);
@@ -1706,6 +1879,22 @@ class SdfInstanceBase : public DrawEngine {
       gpu_obj.box_corners = float4(sinf(half_rad), cosf(half_rad), 0.0f, 0.0f);
       gpu_obj.box_edges = float4(0.0f);
       gpu_obj.box_modes = int4(0, 0, 0, (angle_rad < (float(M_PI) * 2.0f) - 0.001f) ? 1 : 0);
+    }
+    else if (sdf_data->sdf_type == SDF_TYPE_CYLINDER) {
+      float cyl_taper = sdf_data->cylinder_taper;
+      gpu_obj.box_corners = float4(0.0f);
+      gpu_obj.box_edges = float4(sdf_data->cylinder_edge_top,
+                                 sdf_data->cylinder_edge_bottom,
+                                 math::max(cyl_taper, 0.0f),
+                                 math::max(-cyl_taper, 0.0f));
+      gpu_obj.box_modes = int4(0, sdf_data->cylinder_edge_mode, 0, 0);
+    }
+    else if (sdf_data->sdf_type == SDF_TYPE_CONE) {
+      gpu_obj.box_corners = float4(0.0f);
+      gpu_obj.box_edges = float4(sdf_data->cone_edge_top,
+                                 sdf_data->cone_edge_bottom,
+                                 0.0f, 0.0f);
+      gpu_obj.box_modes = int4(0, 0, 0, 0);
     }
     else {
       gpu_obj.box_corners = float4(sdf_data->box_corners[0],
@@ -2605,10 +2794,14 @@ class SdfInstanceBase : public DrawEngine {
           std::stable_sort(sort_pairs.begin(), sort_pairs.end());
 
           Vector<SDFObjectGPU> sorted(n);
+          Vector<Object *> sorted_ptrs(n);
+          Vector<const void *> sorted_mesh_keys(n);
           Vector<int> old_to_new(n);
           for (int new_idx = 0; new_idx < n; new_idx++) {
             int old_idx = sort_pairs[new_idx].second;
             sorted[new_idx] = objects_[old_idx];
+            sorted_ptrs[new_idx] = object_ptrs_[old_idx];
+            sorted_mesh_keys[new_idx] = object_mesh_keys_[old_idx];
             old_to_new[old_idx] = new_idx;
           }
           objects_ = std::move(sorted);
@@ -2638,6 +2831,16 @@ class SdfInstanceBase : public DrawEngine {
               prev_ptr = ptr;
             }
           }
+
+          /* Keep the parallel arrays aligned with the sorted objects_:
+           * update_mesh_bakes pairs objects_[i] with object_ptrs_[i] /
+           * object_mesh_keys_[i]; leaving them in sync order resolved every
+           * mesh's baked fields against the WRONG bake record whenever the
+           * sort reordered (groups / custom sdf_index), making meshes
+           * sample a foreign bake or vanish until a rebake. Done after the
+           * mapping loops above, which index object_ptrs_ pre-sort. */
+          object_ptrs_ = std::move(sorted_ptrs);
+          object_mesh_keys_ = std::move(sorted_mesh_keys);
         }
       }
 
@@ -2964,6 +3167,22 @@ class SdfInstanceBase : public DrawEngine {
           }
         }
         s_sorted_object_ptrs = std::move(compact_sorted_ptrs);
+
+        /* Compact the parallel arrays the same way (they were reordered
+         * along with objects_ by the sort above; update_mesh_bakes pairs
+         * objects_[i] with object_ptrs_[i] / object_mesh_keys_[i]). */
+        Vector<Object *> compact_ptrs;
+        Vector<const void *> compact_mesh_keys;
+        compact_ptrs.reserve(visible_count);
+        compact_mesh_keys.reserve(visible_count);
+        for (int i = 0; i < int(objects_.size()); i++) {
+          if (obj_remap[i] >= 0) {
+            compact_ptrs.append(object_ptrs_[i]);
+            compact_mesh_keys.append(object_mesh_keys_[i]);
+          }
+        }
+        object_ptrs_ = std::move(compact_ptrs);
+        object_mesh_keys_ = std::move(compact_mesh_keys);
 
         objects_ = std::move(compact_objects);
         modifiers_ = std::move(compact_modifiers);
@@ -3596,6 +3815,7 @@ class SdfInstanceBase : public DrawEngine {
     resolution_scale_ = (scale_pct >= 20.0f) ? scale_pct / 100.0f : 1.0f;
     adaptive_resolution_ = s.sdf_adaptive_resolution != 0;
     adaptive_precision_ = s.sdf_adaptive_precision != 0;
+    smooth_upscale_ = (U.sdf_smooth_upscale != 0);
     use_frustum_cull_ = s.sdf_frustum_cull != 0;
 
     sync_engine_settings(s);
@@ -4108,15 +4328,18 @@ class SdfInstanceBase : public DrawEngine {
      * distance field (blends beyond it soften instead of breaking). */
     const float reach = max_blend_ + max_shell_distance_;
 
-    /* ---- 1. Flip completed work grids into live. The abandoned old live
-     * ranges stay allocated until the next compaction (pools are
-     * append-only). ---- */
+    /* ---- 1. Flip completed work grids into live. The old live grid is
+     * kept in `work` as the SPARE: phase 2 reuses its pool range for the
+     * next rebake whose layout matches, so a steady edit stream appends
+     * nothing to the pools (appends used to thrash the pool into
+     * compaction, which clears the live grids — the edit-mode flicker).
+     * ---- */
     for (const auto &item : bake_records_.items()) {
       MeshBakeRecord &rec = item.value;
       if (rec.work_active && rec.work.ready &&
           (rec.work.cres.x == 0 || rec.work.cready))
       {
-        rec.live = rec.work;
+        std::swap(rec.live, rec.work);
         rec.revision = rec.w_revision;
         rec.voxel_resolution = rec.w_setting;
         rec.reach = rec.w_reach;
@@ -4170,39 +4393,115 @@ class SdfInstanceBase : public DrawEngine {
       const float pad = band + voxel_size;
 
       MeshBakeRecord &r = bake_records_.lookup_or_add_default(key);
+      const int prev_w_setting = r.w_setting;
+      const float prev_w_reach = r.w_reach;
+      /* Spare range (the pre-flip live grid; see phase 1) available for
+       * reuse when the new layout matches — captured before `work` is
+       * overwritten below. Meaningless while a bake is in flight. */
+      const int3 spare_res = r.work.res;
+      const int spare_base = r.work.base;
+      const int3 spare_cres = r.work.cres;
+      const int spare_cbase = r.work.cbase;
       r.w_revision = info->revision;
       r.w_setting = setting;
       r.w_reach = reach;
-      r.work.res = math::clamp(int3(math::ceil((extent + float3(2.0f * pad)) / voxel_size)),
-                               8,
-                               256);
-      r.work.origin = info->bounds_min - float3(pad);
-      r.work.voxel_size = voxel_size;
-      r.work.band = band;
+
+      /* Layout stabilization: continuous editing nudges the mesh bounds
+       * every stroke; re-deriving the grid from the new bounds each
+       * revision would change res/origin/voxel_size every time, defeating
+       * the range reuse below and thrashing the append-only pool into
+       * compaction (which clears the live grids — the edit-mode flicker).
+       * When the new padded bounds still fit inside the current grid (the
+       * in-flight work grid, else the live one) at an unchanged resolution
+       * setting, keep that grid's layout; relayout only when the bounds
+       * outgrow the grid or shrink below half its voxel pitch. */
+      int3 work_res = math::clamp(int3(math::ceil((extent + float3(2.0f * pad)) / voxel_size)),
+                                  8,
+                                  256);
+      float3 work_origin = info->bounds_min - float3(pad);
+      float work_voxel = voxel_size;
+      const MeshBakeGrid *stable = (r.work_active && prev_w_setting == setting) ?
+                                       &r.work :
+                                   (r.live.ready && r.voxel_resolution == setting) ?
+                                       &r.live :
+                                       nullptr;
+      if (stable != nullptr && stable->res.x > 0 && voxel_size > 0.5f * stable->voxel_size) {
+        const float stable_pad = stable->band + stable->voxel_size;
+        const float3 fit_min = info->bounds_min - float3(stable_pad);
+        const float3 fit_max = info->bounds_max + float3(stable_pad);
+        const float3 grid_max = stable->origin + float3(stable->res) * stable->voxel_size;
+        const bool fits = fit_min.x >= stable->origin.x && fit_min.y >= stable->origin.y &&
+                          fit_min.z >= stable->origin.z && fit_max.x <= grid_max.x &&
+                          fit_max.y <= grid_max.y && fit_max.z <= grid_max.z;
+        if (fits) {
+          work_res = stable->res;
+          work_origin = stable->origin;
+          work_voxel = stable->voxel_size;
+        }
+      }
+      r.work.res = work_res;
+      r.work.origin = work_origin;
+      r.work.voxel_size = work_voxel;
+      r.work.band = 4.0f * work_voxel;
 
       /* Coarse far-field level: ~48 cells across the padded bounds, fp32
        * unclamped distance out to the blend reach. Skipped (cres = 0) when
-       * the scene has no blends at all. */
+       * the scene has no blends at all. The coarse voxel is capped at 8
+       * fine voxels: trilinear interpolation of the coarse field
+       * overestimates the true distance near convex features by up to
+       * ~(cvoxel^2 / 8) * surface curvature, and at blend-reach-sized
+       * voxels that error breaks the 1.5-Lipschitz step bound the LP
+       * marcher relies on near the fine -> coarse defer boundary
+       * (overshoot -> torn patches in wide blends). Capped at 8 fine
+       * voxels the error stays below half the narrow band for any surface
+       * the fine grid resolves (>= 4 voxels per curvature radius). */
       if (reach > 0.0f) {
-        const float pad_c = reach + pad;
+        const float pad_c = reach + r.work.band + work_voxel;
         const float3 extent_c = extent + float3(2.0f * pad_c);
-        const float cvoxel = math::reduce_max(extent_c) / 48.0f;
+        const float cvoxel = math::max(math::reduce_max(extent_c) / 48.0f, 8.0f * work_voxel);
         r.work.cres = math::clamp(int3(math::ceil(extent_c / cvoxel)), 8, 64);
-        r.work.corigin = info->bounds_min - float3(pad_c);
+        /* Center the grid on the bounds: when the 64-cell clamp keeps the
+         * grid from covering bounds + reach, coverage stays centered on
+         * the mesh instead of being clipped on the max side. */
+        r.work.corigin = (info->bounds_min + info->bounds_max) * 0.5f -
+                         float3(r.work.cres) * (0.5f * cvoxel);
         r.work.cvoxel = cvoxel;
+        /* Coarse layout stabilization (same rationale as the fine grid):
+         * reuse the current coarse grid when the padded bounds still fit
+         * at an unchanged blend reach. */
+        const bool stable_reach = (stable == &r.work) ? (prev_w_reach == reach) :
+                                  (stable == &r.live) ? (r.reach == reach) :
+                                                        false;
+        if (stable_reach && stable->cres.x > 0) {
+          const float cpad = reach + stable->band + stable->voxel_size;
+          const float3 cfit_min = info->bounds_min - float3(cpad);
+          const float3 cfit_max = info->bounds_max + float3(cpad);
+          const float3 cgrid_max = stable->corigin + float3(stable->cres) * stable->cvoxel;
+          const bool cfits = cfit_min.x >= stable->corigin.x && cfit_min.y >= stable->corigin.y &&
+                             cfit_min.z >= stable->corigin.z && cfit_max.x <= cgrid_max.x &&
+                             cfit_max.y <= cgrid_max.y && cfit_max.z <= cgrid_max.z;
+          if (cfits) {
+            r.work.cres = stable->cres;
+            r.work.corigin = stable->corigin;
+            r.work.cvoxel = stable->cvoxel;
+          }
+        }
       }
       else {
         r.work.cres = int3(0);
         r.work.cbase = 0;
       }
 
-      /* Fresh pool ranges — the live grid is never rewritten mid-bake. When
+      /* Pool ranges — the live grid is never rewritten mid-bake. When
        * only the blend reach changed (payload and fine grid identical), the
        * live fine bake doubles as the work fine bake (same for the coarse
        * level when its grid is unchanged), so only the coarse level
        * rebakes. When RETARGETING an in-flight bake (continuous editing),
-       * reuse the work ranges — appending a fresh range every revision
-       * would thrash the pool into compaction. */
+       * reuse the work ranges. Otherwise reuse the SPARE range (the
+       * pre-flip live grid kept in `work`) when its size matches — a fresh
+       * append every completed bake would thrash the pool into compaction.
+       * The spare is only valid while no bake is in flight and must not
+       * alias the live range (the reach-only fast path shares it). */
       const bool content_same = r.live.ready && r.revision == info->revision &&
                                 r.voxel_resolution == setting;
       if (content_same && r.live.res == r.work.res) {
@@ -4212,6 +4511,13 @@ class SdfInstanceBase : public DrawEngine {
       }
       else if (rec != nullptr && rec->work_active && rec->work.res == r.work.res) {
         r.work.base = rec->work.base;
+        r.work.ready = false;
+        r.next_z = 0;
+      }
+      else if (!r.work_active && spare_res.x > 0 && spare_res == r.work.res &&
+               spare_base != r.live.base)
+      {
+        r.work.base = spare_base;
         r.work.ready = false;
         r.next_z = 0;
       }
@@ -4232,6 +4538,13 @@ class SdfInstanceBase : public DrawEngine {
           r.work.cready = false;
           r.next_cz = 0;
         }
+        else if (!r.work_active && spare_cres.x > 0 && spare_cres == r.work.cres &&
+                 spare_cbase != r.live.cbase)
+        {
+          r.work.cbase = spare_cbase;
+          r.work.cready = false;
+          r.next_cz = 0;
+        }
         else {
           r.work.cbase = int(bake_pool_used_);
           bake_pool_used_ += int64_t(r.work.cres.x) * r.work.cres.y * r.work.cres.z;
@@ -4244,9 +4557,11 @@ class SdfInstanceBase : public DrawEngine {
         r.next_cz = 0;
       }
       r.work_active = !(r.work.ready && (r.work.cres.x == 0 || r.work.cready));
-      /* Nothing to bake (grids identical to live): flip immediately. */
+      /* Nothing to bake (grids identical to live): flip immediately.
+       * Swap (as in phase 1) so the old live grid stays around as the
+       * spare for the next rebake. */
       if (!r.work_active) {
-        r.live = r.work;
+        std::swap(r.live, r.work);
         r.revision = r.w_revision;
         r.voxel_resolution = r.w_setting;
         r.reach = r.w_reach;
@@ -5049,7 +5364,7 @@ class SdfInstanceBase : public DrawEngine {
     GPU_shader_uniform_2fv(blit_sh(), "uv_scale", uv_sc);
 
     int color_slot = GPU_shader_get_sampler_binding(blit_sh(), "color_tx");
-    GPU_texture_filter_mode(comp_color_tx_, true);
+    GPU_texture_filter_mode(comp_color_tx_, smooth_upscale_);
     GPU_texture_bind(comp_color_tx_, color_slot);
     int depth_slot = GPU_shader_get_sampler_binding(blit_sh(), "depth_tx");
     GPU_texture_filter_mode(comp_depth_tx_, false);

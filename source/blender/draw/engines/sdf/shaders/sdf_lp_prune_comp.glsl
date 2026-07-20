@@ -6,18 +6,25 @@
  *
  * Hierarchical construction: level `grid_size` reads the active node lists of
  * the parent level (grid_size/4) and produces, for each cell, a compacted
- * list of the nodes that can influence the SDF inside the cell. A binary op
- * child is pruned when its value at the cell center differs from its sibling
- * by more than (Ll+Lr)*R + k (R = half the cell diagonal, Ll/Lr = per-subtree
- * Lipschitz constants serialized in SDFLpNode.lipschitz, k = blend radius):
- * the dominated subtree cannot win the min()/max() anywhere inside the cell.
- * Cells whose center distance exceeds 2*L*R are "far field" and only store a
- * constant lower bound on the distance to the surface,
- * sign(d)*((|d| - L*R)/scene_l), where L is the cell list root's constant
- * (in-cell field variation) and scene_l the full tree's constant (field to
- * distance conversion — the ROUND fillet field can exceed the true distance
- * by up to sqrt(n) along fillet crests of parallel surfaces, so un-divided
- * |d| steps overshoot thin features; see the far-field block below).
+ * list of the nodes that can influence the SDF inside the cell. The forward
+ * pass propagates a distance INTERVAL [lo, hi] per node over the cell:
+ * leaves use exact primitive bounds / value(center) +- lip*R
+ * (lp_prim_interval), ops use the exact corner evaluation
+ * [eval(lo), eval(hi)] (lp_binary_op_eval is componentwise monotone in
+ * stack space — verified numerically — a hard requirement, see its doc).
+ * A binary op child is culled when its whole interval clears the sibling's
+ * by more than the blend radius k: the dominated subtree cannot win the
+ * min()/max() anywhere inside the cell and the op reduces to the exact
+ * winner there. Cells whose root interval excludes zero are "far field" and
+ * only store a constant lower bound on the distance to the surface,
+ * lo/scene_l (resp. hi/scene_l), where scene_l is the full tree's Lipschitz
+ * constant — the field-to-distance conversion the ROUND fillet needs (its
+ * field can exceed the true distance by up to sqrt(n) along fillet crests
+ * of parallel surfaces, so un-divided |d| steps overshoot thin features;
+ * see sdf_lp_march_comp.glsl). The interval form keeps dominance and
+ * far-cell culling effective for ROUND / many-object scenes, where the old
+ * center value +- (Ll+Lr)*R form degraded with the sqrt-composed per-node
+ * Lipschitz constants.
  *
  * Port of culling.comp.glsl / common_culling.glsl from the reference engine.
  * The subgroup-based scratch allocation of the original is replaced by a
@@ -139,12 +146,17 @@ void main()
     return;
   }
 
-  /* ---- Forward pass: evaluate the parent's active list at the cell center,
-   * marking binary-op children that are dominated within this cell. ---- */
-  float d_stack[SDF_LP_STACK_DEPTH];
-  /* Per-stack-entry Lipschitz constant (SDFLpNode.lipschitz of the node that
-   * produced the value); tracks how far each value can move inside the cell. */
-  float l_stack[SDF_LP_STACK_DEPTH];
+  /* ---- Forward pass: propagate a distance INTERVAL [lo, hi] of each node
+   * over this cell, marking binary-op children that are dominated on the
+   * whole cell. lp_binary_op_eval is componentwise monotone in stack space
+   * (verified numerically), so a node's exact interval is simply
+   * [eval(lo_corner), eval(hi_corner)]; leaves get exact/primitive-specific
+   * intervals (lp_prim_interval). This replaces the old
+   * value(center) +- (Ll+Lr)*R form, whose sqrt-composed Lipschitz constants
+   * (~sqrt(n) for n nested ROUND ops) inflated every dominance band until
+   * culling stopped firing for ROUND / many-object scenes. ---- */
+  float lo_stack[SDF_LP_STACK_DEPTH];
+  float hi_stack[SDF_LP_STACK_DEPTH];
   int i_stack[SDF_LP_STACK_DEPTH];
   int stack_idx = 0;
 
@@ -152,15 +164,14 @@ void main()
     uint active_node = lp_active_in[parent_offset + i];
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
-    float d;
-    float node_l;
+    float lo, hi;
     uint node_state = LP_NODESTATE_ACTIVE;
     if (node.type == SDF_LP_NODETYPE_BINARY) {
-      float left_val = d_stack[stack_idx - 2];
-      float left_l = l_stack[stack_idx - 2];
+      float left_lo = lo_stack[stack_idx - 2];
+      float left_hi = hi_stack[stack_idx - 2];
       int left_i = i_stack[stack_idx - 2];
-      float right_val = d_stack[stack_idx - 1];
-      float right_l = l_stack[stack_idx - 1];
+      float right_lo = lo_stack[stack_idx - 1];
+      float right_hi = hi_stack[stack_idx - 1];
       int right_i = i_stack[stack_idx - 1];
       stack_idx -= 2;
 
@@ -168,53 +179,52 @@ void main()
       uint op = opw.x;
       float k = lp_op_dom_k(opw);
       float s = lp_op_sign(op);
-      /* Same blend dispatch as the trace pass (lp_binary_op_eval) so prune
-       * and trace agree on the field. */
-      d = lp_binary_op_eval(opw, left_val, right_val);
-      node_l = node.lipschitz;
+      /* Monotone in stack space: exact op interval from the two corners. */
+      lo = lp_binary_op_eval(opw, left_lo, right_lo);
+      hi = lp_binary_op_eval(opw, left_hi, right_hi);
 
       /* PAINT's right child carries color, not geometry: never cull it.
-       * The |l-r| <= (Ll+Lr)*R+k dominance bound is valid for every blend
-       * type: each child moves by at most L*R inside the cell, so outside the
-       * widened band |a-b| > k holds everywhere and the winner is exact for
-       * LINEAR/SMOOTH/CHAMFER, while the ROUND kernel's max(q.x, ad) clamp
-       * (see lp_op_iround) makes it reduce to the exact winner there as
-       * well, so substituting the winner is exact, not just sign-preserving.
-       * The one exception is lp_op_intersection_round (inward SHELL start
-       * edge): only sign-exact outside the band, but its value always
+       * Interval dominance: outside |a-b| > k every op reduces to the exact
+       * winner (lp_op_iround's max(q.x, ad) clamp; lp_op_dom_k for the
+       * k2/k3 variants), so when a child's whole interval clears the
+       * sibling's by more than k, the dominated subtree cannot win the
+       * min()/max() anywhere inside the cell and is culled. The one
+       * exception is lp_op_intersection_round (inward SHELL start edge):
+       * only sign-exact outside the band, but its value always
        * over-estimates the winner, so the substituted field stays
        * conservative and its zero set always lies inside the band (see
-       * lp_op_cullable). For the smooth k2/k3
-       * variants k here is lp_op_dom_k = k + 2*max(k2,k3): the chamfer plane /
-       * round corner keeps pulling the smin terms until it clears the winner
-       * by the full softness radius, so the plain k band would cull cells
-       * where the blend is still active. */
-      if (!lp_op_cullable(op) || abs(left_val - right_val) <= (left_l + right_l) * R + k) {
-        node_state = LP_NODESTATE_ACTIVE;
-      }
-      else {
-        node_state = LP_NODESTATE_SKIPPED;
-        int dominated = (s * left_val < s * right_val) ? right_i : left_i;
-        int addr = tmp_offset + 64 * dominated + lane;
-        if (addr < tmp_capacity) {
-          uint t = lp_tmp[addr];
-          lp_tmp_write_state(t, LP_NODESTATE_INACTIVE);
-          lp_tmp[addr] = t;
+       * lp_op_cullable). */
+      if (lp_op_cullable(op)) {
+        /* (s>0) min-form: right dominated when left_hi < right_lo - k.
+         * (s<0) max-form: right dominated when left_lo > right_hi + k. */
+        bool cull_right = (s > 0.0f) ? (left_hi < right_lo - k) :
+                                       (left_lo > right_hi + k);
+        bool cull_left = (s > 0.0f) ? (right_hi < left_lo - k) :
+                                      (right_lo > left_hi + k);
+        if (cull_right || cull_left) {
+          node_state = LP_NODESTATE_SKIPPED;
+          int dominated = cull_right ? right_i : left_i;
+          int addr = tmp_offset + 64 * dominated + lane;
+          if (addr < tmp_capacity) {
+            uint t = lp_tmp[addr];
+            lp_tmp_write_state(t, LP_NODESTATE_INACTIVE);
+            lp_tmp[addr] = t;
+          }
         }
       }
     }
     else if (node.type == SDF_LP_NODETYPE_OFFSET) {
-      /* Unary offset (desugared SHELL/PUSH/AVOID): replace the top of stack
-       * with value + offset, and account this node once on the index stack.
-       * Never culled (it shifts both sides of the parent op equally). */
-      d = d_stack[stack_idx - 1] + lp_offset_node_value(node);
-      node_l = node.lipschitz;
+      /* Unary offset (desugared SHELL/PUSH/AVOID): shift both bounds. Never
+       * culled (it shifts both sides of the parent op equally). */
+      lo = lo_stack[stack_idx - 1] + lp_offset_node_value(node);
+      hi = hi_stack[stack_idx - 1] + lp_offset_node_value(node);
       stack_idx -= 1;
     }
     else {
       SDFLpPrimitive prim = lp_prims[node.idx_in_type];
-      d = lp_eval_prim(cell_center, prim);
-      node_l = node.lipschitz;
+      float2 iv = lp_prim_interval(cell_center, cell_size * 0.5f, R, prim, node.lipschitz);
+      lo = iv.x;
+      hi = iv.y;
     }
 
     int my_addr = tmp_offset + 64 * i + lane;
@@ -222,17 +232,20 @@ void main()
       lp_tmp[my_addr] = lp_tmp_pack(node_state, false, false, true, 0xffffu);
     }
 
-    d *= lp_active_node_sign(active_node);
-    d_stack[stack_idx] = d;
-    l_stack[stack_idx] = node_l;
+    /* A negated subtree flips the field: negate and swap the bounds. */
+    if (lp_active_node_sign(active_node) < 0.0f) {
+      float tmp = lo;
+      lo = -hi;
+      hi = -tmp;
+    }
+    lo_stack[stack_idx] = lo;
+    hi_stack[stack_idx] = hi;
     i_stack[stack_idx] = i;
     stack_idx++;
   }
 
-  float d = d_stack[0];
-  /* Lipschitz constant of the whole evaluated list (root node): bounds how
-   * far the field can move anywhere inside this cell. */
-  float root_l = l_stack[0];
+  float lo = lo_stack[0];
+  float hi = hi_stack[0];
   /* Lipschitz constant of the FULL tree: converts a field magnitude into a
    * distance bound. Needed because the ROUND fillet field is NOT a
    * conservative distance under-estimate: along a fillet crest between two
@@ -246,17 +259,15 @@ void main()
   float scene_l = lp_nodes[total_num_nodes - 1].lipschitz;
 
   /* Far field: the whole cell maps to a constant lower bound on the DISTANCE
-   * to the surface, sign(d)*((|d| - root_l*R)/scene_l): |d| - root_l*R bounds
-   * |f| below inside the cell (root_l scales the in-cell variation; for a
-   * ROUND fillet L can reach sqrt(2), and an un-scaled |d|-R bound
-   * overestimates the field, letting sphere tracing overshoot the fillet),
-   * and dividing by scene_l turns the field bound into a distance bound (see
-   * above). Both bounds matter: without them a far step can jump over a thin
-   * feature between two fillet crossings. */
-  if (abs(d) > 2.0f * root_l * R) {
+   * to the surface. The interval already proves the cell has no zero
+   * crossing (lo > 0 or hi < 0) and |f| >= lo (resp. |hi|) inside it;
+   * dividing by scene_l turns that field bound into a distance bound (see
+   * above). Strictly tighter than the old sign(d)*((|d| - 2*L*R)/scene_l)
+   * form: the interval lo/hi is always at least as tight as
+   * value(center) -+ L*R, and much tighter once ROUND constants compound. */
+  if (lo > 0.0f || hi < 0.0f) {
     lp_cell_meta_out[cell_idx].x = 0;
-    lp_cell_meta_out[cell_idx].z =
-        floatBitsToInt(sign(d) * (abs(d) - root_l * R) / scene_l);
+    lp_cell_meta_out[cell_idx].z = floatBitsToInt(((lo > 0.0f) ? lo : hi) / scene_l);
     return;
   }
 

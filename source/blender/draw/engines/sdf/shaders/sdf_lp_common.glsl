@@ -279,7 +279,15 @@ float lp_op_smooth_round_intersection_inverted(float d1, float d2, float r, floa
  *   position; see SDFLpNode.lipschitz.
  * - Smooth (k2/k3) CHAMFER/ROUND variants dispatch to the verbatim classic
  *   ports above (combineCSG :1490-1537). SUBTRACT's right operand arrives
- *   negated (b = -d2), so the classic (d2, d1) argument order is (-b, a). */
+ *   negated (b = -d2), so the classic (d2, d1) argument order is (-b, a).
+ *
+ * HARD REQUIREMENT: every form this dispatcher emits — all CSG/blend/flag
+ * combinations, including the SHELL INVERTED variants — is componentwise
+ * NONDECREASING in the stack operands (a, b) (the SUB/INTER max-forms gain
+ * monotonicity through the negated right operand; verified numerically for
+ * the whole dispatch space). The prune pass relies on it: a node's exact
+ * distance interval over a cell is [eval(a_lo, b_lo), eval(a_hi, b_hi)].
+ * Any future op form must preserve this property. */
 float lp_binary_op_eval(uint4 opw, float a, float b)
 {
   uint op = opw.x;
@@ -424,6 +432,50 @@ float lp_sd_cylinder(float3 p, float3 size)
   return length(max(d, float2(0.0f))) + min(max(d.x, d.y), 0.0f);
 }
 
+float lp_sd_advanced_cylinder(float3 p, float3 size,
+                              float edgeTop, float edgeBot,
+                              float tapTop, float tapBot,
+                              int edgeMode, float taperH)
+{
+  float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
+  float t = (zn + 1.0f) * 0.5f;
+  float tapFactor = max(1.0f - tapTop * t - tapBot * (1.0f - t), 0.001f);
+  float radius = size.x * tapFactor;
+
+  float slope = size.x * (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
+  float lipschitz = sqrt(1.0f + slope * slope);
+
+  float d2d = length(p.xy) - radius;
+  float dz = abs(p.z) - size.z;
+
+  float edgeR = (p.z > 0.0f) ? edgeTop * min(radius, size.z)
+                              : edgeBot * min(radius, size.z);
+
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d2d + edgeR, dz + edgeR);
+      return (min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR) / lipschitz;
+    }
+    else {
+      float base = max(d2d, dz);
+      float cham = (d2d + dz + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) { return dd / lipschitz; }
+      if (d2d <= 0.0f && dz <= 0.0f) { return cham / lipschitz; }
+      if (dz <= -edgeR) { return d2d / lipschitz; }
+      if (d2d <= -edgeR) { return dz / lipschitz; }
+      float tc2 = (-d2d + dz + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) { return length(float2(d2d, dz + edgeR)) / lipschitz; }
+      if (tc2 >= 1.0f) { return length(float2(d2d + edgeR, dz)) / lipschitz; }
+      return cham / lipschitz;
+    }
+  }
+  else {
+    float2 dd = float2(d2d, dz);
+    return (length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f)) / lipschitz;
+  }
+}
+
 float lp_sd_cone_frustum(float3 p, float rb, float rt, float h)
 {
   float2 q = float2(length(p.xy), p.z);
@@ -433,6 +485,63 @@ float lp_sd_cone_frustum(float3 p, float rb, float rt, float h)
   float2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0f, 1.0f);
   float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
   return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+
+float lp_sd_advanced_cone_frustum(float3 p, float rb, float rt, float h,
+                                  float edgeTop, float edgeBot, int edgeMode)
+{
+  float2 q = float2(length(p.xy), p.z);
+
+  float2 side_dir = float2(rt - rb, 2.0f * h);
+  float len_dir = max(length(side_dir), 1e-8f);
+  float2 outward_normal = float2(side_dir.y, -side_dir.x) / len_dir;
+
+  float t = clamp(dot(q - float2(rb, -h), side_dir) / dot(side_dir, side_dir), 0.0f, 1.0f);
+  float2 pt_side = float2(rb, -h) + side_dir * t;
+  float2 diff = q - pt_side;
+  float d_side_abs = length(diff);
+  float d_side_sign = dot(diff, outward_normal);
+  bool on_segment = (t > 0.0f && t < 1.0f);
+  float d_side = (on_segment && d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
+
+  float cap_r = (q.y < 0.0f) ? rb : rt;
+  float d_cap_r = q.x - cap_r;
+  float d_cap_z = abs(q.y) - h;
+  float d_cap;
+  if (d_cap_r < 0.0f && d_cap_z < 0.0f) {
+    d_cap = max(d_cap_r, d_cap_z);
+  }
+  else {
+    float2 cap_dd = float2(max(d_cap_r, 0.0f), max(d_cap_z, 0.0f));
+    d_cap = length(cap_dd);
+    if (d_cap_r > 0.0f && d_cap_z < 0.0f) { d_cap = d_cap_r; }
+    if (d_cap_z > 0.0f && d_cap_r < 0.0f) { d_cap = d_cap_z; }
+  }
+
+  float edgeR = (q.y > 0.0f) ? edgeTop * min(cap_r, h) : edgeBot * min(cap_r, h);
+  if (edgeR > 0.001f) {
+    if (edgeMode == 0) {
+      float2 dd = float2(d_side + edgeR, d_cap + edgeR);
+      return min(max(dd.x, dd.y), 0.0f) + length(max(dd, float2(0.0f))) - edgeR;
+    }
+    else {
+      float base = max(d_side, d_cap);
+      float cham = (d_side + d_cap + edgeR) * 0.70710678f;
+      float dd = max(base, cham);
+      if (dd <= 0.0f) { return dd; }
+      if (d_side <= 0.0f && d_cap <= 0.0f) { return cham; }
+      if (d_cap <= -edgeR) { return d_side; }
+      if (d_side <= -edgeR) { return d_cap; }
+      float tc2 = (-d_side + d_cap + edgeR) / (2.0f * edgeR);
+      if (tc2 <= 0.0f) { return length(float2(d_side, d_cap + edgeR)); }
+      if (tc2 >= 1.0f) { return length(float2(d_side + edgeR, d_cap)); }
+      return cham;
+    }
+  }
+  else {
+    float2 dd = float2(d_side, d_cap);
+    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+  }
 }
 
 float lp_sd_capsule(float3 p, float3 size)
@@ -696,49 +805,73 @@ float lp_sd_regular_polygon_2d(float2 p, float R, int n)
   return length(p - float2(r, clamp(p.y, -he, he))) * sign(p.x - r);
 }
 
-/* Quadratic bezier distance (identical to sdBezier2D). */
+/* Quadratic bezier distance (identical to sdBezier2D: exact bracketed
+ * bisection; robust on the evolute). */
 float lp_sd_bezier_2d(float2 A, float2 B, float2 C, float2 pos)
 {
-  float2 a = B - A;
-  float2 b = A - 2.0f * B + C;
-  float2 c = a * 2.0f;
-  float2 d = A - pos;
+  float2 u = 2.0f * (B - A);
+  float2 v = A - 2.0f * B + C;
+  float2 p = pos;
 
-  float kk = 1.0f / max(dot(b, b), 1e-12f);
-  float kx = kk * dot(a, b);
-  float ky = kk * (2.0f * dot(a, a) + dot(d, b)) / 3.0f;
-  float kz = kk * dot(d, a);
+  float qa = 6.0f * dot(v, v);
+  float qb = 6.0f * dot(u, v);
+  float qc = 2.0f * dot(A - p, v) + dot(u, u);
 
-  float res = 0.0f;
-  float pp = ky - kx * kx;
-  float qq = kx * (2.0f * kx * kx - 3.0f * ky) + kz;
-  float p3 = pp * pp * pp;
-  float q2 = qq * qq;
-  float h = q2 + 4.0f * p3;
-
-  if (h >= 0.0f) {
-    h = sqrt(h);
-    h = (qq < 0.0f) ? h : -h;
-    float x = (h - qq) / 2.0f;
-    float v = sign(x) * pow(abs(x), 1.0f / 3.0f);
-    float t = v - pp / v;
-    t -= (t * (t * t + 3.0f * pp) + qq) / (3.0f * t * t + 3.0f * pp);
-    t = clamp(t - kx, 0.0f, 1.0f);
-    float2 w = d + (c + b * t) * t;
-    res = dot(w, w);
+  float brk[4];
+  brk[0] = 0.0f;
+  int nb = 1;
+  float disc = qb * qb - 4.0f * qa * qc;
+  if (abs(qa) < 1e-12f) {
+    if (abs(qb) > 1e-12f) {
+      float t = -qc / qb;
+      if (t > 0.0f && t < 1.0f) { brk[nb++] = t; }
+    }
   }
-  else {
-    float z = sqrt(-pp);
-    float v = acos(qq / (pp * z * 2.0f)) / 3.0f;
-    float m = cos(v);
-    float n = sin(v) * sqrt(3.0f);
-    float3 t3 = clamp(float3(m + m, -n - m, n - m) * z - kx, 0.0f, 1.0f);
-    float2 qx = d + (c + b * t3.x) * t3.x;
-    float2 qy = d + (c + b * t3.y) * t3.y;
-    res = min(dot(qx, qx), dot(qy, qy));
+  else if (disc > 0.0f) {
+    float s = sqrt(disc);
+    float ta = (-qb - s) / (2.0f * qa);
+    float tb = (-qb + s) / (2.0f * qa);
+    if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+    if (ta > 0.0f && ta < 1.0f) { brk[nb++] = ta; }
+    if (tb > 0.0f && tb < 1.0f) { brk[nb++] = tb; }
+  }
+  brk[nb++] = 1.0f;
+
+  float best = 1e20f;
+  for (int k = 0; k < nb; k++) {
+    float t = brk[k];
+    float2 q = A + (u + v * t) * t - p;
+    best = min(best, dot(q, q));
   }
 
-  return sqrt(res);
+  for (int k = 0; k + 1 < nb; k++) {
+    float lo = brk[k], hi = brk[k + 1];
+    float2 ql = A + (u + v * lo) * lo - p;
+    float flo = dot(ql, u + 2.0f * v * lo);
+    float2 qh = A + (u + v * hi) * hi - p;
+    float fhi = dot(qh, u + 2.0f * v * hi);
+    if (flo * fhi > 0.0f) {
+      continue;
+    }
+    for (int it = 0; it < 24; it++) {
+      float mid = 0.5f * (lo + hi);
+      float2 qm = A + (u + v * mid) * mid - p;
+      float fm = dot(qm, u + 2.0f * v * mid);
+      if (flo * fm <= 0.0f) {
+        hi = mid;
+        fhi = fm;
+      }
+      else {
+        lo = mid;
+        flo = fm;
+      }
+    }
+    float t = 0.5f * (lo + hi);
+    float2 q = A + (u + v * t) * t - p;
+    best = min(best, dot(q, q));
+  }
+
+  return sqrt(best);
 }
 
 void lp_toggle_bezier_root(float t,
@@ -798,8 +931,29 @@ void lp_toggle_bezier_winding(float2 a,
 /* Arbitrary polygon 2D SDF with straight + bezier edges (identical to
  * sdPolygon2D, including the contour-header AABB culling). Exact distance,
  * 1-Lipschitz. */
-float lp_sd_polygon_2d_bvh(float2 p, int ps, float corner_pad)
+float lp_sd_polygon_2d_bvh(float2 p, int ps, float corner_pad, float grid_slack)
 {
+  /* Coarse far-field grid (identical to sdPolygon2DBVH). */
+  if (grid_slack > 0.0f) {
+    float4 ub = polygon_points[ps].arc_bounds;
+    float4 ud = polygon_points[ps].arc_data;
+    float cell = ub.z;
+    float2 gp = (p - ub.xy) / cell;
+    int2 gc = int2(floor(gp));
+    int gres = int(ud.z);
+    if (gc.x >= 0 && gc.y >= 0 && gc.x < gres && gc.y < gres) {
+      int ci = gc.y * gres + gc.x;
+      int ei = int(ud.y) + ci / 12;
+      int cc = ci % 12;
+      float cv = (cc < 4) ? polygon_points[ei].vi_edge[cc] :
+                 (cc < 8) ? polygon_points[ei].arc_data[cc - 4] :
+                            polygon_points[ei].arc_bounds[cc - 8];
+      if (abs(cv) > grid_slack) {
+        return cv;
+      }
+    }
+  }
+
   float d = 1e20f;
   int winding = 0;
   int stack[64];
@@ -909,10 +1063,10 @@ float lp_sd_polygon_2d_bvh(float2 p, int ps, float corner_pad)
   return (winding != 0) ? -d : d;
 }
 
-float lp_sd_polygon_2d(float2 p, int ps, int pc, float corner_pad)
+float lp_sd_polygon_2d(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
-    return lp_sd_polygon_2d_bvh(p, ps, corner_pad);
+    return lp_sd_polygon_2d_bvh(p, ps, corner_pad, grid_slack);
   }
   float d = 1e20f;
   int winding = 0;
@@ -988,10 +1142,10 @@ float lp_sd_polygon_2d(float2 p, int ps, int pc, float corner_pad)
 /* Corner-rounded variant (identical to sdPolygon2DRounded, including the
  * contour-header AABB culling): straight edges are trimmed and joined by
  * exact arc fillets. Still an exact 1-Lipschitz SDF. */
-float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc, float corner_pad)
+float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
-    return lp_sd_polygon_2d_bvh(p, ps, corner_pad);
+    return lp_sd_polygon_2d_bvh(p, ps, corner_pad, grid_slack);
   }
   float d = 1e20f;
   int winding = 0;
@@ -1136,7 +1290,8 @@ float lp_sd_advanced_polygon(float3 p,
                              int edgeMode,
                              float taperH,
                              float outline_hw,
-                             float corner_pad)
+                             float corner_pad,
+                             float grid_slack)
 {
   float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
   float t = (zn + 1.0f) * 0.5f;
@@ -1145,7 +1300,8 @@ float lp_sd_advanced_polygon(float3 p,
   float slope = (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
   float lipschitz = sqrt(1.0f + slope * slope);
 
-  float d2d = lp_sd_polygon_2d_rounded(p.xy / tapFactor, ps, pc, corner_pad) * tapFactor;
+  float d2d = lp_sd_polygon_2d_rounded(p.xy / tapFactor, ps, pc, corner_pad, grid_slack) *
+              tapFactor;
   /* Outline stroke mode (SDF text thickness): abs keeps the field 1-Lipschitz. */
   if (outline_hw > 0.0f) {
     d2d = abs(d2d) - outline_hw;
@@ -2054,10 +2210,25 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
                  lp_sd_ellipsoid(lp, r);
     }
     else if (prim.type == SDF_GPU_TYPE_CYLINDER) {
-      dist = lp_sd_cylinder(lp, r);
+      if ((prim.box_edges.x + prim.box_edges.y + prim.box_edges.z + prim.box_edges.w) > 0.001f) {
+        dist = lp_sd_advanced_cylinder(lp, r,
+                                       prim.box_edges.x, prim.box_edges.y,
+                                       prim.box_edges.z, prim.box_edges.w,
+                                       prim.box_modes.y, r.z);
+      }
+      else {
+        dist = lp_sd_cylinder(lp, r);
+      }
     }
     else if (prim.type == SDF_GPU_TYPE_CONE) {
-      dist = lp_sd_cone_frustum(lp, r.x, r.z, r.y);
+      if ((prim.box_edges.x + prim.box_edges.y) > 0.001f) {
+        dist = lp_sd_advanced_cone_frustum(lp, r.x, r.z, r.y,
+                                           prim.box_edges.x, prim.box_edges.y,
+                                           prim.box_modes.y);
+      }
+      else {
+        dist = lp_sd_cone_frustum(lp, r.x, r.z, r.y);
+      }
     }
     else if (prim.type == SDF_GPU_TYPE_CAPSULE) {
       dist = lp_sd_capsule(lp, r);
@@ -2097,6 +2268,14 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
       int edgeMode = prim.box_modes.y;
       /* Outline stroke half-width (SDF text thickness; 0 = filled). */
       float outline_hw = (prim.box_modes.z != 0) ? prim.box_corners.y : 0.0f;
+      /* Coarse-grid slack (identical to the classic branch); blend and
+       * clearance reach ride in prim.box_corners.zw (packed in make_leaf). */
+      float grid_slack = 0.0f;
+      if (pc >= 3 && polygon_points[ps].arc_bounds.w <= -2.5f) {
+        grid_slack = polygon_points[ps].arc_bounds.z * 0.70710678f + prim.auxf +
+                     prim.size.w + max(edgeTop, edgeBot) * r.z + outline_hw +
+                     prim.box_corners.z + abs(prim.box_corners.w);
+      }
       if (pc >= 3) {
         if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f || prim.box_corners.x > 0.001f) {
           dist = lp_sd_advanced_polygon(lp,
@@ -2110,11 +2289,13 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
                                         edgeMode,
                                         r.z,
                                         outline_hw,
-                                        prim.auxf);
+                                        prim.auxf,
+                                        grid_slack);
         }
         else {
-          float d2d = (prim.auxf > 0.001f) ? lp_sd_polygon_2d_rounded(lp.xy, ps, pc, prim.auxf) :
-                                             lp_sd_polygon_2d(lp.xy, ps, pc, 0.0f);
+          float d2d = (prim.auxf > 0.001f) ?
+                          lp_sd_polygon_2d_rounded(lp.xy, ps, pc, prim.auxf, grid_slack) :
+                          lp_sd_polygon_2d(lp.xy, ps, pc, 0.0f, grid_slack);
           if (outline_hw > 0.0f) {
             d2d = abs(d2d) - outline_hw;
           }
@@ -2261,6 +2442,57 @@ float lp_eval_prim(float3 p, SDFLpPrimitive prim)
   float d = lp_eval_prim_base(pw, prim) * prim.scale.w;
   d = lp_apply_distance_modifiers(d, pw, prim);
   return d * dm.w;
+}
+
+/* Distance interval [lo, hi] of a primitive over a world-space cell AABB
+ * (center/half-extents; R = half diagonal, lip = SDFLpNode.lipschitz).
+ * Exact for plain uniform spheres and plain boxes: in local space the SDFs
+ * are componentwise monotone in |local_axis|, so the min sits at the
+ * per-axis closest point (clamp of the origin) and the max at the per-axis
+ * farthest bound. The local cell box is the componentwise AABB of the
+ * transformed world cell (conservative under rotation, exact without).
+ * Everything else (advanced shapes, meshes, modifiers) falls back to
+ * value(center) +- lip*R, the same bound the center-based prune used for
+ * every node. Used by the prune pass (sdf_lp_prune_comp.glsl): op intervals
+ * compose exactly on top of these leaf intervals because lp_binary_op_eval
+ * is componentwise monotone in stack space (verified numerically), which is
+ * what makes ROUND / many-object pruning effective — the old center value
+ * +- L*R form degraded with the sqrt-composed Lipschitz constants. */
+float2 lp_prim_interval(float3 cell_center, float3 cell_half, float R, SDFLpPrimitive prim, float lip)
+{
+  float3 d4 = cell_center - prim.position.xyz;
+  if (prim.modifier_count == 0 &&
+      (prim.type == SDF_GPU_TYPE_SPHERE || prim.type == SDF_GPU_TYPE_BOX))
+  {
+    float3 r = prim.size.xyz;
+    float3 cl = float3(dot(prim.m_row0, float4(d4, 1.0f)),
+                       dot(prim.m_row1, float4(d4, 1.0f)),
+                       dot(prim.m_row2, float4(d4, 1.0f))) /
+                prim.scale.xyz;
+    float3 hl = float3(dot(abs(prim.m_row0.xyz), cell_half),
+                       dot(abs(prim.m_row1.xyz), cell_half),
+                       dot(abs(prim.m_row2.xyz), cell_half)) /
+                prim.scale.xyz;
+    float3 lo3 = cl - hl;
+    float3 hi3 = cl + hl;
+    float3 closest = clamp(float3(0.0f), lo3, hi3);
+    float3 farthest = max(abs(lo3), abs(hi3));
+    if (prim.type == SDF_GPU_TYPE_SPHERE && abs(r.x - r.y) < 0.0001f &&
+        abs(r.x - r.z) < 0.0001f)
+    {
+      return prim.scale.w *
+             (float2(length(closest), length(farthest)) - r.x - prim.size.w);
+    }
+    if (prim.type == SDF_GPU_TYPE_BOX &&
+        (prim.box_corners.x + prim.box_corners.y + prim.box_corners.z + prim.box_corners.w +
+         prim.box_edges.x + prim.box_edges.y + prim.box_edges.z + prim.box_edges.w) <= 0.001f)
+    {
+      return prim.scale.w *
+             (float2(lp_sd_box(closest, r), lp_sd_box(farthest, r)) - prim.size.w);
+    }
+  }
+  float d = lp_eval_prim(cell_center, prim);
+  return float2(d - lip * R, d + lip * R);
 }
 
 /** \} */

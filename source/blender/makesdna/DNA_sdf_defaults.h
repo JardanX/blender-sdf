@@ -58,6 +58,12 @@
     .polygon_is_line = 0, \
     .polygon_line_thickness = 0.1f, \
     .torus_angle = ((float)M_PI * 2.0f), \
+    .cylinder_edge_top = 0.0f, \
+    .cylinder_edge_bottom = 0.0f, \
+    .cylinder_taper = 0.0f, \
+    .cylinder_edge_mode = 0, \
+    .cone_edge_top = 0.0f, \
+    .cone_edge_bottom = 0.0f, \
     .text_len = 0, \
     .text_len_char32 = 0, \
     .text_pos = 0, \
@@ -71,8 +77,8 @@
     .text_yof = 0.0f, \
     .text_thickness = 0.0f, \
     .text_corner = 0.0f, \
-    .text_align_x = 0, \
-    .text_align_y = 0, \
+    .text_align_x = 1, /* CU_ALIGN_X_MIDDLE */ \
+    .text_align_y = 2, /* CU_ALIGN_Y_CENTER */ \
     .sdf_index = 0, \
   }
 
