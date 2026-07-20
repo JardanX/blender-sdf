@@ -196,7 +196,14 @@ TimelineValue VKContext::flush_render_graph(RenderGraphFlushFlags flags,
   return timeline;
 }
 
-void VKContext::finish() {}
+void VKContext::finish()
+{
+  /* Block until all submitted GPU work has completed (GPU_finish semantics).
+   * Was a no-op, which silently broke CPU-side per-pass GPU timing and any
+   * other caller relying on GPU_finish() to actually synchronize. */
+  flush_render_graph(RenderGraphFlushFlags::SUBMIT | RenderGraphFlushFlags::WAIT_FOR_COMPLETION |
+                     RenderGraphFlushFlags::RENEW_RENDER_GRAPH);
+}
 
 void VKContext::memory_statistics_get(int *r_total_mem_kb, int *r_free_mem_kb)
 {
