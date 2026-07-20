@@ -3258,9 +3258,10 @@ class Instance : public DrawEngine {
         stack_sign.append(build[bidx].op == SDF_LP_CSG_SUBTRACT);
       }
       else if (build[bidx].type == SDF_LP_NODETYPE_OFFSET) {
-        /* Unary pass-through: child inherits the sign unchanged. */
+        /* Unary node: the sign stays on this node (it negates child+offset as
+         * a whole); the child edge itself is always positive. */
         stack.append(build[bidx].child);
-        stack_sign.append(sign);
+        stack_sign.append(false);
       }
     }
 
@@ -3277,6 +3278,18 @@ class Instance : public DrawEngine {
         lp_binary_ops_.append(lp_pack_binary_op(bn.blend, bn.op, bn.blend_type));
         lp_active_init_[gpu_of_build[bn.left]].y = uint32_t(self_idx);
         lp_active_init_[gpu_of_build[bn.right]].y = uint32_t(self_idx);
+        /* Per-subtree Lipschitz constant w.r.t. position. The ROUND fillet
+         * (lp_op_iround) is 1-Lipschitz in the Euclidean (a,b)-metric, which
+         * composes with two child fields of constants Ll/Lr into
+         * sqrt(Ll^2+Lr^2) (tight: sqrt(2) along the fillet crest of two
+         * parallel surfaces, where both child gradients align). All other
+         * blend types are 1-Lipschitz in the max metric, so they keep
+         * max(Ll,Lr). Negation (SUB) and PAINT do not change the constant. */
+        const float ll = lp_nodes_[gpu_of_build[bn.left]].lipschitz;
+        const float lr = lp_nodes_[gpu_of_build[bn.right]].lipschitz;
+        gpu_node.lipschitz = (bn.blend_type == SDF_BLEND_ROUND && bn.blend > 0.0f) ?
+                                 sqrtf(ll * ll + lr * lr) :
+                                 math::max(ll, lr);
       }
       else if (bn.type == SDF_LP_NODETYPE_OFFSET) {
         /* Unary node: idx_in_type carries the float bits of the offset; the
@@ -3286,9 +3299,15 @@ class Instance : public DrawEngine {
         memcpy(&offset_bits, &bn.offset, sizeof(float));
         gpu_node.idx_in_type = offset_bits;
         lp_active_init_[gpu_of_build[bn.child]].y = uint32_t(self_idx);
+        /* Adding a constant preserves the child's Lipschitz constant. */
+        gpu_node.lipschitz = lp_nodes_[gpu_of_build[bn.child]].lipschitz;
       }
       else {
         gpu_node.idx_in_type = bn.prim_idx;
+        /* Primitives are (conservatively) 1-Lipschitz: exact SDFs, with the
+         * min-axis scale and taper/displacement corrections already applied
+         * inside the primitive evaluation. */
+        gpu_node.lipschitz = 1.0f;
       }
       lp_nodes_.append(gpu_node);
       lp_active_init_[self_idx].x = uint32_t(self_idx) | (sign ? SDF_LP_SIGN_BIT : 0u);
@@ -3461,12 +3480,18 @@ class Instance : public DrawEngine {
     lp_grid_valid_ = true;
     lp_grid_level_built_ = lp_grid_level_;
 
-    /* Read back overflow stats (cleared to zero at the top of this pass). */
-    int32_t counters[32];
-    GPU_memory_barrier(GPU_BARRIER_BUFFER_UPDATE);
-    GPU_storagebuf_read(lp_active_count_ssbo_, counters);
-    lp_stat_active_overflow_ = counters[SDF_LP_STAT_ACTIVE_OVERFLOW];
-    lp_stat_tmp_overflow_ = counters[SDF_LP_STAT_TMP_OVERFLOW];
+    /* Read back overflow stats (cleared to zero at the top of this pass).
+     * GPU_storagebuf_read is a synchronous stall, so only pay it when the
+     * message it feeds would actually be logged. */
+    lp_stat_active_overflow_ = 0;
+    lp_stat_tmp_overflow_ = 0;
+    if (CLOG_CHECK(&LOG, CLG_LEVEL_INFO)) {
+      int32_t counters[32];
+      GPU_memory_barrier(GPU_BARRIER_BUFFER_UPDATE);
+      GPU_storagebuf_read(lp_active_count_ssbo_, counters);
+      lp_stat_active_overflow_ = counters[SDF_LP_STAT_ACTIVE_OVERFLOW];
+      lp_stat_tmp_overflow_ = counters[SDF_LP_STAT_TMP_OVERFLOW];
+    }
     if (lp_stat_active_overflow_ > 0 || lp_stat_tmp_overflow_ > 0) {
       CLOG_INFO(&LOG,
                 "SDF LP prune overflow: %d cell(s) exceeded the active-list pool, "
@@ -3513,6 +3538,7 @@ class Instance : public DrawEngine {
     GPU_shader_uniform_1f(sh, "viz_max", float(lp_colormap_max_));
     GPU_shader_uniform_1i(sh, "max_steps", sdf_max_steps_);
     GPU_shader_uniform_1f(sh, "ray_epsilon", sdf_ray_epsilon_);
+    GPU_shader_uniform_1f(sh, "over_relaxation", sdf_over_relaxation_);
     GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     View &view = View::default_get();
