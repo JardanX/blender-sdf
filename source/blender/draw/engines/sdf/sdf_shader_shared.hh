@@ -203,8 +203,12 @@ BLI_STATIC_ASSERT_ALIGN(SDFShadingDataGPU, 16)
  * during pruning; the trace pass evaluates the full tree for these cells.
  * Always exact geometry — overflow degrades to slower tracing locally. */
 #define SDF_LP_FALLBACK_LIST (-1)
-/* lp_stats slots (indices into the combined lp_counters buffer; slots 1-4 are
- * the per-level active counters, 9-12 the per-level tmp counters). */
+/* lp_stats slots (indices into the combined lp_counters buffer: slots 0-15
+ * are the per-level active-list counters indexed by `counter_slot` (grid
+ * level, only 2/4/6/8 used), slots 16-31 the per-level tmp counters; 14 and
+ * 15 are reserved for overflow statistics). The prune shader increments
+ * these once per cell that overflows; the engine reads them back after each
+ * rebuild (counters are cleared to zero before every prune dispatch). */
 #define SDF_LP_STAT_ACTIVE_OVERFLOW 14
 #define SDF_LP_STAT_TMP_OVERFLOW 15
 

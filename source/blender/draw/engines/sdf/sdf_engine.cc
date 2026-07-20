@@ -530,6 +530,10 @@ class Instance : public DrawEngine {
   int lp_final_idx_ = 0; /* Ping-pong slot holding the final level results. */
   float3 lp_aabb_min_ = float3(0.0f);
   float3 lp_aabb_max_ = float3(0.0f);
+  /* Overflow stats read back after each prune rebuild (cells that fell back
+   * to full-tree tracing because a pool was exceeded). */
+  int lp_stat_active_overflow_ = 0;
+  int lp_stat_tmp_overflow_ = 0;
 
  public:
   Instance() {}
@@ -3456,6 +3460,21 @@ class Instance : public DrawEngine {
     lp_final_idx_ = in_idx;
     lp_grid_valid_ = true;
     lp_grid_level_built_ = lp_grid_level_;
+
+    /* Read back overflow stats (cleared to zero at the top of this pass). */
+    int32_t counters[32];
+    GPU_memory_barrier(GPU_BARRIER_BUFFER_UPDATE);
+    GPU_storagebuf_read(lp_active_count_ssbo_, counters);
+    lp_stat_active_overflow_ = counters[SDF_LP_STAT_ACTIVE_OVERFLOW];
+    lp_stat_tmp_overflow_ = counters[SDF_LP_STAT_TMP_OVERFLOW];
+    if (lp_stat_active_overflow_ > 0 || lp_stat_tmp_overflow_ > 0) {
+      CLOG_INFO(&LOG,
+                "SDF LP prune overflow: %d cell(s) exceeded the active-list pool, "
+                "%d cell(s) exceeded the tmp pool; affected cells fall back to "
+                "full-tree tracing (exact, slower)",
+                lp_stat_active_overflow_,
+                lp_stat_tmp_overflow_);
+    }
   }
 
   void draw_lp_trace()
