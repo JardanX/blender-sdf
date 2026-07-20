@@ -29,8 +29,9 @@
  * Binary op packing: see SDF_LP_OP_KMASK comment in sdf_shader_shared.hh.
  *
  * Expects the including shader to declare (via its CREATE_INFO):
- *   lp_prims[], lp_nodes[], lp_binary_ops[], lp_active_in[] (uint2: x = node
- *   word, y = parent), polygon_points[], mesh_data_buf[]
+ *   lp_prims[], lp_nodes[], lp_binary_ops[], lp_active_in[] (uint: node word;
+ *   parent indices live in a separate prune-only array), polygon_points[],
+ *   mesh_data_buf[]
  */
 
 /* Eval stack depth. The scene fold produces left-leaning trees whose
@@ -68,7 +69,15 @@ float lp_op_sign(uint op)
   return -1.0f + 2.0f * float(op & 1u);
 }
 
-/* All ops except PAINT have exact winner fallback outside |a-b| >= k. */
+/* All ops except PAINT are cullable. Every generic s*op(s*a,s*b) form is the
+ * EXACT winner outside |a-b| >= lp_op_dom_k (verified numerically). The one
+ * exception is lp_op_intersection_round (inward SHELL start edge): outside
+ * the band its value is >= the max-winner but NOT equal to it (the rounded
+ * corner arc keeps contributing wherever both operands exceed -k). It is
+ * still sign-exact there, so substituting the winner under-estimates the
+ * field — conservative for sphere tracing and for the far-field bound — and
+ * the op's zero set always lies strictly inside the band, so culling never
+ * removes surface (verified numerically in tools/sdf_lp/harness.py). */
 bool lp_op_cullable(uint op)
 {
   return lp_op_csg(op) != SDF_LP_CSG_PAINT;
@@ -97,7 +106,28 @@ float2 lp_mirror2D(float2 p, float2 N)
   return p - 2.0f * N * proj;
 }
 
-/* Spherical fillet (identical to the classic opUnionIRound). */
+/* Spherical fillet (zero set identical to the classic opUnionIRound).
+ * Unlike the plain classic kernel, the fillet term `ad` is clamped below by
+ * the winner min(a,b): after the mirror q.x = min(a,b), and for q.x < 0 the
+ * unclamped ad = -length(q) <= q.x drifts away from the winner without bound
+ * (up to (sqrt(2)-1)*|a| at |a-b| == r). That drift breaks the prune pass:
+ * once the dominated child is culled (|a-b| > (Ll+Lr)*R + k), the winner's
+ * value is substituted for the op, and the unbounded discrepancy propagates
+ * into parent dominance tests and the far-field constant, culling cells the
+ * surface actually passes through. With the max(q.x, ad) clamp the op is the
+ * EXACT winner everywhere |a-b| >= r (corn >= min(a,b) there), so the
+ * dominance bound holds; inside the band the clamp only lifts the field where
+ * both operands are negative, which changes neither the zero set nor the sign
+ * (ad <= q.x exactly when q.x < 0, and at q.x == 0, q.y < 0 corn == q.y < 0
+ * keeps min() continuous). The field stays 1-Lipschitz in the Euclidean
+ * (a,b)-metric (max/min of 1-Lipschitz terms).
+ * Caveat: the lift (at most (sqrt(2)-1)*r) is a VALUE difference against the
+ * classic opRound* kernels inside the band; a downstream blend that mixes
+ * this op's output with a third field (e.g. a SHELL limit plane) can shift
+ * its zero set by that amount vs the classic engine. Matching the classic
+ * values there is impossible for any continuous winner-exact field — the
+ * classic kernel itself jumps at |a-b| == r in this quadrant — and that jump
+ * is exactly what broke pruning before the clamp. */
 float lp_op_iround(float a, float b, float r)
 {
   float2 q = float2(a, b);
@@ -107,7 +137,7 @@ float lp_op_iround(float a, float b, float r)
   float ad = sign(q.x) * length(q);
   float2 s = float2(max(a, 0.0f), max(b, 0.0f));
   float corn = length(s) - r;
-  return min(ad, corn);
+  return min(max(q.x, ad), corn);
 }
 
 /* ---- Smooth (k2/k3 edge-softness) blend variants ----
@@ -236,12 +266,11 @@ float lp_op_smooth_round_intersection_inverted(float d1, float d2, float r, floa
  * - CHAMFER: min - max(0,k-|a-b|)/2 == min(min(a,b),(a-k+b)/2) inside the
  *   blend zone and min outside, i.e. exactly opChamferUnion (:789) (the
  *   kernel-subtracted form is algebraic, not an approximation).
- * - ROUND: s*opUnionIRound(s*a,s*b,k) evaluated WITHOUT the classic
- *   |a-b| >= k cutoff. opUnionIRound reduces to the exact winner outside the
- *   blend zone on its own (the q.y clamp makes `ad` coincide with min there),
- *   so the signed form stays continuous; the classic cutoff is discontinuous
- *   in the negative/mixed quadrants, which breaks the per-cell far-field
- *   bound (blocky band artifacts). The zero set matches
+ * - ROUND: s*lp_op_iround(s*a,s*b,k) evaluated WITHOUT the classic
+ *   |a-b| >= k cutoff. lp_op_iround reduces to the exact winner outside the
+ *   blend zone via its max(q.x, ad) clamp (the classic cutoff is
+ *   discontinuous in the negative/mixed quadrants, which breaks the per-cell
+ *   far-field bound). The zero set matches
  *   opRoundUnion/opRoundSubtraction/opRoundIntersection (:849-887) exactly.
  *   The field is 1-Lipschitz in (a,b) but up to sqrt(2)-Lipschitz w.r.t.
  *   position; see SDFLpNode.lipschitz.
@@ -295,17 +324,17 @@ float lp_binary_op_eval(uint4 opw, float a, float b)
     if (k <= 0.0f) {
       return s * min(s * a, s * b);
     }
-    /* No winner fallback at |a-b| >= k: lp_op_iround already reduces to the
-     * exact winner outside the blend zone (q.y clamps to 0, so `ad` becomes
-     * min(s*a, s*b) and `corn` stays above it wherever the zone fallback
-     * would be exact), so the fillet evaluates as one continuous field. The
-     * classic opRound* cutoff to min() is discontinuous in the negative/mixed
-     * quadrants (jump up to ~1.24k), which breaks the per-cell far-field
-     * bound this engine stores and shows up as blocky bands along the blend
-     * regions. The field is 1-Lipschitz in the Euclidean (a,b)-metric, i.e.
-     * up to sqrt(2)-Lipschitz w.r.t. position when both children vary
-     * together — the prune pass scales its bounds with the per-node Lipschitz
-     * constant (SDFLpNode.lipschitz) to stay conservative. */
+    /* No winner fallback at |a-b| >= k: lp_op_iround's max(q.x, ad) clamp
+     * already reduces it to the exact winner outside the blend zone, so the
+     * fillet evaluates as one continuous field and the (Ll+Lr)*R + k
+     * dominance bound of the prune pass stays valid. (The unclamped classic
+     * kernel drifts below the winner by up to (sqrt(2)-1)*|a| in the
+     * negative quadrant, and the classic min() cutoff is discontinuous
+     * there — both break the per-cell bounds.) The field is 1-Lipschitz in
+     * the Euclidean (a,b)-metric, i.e. up to sqrt(2)-Lipschitz w.r.t.
+     * position when both children vary together — the prune pass scales its
+     * bounds with the per-node Lipschitz constant (SDFLpNode.lipschitz) to
+     * stay conservative. */
     return s * lp_op_iround(s * a, s * b, k);
   }
   float ker = (bt == SDF_LP_BLEND_CHAMFER) ? lp_kernel_chamfer(abs(a - b), k) :
@@ -332,7 +361,9 @@ float lp_op_dom_k(uint4 opw)
   return k;
 }
 
-/* Smooth-min blend returning (distance, color mix factor). */
+/* Smooth-min blend returning (distance, color mix factor). The distance
+ * evaluator uses lp_binary_op_eval instead; the mix factor drives the color
+ * and dominant-object-id folds. */
 float2 lp_smin_blend(float a, float b, float k)
 {
   if (k <= 0.0f) {
@@ -1253,7 +1284,7 @@ bool lp_mesh_nearest(int4 mesh_data,
 }
 
 /* Signed distance to a triangle mesh (identical to sdTriangleMesh). Also
- * records the winning triangle for lp_mesh_last_world_normals. */
+ * records the winning triangle for lp_mesh_smooth_world_normal. */
 float lp_sd_triangle_mesh(float3 p, int4 mesh_data, int mesh_node_count, float4 mesh_scale)
 {
   g_lp_mesh_last_triangle = -1;
@@ -1277,22 +1308,30 @@ float lp_sd_triangle_mesh(float3 p, int4 mesh_data, int mesh_node_count, float4 
   float sign_value = dot(p - closest_point, feature_normal) < 0.0f ? -1.0f : 1.0f;
   g_lp_mesh_last_triangle = triangle_index;
   g_lp_mesh_last_barycentric = barycentric;
-  g_lp_mesh_last_geometric_normal = distance_squared > 1e-12f ?
+  /* Near the surface (d < 1e-4) the p-closest displacement is floating-point
+   * noise, so use the feature normal: on a face interior it IS the exact SDF
+   * gradient, and it is stable. Using the noisy direction here made the
+   * alignment flip in lp_mesh_smooth_world_normal fire randomly, flipping
+   * shading normals 180° depending on sub-micron hit error (camera
+   * dependent). */
+  g_lp_mesh_last_geometric_normal = distance_squared > 1e-8f ?
                                         normalize(p - closest_point) * sign_value :
                                         feature_normal;
   return sqrt(max(distance_squared, 0.0f)) * sign_value;
 }
 
-/* World-space normals of the last mesh hit (port of sdfMeshLastWorldNormals,
- * sdf_mesh_lib.glsl:318), built from data already fetched by the distance
- * evaluation: one extra triangle record load, zero extra SDF evaluations.
- * shading_normal interpolates the triangle's corner normals — the smooth
- * normal a regular mesh would shade with; geometric_normal is the true SDF
- * gradient direction. Returns false when there is no valid mesh hit, in
- * which case the caller falls back to the finite-difference gradient. */
-bool lp_mesh_last_world_normals(SDFObjectGPU obj,
-                                out float3 shading_normal,
-                                out float3 geometric_normal)
+#ifndef SDF_LP_NO_COLOR
+/* World-space shading normal of the last mesh hit for primitive `prim`
+ * (port of sdfMeshLastWorldNormals, sdf_mesh_lib.glsl:318), built from data
+ * already fetched by the distance evaluation: one extra triangle record
+ * load, zero extra SDF evaluations. Interpolates the winning triangle's
+ * corner normals — the smooth normal a regular mesh shades with (shade
+ * flat/sharp included). The caller must have evaluated this primitive at
+ * the query point immediately beforehand. Returns false when there is no
+ * valid mesh hit, in which case the caller falls back to the gradient. */
+bool lp_mesh_smooth_world_normal(SDFLpPrimitive prim,
+                                 out float3 shading_normal,
+                                 out float3 geometric_normal)
 {
   if (g_lp_mesh_last_triangle < 0) {
     shading_normal = float3(0.0f);
@@ -1300,26 +1339,22 @@ bool lp_mesh_last_world_normals(SDFObjectGPU obj,
     return false;
   }
 
-  /* transpose(to_float3x3(obj.inverse_matrix)), written out so this file
-   * does not depend on the matrix conversion lib. */
-  float3x3 normal_to_world = float3x3(
-      float3(obj.inverse_matrix[0][0], obj.inverse_matrix[1][0], obj.inverse_matrix[2][0]),
-      float3(obj.inverse_matrix[0][1], obj.inverse_matrix[1][1], obj.inverse_matrix[2][1]),
-      float3(obj.inverse_matrix[0][2], obj.inverse_matrix[1][2], obj.inverse_matrix[2][2]));
-  geometric_normal = normal_to_world * g_lp_mesh_last_geometric_normal * obj.obj_scale.w;
+  /* transpose of the world-to-local rotation rows: local -> world. */
+  float3x3 normal_to_world = float3x3(prim.m_row0.xyz, prim.m_row1.xyz, prim.m_row2.xyz);
+  geometric_normal = normal_to_world * g_lp_mesh_last_geometric_normal * prim.scale.w;
   float geometric_len_squared = dot(geometric_normal, geometric_normal);
   if (geometric_len_squared <= 1e-12f || any(isnan(geometric_normal))) {
     shading_normal = float3(0.0f);
     geometric_normal = float3(0.0f);
     return false;
   }
-  SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(obj.mesh_data, g_lp_mesh_last_triangle);
+  SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(prim.mesh_data, g_lp_mesh_last_triangle);
   float3 n0 = normalize(normal_to_world *
-                        (lp_mesh_unpack_normal(triangle.corner_normals.x) / obj.obj_scale.xyz));
+                        (lp_mesh_unpack_normal(triangle.corner_normals.x) / prim.scale.xyz));
   float3 n1 = normalize(normal_to_world *
-                        (lp_mesh_unpack_normal(triangle.corner_normals.y) / obj.obj_scale.xyz));
+                        (lp_mesh_unpack_normal(triangle.corner_normals.y) / prim.scale.xyz));
   float3 n2 = normalize(normal_to_world *
-                        (lp_mesh_unpack_normal(triangle.corner_normals.z) / obj.obj_scale.xyz));
+                        (lp_mesh_unpack_normal(triangle.corner_normals.z) / prim.scale.xyz));
   shading_normal = n0 * g_lp_mesh_last_barycentric.x + n1 * g_lp_mesh_last_barycentric.y +
                    n2 * g_lp_mesh_last_barycentric.z;
   float shading_len_squared = dot(shading_normal, shading_normal);
@@ -1328,13 +1363,30 @@ bool lp_mesh_last_world_normals(SDFObjectGPU obj,
     shading_len_squared = geometric_len_squared;
   }
   shading_normal *= inversesqrt(shading_len_squared);
-  float alignment = dot(shading_normal, geometric_normal) / geometric_len_squared;
-  if (alignment < 0.0f) {
+  /* The classic engine REFLECTS the shading normal into the geometric
+   * normal's hemisphere when they oppose (meant for open/back-facing
+   * meshes). On closed, oriented meshes — which the payload always is — a
+   * negative alignment only happens on lowpoly regions of strong curvature,
+   * where reflecting invents a ~180°-rotated garbage normal (dark splotch,
+   * shimmering under specular). Fall back to the feature normal instead;
+   * genuine backfaces are already handled by the shade pass, which flips
+   * normals toward the camera (sdf_shade_comp.glsl:38). */
+  if ((prim.mesh_flags & SDF_LP_MESH_FLAG_CLOSED) != 0 &&
+      dot(shading_normal, geometric_normal) < 0.0f)
+  {
+    shading_normal = geometric_normal;
+  }
+  else if (dot(shading_normal, geometric_normal) < 0.0f) {
+    float alignment = dot(shading_normal, geometric_normal) / geometric_len_squared;
     shading_normal -= 2.0f * alignment * geometric_normal;
   }
-  shading_normal *= sqrt(geometric_len_squared);
+  /* Return unit length (the classic engine keeps the gradient magnitude for
+   * its blend weights; the LP tree blend uses unit leaf normals). */
+  shading_normal = normalize(shading_normal);
+  geometric_normal = normalize(geometric_normal);
   return true;
 }
+#endif
 
 /** \} */
 
@@ -1738,20 +1790,6 @@ float4 lp_apply_domain_modifiers(float3 p, SDFLpPrimitive prim)
 
 /** \} */
 
-/* Smooth intersection (identical to opSmoothIntersection, sdf_lib.glsl:685);
- * used by the SOLIDIFY distance modifier's bevel. */
-float lp_op_smooth_intersection(float d1, float d2, float k)
-{
-  if (k <= 0.0001f) {
-    return max(d1, d2);
-  }
-  if (abs(d2 - d1) >= k) {
-    return max(d1, d2);
-  }
-  float h = clamp(0.5f - 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
-  return mix(d2, d1, h) + k * h * (1.0f - h);
-}
-
 /* Primitive-only evaluation (identical to evalPrimitiveOnly,
  * sdf_lib.glsl:1739-1859): dispatches on the primitive type including the
  * advanced variants, applies the coordinate scale, and subtracts the
@@ -2004,14 +2042,16 @@ float lp_offset_node_value(SDFLpNode node)
 /* Evaluate `count` nodes of the active list starting at `base`.
  * The stack is deliberately NOT zero-initialized: the post-order list only
  * ever reads entries it has pushed (same as the reference eval.glsl), and the
- * init loop costs SDF_LP_STACK_DEPTH writes on every trace step. */
+ * init loop costs SDF_LP_STACK_DEPTH writes on every trace step.
+ * Trace-pass only: the prune pass runs its own forward pass. */
+#ifndef SDF_LP_NO_LIST_EVAL
 float lp_list_eval(float3 p, int count, int base)
 {
   float stack[SDF_LP_STACK_DEPTH];
   int stack_idx = 0;
 
   for (int i = 0; i < count; i++) {
-    uint active_node = lp_active_in[base + i].x;
+    uint active_node = lp_active_in[base + i];
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
     float d;
@@ -2019,8 +2059,8 @@ float lp_list_eval(float3 p, int count, int base)
       float left_val = stack[stack_idx - 2];
       float right_val = stack[stack_idx - 1];
       stack_idx -= 2;
-      uint op = lp_binary_ops[node.idx_in_type];
-      d = lp_binary_op_eval(op, left_val, right_val);
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      d = lp_binary_op_eval(opw, left_val, right_val);
     }
     else if (node.type == SDF_LP_NODETYPE_OFFSET) {
       d = stack[stack_idx - 1] + lp_offset_node_value(node);
@@ -2041,6 +2081,73 @@ float lp_list_eval(float3 p, int count, int base)
   return stack[0];
 }
 
+/* Folded dominant-object id: lp_list_eval with the winning leaf's object
+ * index tracked alongside the distance (same selection rules as
+ * lp_list_eval_color). The march pass uses it to seed gbuf_color.a for
+ * picking — much lighter than the folded color/normal evaluator. */
+float lp_list_eval_obj_id(float3 p, int count, int base)
+{
+  float d_stack[SDF_LP_STACK_DEPTH];
+  float i_stack[SDF_LP_STACK_DEPTH];
+  /* No stack initialization: see lp_list_eval. */
+  int stack_idx = 0;
+
+  for (int i = 0; i < count; i++) {
+    uint active_node = lp_active_in[base + i];
+    SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
+
+    float d;
+    float obj_id;
+    if (node.type == SDF_LP_NODETYPE_BINARY) {
+      float left_val = d_stack[stack_idx - 2];
+      float right_val = d_stack[stack_idx - 1];
+      float left_id = i_stack[stack_idx - 2];
+      float right_id = i_stack[stack_idx - 1];
+      stack_idx -= 2;
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      uint op = opw.x;
+      d = lp_binary_op_eval(opw, left_val, right_val);
+      if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
+        /* Paint only recolors where the right operand is inside-ish. */
+        float cb = lp_op_blend_factor(op);
+        float t = (cb > 0.0f) ?
+                      1.0f - smoothstep(-cb, cb, right_val) :
+                      ((right_val < 0.0f) ? 1.0f : 0.0f);
+        obj_id = (t >= 0.5f) ? right_id : left_id;
+      }
+      else {
+        float s = lp_op_sign(op);
+        float k = lp_op_blend_factor(op);
+        float2 v = s * lp_smin_blend(s * left_val, s * right_val, k);
+        obj_id = (v.y < 0.5f) ? left_id : right_id;
+      }
+    }
+    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
+      d = d_stack[stack_idx - 1] + lp_offset_node_value(node);
+      obj_id = i_stack[stack_idx - 1];
+      stack_idx -= 1;
+    }
+    else {
+      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
+      d = lp_eval_prim(p, prim);
+      obj_id = prim.color.w;
+    }
+
+    d *= lp_active_node_sign(active_node);
+    if (stack_idx >= SDF_LP_STACK_DEPTH) {
+      return -1.0f;
+    }
+    d_stack[stack_idx] = d;
+    i_stack[stack_idx] = obj_id;
+    stack_idx++;
+  }
+
+  return i_stack[0];
+}
+#endif /* SDF_LP_NO_LIST_EVAL */
+
+#ifndef SDF_LP_NO_COLOR
+#ifndef SDF_LP_NO_COLOR_FLAT
 /* Folded color evaluation: primitive albedos blended with smooth-min weights.
  * Also folds the sorted object id (dominant operand wins). */
 float4 lp_list_eval_color(float3 p, int count, int base, out float out_obj_id)
@@ -2052,7 +2159,7 @@ float4 lp_list_eval_color(float3 p, int count, int base, out float out_obj_id)
   int stack_idx = 0;
 
   for (int i = 0; i < count; i++) {
-    uint active_node = lp_active_in[base + i].x;
+    uint active_node = lp_active_in[base + i];
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
     float d;
@@ -2066,8 +2173,9 @@ float4 lp_list_eval_color(float3 p, int count, int base, out float out_obj_id)
       float left_id = i_stack[stack_idx - 2];
       float right_id = i_stack[stack_idx - 1];
       stack_idx -= 2;
-      uint op = lp_binary_ops[node.idx_in_type];
-      d = lp_binary_op_eval(op, left_val, right_val);
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      uint op = opw.x;
+      d = lp_binary_op_eval(opw, left_val, right_val);
       if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
         /* Paint only recolors where the right operand is inside-ish. */
         float cb = lp_op_blend_factor(op);
@@ -2112,6 +2220,256 @@ float4 lp_list_eval_color(float3 p, int count, int base, out float out_obj_id)
   out_obj_id = i_stack[0];
   return float4(c_stack[0], 1.0f);
 }
+#endif /* SDF_LP_NO_COLOR_FLAT */
+
+/* World-space normals of a single primitive at p, for the tree-folded normal
+ * blend. Every leaf contributes two normals (mirroring the classic engine's
+ * obj_normal/obj_gradient split): the shading normal — mesh leaves without
+ * modifiers get the corner-interpolated smooth normal from the
+ * just-evaluated hit record (the caller MUST have evaluated this primitive
+ * at p immediately beforehand) — and the geometric gradient, which is
+ * continuous across mesh triangle flips and is what blend zones should mix
+ * (a flat shading normal jumps by the full dihedral angle when the closest
+ * triangle changes, which speckles blend regions). Non-mesh leaves use
+ * 6-tap central differences for both (same vector). */
+bool lp_leaf_world_normal(SDFLpPrimitive prim,
+                          float3 p,
+                          out float3 shading_nrm,
+                          out float3 geometric_nrm)
+{
+  if (prim.type == SDF_GPU_TYPE_MESH && prim.modifier_count == 0) {
+    bool ok = lp_mesh_smooth_world_normal(prim, shading_nrm, geometric_nrm);
+    /* Smooth-shaded meshes: corner normals are continuous across triangles,
+     * so use them as the blend term too (geometric := shading). Blending the
+     * raw gradient instead facets along the mesh's Voronoi boundaries in
+     * blend zones (big camera-dependent dark patches on lowpoly). Flat
+     * meshes keep the true gradient as the blend term: on the face interior
+     * it IS the face normal, and in blend zones it stays continuous where
+     * face normals would jump. */
+    if ((prim.mesh_flags & SDF_LP_MESH_FLAG_SMOOTH_NORMALS) != 0) {
+      geometric_nrm = shading_nrm;
+    }
+    return ok;
+  }
+  const float e = 1e-4f;
+  geometric_nrm = float3(lp_eval_prim(p + float3(e, 0.0f, 0.0f), prim) -
+                             lp_eval_prim(p - float3(e, 0.0f, 0.0f), prim),
+                         lp_eval_prim(p + float3(0.0f, e, 0.0f), prim) -
+                             lp_eval_prim(p - float3(0.0f, e, 0.0f), prim),
+                         lp_eval_prim(p + float3(0.0f, 0.0f, e), prim) -
+                             lp_eval_prim(p - float3(0.0f, 0.0f, e), prim)) /
+                  (2.0f * e);
+  float len_sq = dot(geometric_nrm, geometric_nrm);
+  if (len_sq <= 1e-12f || any(isnan(geometric_nrm))) {
+    shading_nrm = float3(0.0f);
+    geometric_nrm = float3(0.0f);
+    return false;
+  }
+  geometric_nrm *= inversesqrt(len_sq);
+  shading_nrm = geometric_nrm;
+  return true;
+}
+
+/* Folded color + normal evaluation: like lp_list_eval_color, but every leaf
+ * also carries its world-space normal, blended through the tree with the
+ * same smooth-min weight that blends the distance (hard ops select the
+ * winner's normal; PAINT keeps the left operand's, matching its geometry).
+ * A negated subtree flips the field, so its normal flips too. The blend is
+ * marked invalid when a contributing side has no valid normal or the mixed
+ * vector degenerates — the caller then falls back to the FD gradient, which
+ * is also the correct creased normal at hard CSG seams. */
+float4 lp_list_eval_color_nrm(float3 p,
+                              int count,
+                              int base,
+                              out float out_obj_id,
+                              out float3 out_shading_nrm,
+                              out float3 out_geometric_nrm,
+                              out float out_mix,
+                              out bool out_nrm_valid)
+{
+  float d_stack[SDF_LP_STACK_DEPTH];
+  float3 c_stack[SDF_LP_STACK_DEPTH];
+  float i_stack[SDF_LP_STACK_DEPTH];
+  float3 n_stack[SDF_LP_STACK_DEPTH]; /* shading normals */
+  float3 g_stack[SDF_LP_STACK_DEPTH]; /* geometric gradients */
+  float m_stack[SDF_LP_STACK_DEPTH];  /* blend purity: 0 = pure, 1 = 50/50 */
+  float v_stack[SDF_LP_STACK_DEPTH];  /* 1.0 = normals valid */
+  /* No stack initialization: see lp_list_eval. */
+  int stack_idx = 0;
+
+  for (int i = 0; i < count; i++) {
+    uint active_node = lp_active_in[base + i];
+    SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
+
+    float d;
+    float3 albedo;
+    float obj_id;
+    float3 nrm;
+    float3 grad;
+    float mixv;
+    float nvalid;
+    if (node.type == SDF_LP_NODETYPE_BINARY) {
+      float left_val = d_stack[stack_idx - 2];
+      float3 left_col = c_stack[stack_idx - 2];
+      float left_id = i_stack[stack_idx - 2];
+      float3 left_nrm = n_stack[stack_idx - 2];
+      float3 left_grad = g_stack[stack_idx - 2];
+      float left_mix = m_stack[stack_idx - 2];
+      float left_v = v_stack[stack_idx - 2];
+      float right_val = d_stack[stack_idx - 1];
+      float3 right_col = c_stack[stack_idx - 1];
+      float right_id = i_stack[stack_idx - 1];
+      float3 right_nrm = n_stack[stack_idx - 1];
+      float3 right_grad = g_stack[stack_idx - 1];
+      float right_mix = m_stack[stack_idx - 1];
+      float right_v = v_stack[stack_idx - 1];
+      stack_idx -= 2;
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      uint op = opw.x;
+      d = lp_binary_op_eval(opw, left_val, right_val);
+      if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
+        /* Paint only recolors where the right operand is inside-ish. */
+        float cb = lp_op_blend_factor(op);
+        float t = (cb > 0.0f) ?
+                      1.0f - smoothstep(-cb, cb, right_val) :
+                      ((right_val < 0.0f) ? 1.0f : 0.0f);
+        albedo = mix(left_col, right_col, t);
+        obj_id = (t >= 0.5f) ? right_id : left_id;
+        /* Geometry is the left operand: keep its normals. */
+        nrm = left_nrm;
+        grad = left_grad;
+        mixv = left_mix;
+        nvalid = left_v;
+      }
+      else {
+        float s = lp_op_sign(op);
+        float k = lp_op_blend_factor(op);
+        uint bt = lp_op_blend_type(op);
+        float2 v = s * lp_smin_blend(s * left_val, s * right_val, k);
+        albedo = mix(left_col, right_col, v.y);
+        obj_id = (v.y < 0.5f) ? left_id : right_id;
+        /* Gradient of the blended field is wl*na + wr*nb with (wl, wr) the
+         * (a,b)-gradient of the op. Each kernel has its own gradient: using
+         * the quadratic smin weight for CHAMFER/ROUND shades them with the
+         * SMOOTH kernel's normal field (a chamfer reads as a round fillet).
+         * Mirror the classic sdfCSGNormalWeights
+         * (sdf_color_resolve_comp.glsl:94): analytic for LINEAR/SMOOTH,
+         * central finite differences of the actual op for CHAMFER/ROUND.
+         * The FD form is the only one that covers every CHAMFER/ROUND
+         * variant the dispatcher can emit — the k2/k3 soft-edge variants
+         * (whose true gradient mixes the chamfer plane / corner arc with
+         * the smin weights; the quadratic approximation was off by up to
+         * ~0.9) and the INVERTED shell forms (whose flag is only meaningful
+         * on the SUBTRACT path, so the old per-flag analytic selection could
+         * apply the Quilez-kernel gradient to the generic iround field).
+         * x/y below are the s-signed operands (the s cancels against the
+         * s-prefix of the op form, so the weights apply to na/nb directly). */
+        float x = s * left_val;
+        float y = s * right_val;
+
+        float2 w2;
+        if (k <= 0.0f) {
+          /* Hard op / outside any blend zone: the winner's normal. */
+          float wl = step(x, y); /* 1 when x <= y. */
+          w2 = float2(wl, 1.0f - wl);
+        }
+        else if (bt == SDF_LP_BLEND_SMOOTH) {
+          /* h is the exact quadratic smin gradient weight. */
+          float wa = clamp(0.5f + 0.5f * (y - x) / k, 0.0f, 1.0f);
+          w2 = float2(wa, 1.0f - wa);
+        }
+        else {
+          /* CHAMFER/ROUND (plain, k2/k3 soft, INVERTED shell forms): central
+           * FD of lp_binary_op_eval w.r.t. the two stack operands — the same
+           * scheme and the same step the classic engine uses, so the shading
+           * matches kernel-for-kernel (FD also yields the classic's averaged
+           * gradient on kernel creases). Only the resolve pass pays for the
+           * four extra op evaluations. */
+          const float e = 1e-5f;
+          float dxa = lp_binary_op_eval(opw, left_val + e, right_val) -
+                      lp_binary_op_eval(opw, left_val - e, right_val);
+          float dyb = lp_binary_op_eval(opw, left_val, right_val + e) -
+                      lp_binary_op_eval(opw, left_val, right_val - e);
+          w2 = float2(dxa, dyb) / (2.0f * e);
+        }
+        bool uses_l = w2.x > 1e-4f;
+        bool uses_r = w2.y > 1e-4f;
+        nvalid = ((!uses_l || left_v > 0.5f) && (!uses_r || right_v > 0.5f) &&
+                  (uses_l || uses_r)) ?
+                     1.0f :
+                     0.0f;
+        nrm = (uses_l ? left_nrm * w2.x : float3(0.0f)) +
+              (uses_r ? right_nrm * w2.y : float3(0.0f));
+        grad = (uses_l ? left_grad * w2.x : float3(0.0f)) +
+               (uses_r ? right_grad * w2.y : float3(0.0f));
+        /* Purity: how evenly both operands contribute (0 = one side fully
+         * dominates, 1 = equal contribution). Some kernel gradients are not
+         * partition-of-unity (ROUND corner arcs), so normalize first. */
+        float w_sum = w2.x + w2.y;
+        float wl_n = (w_sum > 1e-12f) ? w2.x / w_sum : 1.0f;
+        mixv = max(max(left_mix, right_mix), 1.0f - abs(2.0f * wl_n - 1.0f));
+        if (nvalid > 0.5f && (dot(grad, grad) <= 1e-12f || any(isnan(grad)))) {
+          /* Degenerate mix (opposing normals cancel): keep the dominant
+           * side, matching sdfBlendNormalContributions. */
+          bool dom_l = w2.x >= w2.y;
+          grad = dom_l ? left_grad : right_grad;
+          nrm = dom_l ? left_nrm : right_nrm;
+          nvalid = ((dom_l ? left_v : right_v) > 0.5f &&
+                    dot(grad, grad) > 1e-12f && !any(isnan(grad))) ?
+                       1.0f :
+                       0.0f;
+        }
+      }
+    }
+    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
+      d = d_stack[stack_idx - 1] + lp_offset_node_value(node);
+      albedo = c_stack[stack_idx - 1];
+      obj_id = i_stack[stack_idx - 1];
+      nrm = n_stack[stack_idx - 1];
+      grad = g_stack[stack_idx - 1];
+      mixv = m_stack[stack_idx - 1];
+      nvalid = v_stack[stack_idx - 1];
+      stack_idx -= 1;
+    }
+    else {
+      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
+      d = lp_eval_prim(p, prim);
+      albedo = prim.color.rgb;
+      obj_id = prim.color.w;
+      mixv = 0.0f;
+      nvalid = lp_leaf_world_normal(prim, p, nrm, grad) ? 1.0f : 0.0f;
+    }
+
+    float sign = lp_active_node_sign(active_node);
+    d *= sign;
+    nrm *= sign; /* A negated subtree flips the field, so flip its gradients. */
+    grad *= sign;
+    if (stack_idx >= SDF_LP_STACK_DEPTH) {
+      out_obj_id = -1.0f;
+      out_shading_nrm = float3(0.0f);
+      out_geometric_nrm = float3(0.0f);
+      out_mix = 1.0f;
+      out_nrm_valid = false;
+      return float4(0.0f);
+    }
+    d_stack[stack_idx] = d;
+    c_stack[stack_idx] = albedo;
+    i_stack[stack_idx] = obj_id;
+    n_stack[stack_idx] = nrm;
+    g_stack[stack_idx] = grad;
+    m_stack[stack_idx] = mixv;
+    v_stack[stack_idx] = nvalid;
+    stack_idx++;
+  }
+
+  out_obj_id = i_stack[0];
+  out_shading_nrm = n_stack[0];
+  out_geometric_nrm = g_stack[0];
+  out_mix = m_stack[0];
+  out_nrm_valid = v_stack[0] > 0.5f;
+  return float4(c_stack[0], 1.0f);
+}
+#endif /* SDF_LP_NO_COLOR */
 
 /** \} */
 

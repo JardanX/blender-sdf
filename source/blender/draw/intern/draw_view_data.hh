@@ -73,6 +73,7 @@ struct DRWViewData {
   /** Engines running for this viewport. nullptr if not enabled. */
   blender::workbench::Engine workbench;
   blender::draw::sdf::Engine sdf;
+  blender::draw::sdf::EngineLp sdf_lp;
   blender::draw::external::Engine external;
   blender::image_engine::Engine image;
   /* MATHOPS: Removed — Grease Pencil draw engine */
@@ -111,6 +112,7 @@ struct DRWViewData {
     callback(workbench);
     callback(external);
     callback(sdf);
+    callback(sdf_lp);
     callback(image);
 #ifdef WITH_DRAW_DEBUG
     callback(edit_select_debug);

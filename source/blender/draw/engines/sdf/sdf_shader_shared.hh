@@ -17,6 +17,12 @@
 #define SDF_GPU_TYPE_MESH 8
 #define SDF_GPU_TYPE_GROUP 100
 
+/* Mirrors eSDFMeshFlags (DNA_sdf_types.h); prefixed to avoid colliding with
+ * the DNA enum member of the same name in host code. */
+#define SDF_LP_MESH_FLAG_CLOSED (1 << 0)
+#define SDF_LP_MESH_FLAG_ORIENTED (1 << 1)
+#define SDF_LP_MESH_FLAG_SMOOTH_NORMALS (1 << 4)
+
 struct [[host_shared]] SDFObjectGPU {
   float4x4 inverse_matrix;
   float4 position;
@@ -258,7 +264,9 @@ struct [[host_shared]] SDFLpPrimitive {
   int4 mesh_data;
   /* MESH: BVH node count (mirrors SDFObjectGPU.mesh_settings.z). */
   int mesh_node_count;
-  int _pad0;
+  /* MESH: eSDFMeshFlags (mirrors SDFObjectGPU.mesh_settings.y; unused
+   * otherwise). SDF_LP_MESH_FLAG_SMOOTH_NORMALS selects corner-normal blending. */
+  int mesh_flags;
   int _pad1;
   int _pad2;
   /* Advanced-variant payload (mirrors SDFObjectGPU.box_corners/box_edges/
@@ -277,7 +285,7 @@ BLI_STATIC_ASSERT_ALIGN(SDFLpPrimitive, 16)
 BLI_STATIC_ASSERT(sizeof(SDFLpPrimitive) == 224, "SDFLpPrimitive size mismatch")
 
 /* Serialized binary op (kept for reference; the runtime format is the packed
- * uint produced by lp_pack_binary_op, stored in lp_binary_ops_). param0 is
+ * uint4 produced by lp_pack_binary_op, stored in lp_binary_ops_). param0 is
  * only used by PAINT (color blend radius); all other parameters are baked
  * into the tree structure by the builder. (`packed` is a GLSL reserved word,
  * hence op_word.) */

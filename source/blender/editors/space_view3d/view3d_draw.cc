@@ -1749,6 +1749,25 @@ void view3d_draw_region_info(const bContext *C, ARegion *region)
       }
     }
 
+    /* SDF shader compile progress: drawn unconditionally while compiling. */
+    {
+      const char *status_text = nullptr;
+      DRW_sdf_shader_compile_status_get(&status_text);
+      if (status_text) {
+        const int line_height = int(VIEW3D_OVERLAY_LINEHEIGHT);
+        const char *p = status_text;
+        while (*p) {
+          const char *eol = p;
+          while (*eol && *eol != '\n') {
+            eol++;
+          }
+          yoffset -= line_height;
+          BLF_draw_default(float(xoffset), float(yoffset), 0.0f, p, size_t(eol - p));
+          p = (*eol) ? eol + 1 : eol;
+        }
+      }
+    }
+
     /* Set the size back to the default hard-coded size. Otherwise anyone drawing after this,
      * without setting explicit size, will draw with widget size. That is probably ideal,
      * but size should be set at the calling site not just carried over from here. */

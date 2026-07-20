@@ -106,6 +106,7 @@ set(SRC
   engines/workbench/workbench_state.cc
   engines/workbench/workbench_volume.cc
   engines/sdf/sdf_engine.cc
+  engines/sdf/sdf_lp_engine.cc
   engines/sdf/sdf_bvh.cc
   engines/external/external_engine.cc
   # gpencil draw engine sources removed (not needed for SDF)
@@ -229,6 +230,7 @@ set(SRC
   engines/select/select_instance.hh
   engines/sdf/sdf_engine.h
   engines/sdf/sdf_engine_api.hh
+  engines/sdf/sdf_engine_internal.hh
   engines/sdf/sdf_bvh.hh
   engines/sdf/sdf_meshing.hh
   engines/sdf/sdf_private.hh
@@ -357,8 +359,10 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_normal_comp.glsl
   engines/sdf/shaders/sdf_shade_comp.glsl
   engines/sdf/shaders/sdf_lp_prune_comp.glsl
-  engines/sdf/shaders/sdf_lp_trace_comp.glsl
+  engines/sdf/shaders/sdf_lp_march_comp.glsl
+  engines/sdf/shaders/sdf_lp_resolve_comp.glsl
   engines/sdf/shaders/sdf_lp_common.glsl
+  engines/sdf/shaders/sdf_lp_trace_lib.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl

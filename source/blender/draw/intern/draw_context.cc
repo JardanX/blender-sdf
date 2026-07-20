@@ -1106,6 +1106,11 @@ void DRW_sdf_perf_info_get(const char **r_text, bool *r_active)
   }
 }
 
+void DRW_sdf_shader_compile_status_get(const char **r_text)
+{
+  *r_text = draw::sdf::sdf_shader_compile_status_get();
+}
+
 void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *render_engine_type)
 {
   UNUSED_VARS(gpencil_engine_needed);
@@ -1145,10 +1150,16 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
     return;
   }
 
+  /* SDF engine selection: classic vs. Lipschitz pruning (per-viewport setting). */
+  DrawEngine::Pointer &sdf_engine =
+      (this->v3d && this->v3d->shading.sdf_engine_mode == 1) ?
+          static_cast<DrawEngine::Pointer &>(view_data.sdf_lp) :
+          static_cast<DrawEngine::Pointer &>(view_data.sdf);
+
   if (ELEM(this->mode, DRWContext::DEPTH, DRWContext::DEPTH_ACTIVE_OBJECT)) {
     /* MATHOPS: Removed — Grease Pencil draw engine */
     // view_data.grease_pencil.set_used(gpencil_engine_needed);
-    view_data.sdf.set_used(true);
+    sdf_engine.set_used(true);
     view_data.overlay.set_used(true);
     return;
   }
@@ -1162,19 +1173,19 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
       case OB_WIRE:
       case OB_SOLID:
         view_data.workbench.set_used(true);
-        view_data.sdf.set_used(true);
+        sdf_engine.set_used(true);
         break;
       case OB_MATERIAL:
       case OB_RENDER:
       default:
         if (render_engine_type == &DRW_engine_viewport_workbench_type) {
           view_data.workbench.set_used(true);
-          view_data.sdf.set_used(true);
+          sdf_engine.set_used(true);
         }
         else if ((render_engine_type->flag & RE_INTERNAL) == 0) {
           view_data.external.set_used(true);
           /* SDF engine must also run to provide depth for overlays (grid, outlines). */
-          view_data.sdf.set_used(true);
+          sdf_engine.set_used(true);
         }
         else {
           BLI_assert_unreachable();
