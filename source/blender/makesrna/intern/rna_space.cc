@@ -5027,12 +5027,6 @@ static void rna_def_space_view3d_shading(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Enable Pruning", "Use per-cell pruned CSG trees while tracing (off = evaluate the full tree)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
-  prop = RNA_def_property(srna, "sdf_lp_recompute_pruning", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "sdf_lp_recompute_pruning", 1);
-  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  RNA_def_property_ui_text(prop, "Recompute Pruning", "Rebuild the pruning grid every frame (needed for animated scenes; disable to freeze the grid)");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
-
   static const EnumPropertyItem sdf_lp_shading_mode_items[] = {
       {0, "SHADED", 0, "Shaded", "Shaded with studio lighting"},
       {1, "HEATMAP", 0, "Heatmap", "Heatmap of the per-cell active node count (pruning efficiency)"},
