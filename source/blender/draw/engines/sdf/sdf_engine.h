@@ -31,6 +31,10 @@ struct Engine : public DrawEngine::Pointer {
   DrawEngine *create_instance() final;
 };
 
+struct EngineLp : public DrawEngine::Pointer {
+  DrawEngine *create_instance() final;
+};
+
 int sdf_object_count_get();
 int sdf_group_count_get();
 const SDFObjectGPU *sdf_objects_cpu_get();
@@ -52,6 +56,9 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
 
 /* Free static shader cache (call on application exit). */
 void sdf_shaders_free();
+
+/* Viewport overlay text while shaders compile asynchronously; nullptr when idle. */
+const char *sdf_shader_compile_status_get();
 
 /* Frame profiling */
 void sdf_profile_request();

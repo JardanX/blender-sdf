@@ -3189,3 +3189,98 @@ Limitations vs. the classic engine:
 | `scripts/startup/bl_ui/properties_render.py` | UI panel for Lipschitz engine settings under the SDF proximity raymarcher section. |
 | `blenloader/intern/versioning_500.cc` | Versioning for subversion 41: initializes Lipschitz fields to defaults for existing .blend files. |
 | `blenkernel/BKE_blender_version.h` | Bumped `BLENDER_FILE_SUBVERSION` from 40 to 41. |
+
+### Engine Split + Non-blocking Shader Compilation
+
+The Lipschitz pruning engine is now a separate draw engine (`EngineLp` / `LpInstance`)
+instead of a mode branch inside the classic engine. Both engines share the scene
+sync/upload and the normal/shade/blit/FXAA passes through a common `SdfInstanceBase`
+(`sdf_engine_internal.hh`); the classic tile/BVH trace pipeline and the LP prune/trace
+pipeline live in their own translation units and never touch each other's state.
+`DRWViewData` holds both engine pointers and `draw_context.cc` selects one per
+viewport from `View3DShading.sdf_engine_mode`.
+
+Shader compilation is per-engine and lazy: each engine only ensures the
+`StaticShader`s it actually uses (classic: trace/tile/cone/color-resolve + normal/shade/
+blit/FXAA; LP: prune/march/resolve + normal/shade/blit/FXAA), so selecting `CLASSIC` never
+compiles the LP shaders and vice versa. Compilation no longer blocks the UI: while an
+engine's shaders are still building in the async worker, `draw()` skips the compute
+passes, keeps blitting the previous frame, requests a redraw, and reports
+"Compiling SDF shaders N/M…" as viewport overlay text (not gated on the SDF perf
+overlay flag).
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine_internal.hh` | New: shared statics + `SdfInstanceBase : public DrawEngine` with per-engine virtual hooks (`engine_shader_list`, `draw_trace_pipeline`, `sync_extra`, `sync_engine_settings`, `upload_extra`, `pre_trace_hook`, `hash_shading_extra`, `effective_lighting`) and the non-blocking compile path in `draw()`. |
+| `draw/engines/sdf/sdf_engine.cc` | Classic `Instance` (overrides only), per-engine shader-cache ensure/ready lists, `sdf_shader_compile_status_get()`, free functions, `Engine::create_instance()`. |
+| `draw/engines/sdf/sdf_lp_engine.cc` | New: `LpInstance` with all LP state, CSG tree build/upload, prune/trace dispatches, and `EngineLp::create_instance()`. |
+| `draw/intern/draw_view_data.hh` | Added `sdf::EngineLp sdf_lp` next to `sdf` (draw order preserved). |
+| `draw/intern/draw_context.cc` | Selects `sdf` vs `sdf_lp` from `sdf_engine_mode`; added `DRW_sdf_shader_compile_status_get()`. |
+| `draw/DRW_engine.hh`, `editors/space_view3d/view3d_draw.cc` | Compile-progress overlay text drawn while shaders compile. |
+
+### LP March/Resolve Shader Split + Compile Timing
+
+The monolithic `sdf_lp_trace_comp` is split in two (`sdf_lp_march_comp`,
+`sdf_lp_resolve_comp`, sharing `sdf_lp_trace_lib.glsl`). The march pass is
+distance-only (`SDF_LP_NO_COLOR` strips the folded color/normal evaluators
+from `sdf_lp_common.glsl`) and writes just the position buffer; the resolve
+pass evaluates the folded color+normal tree once per hit pixel and writes the
+color/normal buffers (clearing miss pixels, which march no longer touches).
+The resolve shader also drops the dead flat-color evaluator behind a new
+`SDF_LP_NO_COLOR_FLAT` define. The driver now compiles the two smaller
+shaders in parallel worker threads instead of one giant one.
+
+Per-shader wall-clock compile timing is logged on the `draw.sdf` CLOG channel
+("SDF shader '<name>' ready after N.NN s", recorded from first async schedule
+to finalization): large values mean a full driver compile, sub-second values
+mean the driver disk cache served it.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lp_march_comp.glsl` | New: distance-only sphere tracing + surface snap, writes `gbuf_pos_img`. |
+| `draw/engines/sdf/shaders/sdf_lp_resolve_comp.glsl` | New: folded color+normal eval, debug shading modes, writes `gbuf_color_img`/`gbuf_normal_img`. |
+| `draw/engines/sdf/shaders/sdf_lp_trace_lib.glsl` | New: `lp_cell_num_active`/`lp_sdf` helpers shared by march and resolve. |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | `lp_list_eval_color` wrapped in `SDF_LP_NO_COLOR_FLAT` (dead after the split). |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_lp_trace_comp` info replaced by `sdf_lp_march_comp` + `sdf_lp_resolve_comp`. |
+| `draw/engines/sdf/sdf_lp_engine.cc` | `draw_lp_trace()` split into `draw_lp_march()`/`draw_lp_resolve()` (shared `lp_bind_common()`); LP shader list grew to 7. |
+| `draw/engines/sdf/sdf_engine.cc` | Per-shader compile timing in `sdf_shaders_ensure_list()`. |
+
+### LP Default Mode Reuses Classic Color Resolve
+
+Even split in two, `sdf_lp_resolve_comp` still inlines the full primitive
+library into the folded color+normal evaluator (`lp_list_eval_color_nrm`),
+which takes the NVIDIA driver minutes to compile. The LP DEFAULT shading mode
+(`SHADED`) no longer uses it: after `sdf_lp_march_comp` writes the position
+buffer, the pipeline runs the classic `draw_aabb_project()` /
+`draw_tile_cull()` / `draw_color_resolve()` passes (same order, profiling and
+memory-barrier pattern as the classic engine) and `sdf_color_resolve_comp`
+produces `gbuf_color`/`gbuf_normal` from the per-tile candidate lists. All
+inputs (BVH, object AABBs, screen AABBs, tile buffers) were already built on
+the shared base-class path (`end_sync` / `upload_objects`), so no engine
+plumbing was needed. This also closes a functional gap: the folded LP color
+evaluator does not apply group distance modifiers, while the classic resolve
+does, so LP shaded output now matches the classic engine for modified groups.
+
+`sdf_lp_resolve_comp` now only serves the debug shading modes
+(heatmap/normals) and is sliced out of `LpInstance::engine_shader_list()`
+unless one is selected, so it compiles lazily on first debug-mode use (the
+base re-ensures the list every frame; the mode switch shows the usual
+"Compiling SDF shaders N/M…" overlay until it is ready). The debug modes are
+unchanged.
+
+Object picking reads the object id from `gbuf_color.a`, which the classic
+trace writes and `sdf_color_resolve_comp` passes through. LP march therefore
+now also writes `gbuf_color`: zero on miss, and the dominant object index on
+hit — computed at the snapped hit point by a new lightweight folded evaluator
+(`lp_list_eval_obj_id`, distances + winning-leaf index only, same selection
+rules as `lp_list_eval_color`; dispatched per cell by `lp_sdf_obj_id` in
+`sdf_lp_trace_lib.glsl`). This keeps picking working in the LP engine without
+pulling the heavy color/normal evaluator into the march shader.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_lp_engine.cc` | `draw_trace_pipeline()`: default mode runs aabb_project/tile_cull/color_resolve, debug modes keep `draw_lp_resolve()`; `engine_shader_list()` slices off `SH_LP_RESOLVE_COMP` in the default mode and adds the three classic passes' shaders; `draw_lp_march()` also binds `gbuf_color_img`. |
+| `draw/engines/sdf/shaders/sdf_lp_march_comp.glsl` | Writes `gbuf_color_img` (zero on miss, dominant object id in `.a` on hit, mirroring `sdf_trace_comp.glsl`). |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | New `lp_list_eval_obj_id` folded evaluator (in the `SDF_LP_NO_LIST_EVAL` section); `lp_smin_blend` moved out of the `SDF_LP_NO_COLOR` guard so the distance-only shaders can use it. |
+| `draw/engines/sdf/shaders/sdf_lp_trace_lib.glsl` | New `lp_sdf_obj_id` cell-dispatch helper mirroring `lp_sdf`. |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_lp_march_comp` gained the `gbuf_color_img` image binding. |

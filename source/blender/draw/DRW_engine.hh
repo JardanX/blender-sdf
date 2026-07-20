@@ -199,6 +199,7 @@ bool DRW_gpu_context_release();
 void DRW_gpu_context_activate(bool drw_state);
 
 void DRW_sdf_perf_info_get(const char **r_text, bool *r_active);
+void DRW_sdf_shader_compile_status_get(const char **r_text);
 
 namespace draw {
 

@@ -12,12 +12,12 @@
  * Lipschitz constants serialized in SDFLpNode.lipschitz, k = blend radius):
  * the dominated subtree cannot win the min()/max() anywhere inside the cell.
  * Cells whose center distance exceeds 2*L*R are "far field" and only store a
- * constant lower bound sign(d)*(|d| - L*R) instead of a node list, where L is
- * the root's constant. The constants matter: the ROUND fillet is only
- * sqrt(2)-Lipschitz w.r.t. position (both child gradients align along the
- * fillet crest), so an L=1 bound overestimates the distance by up to
- * (sqrt(2)-1)*R per cell and sphere tracing overshoots the fillet, showing
- * as cell-sized staircase bands along the blend.
+ * constant lower bound on the distance to the surface,
+ * sign(d)*((|d| - L*R)/scene_l), where L is the cell list root's constant
+ * (in-cell field variation) and scene_l the full tree's constant (field to
+ * distance conversion — the ROUND fillet field can exceed the true distance
+ * by up to sqrt(n) along fillet crests of parallel surfaces, so un-divided
+ * |d| steps overshoot thin features; see the far-field block below).
  *
  * Port of culling.comp.glsl / common_culling.glsl from the reference engine.
  * The subgroup-based scratch allocation of the original is replaced by a
@@ -125,7 +125,8 @@ void main()
     if (cell_offset < active_capacity) {
       lp_cell_meta_out[cell_idx].x = 1;
       lp_cell_meta_out[cell_idx].y = cell_offset;
-      lp_active_out[cell_offset] = uint2(lp_active_in[parent_offset].x, SDF_LP_INVALID_INDEX);
+      lp_active_out[cell_offset] = lp_active_in[parent_offset];
+      lp_active_parents_out[cell_offset] = SDF_LP_INVALID_INDEX;
     }
     else {
       /* List does not fit the pool: trace falls back to the full tree. */
@@ -148,7 +149,7 @@ void main()
   int stack_idx = 0;
 
   for (int i = 0; i < num_nodes; i++) {
-    uint active_node = lp_active_in[parent_offset + i].x;
+    uint active_node = lp_active_in[parent_offset + i];
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
     float d;
@@ -163,21 +164,31 @@ void main()
       int right_i = i_stack[stack_idx - 1];
       stack_idx -= 2;
 
-      uint op = lp_binary_ops[node.idx_in_type];
-      float k = lp_op_blend_factor(op);
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      uint op = opw.x;
+      float k = lp_op_dom_k(opw);
       float s = lp_op_sign(op);
       /* Same blend dispatch as the trace pass (lp_binary_op_eval) so prune
        * and trace agree on the field. */
-      d = lp_binary_op_eval(op, left_val, right_val);
+      d = lp_binary_op_eval(opw, left_val, right_val);
       node_l = node.lipschitz;
 
       /* PAINT's right child carries color, not geometry: never cull it.
        * The |l-r| <= (Ll+Lr)*R+k dominance bound is valid for every blend
        * type: each child moves by at most L*R inside the cell, so outside the
        * widened band |a-b| > k holds everywhere and the winner is exact for
-       * LINEAR/SMOOTH/CHAMFER, while the ROUND kernel reduces to
-       * min(winner, corn) whose sign still coincides with the winner's, so
-       * substituting the winner stays conservative. */
+       * LINEAR/SMOOTH/CHAMFER, while the ROUND kernel's max(q.x, ad) clamp
+       * (see lp_op_iround) makes it reduce to the exact winner there as
+       * well, so substituting the winner is exact, not just sign-preserving.
+       * The one exception is lp_op_intersection_round (inward SHELL start
+       * edge): only sign-exact outside the band, but its value always
+       * over-estimates the winner, so the substituted field stays
+       * conservative and its zero set always lies inside the band (see
+       * lp_op_cullable). For the smooth k2/k3
+       * variants k here is lp_op_dom_k = k + 2*max(k2,k3): the chamfer plane /
+       * round corner keeps pulling the smin terms until it clears the winner
+       * by the full softness radius, so the plain k band would cull cells
+       * where the blend is still active. */
       if (!lp_op_cullable(op) || abs(left_val - right_val) <= (left_l + right_l) * R + k) {
         node_state = LP_NODESTATE_ACTIVE;
       }
@@ -222,14 +233,30 @@ void main()
   /* Lipschitz constant of the whole evaluated list (root node): bounds how
    * far the field can move anywhere inside this cell. */
   float root_l = l_stack[0];
+  /* Lipschitz constant of the FULL tree: converts a field magnitude into a
+   * distance bound. Needed because the ROUND fillet field is NOT a
+   * conservative distance under-estimate: along a fillet crest between two
+   * (near-)parallel surfaces the field grows at up to sqrt(2) per op (up to
+   * sqrt(n) for n nested ROUND ops, measured numerically), so |f| can exceed
+   * the true distance to the zero set by that factor. The march pass must
+   * therefore step |f|/scene_l (and far cells store a pre-divided constant),
+   * or a step can clear a thin feature between two fillet crossings — the
+   * classic engine catches those with its SOR radius-sum backtrack
+   * (sdf_trace_comp.glsl:805), which this pipeline does not have. */
+  float scene_l = lp_nodes[total_num_nodes - 1].lipschitz;
 
-  /* Far field: the whole cell maps to a constant lower bound. The bound must
-   * shrink by L*R, not R: for a ROUND fillet L can reach sqrt(2), and an
-   * un-scaled |d|-R bound overestimates the true distance, letting sphere
-   * tracing overshoot the fillet (cell-sized band artifacts). */
+  /* Far field: the whole cell maps to a constant lower bound on the DISTANCE
+   * to the surface, sign(d)*((|d| - root_l*R)/scene_l): |d| - root_l*R bounds
+   * |f| below inside the cell (root_l scales the in-cell variation; for a
+   * ROUND fillet L can reach sqrt(2), and an un-scaled |d|-R bound
+   * overestimates the field, letting sphere tracing overshoot the fillet),
+   * and dividing by scene_l turns the field bound into a distance bound (see
+   * above). Both bounds matter: without them a far step can jump over a thin
+   * feature between two fillet crossings. */
   if (abs(d) > 2.0f * root_l * R) {
     lp_cell_meta_out[cell_idx].x = 0;
-    lp_cell_meta_out[cell_idx].z = floatBitsToInt(sign(d) * (abs(d) - root_l * R));
+    lp_cell_meta_out[cell_idx].z =
+        floatBitsToInt(sign(d) * (abs(d) - root_l * R) / scene_l);
     return;
   }
 
@@ -249,7 +276,7 @@ void main()
       lp_tmp[my_addr] = lp_tmp_pack(LP_NODESTATE_INACTIVE, false, true, lp_tmp_sign(t), 0xffffu);
     }
     else {
-      uint parent_idx = lp_active_in[parent_offset + i].y;
+      uint parent_idx = lp_active_parents_in[parent_offset + i];
       uint t_parent = 0u;
       bool has_inactive_ancestors = false;
       if (parent_idx != SDF_LP_INVALID_INDEX) {
@@ -265,7 +292,7 @@ void main()
         cell_num_active++;
       }
 
-      uint old_active = lp_active_in[parent_offset + i].x;
+      uint old_active = lp_active_in[parent_offset + i];
       int node_sign = (lp_active_node_sign(old_active) > 0.0f) ? 1 : -1;
       uint new_parent_idx;
       if (parent_idx != SDF_LP_INVALID_INDEX &&
@@ -297,7 +324,7 @@ void main()
     uint t = lp_tmp[my_addr];
     if (lp_tmp_active_global(t) && !active_overflow && !tmp_overflow) {
       if (out_idx >= 0) {
-        uint old_active = lp_active_in[parent_offset + i].x;
+        uint old_active = lp_active_in[parent_offset + i];
         uint node_idx = lp_active_node_index(old_active);
         uint node_word = node_idx | (lp_tmp_sign(t) ? 0u : SDF_LP_SIGN_BIT);
         lp_scratch[my_addr] = uint(out_idx);
@@ -310,7 +337,8 @@ void main()
             new_parent_idx = lp_scratch[paddr];
           }
         }
-        lp_active_out[cell_offset + out_idx] = uint2(node_word, new_parent_idx);
+        lp_active_out[cell_offset + out_idx] = node_word;
+        lp_active_parents_out[cell_offset + out_idx] = new_parent_idx;
       }
       out_idx--;
     }

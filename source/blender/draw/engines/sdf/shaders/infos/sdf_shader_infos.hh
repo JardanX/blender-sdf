@@ -292,15 +292,24 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_lp_prune_comp)
 LOCAL_GROUP_SIZE(4, 4, 4)
-DO_STATIC_COMPILATION()
-/* Active list entries pack the node word in .x and the parent index in .y.
- * Cell metadata packs num_active in .x (SDF_LP_FALLBACK_LIST sentinel), the
- * cell list offset in .y and the float bits of the cell value in .z. */
+/* Not statically compiled: the LP shaders are huge (sdf_lp_common.glsl) and
+ * the NVIDIA driver spends minutes compiling them at startup. Compiling
+ * lazily on first use lets the driver's disk shader cache take over on
+ * subsequent runs. */
+/* The prune pass only evaluates distances (its own forward pass): strip the
+ * color/normal list evaluators and the trace-side lp_list_eval from
+ * sdf_lp_common.glsl to cut compile time. */
+DEFINE_VALUE("SDF_LP_NO_COLOR", "1")
+DEFINE_VALUE("SDF_LP_NO_LIST_EVAL", "1")
+/* Active list node words are uint (index | sign); parent indices live in a
+ * parallel uint array consumed only by this prune pass. Cell metadata packs
+ * num_active in .x (SDF_LP_FALLBACK_LIST sentinel), the cell list offset in .y
+ * and the float bits of the cell value in .z. */
 STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
 STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
 STORAGE_BUF(2, read, uint4, lp_binary_ops[])
-STORAGE_BUF(3, read, uint2, lp_active_in[])
-STORAGE_BUF(4, write, uint2, lp_active_out[])
+STORAGE_BUF(3, read, uint, lp_active_in[])
+STORAGE_BUF(4, write, uint, lp_active_out[])
 STORAGE_BUF(5, read, int4, lp_cell_meta_in[])
 STORAGE_BUF(6, write, int4, lp_cell_meta_out[])
 STORAGE_BUF(7, read_write, int, lp_counters[])
@@ -310,6 +319,8 @@ STORAGE_BUF(10, read, SDFObjectGPU, objects[])
 STORAGE_BUF(11, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(12, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(13, read, uint4, mesh_data_buf[])
+STORAGE_BUF(14, read, uint, lp_active_parents_in[])
+STORAGE_BUF(15, write, uint, lp_active_parents_out[])
 PUSH_CONSTANT(float3, aabb_min)
 PUSH_CONSTANT(float3, aabb_max)
 PUSH_CONSTANT(int, total_num_nodes)
@@ -325,22 +336,66 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Lipschitz Trace (sphere tracing over per-cell pruned trees)
+/** \name SDF Lipschitz March (sphere tracing over per-cell pruned trees)
  * \{ */
 
-GPU_SHADER_CREATE_INFO(sdf_lp_trace_comp)
+GPU_SHADER_CREATE_INFO(sdf_lp_march_comp)
 LOCAL_GROUP_SIZE(8, 8)
-DO_STATIC_COMPILATION()
+/* Not statically compiled: see sdf_lp_prune_comp. Compiled lazily on first
+ * use; the driver's disk shader cache makes subsequent startups fast. */
+/* Distance-only: SDF_LP_NO_COLOR strips the folded color/normal evaluators
+ * from sdf_lp_common.glsl, keeping this latency-critical shader small. The
+ * march pass still seeds gbuf_color.a with the dominant object id (light
+ * lp_list_eval_obj_id fold) for picking; hit color and normals are resolved
+ * by sdf_color_resolve_comp (default mode) or sdf_lp_resolve_comp (debug
+ * modes). */
+DEFINE_VALUE("SDF_LP_NO_COLOR", "1")
 STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
 STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
 STORAGE_BUF(2, read, uint4, lp_binary_ops[])
-STORAGE_BUF(3, read, uint2, lp_active_in[])
+STORAGE_BUF(3, read, uint, lp_active_in[])
 STORAGE_BUF(4, read, int4, lp_cell_meta[])
 STORAGE_BUF(5, read, SDFObjectGPU, objects[])
 STORAGE_BUF(6, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(7, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(8, read, uint4, mesh_data_buf[])
 IMAGE(0, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
+IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_color_img)
+PUSH_CONSTANT(float3, aabb_min)
+PUSH_CONSTANT(float3, aabb_max)
+PUSH_CONSTANT(int, grid_size)
+PUSH_CONSTANT(int, total_num_nodes)
+PUSH_CONSTANT(int, culling_enabled)
+PUSH_CONSTANT(int, max_steps)
+PUSH_CONSTANT(float, ray_epsilon)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+ADDITIONAL_INFO(draw_view)
+COMPUTE_SOURCE("sdf_lp_march_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Lipschitz Resolve (per-hit-pixel color + normals)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_lp_resolve_comp)
+LOCAL_GROUP_SIZE(8, 8)
+/* Not statically compiled: see sdf_lp_prune_comp. */
+/* SDF_LP_NO_COLOR_FLAT strips the unused flat-color evaluator
+ * (lp_list_eval_color); the folded color+normal evaluator stays. */
+DEFINE_VALUE("SDF_LP_NO_COLOR_FLAT", "1")
+STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
+STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
+STORAGE_BUF(2, read, uint4, lp_binary_ops[])
+STORAGE_BUF(3, read, uint, lp_active_in[])
+STORAGE_BUF(4, read, int4, lp_cell_meta[])
+STORAGE_BUF(5, read, SDFObjectGPU, objects[])
+STORAGE_BUF(6, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(7, read, SDFPolygonPointGPU, polygon_points[])
+STORAGE_BUF(8, read, uint4, mesh_data_buf[])
+IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
 IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_color_img)
 IMAGE(2, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
 PUSH_CONSTANT(float3, aabb_min)
@@ -350,13 +405,10 @@ PUSH_CONSTANT(int, total_num_nodes)
 PUSH_CONSTANT(int, culling_enabled)
 PUSH_CONSTANT(int, shading_mode)
 PUSH_CONSTANT(float, viz_max)
-PUSH_CONSTANT(int, max_steps)
-PUSH_CONSTANT(float, ray_epsilon)
-PUSH_CONSTANT(float, over_relaxation)
 PUSH_CONSTANT(int2, screen_size)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 ADDITIONAL_INFO(draw_view)
-COMPUTE_SOURCE("sdf_lp_trace_comp.glsl")
+COMPUTE_SOURCE("sdf_lp_resolve_comp.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */
