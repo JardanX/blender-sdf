@@ -114,8 +114,7 @@ inline float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
   float2 diff = q - pt_side;
   float d_side_abs = math::length(diff);
   float d_side_sign = math::dot(diff, outward_normal);
-  bool on_segment = (t > 0.0f && t < 1.0f);
-  float d_side = (on_segment && d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
+  float d_side = (d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
 
   float cap_r = (q.y < 0.0f) ? rb : rt;
   float d_cap_r = q.x - cap_r;

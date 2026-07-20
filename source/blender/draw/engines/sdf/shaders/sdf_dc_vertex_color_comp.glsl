@@ -17,7 +17,7 @@ void main()
   int vi = int(gl_GlobalInvocationID.x);
   if (vi >= vert_count) { return; }
 
-  float3 world_pos = dc_positions[vi * 2].xyz;
+  float3 world_pos = dc_positions[vi].xyz;
 
   /* Build per-object active-bits via BVH or brute-force AABB test. */
   uint obj_bits[32];

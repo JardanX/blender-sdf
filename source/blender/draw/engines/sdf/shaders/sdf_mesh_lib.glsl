@@ -14,6 +14,14 @@
  * sdTriangleMesh); consumed by sdfMeshLastWorldNormals to fetch the baked
  * normal at the hit. */
 float3 g_sdf_mesh_last_baked_pos;
+/* Raw FINE-grid distance of the last baked volume sample (unscaled local
+ * units; 1e30 when the sample fell outside the fine grid). Drives the
+ * baked-normal -> field-gradient cross-fade in the color resolve: near the
+ * surface the baked smooth normal is authoritative, deep in a blend zone
+ * (|d| towards the narrow band and beyond) only the field gradient is
+ * meaningful. NOTE: FD stencil taps (sdfAnalyticWorldNormals) re-evaluate
+ * the mesh and overwrite this — read it before calling them. */
+float g_sdf_mesh_last_baked_fine_dist;
 
 /* ------------------------------------------------------------------ */
 /** \name Baked volume sampling (SDF_LP_MESH_FLAG_BAKED)
@@ -160,10 +168,12 @@ float sdfBakedSample(float3 origin,
                      float cvoxel,
                      int3 cres,
                      int cbase,
-                     float3 p)
+                     float3 p,
+                     out float fine_d)
 {
   float d;
   const bool have_fine = sdfBakedGridSample(origin, voxel_size, res, base, false, p, d);
+  fine_d = have_fine ? d : 1e30f;
   if (have_fine && abs(d) < 0.99f * band) {
     return d * 0.95f;
   }
@@ -263,6 +273,7 @@ float sdTriangleMesh(float3 p, SDFObjectGPU obj)
   if ((obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) == 0) {
     /* Bake pending: the object stays invisible until its record flips ready
      * (the analytic BVH runtime path was removed). */
+    g_sdf_mesh_last_baked_fine_dist = 1e30f;
     return 1e30f;
   }
   /* p is the rotation-only local position; dividing by the scale maps into
@@ -280,7 +291,8 @@ float sdTriangleMesh(float3 p, SDFObjectGPU obj)
                            obj.bake_coarse_origin.w,
                            obj.bake_coarse_grid.xyz,
                            obj.bake_coarse_grid.w,
-                           p_unscaled);
+                           p_unscaled,
+                           g_sdf_mesh_last_baked_fine_dist);
   return d * min(min(obj.obj_scale.x, obj.obj_scale.y), obj.obj_scale.z);
 }
 

@@ -173,12 +173,6 @@ struct [[host_shared]] SdfAabbNodeGPU {
 };
 BLI_STATIC_ASSERT_ALIGN(SdfAabbNodeGPU, 16)
 
-struct [[host_shared]] DCVertexGPU {
-  float4 position;
-  float4 normal;
-};
-BLI_STATIC_ASSERT_ALIGN(DCVertexGPU, 16)
-
 struct [[host_shared]] SDFShadingDataGPU {
   float4 studio_light[4];
   float4 studio_color[4];

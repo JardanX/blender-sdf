@@ -71,21 +71,28 @@ bool sdfAnalyticWorldNormals(SDFObjectGPU obj,
 {
   float e = max(sdf_ray_epsilon * 0.5f, 1e-4f);
   if (obj.sdf_type == SDF_GPU_TYPE_MESH &&
-      (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0 &&
-      obj.bake_coarse_grid.x > 0)
+      (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0)
   {
-    /* Blend-zone hits sample the coarse far-field grid; a ray-epsilon-wide
-     * stencil sees its trilinear staircase. Widen the stencil past the
-     * coarse voxel (in world units, min axis scale) so the finite
-     * difference returns the true smooth gradient of the coarse field —
-     * the blend fillet normals are only defined at that scale anyway. */
-    e = max(e, obj.bake_coarse_origin.w * min(min(obj.obj_scale.x, obj.obj_scale.y),
-                                              obj.obj_scale.z) *
-               1.5f);
+    const float min_scale = min(min(obj.obj_scale.x, obj.obj_scale.y), obj.obj_scale.z);
+    if (abs(g_sdf_mesh_last_baked_fine_dist) < obj.bake_params.x) {
+      /* Fine-grid region (including the baked-normal cross-fade zone): a
+       * ray-epsilon-wide stencil sees the trilinear/fp16 staircase of the
+       * fine field. Widen past the fine voxel so the finite difference
+       * returns its smooth gradient. */
+      e = max(e, obj.bake_origin.w * min_scale * 1.5f);
+    }
+    else if (obj.bake_coarse_grid.x > 0) {
+      /* Blend-zone hits sample the coarse far-field grid; a ray-epsilon-wide
+       * stencil sees its trilinear staircase. Widen the stencil past the
+       * coarse voxel (in world units, min axis scale) so the finite
+       * difference returns the true smooth gradient of the coarse field —
+       * the blend fillet normals are only defined at that scale anyway. */
+      e = max(e, obj.bake_coarse_origin.w * min_scale * 1.5f);
+    }
   }
   float3 ex = float3(e, 0.0f, 0.0f);
   float3 ey = float3(0.0f, e, 0.0f);
-  float3 ez = float3(0.0f, 0.0f, e);
+  float3 ez = float3(0.0f, e, 0.0f);
   geometric_normal = float3(
                          sdfObjectDistanceAtPosition(obj, position + ex) -
                              sdfObjectDistanceAtPosition(obj, position - ex),
@@ -414,13 +421,36 @@ void main()
     float3 obj_gradient = float3(0.0f);
     bool obj_normal_valid;
     if (obj.sdf_type == SDF_GPU_TYPE_MESH && sdfMeshModifiersPreserveNormal(obj)) {
-      obj_normal_valid = sdfMeshLastWorldNormals(obj, obj_normal, obj_gradient);
-      if (!obj_normal_valid && (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0) {
-        /* Blend-zone hit (outside the fine bake grid): no baked smooth
-         * normal — use the field gradient (the widened FD stencil below
-         * smooths the coarse grid's trilinear staircase), so CSG normal
-         * blending gets a real gradient. */
-        obj_normal_valid = sdfAnalyticWorldNormals(obj, eval_pos, obj_normal, obj_gradient);
+      obj_normal_valid = false;
+      if ((obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0) {
+        /* Cross-fade the baked smooth shading normal (near the surface)
+         * into the field gradient (blend zone) instead of switching:
+         * analytic primitive pairs feed field gradients into the CSG
+         * normal blend below, so deep in a blend (where the baked normal
+         * is a meaningless nearest-feature extension) the mesh must
+         * contribute its gradient too — a hard switch between the two
+         * quantities reads as a shading cut across the fillet. The fade
+         * keys on the raw fine-grid distance of the eval position: full
+         * baked normal within ~2 voxels of the surface, full gradient at
+         * the narrow band edge and beyond. */
+        const float fine_d = abs(g_sdf_mesh_last_baked_fine_dist);
+        float3 baked_n;
+        float3 baked_g;
+        const bool baked_ok = sdfMeshLastWorldNormals(obj, baked_n, baked_g);
+        float3 fd_n;
+        float3 fd_g;
+        const bool fd_ok = sdfAnalyticWorldNormals(obj, eval_pos, fd_n, fd_g);
+        float fade = smoothstep(2.0f * obj.bake_origin.w, obj.bake_params.x, fine_d);
+        fade = baked_ok ? (fd_ok ? fade : 0.0f) : 1.0f;
+        if (baked_ok || fd_ok) {
+          float3 n = mix(baked_n, fd_n, fade);
+          const float n_len_sq = dot(n, n);
+          if (n_len_sq > 1e-12f && !any(isnan(n))) {
+            obj_normal = n * inversesqrt(n_len_sq);
+            obj_gradient = fd_ok ? fd_g : baked_g;
+            obj_normal_valid = true;
+          }
+        }
       }
     }
     else if (obj.sdf_type != SDF_GPU_TYPE_MESH) {

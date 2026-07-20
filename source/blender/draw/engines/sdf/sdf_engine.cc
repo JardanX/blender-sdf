@@ -11,6 +11,16 @@
 
 #include "sdf_engine_internal.hh"
 
+#include <cstdlib>
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
+#include "BLI_index_range.hh"
+#include "BLI_task.hh"
+
+#include "meshing/dcsdd_contouring.hh"
+
 namespace blender::draw::sdf {
 
 /* Static shader cache — survives engine instance destruction (mode switches). */
@@ -506,13 +516,13 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
   return false;
 }
 
-std::string sdf_dual_contour_to_mesh(int grid_res,
-                                      Vector<float3> &out_positions,
-                                      Vector<float3> &out_normals,
-                                      Vector<int3> &out_tris,
-                                      Vector<float4> &out_colors,
-                                      int *out_vert_count,
-                                      int *out_tri_count)
+std::string sdf_bake_to_mesh(int grid_res,
+                             Vector<float3> &out_positions,
+                             Vector<float3> &out_normals,
+                             Vector<int3> &out_tris,
+                             Vector<float4> &out_colors,
+                             int *out_vert_count,
+                             int *out_tri_count)
 {
   *out_vert_count = 0;
   *out_tri_count = 0;
@@ -550,52 +560,58 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   n_chunks.y = (grid_cells.y + CHUNK - 1) / CHUNK;
   n_chunks.z = (grid_cells.z + CHUNK - 1) / CHUNK;
 
+  /* Grid-vertex dimensions and a safety cap: the CPU mesher holds the whole grid. */
+  const int3 gv = grid_cells + int3(1);
+  const int64_t total_gv = int64_t(gv.x) * int64_t(gv.y) * int64_t(gv.z);
+  if (gv.x > 1025 || gv.y > 1025 || gv.z > 1025 || total_gv > int64_t(512) * 512 * 512) {
+    return "Grid too large (" + std::to_string(gv.x) + " x " + std::to_string(gv.y) + " x " +
+           std::to_string(gv.z) + " grid vertices). Lower the resolution.";
+  }
+
+  /* Grid SDF values (S) and grid vertex positions (GV) for the CPU DC-SDD mesher.
+   * Indexing matches meshing::index3D: x-fastest, idx = x + gv.x * (y + gv.y * z). */
+  Eigen::VectorXf S(total_gv);
+  Eigen::MatrixXf GV(total_gv, 3);
+  S.fill(1e6f); /* Large positive = far outside; covers AABB-skipped chunks. */
+  threading::parallel_for(IndexRange(int64_t(gv.z)), 1, [&](const IndexRange range) {
+    for (const int64_t k : range) {
+      for (int64_t j = 0; j < gv.y; j++) {
+        for (int64_t i = 0; i < gv.x; i++) {
+          const int64_t idx = i + int64_t(gv.x) * (j + int64_t(gv.y) * k);
+          GV.row(idx) = Eigen::Vector3f(grid_origin.x + float(i) * cell_size,
+                                        grid_origin.y + float(j) * cell_size,
+                                        grid_origin.z + float(k) * cell_size);
+        }
+      }
+    }
+  });
+
   /* Compile shaders (cached) */
   gpu::Shader *grid_sh = GPU_shader_create_from_info_name("sdf_grid_eval_comp");
-  gpu::Shader *dc_sh = GPU_shader_create_from_info_name("sdf_dc_contour_comp");
-  gpu::Shader *tri_sh = GPU_shader_create_from_info_name("sdf_dc_triangulate_comp");
   gpu::Shader *color_sh = GPU_shader_create_from_info_name("sdf_dc_vertex_color_comp");
-  if (!grid_sh || !dc_sh || !tri_sh || !color_sh) return "Shader compile failed";
+  if (!grid_sh || !color_sh) {
+    return "Shader compile failed";
+  }
 
-  /* Scale output buffers with resolution: surface verts grow ~O(res^2).
-   * Base 4M/8M sized for res=32; scale quadratically, cap at 32M/64M. */
-  const int base_verts = 4 * 1024 * 1024;
-  const int base_tris = 8 * 1024 * 1024;
-  const float res_scale = float(grid_res) / 32.0f;
-  const float area_scale = math::max(res_scale * res_scale, 1.0f);
-  const int global_max_verts = math::min(int(base_verts * area_scale), 32 * 1024 * 1024);
-  const int global_max_tris = math::min(int(base_tris * area_scale), 64 * 1024 * 1024);
-
-  gpu::StorageBuf *vert_ssbo = GPU_storagebuf_create_ex(
-      global_max_verts * sizeof(DCVertexGPU), nullptr, GPU_USAGE_DYNAMIC, "dc_vertices");
-  gpu::StorageBuf *counter_ssbo = GPU_storagebuf_create_ex(
-      2 * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "dc_counters");
-  GPU_storagebuf_clear_to_zero(counter_ssbo);
-  gpu::StorageBuf *tri_ssbo = GPU_storagebuf_create_ex(
-      global_max_tris * sizeof(int) * 4, nullptr, GPU_USAGE_DYNAMIC, "dc_triangles");
-
-  /* Per-chunk buffers (reused) */
-  int padded_grid_total = PADDED_GV * PADDED_GV * PADDED_GV;
-  int padded_cells_total = PADDED * PADDED * PADDED;
+  /* Per-chunk grid value buffer (reused) */
+  const int padded_grid_total = PADDED_GV * PADDED_GV * PADDED_GV;
   gpu::StorageBuf *grid_ssbo = GPU_storagebuf_create_ex(
       padded_grid_total * sizeof(float), nullptr, GPU_USAGE_DYNAMIC, "dc_grid_values");
-  gpu::StorageBuf *cell_ssbo = GPU_storagebuf_create_ex(
-      padded_cells_total * sizeof(int), nullptr, GPU_USAGE_DYNAMIC, "dc_cell_verts");
+  Vector<float> chunk_vals(padded_grid_total);
 
-  /* Color output buffer (one float4 per vertex) */
-  gpu::StorageBuf *color_ssbo = GPU_storagebuf_create_ex(
-      global_max_verts * sizeof(float4), nullptr, GPU_USAGE_DYNAMIC, "dc_colors");
+  /* Vertex color buffers (allocated after the CPU contouring, when vert_count is known) */
+  gpu::StorageBuf *pos_ssbo = nullptr;
+  gpu::StorageBuf *color_ssbo = nullptr;
 
   auto cleanup = [&]() {
     GPU_storagebuf_free(grid_ssbo);
-    GPU_storagebuf_free(vert_ssbo);
-    GPU_storagebuf_free(counter_ssbo);
-    GPU_storagebuf_free(cell_ssbo);
-    GPU_storagebuf_free(tri_ssbo);
-    GPU_storagebuf_free(color_ssbo);
+    if (pos_ssbo) {
+      GPU_storagebuf_free(pos_ssbo);
+    }
+    if (color_ssbo) {
+      GPU_storagebuf_free(color_ssbo);
+    }
     GPU_shader_free(grid_sh);
-    GPU_shader_free(dc_sh);
-    GPU_shader_free(tri_sh);
     GPU_shader_free(color_sh);
   };
 
@@ -614,19 +630,7 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   int grid_bake_col_slot = GPU_shader_get_ssbo_binding(grid_sh, "bake_col");
   int has_bvh = (s_bvh_ssbo && s_bvh_root >= 0) ? 1 : 0;
 
-  int dc_gv_slot = GPU_shader_get_ssbo_binding(dc_sh, "grid_values");
-  int dc_v_slot = GPU_shader_get_ssbo_binding(dc_sh, "dc_vertices");
-  int dc_c_slot = GPU_shader_get_ssbo_binding(dc_sh, "dc_counters");
-  int dc_cv_slot = GPU_shader_get_ssbo_binding(dc_sh, "dc_cell_verts");
-
-  int tr_gv_slot = GPU_shader_get_ssbo_binding(tri_sh, "grid_values");
-  int tr_t_slot = GPU_shader_get_ssbo_binding(tri_sh, "dc_triangles");
-  int tr_c_slot = GPU_shader_get_ssbo_binding(tri_sh, "dc_counters");
-  int tr_cv_slot = GPU_shader_get_ssbo_binding(tri_sh, "dc_cell_verts");
-
   int gd = (PADDED_GV + 3) / 4;
-  int cd = (PADDED + 3) / 4;
-  int chunk_done = 0, chunk_skipped = 0;
 
   for (int cz = 0; cz < n_chunks.z; cz++) {
     for (int cy = 0; cy < n_chunks.y; cy++) {
@@ -636,7 +640,7 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
         float3 chunk_min = chunk_origin;
         float3 chunk_max = chunk_origin + float3(float(PADDED_GV)) * cell_size;
 
-        /* AABB cull: skip chunks with no nearby SDF objects */
+        /* AABB cull: skip chunks with no nearby SDF objects (S stays at the 1e6f fill) */
         bool has_overlap = false;
         for (int i = 0; i < s_object_count; i++) {
           float3 obj_min = float3(objs[i].bbox_min);
@@ -650,12 +654,8 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
           }
         }
         if (!has_overlap) {
-          chunk_skipped++;
-          chunk_done++;
           continue;
         }
-
-        GPU_storagebuf_clear(cell_ssbo, 0xFFFFFFFFu);
 
         /* Grid eval */
         GPU_shader_bind(grid_sh);
@@ -684,58 +684,109 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
         GPU_shader_uniform_1f(grid_sh, "cell_size", cell_size);
         GPU_shader_uniform_1i(grid_sh, "use_bvh", has_bvh);
         GPU_shader_uniform_1i(grid_sh, "bvh_root", s_bvh_root);
+        GPU_shader_uniform_1f(grid_sh, "sdf_ray_epsilon", 0.005f);
         GPU_compute_dispatch(grid_sh, gd, gd, gd);
         GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
-        /* DC contour → writes to GLOBAL vert buffer + local cell map */
-        GPU_shader_bind(dc_sh);
-        if (dc_gv_slot >= 0) GPU_storagebuf_bind(grid_ssbo, dc_gv_slot);
-        if (dc_v_slot >= 0) GPU_storagebuf_bind(vert_ssbo, dc_v_slot);
-        if (dc_c_slot >= 0) GPU_storagebuf_bind(counter_ssbo, dc_c_slot);
-        if (dc_cv_slot >= 0) GPU_storagebuf_bind(cell_ssbo, dc_cv_slot);
-        GPU_shader_uniform_1i(dc_sh, "grid_verts", PADDED_GV);
-        GPU_shader_uniform_3fv(dc_sh, "grid_origin", chunk_origin);
-        GPU_shader_uniform_1f(dc_sh, "cell_size", cell_size);
-        GPU_shader_uniform_1i(dc_sh, "max_verts", global_max_verts);
-        GPU_compute_dispatch(dc_sh, cd, cd, cd);
-        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-
-        /* Triangulation → only inner cells, writes to GLOBAL tri buffer */
-        GPU_shader_bind(tri_sh);
-        if (tr_gv_slot >= 0) GPU_storagebuf_bind(grid_ssbo, tr_gv_slot);
-        if (tr_t_slot >= 0) GPU_storagebuf_bind(tri_ssbo, tr_t_slot);
-        if (tr_c_slot >= 0) GPU_storagebuf_bind(counter_ssbo, tr_c_slot);
-        if (tr_cv_slot >= 0) GPU_storagebuf_bind(cell_ssbo, tr_cv_slot);
-        GPU_shader_uniform_1i(tri_sh, "grid_verts", PADDED_GV);
-        GPU_shader_uniform_1i(tri_sh, "inner_start", PAD);
-        GPU_shader_uniform_1i(tri_sh, "inner_end", PAD + CHUNK);
-        GPU_shader_uniform_1i(tri_sh, "max_tris", global_max_tris);
-        GPU_compute_dispatch(tri_sh, cd, cd, cd);
-        GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-
-        chunk_done++;
+        /* Read back the chunk grid and scatter into the global S array.
+         * Global grid-vertex coords g = cell_start + local; skip out-of-range verts. */
+        GPU_storagebuf_read(grid_ssbo, chunk_vals.data());
+        for (int lz = 0; lz < PADDED_GV; lz++) {
+          for (int ly = 0; ly < PADDED_GV; ly++) {
+            for (int lx = 0; lx < PADDED_GV; lx++) {
+              const int3 g = cell_start + int3(lx, ly, lz);
+              if (g.x < 0 || g.y < 0 || g.z < 0 || g.x >= gv.x || g.y >= gv.y || g.z >= gv.z) {
+                continue;
+              }
+              const int64_t sidx = g.x + int64_t(gv.x) * (g.y + int64_t(gv.y) * g.z);
+              const int lidx = lx + PADDED_GV * (ly + PADDED_GV * lz);
+              S(sidx) = chunk_vals[lidx];
+            }
+          }
+        }
       }
     }
   }
   GPU_shader_unbind();
 
-  /* Single readback at end */
-  Vector<int> counters(2);
-  GPU_storagebuf_read(counter_ssbo, counters.data());
-  int vert_count = math::min(counters[0], global_max_verts);
-  int tri_count = math::min(counters[1], global_max_tris);
+  /* CPU DC-SDD contouring (replaces the old GPU QEF + triangulation passes). */
+  namespace meshing = blender::sdf::meshing;
+  meshing::ContouringOptions options;
+  options.method = meshing::ContouringMethod::Ours;
+  options.verbose = getenv("SDF_DCSDD_VERBOSE") != nullptr;
 
-  if (counters[0] > global_max_verts || counters[1] > global_max_tris) {
-    printf("SDF DC: buffer overflow — %d/%d verts, %d/%d tris (res=%d). Mesh truncated.\n",
-           counters[0], global_max_verts, counters[1], global_max_tris, grid_res);
-  }
+  Eigen::MatrixXd V;
+  Eigen::MatrixXi F;
+  meshing::contouring(S, GV, gv.x, gv.y, gv.z, 0.0, V, F, options);
 
+  const int vert_count = int(V.rows());
   if (vert_count == 0) {
     cleanup();
-    return "DC produced 0 vertices";
+    return "DC-SDD produced no surface (empty scene or resolution too low)";
   }
 
-  /* Vertex color pass: evaluate SDF color at each DC vertex position */
+  /* Guarantee outward orientation: flip all triangles if the signed volume is negative. */
+  double signed_volume = 0.0;
+  for (int f = 0; f < F.rows(); f++) {
+    const Eigen::Vector3d v0 = V.row(F(f, 0)).transpose();
+    const Eigen::Vector3d v1 = V.row(F(f, 1)).transpose();
+    const Eigen::Vector3d v2 = V.row(F(f, 2)).transpose();
+    signed_volume += v0.dot(v1.cross(v2)) / 6.0;
+  }
+  if (signed_volume < 0.0) {
+    for (int f = 0; f < F.rows(); f++) {
+      std::swap(F(f, 1), F(f, 2));
+    }
+  }
+
+  out_positions.resize(vert_count);
+  for (int i = 0; i < vert_count; i++) {
+    out_positions[i] = float3(float(V(i, 0)), float(V(i, 1)), float(V(i, 2)));
+  }
+
+  out_tris.reserve(F.rows());
+  for (int f = 0; f < F.rows(); f++) {
+    const int a = F(f, 0), b = F(f, 1), c = F(f, 2);
+    if (a >= 0 && a < vert_count && b >= 0 && b < vert_count && c >= 0 && c < vert_count) {
+      out_tris.append(int3(a, b, c));
+    }
+  }
+
+  /* Area-weighted per-vertex normals from the triangles. */
+  out_normals.resize(vert_count);
+  for (float3 &n : out_normals) {
+    n = float3(0.0f);
+  }
+  for (const int3 &tri : out_tris) {
+    const float3 e1 = out_positions[tri.y] - out_positions[tri.x];
+    const float3 e2 = out_positions[tri.z] - out_positions[tri.x];
+    const float3 n = math::cross(e1, e2);
+    out_normals[tri.x] += n;
+    out_normals[tri.y] += n;
+    out_normals[tri.z] += n;
+  }
+  threading::parallel_for(IndexRange(int64_t(vert_count)), 4096, [&](const IndexRange range) {
+    for (const int64_t i : range) {
+      if (math::dot(out_normals[i], out_normals[i]) > 1e-20f) {
+        out_normals[i] = math::normalize(out_normals[i]);
+      }
+      else {
+        out_normals[i] = float3(0.0f, 0.0f, 1.0f);
+      }
+    }
+  });
+
+  /* Vertex color pass: evaluate SDF color at each mesh vertex position. */
+  Vector<float4> pos4(vert_count);
+  for (int i = 0; i < vert_count; i++) {
+    pos4[i] = float4(out_positions[i], 1.0f);
+  }
+  pos_ssbo = GPU_storagebuf_create_ex(
+      vert_count * sizeof(float4), nullptr, GPU_USAGE_DYNAMIC, "dc_positions");
+  GPU_storagebuf_update(pos_ssbo, pos4.data());
+  color_ssbo = GPU_storagebuf_create_ex(
+      vert_count * sizeof(float4), nullptr, GPU_USAGE_DYNAMIC, "dc_colors");
+
   {
     GPU_shader_bind(color_sh);
     int col_obj_slot = GPU_shader_get_ssbo_binding(color_sh, "objects");
@@ -756,7 +807,7 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     if (s_modifier_ssbo && col_mod_slot >= 0) GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
     if (s_group_ssbo && col_grp_slot >= 0) GPU_storagebuf_bind(s_group_ssbo, col_grp_slot);
     if (col_poly_slot >= 0) GPU_storagebuf_bind(s_polygon_ssbo, col_poly_slot);
-    if (col_pos_slot >= 0) GPU_storagebuf_bind(vert_ssbo, col_pos_slot);
+    if (col_pos_slot >= 0) GPU_storagebuf_bind(pos_ssbo, col_pos_slot);
     if (col_out_slot >= 0) GPU_storagebuf_bind(color_ssbo, col_out_slot);
     if (has_bvh && col_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, col_bvh_slot);
     if (s_mesh_data_ssbo && col_mesh_data_slot >= 0) {
@@ -777,6 +828,7 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     GPU_shader_uniform_1i(color_sh, "vert_count", vert_count);
     GPU_shader_uniform_1i(color_sh, "use_bvh", has_bvh);
     GPU_shader_uniform_1i(color_sh, "bvh_root", s_bvh_root);
+    GPU_shader_uniform_1f(color_sh, "sdf_ray_epsilon", 0.005f);
 
     int color_groups = (vert_count + 63) / 64;
     GPU_compute_dispatch(color_sh, color_groups, 1, 1);
@@ -784,34 +836,8 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     GPU_shader_unbind();
   }
 
-  Vector<DCVertexGPU> gpu_verts(global_max_verts);
-  GPU_storagebuf_read(vert_ssbo, gpu_verts.data());
-
-  out_positions.resize(vert_count);
-  out_normals.resize(vert_count);
-  for (int i = 0; i < vert_count; i++) {
-    out_positions[i] = float3(gpu_verts[i].position);
-    out_normals[i] = float3(gpu_verts[i].normal);
-  }
-
-  /* Read back vertex colors */
-  Vector<float4> gpu_colors(global_max_verts);
-  GPU_storagebuf_read(color_ssbo, gpu_colors.data());
   out_colors.resize(vert_count);
-  for (int i = 0; i < vert_count; i++) {
-    out_colors[i] = gpu_colors[i];
-  }
-
-  Vector<int4> gpu_tris(global_max_tris);
-  GPU_storagebuf_read(tri_ssbo, gpu_tris.data());
-
-  out_tris.reserve(tri_count);
-  for (int i = 0; i < tri_count; i++) {
-    int a = gpu_tris[i].x, b = gpu_tris[i].y, c = gpu_tris[i].z;
-    if (a >= 0 && a < vert_count && b >= 0 && b < vert_count && c >= 0 && c < vert_count) {
-      out_tris.append(int3(a, b, c));
-    }
-  }
+  GPU_storagebuf_read(color_ssbo, out_colors.data());
 
   *out_vert_count = vert_count;
   *out_tri_count = out_tris.size();

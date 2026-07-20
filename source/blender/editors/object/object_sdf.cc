@@ -68,9 +68,6 @@
 #include "BKE_mesh.h"
 #include "BKE_mesh.hh"
 
-#include "BLI_index_mask.hh"
-#include "GEO_mesh_merge_by_distance.hh"
-
 #include "object_intern.hh"
 
 #include "sdf_meshing.hh"
@@ -881,15 +878,13 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
   Vector<float4> colors;
   int vert_count = 0, tri_count = 0;
 
-  std::string err = draw::sdf::sdf_dual_contour_to_mesh(
+  std::string err = draw::sdf::sdf_bake_to_mesh(
       grid_res, positions, normals, tris, colors, &vert_count, &tri_count);
 
   if (!err.empty()) {
     BKE_reportf(op->reports, RPT_ERROR, "SDF to Mesh: %s", err.c_str());
     return OPERATOR_CANCELLED;
   }
-
-  const float cell_size = 1.0f / float(grid_res);
 
   Mesh *mesh_raw = BKE_mesh_new_nomain(vert_count, 0, tri_count, tri_count * 3);
   mesh_raw->vert_positions_for_write().copy_from(positions.as_span());
@@ -902,8 +897,8 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
   MutableSpan<int> cverts = mesh_raw->corner_verts_for_write();
   for (int i = 0; i < tri_count; i++) {
     cverts[i * 3 + 0] = tris[i].x;
-    cverts[i * 3 + 1] = tris[i].z;
-    cverts[i * 3 + 2] = tris[i].y;
+    cverts[i * 3 + 1] = tris[i].y;
+    cverts[i * 3 + 2] = tris[i].z;
   }
 
   /* Add vertex colors before merge so they get interpolated */
@@ -929,17 +924,8 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
 
   bke::mesh_calc_edges(*mesh_raw, false, false);
 
-  /* Weld duplicate vertices at chunk boundaries */
+  /* The DC-SDD extraction shares vertices across cells — no chunk seams to weld. */
   Mesh *mesh_clean = mesh_raw;
-  {
-    const float merge_dist = cell_size * 0.1f;
-    std::optional<Mesh *> merged = geometry::mesh_merge_by_distance_all(
-        *mesh_clean, IndexMask(mesh_clean->verts_num), merge_dist);
-    if (merged.has_value()) {
-      BKE_id_free(nullptr, &mesh_clean->id);
-      mesh_clean = *merged;
-    }
-  }
 
   /* Validate mesh (removes degenerate faces, fixes indices) */
   bke::mesh_validate(*mesh_clean);
@@ -963,7 +949,7 @@ static wmOperatorStatus object_sdf_to_mesh_exec(bContext *C, wmOperator *op)
 void OBJECT_OT_sdf_to_mesh(wmOperatorType *ot)
 {
   ot->name = "SDF to Mesh";
-  ot->description = "Convert SDF scene to triangle mesh via GPU Dual Contouring";
+  ot->description = "Convert SDF scene to triangle mesh via Dual Contouring of Signed Distance Data";
   ot->idname = "OBJECT_OT_sdf_to_mesh";
 
   ot->exec = object_sdf_to_mesh_exec;

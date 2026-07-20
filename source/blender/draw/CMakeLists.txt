@@ -382,8 +382,6 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl
   engines/sdf/shaders/sdf_grid_eval_comp.glsl
-  engines/sdf/shaders/sdf_dc_contour_comp.glsl
-  engines/sdf/shaders/sdf_dc_triangulate_comp.glsl
   engines/sdf/shaders/sdf_dc_vertex_color_comp.glsl
   engines/sdf/shaders/sdf_outline_prepass_frag.glsl
   engines/sdf/shaders/sdf_analytical_pick_frag.glsl
