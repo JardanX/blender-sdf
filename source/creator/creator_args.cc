@@ -1546,7 +1546,7 @@ static const char arg_handle_debug_gpu_sdf_set_doc[] =
     "\tForce SDF compute every frame (disable caching for GPU profiling).";
 static int arg_handle_debug_gpu_sdf_set(int /*argc*/, const char ** /*argv*/, void * /*data*/)
 {
-  G.debug |= G_DEBUG_GPU_SDF | G_DEBUG_GPU;
+  G.debug |= G_DEBUG_GPU_SDF | G_DEBUG_GPU | G_DEBUG_GPU_SHADER_DEBUG_INFO;
   return 0;
 }
 
