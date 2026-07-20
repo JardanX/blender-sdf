@@ -304,10 +304,12 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_lp_prune_comp)
 LOCAL_GROUP_SIZE(4, 4, 4)
-/* Not statically compiled: the LP shaders are huge (sdf_lp_common.glsl) and
- * the NVIDIA driver spends minutes compiling them at startup. Compiling
- * lazily on first use lets the driver's disk shader cache take over on
- * subsequent runs. */
+DO_STATIC_COMPILATION()
+/* Compiled lazily on first use (the LP shaders are huge and the NVIDIA driver
+ * spends minutes compiling them): DO_STATIC_COMPILATION only marks the info as
+ * runtime-compilable (required by ShaderCompiler::compile since the 5.1 merge);
+ * startup batch compilation via GPU_shader_compile_static is opt-in
+ * (G_DEBUG_GPU_COMPILE_SHADERS) and does not run normally. */
 /* The prune pass only evaluates distances (its own forward pass): strip the
  * trace-side list evaluators (lp_list_eval/lp_list_eval_obj_id) from
  * sdf_lp_common.glsl to cut compile time. */
@@ -353,8 +355,8 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_lp_march_comp)
 LOCAL_GROUP_SIZE(8, 8)
-/* Not statically compiled: see sdf_lp_prune_comp. Compiled lazily on first
- * use; the driver's disk shader cache makes subsequent startups fast. */
+DO_STATIC_COMPILATION()
+/* Compiled lazily on first use; see sdf_lp_prune_comp. */
 /* Distance-only: the march pass evaluates the pruned tree for distances and
  * seeds gbuf_color.a with the dominant object id (light lp_list_eval_obj_id
  * fold) for picking; hit color and normals come from the shared classic
@@ -397,7 +399,8 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_lp_debug_comp)
 LOCAL_GROUP_SIZE(8, 8)
-/* Not statically compiled: see sdf_lp_prune_comp. */
+DO_STATIC_COMPILATION()
+/* Compiled lazily on first use; see sdf_lp_prune_comp. */
 /* Tiny shader (cell metadata lookup / normal viz only, no SDF tree
  * evaluation): debug shading modes stay cheap to compile. */
 STORAGE_BUF(0, read, int4, lp_cell_meta[])
@@ -424,8 +427,8 @@ GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(sdf_mesh_bake_comp)
 LOCAL_GROUP_SIZE(4, 4, 4)
-/* Not statically compiled: see sdf_lp_prune_comp. Compiled lazily on first
- * use; the driver's disk shader cache makes subsequent startups fast. */
+DO_STATIC_COMPILATION()
+/* Compiled lazily on first use; see sdf_lp_prune_comp. */
 /* The bake only walks the mesh BVH (lp_mesh_nearest): strip the trace-side
  * list evaluators (lp_list_eval/lp_list_eval_obj_id) from sdf_lp_common.glsl
  * to cut compile time. The lp_* / modifier / polygon buffers below are still
@@ -496,6 +499,7 @@ PUSH_CONSTANT(float3, grid_origin)
 PUSH_CONSTANT(float, cell_size)
 PUSH_CONSTANT(int, use_bvh)
 PUSH_CONSTANT(int, bvh_root)
+PUSH_CONSTANT(float, sdf_ray_epsilon)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_grid_eval_comp.glsl")
 GPU_SHADER_CREATE_END()
@@ -503,49 +507,7 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Dual Contouring (generates vertices from grid sign changes)
- * \{ */
-
-GPU_SHADER_CREATE_INFO(sdf_dc_contour_comp)
-LOCAL_GROUP_SIZE(4, 4, 4)
-DO_STATIC_COMPILATION()
-STORAGE_BUF(0, read, float, grid_values[])
-STORAGE_BUF(1, write, float4, dc_vertices[])
-STORAGE_BUF(2, read_write, int, dc_counters[])
-STORAGE_BUF(3, write, int, dc_cell_verts[])
-PUSH_CONSTANT(int, grid_verts)
-PUSH_CONSTANT(float3, grid_origin)
-PUSH_CONSTANT(float, cell_size)
-PUSH_CONSTANT(int, max_verts)
-TYPEDEF_SOURCE("sdf_shader_shared.hh")
-COMPUTE_SOURCE("sdf_dc_contour_comp.glsl")
-GPU_SHADER_CREATE_END()
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name SDF DC Triangulation (pass 2: emit triangles from cell vertex map)
- * \{ */
-
-GPU_SHADER_CREATE_INFO(sdf_dc_triangulate_comp)
-LOCAL_GROUP_SIZE(4, 4, 4)
-DO_STATIC_COMPILATION()
-STORAGE_BUF(0, read, float, grid_values[])
-STORAGE_BUF(1, write, int4, dc_triangles[])
-STORAGE_BUF(2, read_write, int, dc_counters[])
-STORAGE_BUF(3, read, int, dc_cell_verts[])
-PUSH_CONSTANT(int, grid_verts)
-PUSH_CONSTANT(int, inner_start)
-PUSH_CONSTANT(int, inner_end)
-PUSH_CONSTANT(int, max_tris)
-TYPEDEF_SOURCE("sdf_shader_shared.hh")
-COMPUTE_SOURCE("sdf_dc_triangulate_comp.glsl")
-GPU_SHADER_CREATE_END()
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name SDF DC Vertex Color (samples SDF color at each DC vertex position)
+/** \name SDF DC Vertex Color (samples SDF color at each DC-SDD vertex position)
  * \{ */
 
 GPU_SHADER_CREATE_INFO(sdf_dc_vertex_color_comp)
@@ -567,6 +529,7 @@ PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(int, vert_count)
 PUSH_CONSTANT(int, use_bvh)
 PUSH_CONSTANT(int, bvh_root)
+PUSH_CONSTANT(float, sdf_ray_epsilon)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_dc_vertex_color_comp.glsl")
 GPU_SHADER_CREATE_END()

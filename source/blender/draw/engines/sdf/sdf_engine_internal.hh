@@ -3676,8 +3676,12 @@ class SdfInstanceBase : public DrawEngine {
 
     bool res_changed = (render_size_ != prev_render_size_);
     bool force_compute = (G.debug & G_DEBUG_GPU_SDF) != 0;
+    /* bake_in_flight(): keep the pipeline running while a progressive mesh
+     * bake has slices left — a static scene would otherwise never re-run
+     * the pipeline, stalling the bake (and the mesh's first appearance
+     * after conversion) until the view changes. */
     bool need_compute = force_compute || !compute_valid_ || scene_changed_ || view_changed_ ||
-                         res_changed || shading_changed;
+                         res_changed || shading_changed || bake_in_flight();
 
     if (need_compute) {
       draw_trace_pipeline(profiling);
@@ -3723,8 +3727,10 @@ class SdfInstanceBase : public DrawEngine {
     DRW_submission_end();
 
     if ((G.debug & G_DEBUG_GPU_SDF) ||
-        (adaptive_resolution_ && render_size_ != texture_size_))
+        (adaptive_resolution_ && render_size_ != texture_size_) || bake_in_flight())
     {
+      /* The bake_in_flight() arm keeps redraws coming until every
+       * progressive mesh bake has flipped ready (see need_compute above). */
       DRW_viewport_request_redraw();
     }
 
@@ -4296,6 +4302,25 @@ class SdfInstanceBase : public DrawEngine {
     GPU_shader_uniform_1i(sh, "z_offset", z_begin);
     GPU_shader_uniform_1i(sh, "dist_only", dist_only ? 1 : 0);
     GPU_compute_dispatch(sh, (res.x + 3) / 4, (res.y + 3) / 4, (z_count + 3) / 4);
+  }
+
+  /* True while any mesh bake is still in flight AND can make progress
+   * (the pools are large enough for the committed layout — the dispatch
+   * gate in update_mesh_bakes). Drives the redraw loop in draw(): the
+   * progressive bake only advances inside draw_trace_pipeline, which a
+   * static scene never schedules — without this a freshly converted mesh
+   * stays invisible until the user moves the view. */
+  bool bake_in_flight() const
+  {
+    if (bake_pool_capacity_ < bake_pool_used_) {
+      return false;
+    }
+    for (const auto &item : bake_records_.items()) {
+      if (item.value.work_active) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /* Per-frame update: (re)bake every live mesh payload that has no record

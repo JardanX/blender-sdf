@@ -3420,3 +3420,58 @@ GPU data is packed into the existing `box_edges`/`box_modes` fields on `SDFObjec
 | `draw/engines/sdf/sdf_cpu_eval.hh` | CPU eval path with advanced cylinder/cone support |
 | `makesrna/intern/rna_sdf.cc` | RNA properties for cylinder and cone edge bevel/taper |
 | `scripts/startup/bl_ui/properties_data_sdf.py` | Added `draw_cylinder()`/`draw_cone()` panels; added CYLINDER/CONE to Property panel poll |
+
+### Cone Bevel Fix — Signed Side Distance
+
+The `sdAdvancedConeFrustum` in all three eval mirrors (GPU `sdf_lib.glsl`, LP `sdf_lp_common.glsl`, CPU `sdf_cpu_eval.hh`) had an `on_segment` guard on the signed side distance: when the projection onto the slanted side line fell exactly at an endpoint (t clamped to 0 or 1), `d_side` was forced positive even for points inside the frustum. This caused the edge bevel blend to see the wrong signed distance near the top/bottom edges, producing visual artifacts.
+
+Fix: removed the `on_segment` guard. The signed perpendicular distance via `dot(diff, outward_normal)` is correct everywhere — at the endpoints, the outward normal of the side still correctly classifies interior vs exterior.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Removed `on_segment` guard from `sdAdvancedConeFrustum` |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | Removed `on_segment` guard from `lp_sd_advanced_cone_frustum` |
+| `draw/engines/sdf/sdf_cpu_eval.hh` | Removed `on_segment` guard from `sdAdvancedConeFrustum` |
+
+---
+
+## CPU DC-SDD Meshing — Replace GPU Dual Contouring
+
+Replaced the GPU-based dual contouring pipeline (QEF per cell + edge triangulation) with a CPU-based DC-SDD (Dual Contouring of Signed Distance Data) mesher via Eigen. The grid SDF values are evaluated on the GPU (the existing `sdf_grid_eval_comp` shader, unchanged), read back to CPU, and contoured by `blender::sdf::meshing::contouring()`.
+
+### Removed
+- **`sdf_dc_contour_comp.glsl`** — GPU QEF vertex placement per cell (eigenvalue-adaptive regularization, 12-edge sign-change detection, atomic vertex allocation)
+- **`sdf_dc_triangulate_comp.glsl`** — GPU edge-based quad emission with chunk-boundary deduplication
+
+### Engine Changes
+- `sdf_engine.cc`: `sdf_dual_contour_to_mesh()` → `sdf_bake_to_mesh()`. No longer dispatches the two DC compute shaders; instead reads the full grid back from the GPU, packs it into `Eigen::VectorXf S` / `Eigen::MatrixXf GV`, calls the CPU DC-SDD contouring, flips triangles to outward orientation via signed-volume check, computes area-weighted per-vertex normals, then reads back vertex colors from the GPU via `sdf_dc_vertex_color_comp` (unchanged). Grid-size safety cap added (max 1025 per axis, 512³ total grid verts).
+- `sdf_meshing.hh`: `sdf_dual_contour_to_mesh()` renamed to `sdf_bake_to_mesh()`.
+- `sdf_shader_shared.hh`: `DCVertexGPU` struct removed (no longer uploaded from GPU).
+- `sdf_shader_infos.hh`: `sdf_dc_contour_comp` and `sdf_dc_triangulate_comp` shader infos deleted. `sdf_grid_eval_comp` gained `sdf_ray_epsilon` push constant for depth-accurate grid signed distances.
+- `sdf_dc_vertex_color_comp.glsl`: Now reads `dc_positions[vi]` (flat float4 array) instead of `dc_positions[vi * 2]` (interleaved pos4 + normal4 pairs from the removed DCVertexGPU layout).
+- `CMakeLists.txt`: Removed the two deleted DC shader file entries.
+- `object_sdf.cc`: Calls `sdf_bake_to_mesh()`; removes the weld-by-distance step (DC-SDD extraction produces no chunk-boundary seams); fixed triangle winding order to match the new outward-orientation guarantee.
+
+### Progressive Mesh Bake
+Added `bake_in_flight()` to `sdf_engine_internal.hh` — drives redraw requests while a bake is still in progress (some slices remain), so a freshly converted mesh appears without requiring a view change.
+
+### Baked Normal Cross-Fade
+`sdf_color_resolve_comp.glsl` now cross-fades between the baked smooth shading normal (near the surface, within ~2 fine voxels) and the field gradient (deep in blend zones). Previously the two switched hard at the fine-grid boundary, producing a shading cut across fillet surfaces. `sdf_mesh_lib.glsl` now tracks `g_sdf_mesh_last_baked_fine_dist` in a separate global (not overwritten by FD stencil taps in the color resolve).
+
+### LP Shader Infos
+Added `DO_STATIC_COMPILATION()` to `sdf_lp_prune_comp`, `sdf_lp_march_comp`, `sdf_lp_debug_comp`, and `sdf_mesh_bake_comp` infos — required by the `ShaderCompiler::compile` API after the 5.1 merge (does not affect the lazy-on-first-use compilation strategy).
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine.cc` | Rewrote `sdf_dual_contour_to_mesh()` → `sdf_bake_to_mesh()`: CPU DC-SDD via Eigen, grid safety cap, outward-orientation check, per-vertex area-weighted normals |
+| `draw/engines/sdf/sdf_engine_internal.hh` | Added `bake_in_flight()` for progressive mesh redraw loop |
+| `draw/engines/sdf/sdf_meshing.hh` | Renamed function to `sdf_bake_to_mesh()` |
+| `draw/engines/sdf/sdf_shader_shared.hh` | Removed `DCVertexGPU` struct |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | Removed DC shader infos; added `sdf_ray_epsilon` to `sdf_grid_eval_comp`; added `DO_STATIC_COMPILATION` to 4 LP/mesh-bake infos |
+| `draw/engines/sdf/shaders/sdf_dc_contour_comp.glsl` | **Deleted** (GPU QEF contouring, replaced by CPU DC-SDD) |
+| `draw/engines/sdf/shaders/sdf_dc_triangulate_comp.glsl` | **Deleted** (GPU edge triangulation, replaced by CPU DC-SDD) |
+| `draw/engines/sdf/shaders/sdf_dc_vertex_color_comp.glsl` | Fixed to read flat position array |
+| `draw/engines/sdf/shaders/sdf_color_resolve_comp.glsl` | Baked normal ↔ field gradient cross-fade; fixed `ez` component select typo |
+| `draw/engines/sdf/shaders/sdf_mesh_lib.glsl` | Added `g_sdf_mesh_last_baked_fine_dist` global |
+| `draw/engines/sdf/shaders/CMakeLists.txt`, `draw/CMakeLists.txt` | Removed deleted DC shaders from build |
+| `editors/object/object_sdf.cc` | Renamed function call; removed weld-by-distance step; fixed triangle winding order |
