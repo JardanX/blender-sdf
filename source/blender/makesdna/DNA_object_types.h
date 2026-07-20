@@ -660,6 +660,9 @@ struct Object {
   float sdf_chamfer_k5 = 0.01f;
   int sdf_flip_blend = 0;
   int sdf_flip_blend_end = 0;
+  /* Baked mesh SDF voxels per axis (0 = automatic). */
+  int sdf_voxel_resolution = 0;
+  char _pad_sdf_voxel_resolution[4] = {};
 
   float shadow_terminator_normal_offset = 0;
   float shadow_terminator_geometry_offset = 0.1f;

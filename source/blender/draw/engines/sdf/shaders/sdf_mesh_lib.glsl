@@ -13,6 +13,10 @@ int g_sdf_mesh_hint_triangles[SDF_MESH_HINT_CACHE_SIZE];
 int g_sdf_mesh_last_triangle;
 float3 g_sdf_mesh_last_barycentric;
 float3 g_sdf_mesh_last_geometric_normal;
+/* Local UNSCALED mesh-space position of the last baked volume sample (set by
+ * the SDF_LP_MESH_FLAG_BAKED branch of sdTriangleMesh); consumed by
+ * sdfMeshLastWorldNormals to fetch the baked normal at the hit. */
+float3 g_sdf_mesh_last_baked_pos;
 
 float sdfMeshPointAabbDistSquared(float3 p, float3 bounds_min, float3 bounds_max)
 {
@@ -31,6 +35,174 @@ float3 sdfMeshUnpackNormal(uint packed_normal)
   }
   return normalize(normal);
 }
+
+/* ------------------------------------------------------------------ */
+/** \name Baked volume sampling (SDF_LP_MESH_FLAG_BAKED)
+ *
+ * Trilinear sampling of the per-mesh baked voxel pools (bake_dist/bake_nrm/
+ * bake_col, written by sdf_mesh_bake_comp). All coordinates are in the
+ * payload's UNSCALED local mesh space; the grid convention (voxel centers,
+ * linear index) matches the bake shader exactly.
+ * \{ */
+
+/* Manual IEEE-754 float16 -> float32 decode (bit layout mirrors
+ * sdf_bake_f32_to_f16_bits in sdf_mesh_bake_comp.glsl; written longhand
+ * because unpackHalf2x16 has no other user in the tree and its Metal
+ * translation is unverified). */
+float sdfBakedF16(uint h)
+{
+  uint mag = h & 0x7FFFu;
+  float f;
+  if (mag == 0u) {
+    f = 0.0f;
+  }
+  else if (mag >= 0x7C00u) {
+    /* Half inf/nan: never produced by the bake (values are band-clamped). */
+    f = 1e30f;
+  }
+  else if ((mag >> 10u) == 0u) {
+    /* Subnormal half: mag * 2^-24 (exactly representable). */
+    f = float(mag) * 5.9604644775390625e-8f;
+  }
+  else {
+    /* Normal half: rebias the exponent (15 -> 127), shift the mantissa. */
+    f = uintBitsToFloat((((mag >> 10u) + 112u) << 23u) | ((mag & 0x3FFu) << 13u));
+  }
+  return ((h & 0x8000u) != 0u) ? -f : f;
+}
+
+/* Maps p to the containing trilinear cell. Returns false when p is outside
+ * the voxel-center range [-0.5, res-0.5] on any axis (the far path). On
+ * success `vi` is the linear index of the (0,0,0) corner WITHOUT the pool
+ * base, and f the fractional position inside the cell. */
+bool sdfBakedGridCoords(float3 origin,
+                        float voxel_size,
+                        int3 res,
+                        float3 p,
+                        out int vi,
+                        out int stride_y,
+                        out int stride_z,
+                        out float3 f)
+{
+  float3 uvw = (p - origin) / voxel_size - 0.5f;
+  float3 resf = float3(res);
+  if (any(lessThan(uvw, float3(-0.5f))) || any(greaterThan(uvw, resf - 0.5f))) {
+    return false;
+  }
+  int3 i0 = clamp(int3(floor(uvw)), int3(0), res - 2);
+  f = clamp(uvw - float3(i0), float3(0.0f), float3(1.0f));
+  stride_y = res.x;
+  stride_z = res.x * res.y;
+  vi = i0.x + i0.y * stride_y + i0.z * stride_z;
+  return true;
+}
+
+/* Baked signed distance at p (unscaled local mesh space). Far path: the
+ * point-to-volume-AABB distance — a proven conservative lower bound (the
+ * mesh lies strictly inside the padded volume box), no pool reads. Near
+ * path: manual trilinear over 8 fp16 corner distances, scaled by 0.95 as a
+ * Lipschitz safety margin for fp16 quantization + interpolation error. */
+float sdfBakedSample(float3 origin, float voxel_size, int3 res, int base, float3 p)
+{
+  int vi;
+  int stride_y;
+  int stride_z;
+  float3 f;
+  if (!sdfBakedGridCoords(origin, voxel_size, res, p, vi, stride_y, stride_z, f)) {
+    float3 box_max = origin + float3(res) * voxel_size;
+    float3 delta = max(origin - p, max(p - box_max, float3(0.0f)));
+    return length(delta);
+  }
+  vi += base;
+  float d000 = sdfBakedF16(bake_dist[vi] & 0xFFFFu);
+  float d100 = sdfBakedF16(bake_dist[vi + 1] & 0xFFFFu);
+  float d010 = sdfBakedF16(bake_dist[vi + stride_y] & 0xFFFFu);
+  float d110 = sdfBakedF16(bake_dist[vi + stride_y + 1] & 0xFFFFu);
+  float d001 = sdfBakedF16(bake_dist[vi + stride_z] & 0xFFFFu);
+  float d101 = sdfBakedF16(bake_dist[vi + stride_z + 1] & 0xFFFFu);
+  float d011 = sdfBakedF16(bake_dist[vi + stride_y + stride_z] & 0xFFFFu);
+  float d111 = sdfBakedF16(bake_dist[vi + stride_y + stride_z + 1] & 0xFFFFu);
+  float d = mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+                mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y),
+                f.z);
+  return d * 0.95f;
+}
+
+/* Baked smooth (corner-normal) shading normal at p. No far path: only
+ * called at/near the traced surface, which lies inside the grid. */
+float3 sdfBakedNormal(float3 origin, float voxel_size, int3 res, int base, float3 p)
+{
+  int vi;
+  int stride_y;
+  int stride_z;
+  float3 f;
+  if (!sdfBakedGridCoords(origin, voxel_size, res, p, vi, stride_y, stride_z, f)) {
+    return float3(0.0f, 0.0f, 1.0f);
+  }
+  vi += base;
+  int c000 = 2 * vi;
+  int c100 = 2 * (vi + 1);
+  int c010 = 2 * (vi + stride_y);
+  int c110 = 2 * (vi + stride_y + 1);
+  int c001 = 2 * (vi + stride_z);
+  int c101 = 2 * (vi + stride_z + 1);
+  int c011 = 2 * (vi + stride_y + stride_z);
+  int c111 = 2 * (vi + stride_y + stride_z + 1);
+  float3 n000 = float3(sdfBakedF16(bake_nrm[c000] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c000] >> 16u),
+                       sdfBakedF16(bake_nrm[c000 + 1] & 0xFFFFu));
+  float3 n100 = float3(sdfBakedF16(bake_nrm[c100] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c100] >> 16u),
+                       sdfBakedF16(bake_nrm[c100 + 1] & 0xFFFFu));
+  float3 n010 = float3(sdfBakedF16(bake_nrm[c010] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c010] >> 16u),
+                       sdfBakedF16(bake_nrm[c010 + 1] & 0xFFFFu));
+  float3 n110 = float3(sdfBakedF16(bake_nrm[c110] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c110] >> 16u),
+                       sdfBakedF16(bake_nrm[c110 + 1] & 0xFFFFu));
+  float3 n001 = float3(sdfBakedF16(bake_nrm[c001] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c001] >> 16u),
+                       sdfBakedF16(bake_nrm[c001 + 1] & 0xFFFFu));
+  float3 n101 = float3(sdfBakedF16(bake_nrm[c101] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c101] >> 16u),
+                       sdfBakedF16(bake_nrm[c101 + 1] & 0xFFFFu));
+  float3 n011 = float3(sdfBakedF16(bake_nrm[c011] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c011] >> 16u),
+                       sdfBakedF16(bake_nrm[c011 + 1] & 0xFFFFu));
+  float3 n111 = float3(sdfBakedF16(bake_nrm[c111] & 0xFFFFu),
+                       sdfBakedF16(bake_nrm[c111] >> 16u),
+                       sdfBakedF16(bake_nrm[c111 + 1] & 0xFFFFu));
+  return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+             mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+             f.z);
+}
+
+/* Baked barycentric corner color (RGBA8, linear) at p. Same near-surface
+ * assumption as sdfBakedNormal. */
+float4 sdfBakedColor(float3 origin, float voxel_size, int3 res, int base, float3 p)
+{
+  int vi;
+  int stride_y;
+  int stride_z;
+  float3 f;
+  if (!sdfBakedGridCoords(origin, voxel_size, res, p, vi, stride_y, stride_z, f)) {
+    return float4(1.0f);
+  }
+  vi += base;
+  float4 c000 = unpackUnorm4x8(bake_col[vi]);
+  float4 c100 = unpackUnorm4x8(bake_col[vi + 1]);
+  float4 c010 = unpackUnorm4x8(bake_col[vi + stride_y]);
+  float4 c110 = unpackUnorm4x8(bake_col[vi + stride_y + 1]);
+  float4 c001 = unpackUnorm4x8(bake_col[vi + stride_z]);
+  float4 c101 = unpackUnorm4x8(bake_col[vi + stride_z + 1]);
+  float4 c011 = unpackUnorm4x8(bake_col[vi + stride_y + stride_z]);
+  float4 c111 = unpackUnorm4x8(bake_col[vi + stride_y + stride_z + 1]);
+  return mix(mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y),
+             mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y),
+             f.z);
+}
+
+/** \} */
 
 float3 sdfMeshVertexPositionBase(SDFObjectGPU obj, uint vertex)
 {
@@ -277,6 +449,22 @@ bool sdfMeshNearest(SDFObjectGPU obj,
 
 float sdTriangleMesh(float3 p, SDFObjectGPU obj)
 {
+  if ((obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0) {
+    /* Baked volume fast path: p is the rotation-only local position; the
+     * analytic path scale-multiplies the vertices, so dividing maps into the
+     * unscaled volume frame. The min-scale factor converts the sampled
+     * distance back to the scaled frame (exact for uniform scale,
+     * conservative otherwise). */
+    float3 p_unscaled = p / obj.obj_scale.xyz;
+    g_sdf_mesh_last_triangle = -1;
+    g_sdf_mesh_last_baked_pos = p_unscaled;
+    float d = sdfBakedSample(obj.bake_origin.xyz,
+                             obj.bake_origin.w,
+                             obj.bake_grid.xyz,
+                             obj.bake_grid.w,
+                             p_unscaled);
+    return d * min(min(obj.obj_scale.x, obj.obj_scale.y), obj.obj_scale.z);
+  }
   g_sdf_mesh_last_triangle = -1;
   float distance_squared;
   int triangle_index;
@@ -319,6 +507,27 @@ bool sdfMeshLastWorldNormals(SDFObjectGPU obj,
                              out float3 shading_normal,
                              out float3 geometric_normal)
 {
+  if ((obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0) {
+    /* Baked volume: fetch the baked smooth normal at the last sampled
+     * position and return it as both shading and geometric normal. */
+    float3 n = sdfBakedNormal(obj.bake_origin.xyz,
+                              obj.bake_origin.w,
+                              obj.bake_grid.xyz,
+                              obj.bake_grid.w,
+                              g_sdf_mesh_last_baked_pos);
+    float3x3 normal_to_world = transpose(to_float3x3(obj.inverse_matrix));
+    float3 world_n = normal_to_world * (n / obj.obj_scale.xyz);
+    float len_squared = dot(world_n, world_n);
+    if (len_squared <= 1e-12f || any(isnan(world_n))) {
+      shading_normal = float3(0.0f);
+      geometric_normal = float3(0.0f);
+      return false;
+    }
+    world_n *= inversesqrt(len_squared);
+    shading_normal = world_n;
+    geometric_normal = world_n;
+    return true;
+  }
   if (g_sdf_mesh_last_triangle < 0) {
     shading_normal = float3(0.0f);
     geometric_normal = float3(0.0f);

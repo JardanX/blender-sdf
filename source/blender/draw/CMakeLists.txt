@@ -360,9 +360,11 @@ set(GLSL_SRC
   engines/sdf/shaders/sdf_shade_comp.glsl
   engines/sdf/shaders/sdf_lp_prune_comp.glsl
   engines/sdf/shaders/sdf_lp_march_comp.glsl
-  engines/sdf/shaders/sdf_lp_resolve_comp.glsl
+  engines/sdf/shaders/sdf_lp_debug_comp.glsl
+  engines/sdf/shaders/sdf_mesh_bake_comp.glsl
   engines/sdf/shaders/sdf_lp_common.glsl
   engines/sdf/shaders/sdf_lp_trace_lib.glsl
+  engines/sdf/shaders/sdf_lp_cell_lib.glsl
   engines/sdf/shaders/sdf_blit_frag.glsl
   engines/sdf/shaders/sdf_fxaa_frag.glsl
   engines/sdf/shaders/sdf_fxaa_lib.glsl

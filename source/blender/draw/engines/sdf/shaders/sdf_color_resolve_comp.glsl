@@ -385,6 +385,19 @@ void main()
     float3 lp = (obj.inverse_matrix * float4(eval_pos - obj.position.xyz, 1.0f)).xyz;
     g_sdf_mesh_last_triangle = -1;
     d = evalPrimitive(lp, obj);
+    /* Baked mesh volume: fetch the baked color at the mapped (unscaled) eval
+     * position instead of the flat object color. */
+    float3 obj_albedo = obj.color.rgb;
+    if (obj.sdf_type == SDF_GPU_TYPE_MESH &&
+        (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0)
+    {
+      obj_albedo = sdfBakedColor(obj.bake_origin.xyz,
+                                 obj.bake_origin.w,
+                                 obj.bake_grid.xyz,
+                                 obj.bake_grid.w,
+                                 lp / obj.obj_scale.xyz)
+                       .rgb;
+    }
     float3 obj_normal = float3(0.0f);
     float3 obj_gradient = float3(0.0f);
     bool obj_normal_valid;
@@ -403,7 +416,7 @@ void main()
       if (scene_dist >= 1e9f) {
         if (obj.csg_operation == 0) {
           scene_dist = d;
-          out_color = obj.color.rgb;
+          out_color = obj_albedo;
           scene_normal = obj_normal;
           scene_gradient = obj_gradient;
           scene_normal_valid = obj_normal_valid;
@@ -434,7 +447,7 @@ void main()
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         float t = csgColorFactor(prev, d, scene_dist, obj.csg_operation, obj.color_blend, obj.clearance,
                                  obj.shell_distance, obj.shell_op);
-        out_color = blendSDFColor(out_color, obj.color.rgb, t, obj.color_blend_type);
+        out_color = blendSDFColor(out_color, obj_albedo, t, obj.color_blend_type);
         scene_normal = combined_normal;
         scene_gradient = combined_gradient;
         scene_normal_valid = combined_normal_valid;
@@ -447,7 +460,7 @@ void main()
         if (obj.csg_operation != SDF_CSG_OP_SUBTRACT && obj.csg_operation != SDF_CSG_OP_SHELL &&
             obj.csg_operation != SDF_CSG_OP_INTERSECT && obj.csg_operation != SDF_CSG_OP_PAINT) {
           grp_dist = d;
-          grp_color = obj.color.rgb * grp_tint;
+          grp_color = obj_albedo * grp_tint;
           grp_normal = obj_normal;
           grp_gradient = obj_gradient;
           grp_normal_valid = obj_normal_valid;
@@ -479,7 +492,7 @@ void main()
             obj.shell_distance, obj.shell_mode, obj.shell_op, obj.shell_blend_top, obj.shell_blend_bottom, obj.chamfer_k2, obj.chamfer_k3, obj.chamfer_k4, obj.chamfer_k5, obj.flip_blend, obj.flip_blend_end);
         float t = csgColorFactor(prev, d, grp_dist, obj.csg_operation, obj.color_blend, obj.clearance,
                                  obj.shell_distance, obj.shell_op);
-        grp_color = blendSDFColor(grp_color, obj.color.rgb * grp_tint, t, obj.color_blend_type);
+        grp_color = blendSDFColor(grp_color, obj_albedo * grp_tint, t, obj.color_blend_type);
         grp_normal = combined_normal;
         grp_gradient = combined_gradient;
         grp_normal_valid = combined_normal_valid;

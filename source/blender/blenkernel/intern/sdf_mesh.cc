@@ -24,6 +24,8 @@
 
 #include "BLI_array.hh"
 #include "BLI_bounds.hh"
+#include "BLI_color.hh"
+#include "BLI_color_types.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
@@ -31,6 +33,7 @@
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "BKE_sdf.hh"
@@ -59,6 +62,7 @@ SDFMeshPayload::~SDFMeshPayload()
   sdf_mesh_array_free(vertices);
   sdf_mesh_array_free(triangles);
   sdf_mesh_array_free(bvh_nodes);
+  sdf_mesh_array_free(corner_colors);
 }
 
 static bool sdf_mesh_bvh_flatten(const SDFMeshBVHNode *source,
@@ -179,6 +183,15 @@ static uint32_t sdf_mesh_pack_normal(float3 normal)
   const int16_t x = int16_t(std::lround(std::clamp(oct.x, -1.0f, 1.0f) * 32767.0f));
   const int16_t y = int16_t(std::lround(std::clamp(oct.y, -1.0f, 1.0f) * 32767.0f));
   return uint32_t(uint16_t(x)) | (uint32_t(uint16_t(y)) << 16);
+}
+
+static unsigned int sdf_mesh_pack_color(const float3 linear)
+{
+  unsigned int packed = 255u << 24;
+  for (int i = 0; i < 3; i++) {
+    packed |= uint(std::lround(std::clamp(linear[i], 0.0f, 1.0f) * 255.0f)) << (8 * i);
+  }
+  return packed;
 }
 
 static float sdf_mesh_bounds_area(const float3 &bounds_min, const float3 &bounds_max)
@@ -372,8 +385,40 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
   Array<float3> vertex_pseudonormals(positions.size());
   vertex_pseudonormals.fill(float3(0.0f));
 
+  /* Active color attribute, converted to scene-linear and packed per triangle corner below. */
+  VArray<ColorGeometry4f> colors_f;
+  VArray<ColorGeometry4b> colors_b;
+  bke::AttrDomain color_domain = bke::AttrDomain::Point;
+  if (mesh->active_color_attribute != nullptr) {
+    const bke::AttributeAccessor attributes = mesh->attributes();
+    const StringRef color_name(mesh->active_color_attribute);
+    for (const bke::AttrDomain domain : {bke::AttrDomain::Corner, bke::AttrDomain::Point}) {
+      if (const bke::AttributeReader<ColorGeometry4f> reader =
+              attributes.lookup<ColorGeometry4f>(color_name, domain))
+      {
+        colors_f = reader.varray;
+        color_domain = domain;
+        break;
+      }
+      if (const bke::AttributeReader<ColorGeometry4b> reader =
+              attributes.lookup<ColorGeometry4b>(color_name, domain))
+      {
+        colors_b = reader.varray;
+        color_domain = domain;
+        break;
+      }
+    }
+  }
+  const VArraySpan<ColorGeometry4f> colors_f_span(colors_f);
+  const VArraySpan<ColorGeometry4b> colors_b_span(colors_b);
+  const bool has_corner_colors = bool(colors_f) || bool(colors_b);
+
   Vector<SDFMeshTriangle> source_triangles;
   source_triangles.reserve(corner_tris.size());
+  Vector<unsigned int> source_corner_colors;
+  if (has_corner_colors) {
+    source_corner_colors.reserve(corner_tris.size() * 3);
+  }
   float3 bounds_min(std::numeric_limits<float>::max());
   float3 bounds_max(std::numeric_limits<float>::lowest());
   int degenerate_triangles = 0;
@@ -413,6 +458,25 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
       const float3 e1 = positions[verts[(i + 2) % 3]] - positions[verts[i]];
       const float angle = std::atan2(math::length(math::cross(e0, e1)), math::dot(e0, e1));
       vertex_pseudonormals[verts[i]] += face_normal * angle;
+    }
+
+    if (has_corner_colors) {
+      for (int i = 0; i < 3; i++) {
+        const int color_index = color_domain == bke::AttrDomain::Corner ?
+                                    corners[i] :
+                                    corner_verts[corners[i]];
+        float3 linear;
+        if (colors_f) {
+          const ColorGeometry4f &c = colors_f_span[color_index];
+          linear = float3(c.r, c.g, c.b);
+        }
+        else {
+          /* Byte colors are sRGB-encoded, convert to scene-linear. */
+          const ColorGeometry4f c = color::decode(colors_b_span[color_index]);
+          linear = float3(c.r, c.g, c.b);
+        }
+        source_corner_colors.append(sdf_mesh_pack_color(linear));
+      }
     }
 
     source_triangles.append(triangle);
@@ -478,6 +542,7 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
 
   Array<SDFMeshBVHNode> build_nodes(size_t(triangle_count) * 2);
   Array<SDFMeshTriangle> ordered_triangles(triangle_count);
+  Array<unsigned int> ordered_corner_colors(has_corner_colors ? triangle_count * 3 : 0);
   std::atomic<int> next_node(1);
   std::atomic<int> next_triangle(0);
 
@@ -509,7 +574,13 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
     if (count <= 4 || depth >= 60) {
       const int first = next_triangle.fetch_add(count, std::memory_order_relaxed);
       for (int i = 0; i < count; i++) {
-        ordered_triangles[first + i] = source_triangles[primitive_order[start + i]];
+        const int source = primitive_order[start + i];
+        ordered_triangles[first + i] = source_triangles[source];
+        if (has_corner_colors) {
+          for (int c = 0; c < 3; c++) {
+            ordered_corner_colors[3 * (first + i) + c] = source_corner_colors[3 * source + c];
+          }
+        }
       }
       node.child_or_first = -first - 1;
       node.child_or_count = count;
@@ -652,6 +723,11 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
   SDFMeshTriangle *mesh_triangles = MEM_new_array_uninitialized<SDFMeshTriangle>(triangle_count,
                                                                                  __func__);
   SDFMeshBVHNode *mesh_nodes = MEM_new_array_uninitialized<SDFMeshBVHNode>(node_count, __func__);
+  unsigned int *mesh_corner_colors = nullptr;
+  if (has_corner_colors) {
+    mesh_corner_colors = MEM_new_array_uninitialized<unsigned int>(size_t(triangle_count) * 3,
+                                                                   __func__);
+  }
 
   threading::parallel_for(positions.index_range(), 4096, [&](const IndexRange range) {
     for (const int i : range) {
@@ -666,13 +742,20 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
   });
   memcpy(mesh_triangles, ordered_triangles.data(), sizeof(SDFMeshTriangle) * triangle_count);
   memcpy(mesh_nodes, threaded_nodes.data(), sizeof(SDFMeshBVHNode) * node_count);
+  if (mesh_corner_colors != nullptr) {
+    memcpy(mesh_corner_colors,
+           ordered_corner_colors.data(),
+           sizeof(unsigned int) * 3 * triangle_count);
+  }
 
   sdf_mesh_array_free(sdf->mesh_vertices);
   sdf_mesh_array_free(sdf->mesh_triangles);
   sdf_mesh_array_free(sdf->mesh_bvh_nodes);
+  sdf_mesh_array_free(sdf->mesh_corner_colors);
   sdf->mesh_vertices = mesh_vertices;
   sdf->mesh_triangles = mesh_triangles;
   sdf->mesh_bvh_nodes = mesh_nodes;
+  sdf->mesh_corner_colors = mesh_corner_colors;
   sdf->mesh_vertex_count = int(positions.size());
   sdf->mesh_triangle_count = triangle_count;
   sdf->mesh_bvh_node_count = node_count;
@@ -726,6 +809,7 @@ void BKE_sdf_mesh_runtime_update(Object &object, const Mesh &mesh)
     payload->vertices = temporary_sdf.mesh_vertices;
     payload->triangles = temporary_sdf.mesh_triangles;
     payload->bvh_nodes = temporary_sdf.mesh_bvh_nodes;
+    payload->corner_colors = temporary_sdf.mesh_corner_colors;
     payload->vertex_count = temporary_sdf.mesh_vertex_count;
     payload->triangle_count = temporary_sdf.mesh_triangle_count;
     payload->bvh_node_count = temporary_sdf.mesh_bvh_node_count;

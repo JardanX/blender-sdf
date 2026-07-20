@@ -3209,6 +3209,13 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Flip End", "Flip the round shell-end blend direction");
   RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
 
+  prop = RNA_def_property(srna, "sdf_voxel_resolution", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sdf_voxel_resolution");
+  RNA_def_property_range(prop, 0, 512);
+  RNA_def_property_ui_text(
+      prop, "Voxel Resolution", "Baked mesh SDF voxels per axis (0 = automatic)");
+  RNA_def_property_update(prop, 0, "rna_Object_sdf_update");
+
   prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "mode");
   RNA_def_property_enum_items(prop, rna_enum_object_mode_items);

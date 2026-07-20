@@ -28,7 +28,8 @@ static constexpr const char *s_shader_info_names[SH_COUNT] = {
     "sdf_fxaa",
     "sdf_lp_prune_comp",
     "sdf_lp_march_comp",
-    "sdf_lp_resolve_comp",
+    "sdf_lp_debug_comp",
+    "sdf_mesh_bake_comp",
 };
 
 static gpu::StaticShader s_shaders[SH_COUNT];
@@ -156,6 +157,7 @@ static constexpr int kClassicShaders[] = {
     SH_SHADE_COMP,
     SH_BLIT,
     SH_FXAA,
+    SH_MESH_BAKE_COMP,
 };
 
 class Instance : public SdfInstanceBase {
@@ -169,6 +171,14 @@ class Instance : public SdfInstanceBase {
   {
 #define PROF_START(name) if (profiling) { s_profiler.mark_start(name); }
 #define PROF_END()       if (profiling) { s_profiler.mark_end(); }
+
+    /* Dense per-mesh volume bakes (shared with the LP engine; runtime
+     * sampling is the SDF_LP_MESH_FLAG_BAKED fast path in sdf_mesh_lib). */
+    PROF_START("Mesh Bake");
+    GPU_debug_group_begin("SDF Mesh Bake");
+    update_mesh_bakes();
+    GPU_debug_group_end();
+    PROF_END();
 
     PROF_START("AABB Project");
     GPU_debug_group_begin("SDF AABB Project");
@@ -589,6 +599,9 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
   int grid_val_slot = GPU_shader_get_ssbo_binding(grid_sh, "grid_values");
   int grid_bvh_slot = GPU_shader_get_ssbo_binding(grid_sh, "aabb_nodes");
   int grid_mesh_data_slot = GPU_shader_get_ssbo_binding(grid_sh, "mesh_data_buf");
+  int grid_bake_dist_slot = GPU_shader_get_ssbo_binding(grid_sh, "bake_dist");
+  int grid_bake_nrm_slot = GPU_shader_get_ssbo_binding(grid_sh, "bake_nrm");
+  int grid_bake_col_slot = GPU_shader_get_ssbo_binding(grid_sh, "bake_col");
   int has_bvh = (s_bvh_ssbo && s_bvh_root >= 0) ? 1 : 0;
 
   int dc_gv_slot = GPU_shader_get_ssbo_binding(dc_sh, "grid_values");
@@ -644,6 +657,15 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
         if (has_bvh && grid_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, grid_bvh_slot);
         if (s_mesh_data_ssbo && grid_mesh_data_slot >= 0) {
           GPU_storagebuf_bind(s_mesh_data_ssbo, grid_mesh_data_slot);
+        }
+        if (s_bake_dist_ssbo && grid_bake_dist_slot >= 0) {
+          GPU_storagebuf_bind(s_bake_dist_ssbo, grid_bake_dist_slot);
+        }
+        if (s_bake_nrm_ssbo && grid_bake_nrm_slot >= 0) {
+          GPU_storagebuf_bind(s_bake_nrm_ssbo, grid_bake_nrm_slot);
+        }
+        if (s_bake_col_ssbo && grid_bake_col_slot >= 0) {
+          GPU_storagebuf_bind(s_bake_col_ssbo, grid_bake_col_slot);
         }
         GPU_shader_uniform_1i(grid_sh, "object_count", s_object_count);
         GPU_shader_uniform_1i(grid_sh, "group_count", s_group_count);
@@ -716,6 +738,9 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     int col_out_slot = GPU_shader_get_ssbo_binding(color_sh, "dc_colors");
     int col_bvh_slot = GPU_shader_get_ssbo_binding(color_sh, "aabb_nodes");
     int col_mesh_data_slot = GPU_shader_get_ssbo_binding(color_sh, "mesh_data_buf");
+    int col_bake_dist_slot = GPU_shader_get_ssbo_binding(color_sh, "bake_dist");
+    int col_bake_nrm_slot = GPU_shader_get_ssbo_binding(color_sh, "bake_nrm");
+    int col_bake_col_slot = GPU_shader_get_ssbo_binding(color_sh, "bake_col");
 
     if (s_object_ssbo && col_obj_slot >= 0) GPU_storagebuf_bind(s_object_ssbo, col_obj_slot);
     if (s_modifier_ssbo && col_mod_slot >= 0) GPU_storagebuf_bind(s_modifier_ssbo, col_mod_slot);
@@ -726,6 +751,15 @@ std::string sdf_dual_contour_to_mesh(int grid_res,
     if (has_bvh && col_bvh_slot >= 0) GPU_storagebuf_bind(s_bvh_ssbo, col_bvh_slot);
     if (s_mesh_data_ssbo && col_mesh_data_slot >= 0) {
       GPU_storagebuf_bind(s_mesh_data_ssbo, col_mesh_data_slot);
+    }
+    if (s_bake_dist_ssbo && col_bake_dist_slot >= 0) {
+      GPU_storagebuf_bind(s_bake_dist_ssbo, col_bake_dist_slot);
+    }
+    if (s_bake_nrm_ssbo && col_bake_nrm_slot >= 0) {
+      GPU_storagebuf_bind(s_bake_nrm_ssbo, col_bake_nrm_slot);
+    }
+    if (s_bake_col_ssbo && col_bake_col_slot >= 0) {
+      GPU_storagebuf_bind(s_bake_col_ssbo, col_bake_col_slot);
     }
 
     GPU_shader_uniform_1i(color_sh, "object_count", s_object_count);

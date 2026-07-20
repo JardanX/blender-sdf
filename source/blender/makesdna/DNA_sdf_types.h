@@ -257,6 +257,10 @@ typedef struct SDF {
   SDFMeshVertex *mesh_vertices = nullptr;
   SDFMeshTriangle *mesh_triangles = nullptr;
   SDFMeshBVHNode *mesh_bvh_nodes = nullptr;
+  /* Packed RGBA8 (scene-linear, alpha=255) per triangle corner, 3 * mesh_triangle_count
+   * elements, reordered identically to mesh_triangles. Null when the mesh has no active
+   * color attribute. */
+  unsigned int *mesh_corner_colors = nullptr;
   int mesh_vertex_count = 0;
   int mesh_triangle_count = 0;
   int mesh_bvh_node_count = 0;

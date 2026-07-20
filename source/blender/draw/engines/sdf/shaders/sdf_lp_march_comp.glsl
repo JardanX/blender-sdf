@@ -7,13 +7,12 @@
  * cells (num_active == 0) return a stored constant lower bound, giving large
  * empty-space steps for free. Writes the position G-buffer (w=1 on hit) and
  * seeds gbuf_color.a with the dominant object id for picking (mirroring
- * sdf_trace_comp.glsl); the hit color/normal are produced by the classic
- * color resolve pass (sdf_color_resolve_comp) in the default shading mode,
- * or by sdf_lp_resolve_comp in the debug shading modes.
+ * sdf_trace_comp.glsl); hit color and normals are produced by the shared
+ * classic passes (sdf_color_resolve_comp / sdf_normal_comp), and the debug
+ * shading modes recolor afterwards (sdf_lp_debug_comp).
  *
- * Compiled with SDF_LP_NO_COLOR: the folded color/normal evaluators in
- * sdf_lp_common.glsl are stripped, which drastically cuts driver compile
- * time for this latency-critical shader.
+ * Distance-only: the folded color/normal evaluators were removed from
+ * sdf_lp_common.glsl, keeping this latency-critical shader small.
  *
  * Port of simple.frag.glsl from the reference engine. */
 

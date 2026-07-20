@@ -3284,3 +3284,42 @@ pulling the heavy color/normal evaluator into the march shader.
 | `draw/engines/sdf/shaders/sdf_lp_common.glsl` | New `lp_list_eval_obj_id` folded evaluator (in the `SDF_LP_NO_LIST_EVAL` section); `lp_smin_blend` moved out of the `SDF_LP_NO_COLOR` guard so the distance-only shaders can use it. |
 | `draw/engines/sdf/shaders/sdf_lp_trace_lib.glsl` | New `lp_sdf_obj_id` cell-dispatch helper mirroring `lp_sdf`. |
 | `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_lp_march_comp` gained the `gbuf_color_img` image binding. |
+
+### LP Resolve Shader Deleted — Debug Modes Without Tree Evaluation
+
+Follow-up to the previous subsection: routing only the default mode through
+the classic color resolve still left the debug shading modes (heatmap/normals)
+dependent on `sdf_lp_resolve_comp` and its minutes-long driver compile. But
+the debug modes need no SDF tree evaluation at all — HEATMAP colors from the
+hit cell's pruning metadata, NORMALS from the normal buffer the shared
+`draw_normal` pass already produces. `sdf_lp_resolve_comp` is therefore
+deleted, along with the whole folded color/normal machinery in
+`sdf_lp_common.glsl` (`lp_list_eval_color`, `lp_list_eval_color_nrm`,
+`lp_leaf_world_normal`, `lp_mesh_smooth_world_normal` and the
+`SDF_LP_NO_COLOR` / `SDF_LP_NO_COLOR_FLAT` guards; nothing else referenced
+them — verified by grep).
+
+The LP pipeline is now identical in all shading modes: prune → march →
+classic aabb_project / tile_cull / color_resolve → shared normal pass, then —
+only for debug modes — the new tiny `sdf_lp_debug_comp` recolors hit pixels
+(heatmap from `lp_cell_meta` with the same fallback/0.5-primitive
+approximation as before; normals as `n * 0.5 + 0.5` from `gbuf_normal`),
+after which the shade pass blits the result (lighting still forced off in
+debug modes). The debug shader preserves `gbuf_color.a`, so object picking
+now works in the debug shading modes too. Cell indexing and the inferno
+colormap moved from `sdf_lp_common.glsl` into a new `sdf_lp_cell_lib.glsl` so
+the debug shader (and the prune/march shaders, via the common library) get
+them without the primitive library. Since the debug shader compiles in
+milliseconds, the LP shader list is static again — no lazy-compile stall on
+mode switches, and no LP shader takes minutes anywhere.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lp_resolve_comp.glsl` | Deleted. |
+| `draw/engines/sdf/shaders/sdf_lp_debug_comp.glsl` | New: debug colorize (heatmap from cell metadata, normals viz), no tree evaluation, preserves `gbuf_color.a` for picking. |
+| `draw/engines/sdf/shaders/sdf_lp_cell_lib.glsl` | New: Morton cell indexing + inferno colormap, extracted from `sdf_lp_common.glsl`. |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | Folded color/normal evaluators and `SDF_LP_NO_COLOR*` guards deleted; includes `sdf_lp_cell_lib.glsl`. |
+| `draw/engines/sdf/shaders/infos/sdf_shader_infos.hh` | `sdf_lp_resolve_comp` info replaced by `sdf_lp_debug_comp`; dead `SDF_LP_NO_COLOR*` defines removed. |
+| `draw/engines/sdf/sdf_lp_engine.cc` | `draw_lp_resolve()` → `draw_lp_debug()` (runs after the shared normal pass, debug modes only); all modes run the classic color resolve; shader list static again with `SH_LP_DEBUG_COMP`. |
+| `draw/engines/sdf/sdf_engine.cc`, `sdf_engine_internal.hh` | `SH_LP_RESOLVE_COMP` → `SH_LP_DEBUG_COMP` (enum + shader name table). |
+| `draw/CMakeLists.txt`, `draw/engines/sdf/shaders/CMakeLists.txt` | Shader lists updated (also fixed the stale `sdf_lp_trace_comp.glsl` entry from the march/resolve split). |
