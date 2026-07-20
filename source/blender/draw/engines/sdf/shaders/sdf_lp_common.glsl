@@ -12,11 +12,15 @@
  *
  * Op coverage (feature parity with the classic engine):
  * - UNION/SUBTRACT/INTERSECT x LINEAR/SMOOTH/CHAMFER/ROUND: all share the
- *   signed form s * (op(s*a, s*b) with exact winner fallback outside
+ *   signed form s * op(s*a, s*b) which reduces to the exact winner outside
  *   |a-b| >= k, so the reference 2R+k dominance bound culls them all.
  *   SMOOTH is the quadratic kernel (identical to the classic opSmooth*),
  *   CHAMFER the linear kernel (identical to opChamfer*), ROUND the spherical
- *   fillet (identical to opRound*).
+ *   fillet (same zero set as opRound*, kept continuous — see
+ *   lp_binary_op_eval). Note ROUND is only 1-Lipschitz in the (a,b)-metric;
+ *   w.r.t. position it reaches sqrt(2) where the child gradients align
+ *   (fillet crest), which the prune pass accounts for via the per-node
+ *   Lipschitz constants (SDFLpNode.lipschitz).
  * - PUSH/AVOID/SHELL are desugared by the tree builder into UNION/SUBTRACT/
  *   INTERSECT + OFFSET nodes, so they cull through the same machinery.
  * - PAINT is the only opaque op (geometry = left operand, never culled).
@@ -106,6 +110,125 @@ float lp_op_iround(float a, float b, float r)
   return min(ad, corn);
 }
 
+/* ---- Smooth (k2/k3 edge-softness) blend variants ----
+ * Ported verbatim from sdf_lib.glsl (:661-695, :812-836, :890-951) so the
+ * LP engine matches the classic engine when chamfer_k2/chamfer_k3 (start
+ * edge) or chamfer_k4/chamfer_k5 (shell end edge) are set. Only CHAMFER and
+ * ROUND have smooth variants; SMOOTH ignores k2/k3 in the classic engine. */
+
+float lp_op_smooth_union(float d1, float d2, float k)
+{
+  if (k <= 0.0001f) {
+    return min(d1, d2);
+  }
+  if (abs(d2 - d1) >= k) {
+    return min(d1, d2);
+  }
+  float h = clamp(0.5f + 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
+  return mix(d2, d1, h) - k * h * (1.0f - h);
+}
+
+float lp_op_smooth_subtraction(float d1, float d2, float k)
+{
+  if (k <= 0.0001f) {
+    return max(-d1, d2);
+  }
+  if (abs(d2 + d1) >= k) {
+    return max(-d1, d2);
+  }
+  float h = clamp(0.5f - 0.5f * (d2 + d1) / k, 0.0f, 1.0f);
+  return mix(d2, -d1, h) + k * h * (1.0f - h);
+}
+
+float lp_op_smooth_intersection(float d1, float d2, float k)
+{
+  if (k <= 0.0001f) {
+    return max(d1, d2);
+  }
+  if (abs(d2 - d1) >= k) {
+    return max(d1, d2);
+  }
+  float h = clamp(0.5f - 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
+  return mix(d2, d1, h) + k * h * (1.0f - h);
+}
+
+float lp_op_smooth_chamfer_union(float d1, float d2, float k, float k2, float k3)
+{
+  float chamfer_plane = (d1 + d2 - k) * 0.5f;
+  float term1 = lp_op_smooth_union(d1, chamfer_plane, k2);
+  float term2 = lp_op_smooth_union(d2, chamfer_plane, k3);
+  return min(term1, term2);
+}
+
+float lp_op_smooth_chamfer_subtraction(float d1, float d2, float k, float k2, float k3)
+{
+  float A = -d1;
+  float B = d2;
+  float chamfer_plane = (A + B + k) * 0.5f;
+  float term1 = lp_op_smooth_intersection(A, chamfer_plane, k2);
+  float term2 = lp_op_smooth_intersection(B, chamfer_plane, k3);
+  return max(term1, term2);
+}
+
+float lp_op_smooth_chamfer_intersection(float d1, float d2, float k, float k2, float k3)
+{
+  float chamfer_plane = (d1 + d2 + k) * 0.5f;
+  float term1 = lp_op_smooth_intersection(d1, chamfer_plane, k2);
+  float term2 = lp_op_smooth_intersection(d2, chamfer_plane, k3);
+  return max(term1, term2);
+}
+
+float lp_op_smooth_round_union(float a, float b, float r, float k2, float k3)
+{
+  float2 s = float2(max(a, 0.0f), max(b, 0.0f));
+  float corner = length(s) - r;
+  float term1 = lp_op_smooth_union(a, corner, k2);
+  float term2 = lp_op_smooth_union(b, corner, k3);
+  return min(term1, term2);
+}
+
+float lp_op_smooth_round_subtraction(float d1, float d2, float r, float k2, float k3)
+{
+  float a = d2;
+  float b = d1;
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corner = r - length(s);
+  float term1 = lp_op_smooth_intersection(a, corner, k2);
+  float term2 = lp_op_smooth_intersection(-b, corner, k3);
+  return max(term1, term2);
+}
+
+float lp_op_smooth_round_intersection(float d1, float d2, float r, float k2, float k3)
+{
+  float2 s = float2(min(d1, 0.0f), max(-d2, 0.0f));
+  float corner = r - length(s);
+  float term1 = lp_op_smooth_intersection(d1, corner, k2);
+  float term2 = lp_op_smooth_intersection(d2, corner, k3);
+  return max(term1, term2);
+}
+
+/* Quilez round intersection (classic opIntersectionRound, sdf_lib.glsl:919).
+ * Used by the inward SHELL start edge (non-flipped ROUND), where the classic
+ * engine does NOT use the opRoundSubtraction duality form. */
+float lp_op_intersection_round(float a, float b, float r)
+{
+  float2 u = max(float2(r + a, r + b), float2(0.0f));
+  return min(-r, max(a, b)) + length(u);
+}
+
+/* Classic opSmoothRoundIntersectionInverted (sdf_lib.glsl:944): outward SHELL
+ * end edge with flip_blend_end. */
+float lp_op_smooth_round_intersection_inverted(float d1, float d2, float r, float k2, float k3)
+{
+  float a = d1;
+  float b = -d2;
+  float2 s = float2(min(a, 0.0f), max(b, 0.0f));
+  float corner = r - length(s);
+  float term1 = lp_op_smooth_intersection(a, corner, k2);
+  float term2 = lp_op_smooth_intersection(-b, corner, k3);
+  return max(term1, term2);
+}
+
 /* Common signed form for union/subtract/intersect with any blend type.
  * a and b are the operand values including their active-node signs.
  * Verified exact against the classic kernels (sdf_lib.glsl):
@@ -113,28 +236,100 @@ float lp_op_iround(float a, float b, float r)
  * - CHAMFER: min - max(0,k-|a-b|)/2 == min(min(a,b),(a-k+b)/2) inside the
  *   blend zone and min outside, i.e. exactly opChamferUnion (:789) (the
  *   kernel-subtracted form is algebraic, not an approximation).
- * - ROUND: s*opUnionIRound(s*a,s*b,k) with exact-winner fallback matches
- *   opRoundUnion/opRoundSubtraction/opRoundIntersection (:849-887) because
- *   opUnionIRound is symmetric and |a-b| is invariant under the sign flips
- *   used by the subtract/intersect duality. */
-float lp_binary_op_eval(uint op, float a, float b)
+ * - ROUND: s*opUnionIRound(s*a,s*b,k) evaluated WITHOUT the classic
+ *   |a-b| >= k cutoff. opUnionIRound reduces to the exact winner outside the
+ *   blend zone on its own (the q.y clamp makes `ad` coincide with min there),
+ *   so the signed form stays continuous; the classic cutoff is discontinuous
+ *   in the negative/mixed quadrants, which breaks the per-cell far-field
+ *   bound (blocky band artifacts). The zero set matches
+ *   opRoundUnion/opRoundSubtraction/opRoundIntersection (:849-887) exactly.
+ *   The field is 1-Lipschitz in (a,b) but up to sqrt(2)-Lipschitz w.r.t.
+ *   position; see SDFLpNode.lipschitz.
+ * - Smooth (k2/k3) CHAMFER/ROUND variants dispatch to the verbatim classic
+ *   ports above (combineCSG :1490-1537). SUBTRACT's right operand arrives
+ *   negated (b = -d2), so the classic (d2, d1) argument order is (-b, a). */
+float lp_binary_op_eval(uint4 opw, float a, float b)
 {
+  uint op = opw.x;
   if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
     return a;
   }
   float s = lp_op_sign(op);
   float k = lp_op_blend_factor(op);
   uint bt = lp_op_blend_type(op);
+  uint csg = lp_op_csg(op);
+  float k2 = uintBitsToFloat(opw.y);
+  float k3 = uintBitsToFloat(opw.z);
+  bool has_smooth = (k2 > 0.0f || k3 > 0.0f);
+  if ((bt == SDF_LP_BLEND_CHAMFER || bt == SDF_LP_BLEND_ROUND) && k > 0.0f) {
+    if (has_smooth) {
+      if (bt == SDF_LP_BLEND_CHAMFER) {
+        if (csg == SDF_LP_CSG_UNION) {
+          return lp_op_smooth_chamfer_union(a, b, k, k2, k3);
+        }
+        if (csg == SDF_LP_CSG_INTERSECT) {
+          return lp_op_smooth_chamfer_intersection(a, b, k, k2, k3);
+        }
+        return lp_op_smooth_chamfer_subtraction(-b, a, k, k2, k3);
+      }
+      if ((opw.w & SDF_LP_OP_FLAG_INVERTED) != 0u) {
+        /* Outward SHELL end edge, flip_blend_end (sdf_lib.glsl:1701). */
+        return lp_op_smooth_round_intersection_inverted(a, b, k, k2, k3);
+      }
+      if (csg == SDF_LP_CSG_UNION) {
+        return lp_op_smooth_round_union(a, b, k, k2, k3);
+      }
+      if (csg == SDF_LP_CSG_INTERSECT) {
+        return lp_op_smooth_round_intersection(a, b, k, k2, k3);
+      }
+      return lp_op_smooth_round_subtraction(-b, a, k, k2, k3);
+    }
+    if (bt == SDF_LP_BLEND_ROUND && (opw.w & SDF_LP_OP_FLAG_INVERTED) != 0u &&
+        csg == SDF_LP_CSG_SUBTRACT)
+    {
+      /* Inward SHELL start edge, non-flipped ROUND (sdf_lib.glsl:1616). */
+      return lp_op_intersection_round(a, b, k);
+    }
+  }
   if (bt == SDF_LP_BLEND_ROUND) {
-    /* Exact winner fallback outside the blend zone. */
-    if (k <= 0.0f || abs(a - b) >= k) {
+    if (k <= 0.0f) {
       return s * min(s * a, s * b);
     }
+    /* No winner fallback at |a-b| >= k: lp_op_iround already reduces to the
+     * exact winner outside the blend zone (q.y clamps to 0, so `ad` becomes
+     * min(s*a, s*b) and `corn` stays above it wherever the zone fallback
+     * would be exact), so the fillet evaluates as one continuous field. The
+     * classic opRound* cutoff to min() is discontinuous in the negative/mixed
+     * quadrants (jump up to ~1.24k), which breaks the per-cell far-field
+     * bound this engine stores and shows up as blocky bands along the blend
+     * regions. The field is 1-Lipschitz in the Euclidean (a,b)-metric, i.e.
+     * up to sqrt(2)-Lipschitz w.r.t. position when both children vary
+     * together — the prune pass scales its bounds with the per-node Lipschitz
+     * constant (SDFLpNode.lipschitz) to stay conservative. */
     return s * lp_op_iround(s * a, s * b, k);
   }
   float ker = (bt == SDF_LP_BLEND_CHAMFER) ? lp_kernel_chamfer(abs(a - b), k) :
                                              lp_kernel(abs(a - b), k);
   return s * (min(s * a, s * b) - ker);
+}
+
+/* Effective dominance margin for the prune pass: outside |a-b| > lp_op_dom_k
+ * the op reduces to the exact winner (verified numerically). Smooth variants
+ * keep blending through their k2/k3 smin terms until |a-b| exceeds
+ * k + 2*max(k2,k3) (the chamfer plane / round corner must clear the winning
+ * operand by the full softness radius before the smin is exact). */
+float lp_op_dom_k(uint4 opw)
+{
+  float k = lp_op_blend_factor(opw.x);
+  uint bt = lp_op_blend_type(opw.x);
+  if (bt == SDF_LP_BLEND_CHAMFER || bt == SDF_LP_BLEND_ROUND) {
+    float k2 = uintBitsToFloat(opw.y);
+    float k3 = uintBitsToFloat(opw.z);
+    if (k2 > 0.0f || k3 > 0.0f) {
+      return k + 2.0f * max(k2, k3);
+    }
+  }
+  return k;
 }
 
 /* Smooth-min blend returning (distance, color mix factor). */
@@ -765,8 +960,16 @@ float lp_sd_advanced_polygon(float3 p,
  * the classic engine. Distance to a triangle soup is 1-Lipschitz, and the
  * pseudonormal sign keeps it an exact SDF, so mesh leaves participate in
  * culling like any analytic primitive. The per-thread hint cache of the
- * classic engine is omitted (the BVH walk alone is correct).
+ * classic engine is kept: seeding the walk with the previous hit triangle
+ * gives a tight initial distance bound, so the AABB test prunes almost the
+ * whole tree (near O(log n)). Without it the walk starts at FLT_MAX and
+ * degenerates toward visiting every node (near O(n)).
  * \{ */
+
+#define SDF_LP_MESH_HINT_CACHE_SIZE 8
+
+int g_lp_mesh_hint_keys[SDF_LP_MESH_HINT_CACHE_SIZE];
+int g_lp_mesh_hint_triangles[SDF_LP_MESH_HINT_CACHE_SIZE];
 
 float lp_mesh_point_aabb_dist_sq(float3 p, float3 bounds_min, float3 bounds_max)
 {
@@ -785,20 +988,20 @@ float3 lp_mesh_unpack_normal(uint packed_normal)
   return normalize(normal);
 }
 
-float3 lp_mesh_vertex_position(SDFLpPrimitive prim, uint vertex)
+float3 lp_mesh_vertex_position(int4 mesh_data, float4 mesh_scale, uint vertex)
 {
-  return uintBitsToFloat(mesh_data_buf[prim.mesh_data.x + int(vertex)].xyz) * prim.scale.xyz;
+  return uintBitsToFloat(mesh_data_buf[mesh_data.x + int(vertex)].xyz) * mesh_scale.xyz;
 }
 
-float3 lp_mesh_vertex_pseudonormal(SDFLpPrimitive prim, uint vertex)
+float3 lp_mesh_vertex_pseudonormal(int4 mesh_data, float4 mesh_scale, uint vertex)
 {
-  uint packed_normal = mesh_data_buf[prim.mesh_data.x + int(vertex)].w;
-  return normalize(lp_mesh_unpack_normal(packed_normal) / prim.scale.xyz);
+  uint packed_normal = mesh_data_buf[mesh_data.x + int(vertex)].w;
+  return normalize(lp_mesh_unpack_normal(packed_normal) / mesh_scale.xyz);
 }
 
-SDFMeshTriangleGPU lp_mesh_triangle_load(SDFLpPrimitive prim, int triangle)
+SDFMeshTriangleGPU lp_mesh_triangle_load(int4 mesh_data, int triangle)
 {
-  int start = prim.mesh_data.y + triangle * 3;
+  int start = mesh_data.y + triangle * 3;
   SDFMeshTriangleGPU result;
   result.vertices_and_material = mesh_data_buf[start];
   result.corner_normals = mesh_data_buf[start + 1];
@@ -829,9 +1032,9 @@ bool lp_mesh_triangle_stable_less(SDFMeshTriangleGPU a, SDFMeshTriangleGPU b)
   return a_max < b_max;
 }
 
-BVHNodeGPU lp_mesh_node_load(SDFLpPrimitive prim, int node)
+BVHNodeGPU lp_mesh_node_load(int4 mesh_data, int node)
 {
-  int start = prim.mesh_data.w + node * 2;
+  int start = mesh_data.w + node * 2;
   uint4 data_min = mesh_data_buf[start];
   uint4 data_max = mesh_data_buf[start + 1];
   BVHNodeGPU result;
@@ -900,7 +1103,8 @@ float3 lp_mesh_closest_point(float3 p,
   return a + ab * v + ac * w;
 }
 
-float3 lp_mesh_feature_normal(SDFLpPrimitive prim,
+float3 lp_mesh_feature_normal(int4 mesh_data,
+                              float4 mesh_scale,
                               SDFMeshTriangleGPU triangle,
                               float3 a,
                               float3 b,
@@ -909,46 +1113,93 @@ float3 lp_mesh_feature_normal(SDFLpPrimitive prim,
 {
   const float feature_epsilon = 1e-5f;
   if (barycentric.x >= 1.0f - feature_epsilon) {
-    return lp_mesh_vertex_pseudonormal(prim, triangle.vertices_and_material.x);
+    return lp_mesh_vertex_pseudonormal(mesh_data, mesh_scale, triangle.vertices_and_material.x);
   }
   if (barycentric.y >= 1.0f - feature_epsilon) {
-    return lp_mesh_vertex_pseudonormal(prim, triangle.vertices_and_material.y);
+    return lp_mesh_vertex_pseudonormal(mesh_data, mesh_scale, triangle.vertices_and_material.y);
   }
   if (barycentric.z >= 1.0f - feature_epsilon) {
-    return lp_mesh_vertex_pseudonormal(prim, triangle.vertices_and_material.z);
+    return lp_mesh_vertex_pseudonormal(mesh_data, mesh_scale, triangle.vertices_and_material.z);
   }
   if (barycentric.x <= feature_epsilon) {
-    return normalize(lp_mesh_unpack_normal(triangle.edge_normals.x) / prim.scale.xyz);
+    return normalize(lp_mesh_unpack_normal(triangle.edge_normals.x) / mesh_scale.xyz);
   }
   if (barycentric.y <= feature_epsilon) {
-    return normalize(lp_mesh_unpack_normal(triangle.edge_normals.y) / prim.scale.xyz);
+    return normalize(lp_mesh_unpack_normal(triangle.edge_normals.y) / mesh_scale.xyz);
   }
   if (barycentric.z <= feature_epsilon) {
-    return normalize(lp_mesh_unpack_normal(triangle.edge_normals.z) / prim.scale.xyz);
+    return normalize(lp_mesh_unpack_normal(triangle.edge_normals.z) / mesh_scale.xyz);
   }
   return normalize(cross(b - a, c - a));
 }
 
-bool lp_mesh_nearest(SDFLpPrimitive prim,
+/* Last mesh hit on this thread (written by lp_sd_triangle_mesh), mirroring
+ * the classic engine's g_sdf_mesh_last_*: lets the trace pass derive the
+ * geometric/smooth normal from the winning triangle instead of paying for 4
+ * finite-difference gradient evaluations per pixel. */
+int g_lp_mesh_last_triangle;
+float3 g_lp_mesh_last_barycentric;
+float3 g_lp_mesh_last_geometric_normal;
+
+bool lp_mesh_nearest(int4 mesh_data,
+                     int mesh_node_count,
+                     float4 mesh_scale,
                      float3 p,
                      out float distance_squared,
                      out int triangle_index,
+                     out float3 closest_point,
+                     out float3 barycentric,
                      out float3 feature_normal)
 {
   distance_squared = 3.402823466e+38f;
   triangle_index = -1;
+  closest_point = float3(0.0f);
+  barycentric = float3(1.0f, 0.0f, 0.0f);
   feature_normal = float3(0.0f, 0.0f, 1.0f);
-  if (prim.mesh_data.z <= 0 || prim.mesh_node_count <= 0) {
+  if (mesh_data.z <= 0 || mesh_node_count <= 0) {
     return false;
   }
 
+  /* Seed with the last triangle that won for this mesh: successive SDF
+   * evaluations (sphere-tracing steps, gradient taps, prune cells) are
+   * spatially coherent, so the hint gives an almost-tight distance bound up
+   * front and the AABB test below prunes nearly the whole tree. */
+  int cache_key = mesh_data.y;
+  int cache_slot = (cache_key * 17) & (SDF_LP_MESH_HINT_CACHE_SIZE - 1);
+  int hint_triangle = g_lp_mesh_hint_triangles[cache_slot];
+  if (g_lp_mesh_hint_keys[cache_slot] == cache_key && hint_triangle >= 0 &&
+      hint_triangle < mesh_data.z)
+  {
+    SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(mesh_data, hint_triangle);
+    float3 a = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.x);
+    float3 b = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.y);
+    float3 c = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.z);
+    closest_point = lp_mesh_closest_point(p, a, b, c, barycentric);
+    distance_squared = dot(p - closest_point, p - closest_point);
+    triangle_index = hint_triangle;
+
+    /* O(1) early-out: every triangle lies inside the root AABB, so its
+     * point-to-box distance is a lower bound for the whole mesh. If the hint
+     * is strictly closer than that bound, it is the unique closest triangle
+     * and the full walk would return exactly this result. */
+    BVHNodeGPU root_node = lp_mesh_node_load(mesh_data, 0);
+    float root_dist_sq = lp_mesh_point_aabb_dist_sq(p,
+                                                    root_node.min_and_left.xyz * mesh_scale.xyz,
+                                                    root_node.max_and_right.xyz * mesh_scale.xyz);
+    if (root_dist_sq > distance_squared * (1.0f + 1e-6f) + 1e-12f) {
+      feature_normal = lp_mesh_feature_normal(
+          mesh_data, mesh_scale, triangle, a, b, c, barycentric);
+      return true;
+    }
+  }
+
   int local_node = 0;
-  while (local_node < prim.mesh_node_count) {
-    BVHNodeGPU node = lp_mesh_node_load(prim, local_node);
+  while (local_node < mesh_node_count) {
+    BVHNodeGPU node = lp_mesh_node_load(mesh_data, local_node);
     int child_or_escape = floatBitsToInt(node.min_and_left.w);
     if (lp_mesh_point_aabb_dist_sq(p,
-                                   node.min_and_left.xyz * prim.scale.xyz,
-                                   node.max_and_right.xyz * prim.scale.xyz) >
+                                   node.min_and_left.xyz * mesh_scale.xyz,
+                                   node.max_and_right.xyz * mesh_scale.xyz) >
         distance_squared)
     {
       local_node = child_or_escape >= 0 ? child_or_escape : local_node + 1;
@@ -960,10 +1211,10 @@ bool lp_mesh_nearest(SDFLpPrimitive prim,
       int first = -child_or_escape - 1;
       for (int i = 0; i < child_b; i++) {
         int tri_i = first + i;
-        SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(prim, tri_i);
-        float3 a = lp_mesh_vertex_position(prim, triangle.vertices_and_material.x);
-        float3 b = lp_mesh_vertex_position(prim, triangle.vertices_and_material.y);
-        float3 c = lp_mesh_vertex_position(prim, triangle.vertices_and_material.z);
+        SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(mesh_data, tri_i);
+        float3 a = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.x);
+        float3 b = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.y);
+        float3 c = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.z);
         float3 tri_barycentric = float3(0.0f);
         float3 tri_closest = lp_mesh_closest_point(p, a, b, c, tri_barycentric);
         float tri_distance_squared = dot(p - tri_closest, p - tri_closest);
@@ -973,43 +1224,116 @@ bool lp_mesh_nearest(SDFLpPrimitive prim,
         bool is_closer = tri_distance_squared < distance_squared && !is_near_tie;
         bool is_stable_tie = false;
         if (is_near_tie && triangle_index >= 0 && tri_i != triangle_index) {
-          SDFMeshTriangleGPU current_triangle = lp_mesh_triangle_load(prim, triangle_index);
+          SDFMeshTriangleGPU current_triangle = lp_mesh_triangle_load(mesh_data, triangle_index);
           is_stable_tie = lp_mesh_triangle_stable_less(triangle, current_triangle);
         }
         if (is_closer || is_stable_tie) {
           distance_squared = tri_distance_squared;
           triangle_index = tri_i;
-          feature_normal = lp_mesh_feature_normal(
-              prim, triangle, a, b, c, tri_barycentric);
+          closest_point = tri_closest;
+          barycentric = tri_barycentric;
         }
       }
     }
     local_node++;
   }
+  if (triangle_index >= 0) {
+    /* Feature normal only for the final winner (up to 3 vertex loads +
+     * unpacks); computing it per winner inside the walk is wasted work. */
+    SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(mesh_data, triangle_index);
+    float3 a = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.x);
+    float3 b = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.y);
+    float3 c = lp_mesh_vertex_position(mesh_data, mesh_scale, triangle.vertices_and_material.z);
+    feature_normal = lp_mesh_feature_normal(
+        mesh_data, mesh_scale, triangle, a, b, c, barycentric);
+    g_lp_mesh_hint_keys[cache_slot] = cache_key;
+    g_lp_mesh_hint_triangles[cache_slot] = triangle_index;
+  }
   return triangle_index >= 0;
 }
 
-/* Signed distance to a triangle mesh (identical to sdTriangleMesh). */
-float lp_sd_triangle_mesh(float3 p, SDFLpPrimitive prim)
+/* Signed distance to a triangle mesh (identical to sdTriangleMesh). Also
+ * records the winning triangle for lp_mesh_last_world_normals. */
+float lp_sd_triangle_mesh(float3 p, int4 mesh_data, int mesh_node_count, float4 mesh_scale)
 {
-  float distance_squared = 1e30f;
-  int triangle_index = -1;
-  float3 feature_normal = float3(0.0f, 0.0f, 1.0f);
-  if (!lp_mesh_nearest(prim, p, distance_squared, triangle_index, feature_normal)) {
+  g_lp_mesh_last_triangle = -1;
+  float distance_squared;
+  int triangle_index;
+  float3 closest_point;
+  float3 barycentric;
+  float3 feature_normal;
+  if (!lp_mesh_nearest(mesh_data,
+                       mesh_node_count,
+                       mesh_scale,
+                       p,
+                       distance_squared,
+                       triangle_index,
+                       closest_point,
+                       barycentric,
+                       feature_normal))
+  {
     return 1e10f;
   }
-  float sign_value = 1.0f;
-  {
-    /* Recompute the winning triangle's closest point for the sign test. */
-    SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(prim, triangle_index);
-    float3 a = lp_mesh_vertex_position(prim, triangle.vertices_and_material.x);
-    float3 b = lp_mesh_vertex_position(prim, triangle.vertices_and_material.y);
-    float3 c = lp_mesh_vertex_position(prim, triangle.vertices_and_material.z);
-    float3 barycentric = float3(0.0f);
-    float3 closest_point = lp_mesh_closest_point(p, a, b, c, barycentric);
-    sign_value = dot(p - closest_point, feature_normal) < 0.0f ? -1.0f : 1.0f;
-  }
+  float sign_value = dot(p - closest_point, feature_normal) < 0.0f ? -1.0f : 1.0f;
+  g_lp_mesh_last_triangle = triangle_index;
+  g_lp_mesh_last_barycentric = barycentric;
+  g_lp_mesh_last_geometric_normal = distance_squared > 1e-12f ?
+                                        normalize(p - closest_point) * sign_value :
+                                        feature_normal;
   return sqrt(max(distance_squared, 0.0f)) * sign_value;
+}
+
+/* World-space normals of the last mesh hit (port of sdfMeshLastWorldNormals,
+ * sdf_mesh_lib.glsl:318), built from data already fetched by the distance
+ * evaluation: one extra triangle record load, zero extra SDF evaluations.
+ * shading_normal interpolates the triangle's corner normals — the smooth
+ * normal a regular mesh would shade with; geometric_normal is the true SDF
+ * gradient direction. Returns false when there is no valid mesh hit, in
+ * which case the caller falls back to the finite-difference gradient. */
+bool lp_mesh_last_world_normals(SDFObjectGPU obj,
+                                out float3 shading_normal,
+                                out float3 geometric_normal)
+{
+  if (g_lp_mesh_last_triangle < 0) {
+    shading_normal = float3(0.0f);
+    geometric_normal = float3(0.0f);
+    return false;
+  }
+
+  /* transpose(to_float3x3(obj.inverse_matrix)), written out so this file
+   * does not depend on the matrix conversion lib. */
+  float3x3 normal_to_world = float3x3(
+      float3(obj.inverse_matrix[0][0], obj.inverse_matrix[1][0], obj.inverse_matrix[2][0]),
+      float3(obj.inverse_matrix[0][1], obj.inverse_matrix[1][1], obj.inverse_matrix[2][1]),
+      float3(obj.inverse_matrix[0][2], obj.inverse_matrix[1][2], obj.inverse_matrix[2][2]));
+  geometric_normal = normal_to_world * g_lp_mesh_last_geometric_normal * obj.obj_scale.w;
+  float geometric_len_squared = dot(geometric_normal, geometric_normal);
+  if (geometric_len_squared <= 1e-12f || any(isnan(geometric_normal))) {
+    shading_normal = float3(0.0f);
+    geometric_normal = float3(0.0f);
+    return false;
+  }
+  SDFMeshTriangleGPU triangle = lp_mesh_triangle_load(obj.mesh_data, g_lp_mesh_last_triangle);
+  float3 n0 = normalize(normal_to_world *
+                        (lp_mesh_unpack_normal(triangle.corner_normals.x) / obj.obj_scale.xyz));
+  float3 n1 = normalize(normal_to_world *
+                        (lp_mesh_unpack_normal(triangle.corner_normals.y) / obj.obj_scale.xyz));
+  float3 n2 = normalize(normal_to_world *
+                        (lp_mesh_unpack_normal(triangle.corner_normals.z) / obj.obj_scale.xyz));
+  shading_normal = n0 * g_lp_mesh_last_barycentric.x + n1 * g_lp_mesh_last_barycentric.y +
+                   n2 * g_lp_mesh_last_barycentric.z;
+  float shading_len_squared = dot(shading_normal, shading_normal);
+  if (shading_len_squared <= 1e-12f || any(isnan(shading_normal))) {
+    shading_normal = geometric_normal;
+    shading_len_squared = geometric_len_squared;
+  }
+  shading_normal *= inversesqrt(shading_len_squared);
+  float alignment = dot(shading_normal, geometric_normal) / geometric_len_squared;
+  if (alignment < 0.0f) {
+    shading_normal -= 2.0f * alignment * geometric_normal;
+  }
+  shading_normal *= sqrt(geometric_len_squared);
+  return true;
 }
 
 /** \} */
@@ -1441,7 +1765,7 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
   float dist;
   if (prim.type == SDF_GPU_TYPE_MESH) {
     /* Mesh vertices carry the object scale themselves (classic parity). */
-    dist = lp_sd_triangle_mesh(lp, prim);
+    dist = lp_sd_triangle_mesh(lp, prim.mesh_data, prim.mesh_node_count, prim.scale);
   }
   else {
     lp /= prim.scale.xyz;
@@ -1677,13 +2001,13 @@ float lp_offset_node_value(SDFLpNode node)
   return uintBitsToFloat(uint(node.idx_in_type));
 }
 
-/* Evaluate `count` nodes of the active list starting at `base`. */
+/* Evaluate `count` nodes of the active list starting at `base`.
+ * The stack is deliberately NOT zero-initialized: the post-order list only
+ * ever reads entries it has pushed (same as the reference eval.glsl), and the
+ * init loop costs SDF_LP_STACK_DEPTH writes on every trace step. */
 float lp_list_eval(float3 p, int count, int base)
 {
   float stack[SDF_LP_STACK_DEPTH];
-  for (int i = 0; i < SDF_LP_STACK_DEPTH; i++) {
-    stack[i] = 0.0f;
-  }
   int stack_idx = 0;
 
   for (int i = 0; i < count; i++) {
@@ -1699,7 +2023,7 @@ float lp_list_eval(float3 p, int count, int base)
       d = lp_binary_op_eval(op, left_val, right_val);
     }
     else if (node.type == SDF_LP_NODETYPE_OFFSET) {
-      d = stack[stack_idx - 1] - lp_offset_node_value(node);
+      d = stack[stack_idx - 1] + lp_offset_node_value(node);
       stack_idx -= 1;
     }
     else {
@@ -1724,11 +2048,7 @@ float4 lp_list_eval_color(float3 p, int count, int base, out float out_obj_id)
   float d_stack[SDF_LP_STACK_DEPTH];
   float3 c_stack[SDF_LP_STACK_DEPTH];
   float i_stack[SDF_LP_STACK_DEPTH];
-  for (int i = 0; i < SDF_LP_STACK_DEPTH; i++) {
-    d_stack[i] = 0.0f;
-    c_stack[i] = float3(0.0f);
-    i_stack[i] = -1.0f;
-  }
+  /* No stack initialization: see lp_list_eval. */
   int stack_idx = 0;
 
   for (int i = 0; i < count; i++) {
@@ -1766,7 +2086,7 @@ float4 lp_list_eval_color(float3 p, int count, int base, out float out_obj_id)
       }
     }
     else if (node.type == SDF_LP_NODETYPE_OFFSET) {
-      d = d_stack[stack_idx - 1] - lp_offset_node_value(node);
+      d = d_stack[stack_idx - 1] + lp_offset_node_value(node);
       albedo = c_stack[stack_idx - 1];
       obj_id = i_stack[stack_idx - 1];
       stack_idx -= 1;

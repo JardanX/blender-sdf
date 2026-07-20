@@ -187,13 +187,27 @@ BLI_STATIC_ASSERT_ALIGN(SDFShadingDataGPU, 16)
 #define SDF_LP_BLEND_CHAMFER 2
 #define SDF_LP_BLEND_ROUND 3
 
-/* Binary op packing (SDFLpBinaryOp.op_word):
- * bit 0     = sign s of the min() form (+1 union, -1 subtract/intersect),
- * bits 3..1 = SDF_LP_CSG_*,
- * bits 5..4 = SDF_LP_BLEND_*,
- * bits 31..6 = float bits of the blend radius k (low 6 mantissa bits cleared).
- * For LINEAR (or blend <= 0) k is packed as 0. */
+/* Binary op packing: one uint4 per op in lp_binary_ops[].
+ * x = op_word:
+ *   bit 0     = sign s of the min() form (+1 union, -1 subtract/intersect),
+ *   bits 3..1 = SDF_LP_CSG_*,
+ *   bits 5..4 = SDF_LP_BLEND_*,
+ *   bits 31..6 = float bits of the blend radius k (low 6 mantissa bits
+ *   cleared). For LINEAR (or blend <= 0) k is packed as 0.
+ * y = float bits of k2 (start-edge softness of the first operand),
+ * z = float bits of k3 (start-edge softness of the second operand)
+ *   — the classic chamfer_k2/k3 (or k4/k5 for the SHELL end-edge op);
+ *   only meaningful for CHAMFER/ROUND with k > 0, packed as 0 otherwise.
+ * w = flags (SDF_LP_OP_FLAG_*). */
 #define SDF_LP_OP_KMASK 0xFFFFFFC0u
+
+/* Op flag: select the classic "Inverted" function variants used by the
+ * SHELL desugar (sdf_lib.glsl combineCSG shell branch):
+ * - SUBTRACT + ROUND: opIntersectionRound(d1, -d2, k) (inward shell start
+ *   edge, non-flipped — NOT the opRoundSubtraction duality form);
+ * - INTERSECT + ROUND + k2/k3: opSmoothRoundIntersectionInverted (outward
+ *   shell end edge, flip_blend_end). */
+#define SDF_LP_OP_FLAG_INVERTED 1u
 
 /* Invalid parent index marker for SDFLp parent arrays. */
 #define SDF_LP_INVALID_INDEX 0xFFFFFFFFu
@@ -281,7 +295,13 @@ struct [[host_shared]] SDFLpNode {
   int type;
   /* Index into lp_prims or lp_binary_ops depending on type. */
   int idx_in_type;
-  int _pad0;
+  /* Conservative Lipschitz constant of this subtree's field w.r.t. position,
+   * computed by the CPU builder: 1 for primitives, child constant for OFFSET,
+   * and for BINARY the child constants folded with the op factor
+   * (sqrt(l^2+r^2) for ROUND — the fillet arc is sqrt(2)-Lipschitz when both
+   * child gradients align — max(l,r) for LINEAR/SMOOTH/CHAMFER). The prune
+   * pass scales its dominance and far-field bounds with it. */
+  float lipschitz;
   int _pad1;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFLpNode, 16)

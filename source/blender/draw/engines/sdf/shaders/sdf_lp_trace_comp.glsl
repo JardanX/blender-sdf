@@ -27,18 +27,15 @@ int lp_cell_num_active(int cell_idx)
   return lp_cell_meta[cell_idx].x;
 }
 
-float lp_cell_far_value(int cell_idx)
-{
-  return intBitsToFloat(lp_cell_meta[cell_idx].z);
-}
-
 float lp_sdf(float3 p, int cell_idx, out bool near_field)
 {
   if (culling_enabled == 0) {
     near_field = true;
     return lp_list_eval(p, total_num_nodes, 0);
   }
-  int num_active = lp_cell_num_active(cell_idx);
+  /* Single meta load: num_active (x), list offset (y), far value (z). */
+  int4 meta = lp_cell_meta[cell_idx];
+  int num_active = meta.x;
   if (num_active == SDF_LP_FALLBACK_LIST) {
     /* Cell overflowed the dynamic pools during pruning: full tree eval. */
     near_field = true;
@@ -46,10 +43,10 @@ float lp_sdf(float3 p, int cell_idx, out bool near_field)
   }
   if (num_active == 0) {
     near_field = false;
-    return lp_cell_far_value(cell_idx);
+    return intBitsToFloat(meta.z);
   }
   near_field = true;
-  return lp_list_eval(p, num_active, lp_cell_meta[cell_idx].y);
+  return lp_list_eval(p, num_active, meta.y);
 }
 
 float3 lp_grad(float3 p, int cell_idx)
@@ -68,7 +65,8 @@ float4 lp_albedo(float3 p, int cell_idx, out float obj_id)
   if (culling_enabled == 0) {
     return lp_list_eval_color(p, total_num_nodes, 0, obj_id);
   }
-  int num_active = lp_cell_num_active(cell_idx);
+  int4 meta = lp_cell_meta[cell_idx];
+  int num_active = meta.x;
   if (num_active == SDF_LP_FALLBACK_LIST) {
     return lp_list_eval_color(p, total_num_nodes, 0, obj_id);
   }
@@ -76,7 +74,7 @@ float4 lp_albedo(float3 p, int cell_idx, out float obj_id)
     obj_id = -1.0f;
     return float4(0.0f);
   }
-  return lp_list_eval_color(p, num_active, lp_cell_meta[cell_idx].y, obj_id);
+  return lp_list_eval_color(p, num_active, meta.y, obj_id);
 }
 
 bool lp_bbox_intersect(float3 box_min, float3 box_max, float3 r_o, float3 r_d, out float t_inter)
@@ -131,6 +129,16 @@ void main()
 
   bool hit = false;
   float hit_t = t;
+  float t_prev = t;
+  float d_prev = 1e30f;
+  /* Over-relaxed sphere tracing (same scheme as the classic engine,
+   * sdf_trace_comp.glsl:728-875): take omega * |d| steps and fall back to
+   * omega = 1 for the rest of the ray when an overshoot is detected
+   * (the radius shrank instead of growing past the previous step). Cuts the
+   * step count roughly in half at omega ~1.5-2 on smooth fields. */
+  float prev_radius = 0.0f;
+  float step_length = 0.0f;
+  float omega = over_relaxation;
   for (int i = 0; i < max_steps; i++) {
     float3 p = ray_origin + t * ray_dir;
 
@@ -147,12 +155,41 @@ void main()
       break;
     }
 
-    if (near_field && abs(d) < min(ray_epsilon, ray_epsilon * t)) {
+    float abs_d = abs(d);
+    bool sor_fail = omega > 1.0f && (abs_d + prev_radius) < step_length * 1.01f;
+    if (sor_fail) {
+      step_length -= omega * step_length;
+      omega = 1.0f;
+    }
+    else {
+      step_length = abs_d * omega;
+    }
+
+    if (!sor_fail && near_field && abs(d) < min(ray_epsilon, ray_epsilon * t)) {
       hit = true;
+      /* Secant refinement: interpolate the zero crossing between the previous
+       * and current SDF samples (both already evaluated, 0 extra SDF evals).
+       * Shrinks the hit error from ~ray_epsilon to near-exact, removing the
+       * depth stair-steps along the ray. */
       hit_t = t;
+      float denom = d_prev - d;
+      if (d_prev < 1e29f && denom > 1e-8f) {
+        float alpha = d_prev / denom;
+        if (alpha > 0.0f && alpha < 1.0f) {
+          hit_t = mix(t_prev, t, alpha);
+        }
+      }
       break;
     }
-    t += abs(d);
+    t_prev = t;
+    d_prev = d;
+    prev_radius = abs_d;
+    if (sor_fail) {
+      t += step_length;
+    }
+    else {
+      t += max(step_length, ray_epsilon * 0.5f);
+    }
   }
 
   if (!hit) {
@@ -166,13 +203,43 @@ void main()
   int3 hit_cell = lp_cell_from_pos(hit_pos, aabb_min, cell_size, grid_size);
   int hit_cell_idx = int(lp_cell_idx(hit_cell));
 
-  float3 normal = lp_grad(hit_pos, hit_cell_idx);
+  float obj_id = -1.0f;
+  float4 albedo = lp_albedo(hit_pos, hit_cell_idx, obj_id);
+
+  /* Normals: only when the hit cell resolves to a single primitive (a lone
+   * mesh leaf, no CSG ops or blends in play) do we derive the shading normal
+   * from the winning triangle's corner normals — smooth like a regular mesh
+   * and nearly free (one hint-warm mesh re-evaluation, no finite
+   * differences). In every other case — analytic shapes, modifier-warped
+   * meshes, and especially blend/CSG zones where the true normal is a
+   * position-dependent mix of both fields — we keep the 4-tap gradient.
+   * Using the mesh normal inside blend zones is both wrong (the surface is
+   * not the mesh there) and unstable (the obj_id winner flips mid-blend, so
+   * the normal source popped with camera position). */
+  float3 normal = float3(0.0f);
+  bool normal_valid = false;
+  int cell_active = (culling_enabled != 0) ? lp_cell_num_active(hit_cell_idx) :
+                                             total_num_nodes;
+  if (cell_active == 1 && obj_id >= 0.0f) {
+    SDFObjectGPU hit_obj = objects[int(obj_id + 0.5f)];
+    if (hit_obj.sdf_type == SDF_GPU_TYPE_MESH && hit_obj.modifier_count == 0) {
+      /* Re-evaluate the winning mesh so the last-hit record belongs to this
+       * object even when several meshes share the scene. */
+      float3 hit_lp = (hit_obj.inverse_matrix * float4(hit_pos - hit_obj.position.xyz, 1.0f)).xyz;
+      lp_sd_triangle_mesh(hit_lp, hit_obj.mesh_data, hit_obj.mesh_settings.z, hit_obj.obj_scale);
+      float3 geometric_normal;
+      normal_valid = lp_mesh_last_world_normals(hit_obj, normal, geometric_normal);
+      if (normal_valid) {
+        normal = normalize(normal);
+      }
+    }
+  }
+  if (!normal_valid) {
+    normal = lp_grad(hit_pos, hit_cell_idx);
+  }
   if (any(isnan(normal)) || dot(normal, normal) < 0.5f) {
     normal = -ray_dir;
   }
-
-  float obj_id = -1.0f;
-  float4 albedo = lp_albedo(hit_pos, hit_cell_idx, obj_id);
 
   float3 out_color = albedo.rgb;
   if (shading_mode == LP_SHADING_HEATMAP) {
