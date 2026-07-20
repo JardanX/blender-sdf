@@ -115,6 +115,7 @@ void main()
       /* List does not fit the pool: trace falls back to the full tree. */
       lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
       lp_cell_meta_out[cell_idx].y = 0;
+      atomicAdd(lp_counters[SDF_LP_STAT_ACTIVE_OVERFLOW], 1);
     }
     lp_cell_meta_out[cell_idx].z = (first_lvl == 0) ? lp_cell_meta_in[parent_cell_idx].z :
                                                       floatBitsToInt(0.0f);
@@ -143,9 +144,13 @@ void main()
       uint op = lp_binary_ops[node.idx_in_type];
       float k = lp_op_blend_factor(op);
       float s = lp_op_sign(op);
-      d = s * (min(s * left_val, s * right_val) - lp_kernel(abs(left_val - right_val), k));
+      /* Same blend dispatch as the trace pass (lp_binary_op_eval) so prune
+       * and trace agree on the field. */
+      d = lp_binary_op_eval(op, left_val, right_val);
 
-      /* PAINT's right child carries color, not geometry: never cull it. */
+      /* PAINT's right child carries color, not geometry: never cull it.
+       * The |l-r| <= 2R+k dominance bound is valid for every blend type:
+       * outside the blend zone all kernels reduce to the exact winner. */
       if (!lp_op_cullable(op) || abs(left_val - right_val) <= 2.0f * R + k) {
         node_state = LP_NODESTATE_ACTIVE;
       }
@@ -159,6 +164,13 @@ void main()
           lp_tmp[addr] = t;
         }
       }
+    }
+    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
+      /* Unary offset (desugared SHELL/PUSH/AVOID): replace the top of stack
+       * with value + offset, and account this node once on the index stack.
+       * Never culled (it shifts both sides of the parent op equally). */
+      d = d_stack[stack_idx - 1] - lp_offset_node_value(node);
+      stack_idx -= 1;
     }
     else {
       SDFLpPrimitive prim = lp_prims[node.idx_in_type];
@@ -273,6 +285,12 @@ void main()
      * full tree for this cell (exact, just slower). */
     lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
     lp_cell_meta_out[cell_idx].y = 0;
+    if (active_overflow) {
+      atomicAdd(lp_counters[SDF_LP_STAT_ACTIVE_OVERFLOW], 1);
+    }
+    if (tmp_overflow) {
+      atomicAdd(lp_counters[SDF_LP_STAT_TMP_OVERFLOW], 1);
+    }
   }
   else {
     lp_cell_meta_out[cell_idx].y = cell_offset;

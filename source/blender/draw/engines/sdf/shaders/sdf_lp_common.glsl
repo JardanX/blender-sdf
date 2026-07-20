@@ -107,7 +107,16 @@ float lp_op_iround(float a, float b, float r)
 }
 
 /* Common signed form for union/subtract/intersect with any blend type.
- * a and b are the operand values including their active-node signs. */
+ * a and b are the operand values including their active-node signs.
+ * Verified exact against the classic kernels (sdf_lib.glsl):
+ * - SMOOTH: min - max(0,k-|a-b|)^2/(4k) == opSmoothUnion family (:661-695).
+ * - CHAMFER: min - max(0,k-|a-b|)/2 == min(min(a,b),(a-k+b)/2) inside the
+ *   blend zone and min outside, i.e. exactly opChamferUnion (:789) (the
+ *   kernel-subtracted form is algebraic, not an approximation).
+ * - ROUND: s*opUnionIRound(s*a,s*b,k) with exact-winner fallback matches
+ *   opRoundUnion/opRoundSubtraction/opRoundIntersection (:849-887) because
+ *   opUnionIRound is symmetric and |a-b| is invariant under the sign flips
+ *   used by the subtract/intersect duality. */
 float lp_binary_op_eval(uint op, float a, float b)
 {
   if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
@@ -1405,12 +1414,28 @@ float4 lp_apply_domain_modifiers(float3 p, SDFLpPrimitive prim)
 
 /** \} */
 
-float lp_eval_prim_base(float3 p, SDFLpPrimitive prim);
+/* Smooth intersection (identical to opSmoothIntersection, sdf_lib.glsl:685);
+ * used by the SOLIDIFY distance modifier's bevel. */
+float lp_op_smooth_intersection(float d1, float d2, float k)
 {
-  float3 d4 = p - prim.position.xyz;
-  float3 lp = float3(dot(prim.m_row0, float4(d4, 1.0f)),
-                     dot(prim.m_row1, float4(d4, 1.0f)),
-                     dot(prim.m_row2, float4(d4, 1.0f)));
+  if (k <= 0.0001f) {
+    return max(d1, d2);
+  }
+  if (abs(d2 - d1) >= k) {
+    return max(d1, d2);
+  }
+  float h = clamp(0.5f - 0.5f * (d2 - d1) / k, 0.0f, 1.0f);
+  return mix(d2, d1, h) + k * h * (1.0f - h);
+}
+
+/* Primitive-only evaluation (identical to evalPrimitiveOnly,
+ * sdf_lib.glsl:1739-1859): dispatches on the primitive type including the
+ * advanced variants, applies the coordinate scale, and subtracts the
+ * effective bevel. The caller multiplies by prim.scale.w. Takes the local
+ * (pre-scale) position. */
+float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
+{
+  float3 lp = p;
 
   float3 r = prim.size.xyz;
   float dist;
@@ -1435,39 +1460,206 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim);
       dist = lp_sd_capsule(lp, r);
     }
     else if (prim.type == SDF_GPU_TYPE_TORUS) {
-      dist = lp_sd_torus(lp, float2(r.x, r.y));
+      dist = (prim.box_modes.w != 0) ?
+                 lp_sd_capped_torus(lp, prim.box_corners.xy, r.x, r.y) :
+                 lp_sd_torus(lp, float2(r.x, r.y));
     }
     else if (prim.type == SDF_GPU_TYPE_NGON) {
-      float d2d = lp_sd_regular_polygon_2d(lp.xy, r.x, prim.aux0);
-      float dz = abs(lp.z) - r.z;
-      float2 dd = float2(d2d, dz);
-      dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
-    }
-    else if (prim.type == SDF_GPU_TYPE_POLYGON) {
-      if (prim.aux1 >= 3) {
-        float d2d = (prim.auxf > 0.001f) ?
-                        lp_sd_polygon_2d_rounded(lp.xy, prim.aux0, prim.aux1) :
-                        lp_sd_polygon_2d(lp.xy, prim.aux0, prim.aux1);
+      int sides = prim.box_modes.z;
+      float corner = prim.box_corners.x;
+      float star = prim.box_corners.y;
+      float edgeTop = prim.box_edges.x;
+      float edgeBot = prim.box_edges.y;
+      float tapTop = prim.box_edges.z;
+      float tapBot = prim.box_edges.w;
+      int edgeMode = prim.box_modes.y;
+      if ((corner + edgeTop + edgeBot + tapTop + tapBot + star) > 0.001f) {
+        dist = lp_sd_advanced_ngon(
+            lp, r.x, r.z, sides, corner, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z, star);
+      }
+      else {
+        float d2d = lp_sd_regular_polygon_2d(lp.xy, r.x, sides);
         float dz = abs(lp.z) - r.z;
         float2 dd = float2(d2d, dz);
         dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+      }
+    }
+    else if (prim.type == SDF_GPU_TYPE_POLYGON) {
+      int ps = prim.aux0;
+      int pc = prim.aux1;
+      float edgeTop = prim.box_edges.x;
+      float edgeBot = prim.box_edges.y;
+      float tapTop = prim.box_edges.z;
+      float tapBot = prim.box_edges.w;
+      int edgeMode = prim.box_modes.y;
+      if (pc >= 3) {
+        if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f || prim.box_corners.x > 0.001f) {
+          dist = lp_sd_advanced_polygon(
+              lp, r.z, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z);
+        }
+        else {
+          float d2d = (prim.auxf > 0.001f) ? lp_sd_polygon_2d_rounded(lp.xy, ps, pc) :
+                                             lp_sd_polygon_2d(lp.xy, ps, pc);
+          float dz = abs(lp.z) - r.z;
+          float2 dd = float2(d2d, dz);
+          dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+        }
       }
       else {
         dist = 1e10f;
       }
     }
     else { /* SDF_GPU_TYPE_BOX and fallback */
-      dist = lp_sd_box(lp, r);
+      float4 corners = prim.box_corners;
+      float edgeTop = prim.box_edges.x;
+      float edgeBot = prim.box_edges.y;
+      float tapTop = prim.box_edges.z;
+      float tapBot = prim.box_edges.w;
+      if ((corners.x + corners.y + corners.z + corners.w + edgeTop + edgeBot + tapTop + tapBot) >
+          0.001f)
+      {
+        dist = lp_sd_advanced_box(lp,
+                                  r,
+                                  corners,
+                                  edgeTop,
+                                  edgeBot,
+                                  tapTop,
+                                  tapBot,
+                                  prim.box_modes.x,
+                                  prim.box_modes.y,
+                                  r.z);
+      }
+      else {
+        dist = lp_sd_box(lp, r);
+      }
     }
   }
 
-  return (dist - prim.size.w) * prim.scale.w;
+  return dist - prim.size.w;
+}
+
+/* Distance modifiers (forward stack order), identical to
+ * applyDistanceModifiers (sdf_lib.glsl:1865-1940). DISPLACE keeps the
+ * classic renormalization dist /= 1 + |strength|*frequency*lip so the field
+ * stays conservative. SOLIDIFY open re-evaluates the primitive at an
+ * axis-scaled point via lp_eval_prim_base (no recursion through modifiers). */
+float lp_apply_distance_modifiers(float dist, float3 p, SDFLpPrimitive prim)
+{
+  for (int i = prim.modifier_start; i < prim.modifier_start + prim.modifier_count; i++) {
+    SDFModifierGPU smod = sdf_modifiers[i];
+    int mtype = smod.header.x;
+
+    if (mtype == SDF_LP_MOD_SOLIDIFY) {
+      float thickness = smod.params.x;
+      float bevel = smod.params.z;
+      int mode = smod.header.y;
+
+      if (mode == 0) {
+        /* Closed */
+        float d_inner = -(dist + thickness);
+        if (bevel > 0.0f) {
+          dist = lp_op_smooth_intersection(dist, d_inner, bevel);
+        }
+        else {
+          dist = max(dist, d_inner);
+        }
+      }
+      else {
+        /* Open: axis-scaled inner to punch through caps */
+        int axis = smod.header.z;
+        float inner_scale = smod.params.y;
+        float3 p_inner = p;
+        p_inner[axis] *= inner_scale;
+        float d_inner = -(lp_eval_prim_base(p_inner, prim) + thickness);
+        if (bevel > 0.0f) {
+          dist = lp_op_smooth_intersection(dist, d_inner, bevel);
+        }
+        else {
+          dist = max(dist, d_inner);
+        }
+      }
+    }
+    else if (mtype == SDF_LP_MOD_ROUND) {
+      dist -= smod.params.x;
+    }
+    else if (mtype == SDF_LP_MOD_BEVEL && prim.type == SDF_GPU_TYPE_MESH) {
+      dist -= smod.params.x;
+    }
+    else if (mtype == SDF_LP_MOD_DISPLACE) {
+      float strength = smod.params.x;
+      float frequency = smod.params.y;
+      float lacunarity = smod.params.z;
+      float roughness = smod.params.w;
+      int noise_type = smod.header.y;
+      int octaves = smod.header.z;
+      float n = lp_sdf_displacement_fast(p * frequency, noise_type, octaves, lacunarity, roughness);
+      /* Per-type Lipschitz bound */
+      float lip = 1.0f;
+      if (noise_type == SDF_LP_MOD_DISPLACE_POINTS) {
+        lip = 3.5f;
+      }
+      else if (noise_type == SDF_LP_MOD_DISPLACE_TRIANGLE) {
+        lip = 3.0f;
+      }
+      else if (noise_type == SDF_LP_MOD_DISPLACE_VORONOI) {
+        lip = 1.5f;
+      }
+      dist += n * strength;
+      dist /= (1.0f + abs(strength) * frequency * lip);
+    }
+    else if (mtype == SDF_LP_MOD_ONION) {
+      int layers = max(smod.header.y, 1);
+      float cut_half = max(smod.params.x, 0.001f) * 0.5f;
+      float min_ext = smod.params.y;
+      float original_d = dist;
+      if (layers > 1) {
+        float spacing = min_ext / float(layers);
+        float depth = max(-dist, 0.0f);
+        float max_cut = float(layers - 1) * spacing;
+        float nearest = clamp(floor(depth / spacing + 0.5f) * spacing, spacing, max_cut);
+        float cut_dist = abs(depth - nearest);
+        float onion_d = cut_half - cut_dist;
+        dist = max(original_d, onion_d);
+      }
+    }
+  }
+  return dist;
+}
+
+/* Full primitive evaluation (identical to evalObjectSDF, sdf_lib.glsl:1979):
+ * domain modifiers -> primitive eval -> x scale.w -> distance modifiers ->
+ * x domain-warp correction scale. The modifier chain is skipped entirely
+ * when the object has no modifiers (branch-cheap fast path). */
+float lp_eval_prim(float3 p, SDFLpPrimitive prim)
+{
+  float3 d4 = p - prim.position.xyz;
+  float3 lp = float3(dot(prim.m_row0, float4(d4, 1.0f)),
+                     dot(prim.m_row1, float4(d4, 1.0f)),
+                     dot(prim.m_row2, float4(d4, 1.0f)));
+
+  if (prim.modifier_count == 0) {
+    return lp_eval_prim_base(lp, prim) * prim.scale.w;
+  }
+
+  float4 dm = lp_apply_domain_modifiers(lp, prim);
+  float3 pw = dm.xyz;
+  float d = lp_eval_prim_base(pw, prim) * prim.scale.w;
+  d = lp_apply_distance_modifiers(d, pw, prim);
+  return d * dm.w;
 }
 
 /** \} */
 
 /* ------------------------------------------------------------------ */
 /** \name Active node list evaluation (post-order stack machine)
+ *
+ * KNOWN GAP vs the classic engine: group-level distance modifiers
+ * (applyGroupDistanceModifiers, sdf_lib.glsl:1943-1973) are NOT evaluated
+ * here. LP folds each group into a plain CSG subtree on the CPU, which has
+ * no hook to attach the group's modifier stack to the folded distance.
+ * Objects inside groups with distance modifiers will evaluate without those
+ * modifiers. Not implemented by design (would need per-subtree modifier
+ * ranges in the serialized node format).
  * \{ */
 
 uint lp_active_node_index(uint n)
