@@ -56,6 +56,9 @@ struct SDFMeshPayload {
   SDFMeshVertex *vertices = nullptr;
   SDFMeshTriangle *triangles = nullptr;
   SDFMeshBVHNode *bvh_nodes = nullptr;
+  /* Packed RGBA8 (scene-linear, alpha=255) per triangle corner, 3 * triangle_count
+   * elements, null when the mesh has no active color attribute. */
+  unsigned int *corner_colors = nullptr;
   int vertex_count = 0;
   int triangle_count = 0;
   int bvh_node_count = 0;

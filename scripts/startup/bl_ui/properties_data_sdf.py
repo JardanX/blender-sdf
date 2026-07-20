@@ -1032,6 +1032,7 @@ class SDF_PT_mesh_settings(SDFMeshButtonsPanel, Panel):
         if not ob.is_sdf:
             return
         layout.prop(ob, "sdf_index")
+        layout.prop(ob, "sdf_voxel_resolution")
         layout.prop(ob, "color")
 
 

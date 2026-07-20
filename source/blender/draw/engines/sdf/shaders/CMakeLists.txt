@@ -39,7 +39,9 @@ set(SRC_GLSL_COMP
   sdf_normal_comp.glsl
   sdf_shade_comp.glsl
   sdf_lp_prune_comp.glsl
-  sdf_lp_trace_comp.glsl
+  sdf_lp_march_comp.glsl
+  sdf_lp_debug_comp.glsl
+  sdf_mesh_bake_comp.glsl
   sdf_grid_eval_comp.glsl
   sdf_dc_contour_comp.glsl
   sdf_dc_triangulate_comp.glsl

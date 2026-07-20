@@ -22,6 +22,11 @@
 #define SDF_LP_MESH_FLAG_CLOSED (1 << 0)
 #define SDF_LP_MESH_FLAG_ORIENTED (1 << 1)
 #define SDF_LP_MESH_FLAG_SMOOTH_NORMALS (1 << 4)
+/* Mesh has a ready baked voxel volume (bake_dist/bake_nrm/bake_col pools):
+ * sample the volume instead of walking the BVH. GPU-only flag — it never
+ * appears in eSDFMeshFlags (DNA_sdf_types.h); set by the engine at sync time.
+ * Carried in SDFObjectGPU.mesh_settings.y / SDFLpPrimitive.mesh_flags. */
+#define SDF_LP_MESH_FLAG_BAKED (1 << 5)
 
 struct [[host_shared]] SDFObjectGPU {
   float4x4 inverse_matrix;
@@ -71,9 +76,17 @@ struct [[host_shared]] SDFObjectGPU {
   int4 mesh_data;
   /* normal mode, flags, node count, data version. */
   int4 mesh_settings;
+  /* Baked mesh volume (only when mesh_settings.y has SDF_LP_MESH_FLAG_BAKED;
+   * zero otherwise — the flag governs). xyz = voxel grid origin, w = voxel
+   * size, both in the payload's UNSCALED local mesh space. */
+  float4 bake_origin;
+  /* x = narrow band half-width; y/z/w unused (0). */
+  float4 bake_params;
+  /* xyz = voxel grid resolution, w = first voxel index in the bake pools. */
+  int4 bake_grid;
 };
 BLI_STATIC_ASSERT_ALIGN(SDFObjectGPU, 16)
-BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 416, "SDFObjectGPU size mismatch")
+BLI_STATIC_ASSERT(sizeof(SDFObjectGPU) == 464, "SDFObjectGPU size mismatch")
 
 struct [[host_shared]] SDFObjectAABB {
   float4 bbox_min;
@@ -270,7 +283,11 @@ struct [[host_shared]] SDFLpPrimitive {
   int _pad1;
   int _pad2;
   /* Advanced-variant payload (mirrors SDFObjectGPU.box_corners/box_edges/
-   * box_modes; unused by basic shapes). */
+   * box_modes; unused by basic shapes). MESH with SDF_LP_MESH_FLAG_BAKED
+   * reuses these (unused-for-mesh otherwise) for the baked volume:
+   * box_corners.xyz = grid origin, box_corners.w = voxel size,
+   * box_edges.x = band, box_modes.xyz = resolution, box_modes.w = pool base
+   * (mirrors SDFObjectGPU.bake_origin/bake_params/bake_grid). */
   float4 box_corners;
   float4 box_edges;
   int4 box_modes;

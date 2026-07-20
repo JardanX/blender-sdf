@@ -73,6 +73,7 @@ static void sdf_copy_data(Main *bmain,
   sdf_dst->mesh_vertices = MEM_dupalloc(sdf_src->mesh_vertices);
   sdf_dst->mesh_triangles = MEM_dupalloc(sdf_src->mesh_triangles);
   sdf_dst->mesh_bvh_nodes = MEM_dupalloc(sdf_src->mesh_bvh_nodes);
+  sdf_dst->mesh_corner_colors = MEM_dupalloc(sdf_src->mesh_corner_colors);
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
   BLI_duplicatelist(&sdf_dst->polygon_points, &sdf_src->polygon_points);
   sdf_dst->runtime = new bke::SDFRuntime();
@@ -94,6 +95,7 @@ static void sdf_free_data(ID *id)
   sdf_array_free(sdf->mesh_vertices);
   sdf_array_free(sdf->mesh_triangles);
   sdf_array_free(sdf->mesh_bvh_nodes);
+  sdf_array_free(sdf->mesh_corner_colors);
   MEM_SAFE_DELETE(sdf->mat);
   if (sdf->runtime && sdf->runtime->proxy_batch) {
     GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
@@ -122,6 +124,11 @@ static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
   writer->write_struct_array(sdf->mesh_vertex_count, sdf->mesh_vertices);
   writer->write_struct_array(sdf->mesh_triangle_count, sdf->mesh_triangles);
   writer->write_struct_array(sdf->mesh_bvh_node_count, sdf->mesh_bvh_nodes);
+  if (sdf->mesh_corner_colors != nullptr) {
+    BLO_write_uint32_array(writer,
+                           int64_t(sdf->mesh_triangle_count) * 3,
+                           reinterpret_cast<const uint32_t *>(sdf->mesh_corner_colors));
+  }
   writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFModifier>(), &sdf->modifiers);
   writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFPolygonPoint>(), &sdf->polygon_points);
 }
@@ -137,6 +144,11 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
       reader, SDFMeshTriangle, sdf->mesh_triangle_count, &sdf->mesh_triangles);
   BLO_read_struct_array(
       reader, SDFMeshBVHNode, sdf->mesh_bvh_node_count, &sdf->mesh_bvh_nodes);
+  if (sdf->mesh_corner_colors != nullptr) {
+    BLO_read_uint32_array(reader,
+                          int64_t(sdf->mesh_triangle_count) * 3,
+                          reinterpret_cast<uint32_t **>(&sdf->mesh_corner_colors));
+  }
   BLO_read_struct_list(reader, SDFModifier, &sdf->modifiers);
   BLO_read_struct_list(reader, SDFPolygonPoint, &sdf->polygon_points);
 
@@ -192,6 +204,7 @@ void BKE_sdf_mesh_clear(SDF *sdf)
   sdf_array_free(sdf->mesh_vertices);
   sdf_array_free(sdf->mesh_triangles);
   sdf_array_free(sdf->mesh_bvh_nodes);
+  sdf_array_free(sdf->mesh_corner_colors);
   sdf->mesh_vertex_count = 0;
   sdf->mesh_triangle_count = 0;
   sdf->mesh_bvh_node_count = 0;

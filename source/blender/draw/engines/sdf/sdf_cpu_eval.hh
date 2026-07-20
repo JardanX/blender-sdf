@@ -83,7 +83,10 @@ inline float sdTorus(float3 p, float2 t)
   return math::length(q) - t.y;
 }
 
-/* Eval primitive (simplified, covers main types) */
+/* Eval primitive (simplified, covers main types).
+ * Note: the baked mesh volume fast path (SDF_LP_MESH_FLAG_BAKED, bake_*
+ * fields on SDFObjectGPU) is GPU-only — this evaluator always stays on the
+ * analytic path and ignores the flag. */
 
 inline float evalPrimitive(const SDFObjectGPU &obj, float3 p)
 {

@@ -29,6 +29,9 @@ STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
 STORAGE_BUF(11, read_write, uint, prof_eval_counts[])
 STORAGE_BUF(12, read_write, uint, prof_trace_stats[])
 STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(13, read, uint, bake_dist[])
+STORAGE_BUF(14, read, uint, bake_nrm[])
+STORAGE_BUF(15, read, uint, bake_col[])
 IMAGE(0, SFLOAT_16_16_16_16, write, image2D, out_color_img)
 IMAGE(1, SFLOAT_32, write, image2D, out_depth_img)
 IMAGE(2, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
@@ -112,6 +115,9 @@ STORAGE_BUF(5, read_write, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
 STORAGE_BUF(7, write, float, tile_far_hint[])
 STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(11, read, uint, bake_dist[])
+STORAGE_BUF(12, read, uint, bake_nrm[])
+STORAGE_BUF(13, read, uint, bake_col[])
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(float, sdf_ray_epsilon)
@@ -151,6 +157,9 @@ STORAGE_BUF(12, read_write, uint, prof_trace_stats[])
 STORAGE_BUF(5, read, int, tile_prim_counts[])
 STORAGE_BUF(6, read, int, tile_prim_lists[])
 STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(13, read, uint, bake_dist[])
+STORAGE_BUF(14, read, uint, bake_nrm[])
+STORAGE_BUF(15, read, uint, bake_col[])
 IMAGE(0, SFLOAT_16_16_16_16, write, image2D, out_color_img)
 IMAGE(1, SFLOAT_32, write, image2D, out_depth_img)
 IMAGE(2, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
@@ -195,6 +204,9 @@ STORAGE_BUF(6, read, int, tile_prim_lists[])
 STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
 STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(11, read, uint, bake_dist[])
+STORAGE_BUF(12, read, uint, bake_nrm[])
+STORAGE_BUF(13, read, uint, bake_col[])
 IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
 IMAGE(1, SFLOAT_16_16_16_16, read_write, image2D, gbuf_color_img)
 IMAGE(2, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
@@ -297,9 +309,8 @@ LOCAL_GROUP_SIZE(4, 4, 4)
  * lazily on first use lets the driver's disk shader cache take over on
  * subsequent runs. */
 /* The prune pass only evaluates distances (its own forward pass): strip the
- * color/normal list evaluators and the trace-side lp_list_eval from
+ * trace-side list evaluators (lp_list_eval/lp_list_eval_obj_id) from
  * sdf_lp_common.glsl to cut compile time. */
-DEFINE_VALUE("SDF_LP_NO_COLOR", "1")
 DEFINE_VALUE("SDF_LP_NO_LIST_EVAL", "1")
 /* Active list node words are uint (index | sign); parent indices live in a
  * parallel uint array consumed only by this prune pass. Cell metadata packs
@@ -321,6 +332,7 @@ STORAGE_BUF(12, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(13, read, uint4, mesh_data_buf[])
 STORAGE_BUF(14, read, uint, lp_active_parents_in[])
 STORAGE_BUF(15, write, uint, lp_active_parents_out[])
+STORAGE_BUF(16, read, uint, bake_dist[])
 PUSH_CONSTANT(float3, aabb_min)
 PUSH_CONSTANT(float3, aabb_max)
 PUSH_CONSTANT(int, total_num_nodes)
@@ -343,13 +355,10 @@ GPU_SHADER_CREATE_INFO(sdf_lp_march_comp)
 LOCAL_GROUP_SIZE(8, 8)
 /* Not statically compiled: see sdf_lp_prune_comp. Compiled lazily on first
  * use; the driver's disk shader cache makes subsequent startups fast. */
-/* Distance-only: SDF_LP_NO_COLOR strips the folded color/normal evaluators
- * from sdf_lp_common.glsl, keeping this latency-critical shader small. The
- * march pass still seeds gbuf_color.a with the dominant object id (light
- * lp_list_eval_obj_id fold) for picking; hit color and normals are resolved
- * by sdf_color_resolve_comp (default mode) or sdf_lp_resolve_comp (debug
- * modes). */
-DEFINE_VALUE("SDF_LP_NO_COLOR", "1")
+/* Distance-only: the march pass evaluates the pruned tree for distances and
+ * seeds gbuf_color.a with the dominant object id (light lp_list_eval_obj_id
+ * fold) for picking; hit color and normals come from the shared classic
+ * passes (sdf_color_resolve_comp / sdf_normal_comp). */
 STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
 STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
 STORAGE_BUF(2, read, uint4, lp_binary_ops[])
@@ -359,6 +368,7 @@ STORAGE_BUF(5, read, SDFObjectGPU, objects[])
 STORAGE_BUF(6, read, SDFModifierGPU, sdf_modifiers[])
 STORAGE_BUF(7, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(8, read, uint4, mesh_data_buf[])
+STORAGE_BUF(9, read, uint, bake_dist[])
 IMAGE(0, SFLOAT_32_32_32_32, write, image2D, gbuf_pos_img)
 IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_color_img)
 PUSH_CONSTANT(float3, aabb_min)
@@ -377,27 +387,18 @@ GPU_SHADER_CREATE_END()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name SDF Lipschitz Resolve (per-hit-pixel color + normals)
+/** \name SDF Lipschitz Debug Colorize (heatmap / normals viz)
  * \{ */
 
-GPU_SHADER_CREATE_INFO(sdf_lp_resolve_comp)
+GPU_SHADER_CREATE_INFO(sdf_lp_debug_comp)
 LOCAL_GROUP_SIZE(8, 8)
 /* Not statically compiled: see sdf_lp_prune_comp. */
-/* SDF_LP_NO_COLOR_FLAT strips the unused flat-color evaluator
- * (lp_list_eval_color); the folded color+normal evaluator stays. */
-DEFINE_VALUE("SDF_LP_NO_COLOR_FLAT", "1")
-STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
-STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
-STORAGE_BUF(2, read, uint4, lp_binary_ops[])
-STORAGE_BUF(3, read, uint, lp_active_in[])
-STORAGE_BUF(4, read, int4, lp_cell_meta[])
-STORAGE_BUF(5, read, SDFObjectGPU, objects[])
-STORAGE_BUF(6, read, SDFModifierGPU, sdf_modifiers[])
-STORAGE_BUF(7, read, SDFPolygonPointGPU, polygon_points[])
-STORAGE_BUF(8, read, uint4, mesh_data_buf[])
+/* Tiny shader (cell metadata lookup / normal viz only, no SDF tree
+ * evaluation): debug shading modes stay cheap to compile. */
+STORAGE_BUF(0, read, int4, lp_cell_meta[])
 IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
-IMAGE(1, SFLOAT_16_16_16_16, write, image2D, gbuf_color_img)
-IMAGE(2, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
+IMAGE(1, SFLOAT_16_16_16_16, read, image2D, gbuf_normal_img)
+IMAGE(2, SFLOAT_16_16_16_16, read_write, image2D, gbuf_color_img)
 PUSH_CONSTANT(float3, aabb_min)
 PUSH_CONSTANT(float3, aabb_max)
 PUSH_CONSTANT(int, grid_size)
@@ -407,8 +408,57 @@ PUSH_CONSTANT(int, shading_mode)
 PUSH_CONSTANT(float, viz_max)
 PUSH_CONSTANT(int2, screen_size)
 TYPEDEF_SOURCE("sdf_shader_shared.hh")
-ADDITIONAL_INFO(draw_view)
-COMPUTE_SOURCE("sdf_lp_resolve_comp.glsl")
+COMPUTE_SOURCE("sdf_lp_debug_comp.glsl")
+GPU_SHADER_CREATE_END()
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name SDF Mesh Volume Bake (dense per-mesh SDF/normal/color voxel bake)
+ * \{ */
+
+GPU_SHADER_CREATE_INFO(sdf_mesh_bake_comp)
+LOCAL_GROUP_SIZE(4, 4, 4)
+/* Not statically compiled: see sdf_lp_prune_comp. Compiled lazily on first
+ * use; the driver's disk shader cache makes subsequent startups fast. */
+/* The bake only walks the mesh BVH (lp_mesh_nearest): strip the trace-side
+ * list evaluators (lp_list_eval/lp_list_eval_obj_id) from sdf_lp_common.glsl
+ * to cut compile time. The lp_* / modifier / polygon buffers below are still
+ * declared because sdf_lp_common.glsl references them in other (dead-code)
+ * functions — declarations must exist or the shader does not compile. */
+DEFINE_VALUE("SDF_LP_NO_LIST_EVAL", "1")
+STORAGE_BUF(0, read, SDFLpPrimitive, lp_prims[])
+STORAGE_BUF(1, read, SDFLpNode, lp_nodes[])
+STORAGE_BUF(2, read, uint4, lp_binary_ops[])
+STORAGE_BUF(3, read, uint, lp_active_in[])
+STORAGE_BUF(4, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(5, read, SDFPolygonPointGPU, polygon_points[])
+STORAGE_BUF(6, read, uint4, mesh_data_buf[])
+/* Per-triangle corner colors (xyz = 3 packed RGBA8, w = 0). */
+STORAGE_BUF(7, read, uint4, mesh_color_buf[])
+/* Shared append-only voxel pools, one uint per element; see
+ * sdf_mesh_bake_comp.glsl for the layout. bake_dist is read_write because
+ * sdf_lp_common.glsl (included below) also reads it in the baked-volume
+ * distance sampler. */
+STORAGE_BUF(8, read_write, uint, bake_dist[])
+STORAGE_BUF(9, write, uint, bake_nrm[])
+STORAGE_BUF(10, write, uint, bake_col[])
+/* vertex start, triangle start, triangle count, BVH node start (uint4-record
+ * offsets into mesh_data_buf, same layout as SDFLpPrimitive.mesh_data). */
+PUSH_CONSTANT(int4, mesh_data)
+PUSH_CONSTANT(int, mesh_node_count)
+/* uint4-record offset into mesh_color_buf. */
+PUSH_CONSTANT(int, color_start)
+/* xyz = voxel grid resolution, w = first voxel index (same in all pools). */
+PUSH_CONSTANT(int4, res_and_base)
+/* Local UNSCALED mesh space min corner of the voxel grid. */
+PUSH_CONSTANT(float3, origin)
+PUSH_CONSTANT(float, voxel_size)
+/* Narrow band half-width (4 * voxel_size); distances clamp to +/-band. */
+PUSH_CONSTANT(float, band)
+PUSH_CONSTANT(int, has_colors)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_mesh_bake_comp.glsl")
 GPU_SHADER_CREATE_END()
 
 /** \} */
@@ -427,6 +477,9 @@ STORAGE_BUF(3, read, SDFPolygonPointGPU, polygon_points[])
 STORAGE_BUF(4, write, float, grid_values[])
 STORAGE_BUF(5, read, SdfAabbNodeGPU, aabb_nodes[])
 STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(6, read, uint, bake_dist[])
+STORAGE_BUF(7, read, uint, bake_nrm[])
+STORAGE_BUF(8, read, uint, bake_col[])
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(int, grid_verts)
@@ -497,6 +550,9 @@ STORAGE_BUF(4, read, float4, dc_positions[])
 STORAGE_BUF(5, write, float4, dc_colors[])
 STORAGE_BUF(6, read, SdfAabbNodeGPU, aabb_nodes[])
 STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(7, read, uint, bake_dist[])
+STORAGE_BUF(8, read, uint, bake_nrm[])
+STORAGE_BUF(10, read, uint, bake_col[])
 PUSH_CONSTANT(int, object_count)
 PUSH_CONSTANT(int, group_count)
 PUSH_CONSTANT(int, vert_count)

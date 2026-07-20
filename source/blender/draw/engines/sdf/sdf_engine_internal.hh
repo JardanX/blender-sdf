@@ -101,6 +101,9 @@ inline gpu::StorageBuf *s_polygon_ssbo = nullptr;
 inline gpu::StorageBuf *s_group_ssbo = nullptr;
 inline gpu::StorageBuf *s_bvh_ssbo = nullptr;
 inline gpu::StorageBuf *s_mesh_data_ssbo = nullptr;
+inline gpu::StorageBuf *s_bake_dist_ssbo = nullptr;
+inline gpu::StorageBuf *s_bake_nrm_ssbo = nullptr;
+inline gpu::StorageBuf *s_bake_col_ssbo = nullptr;
 inline int s_bvh_root = -1;
 inline int s_group_count = 0;
 inline Vector<int> s_depsgraph_to_sorted;
@@ -127,6 +130,9 @@ inline void clear_exported_state()
   s_group_ssbo = nullptr;
   s_bvh_ssbo = nullptr;
   s_mesh_data_ssbo = nullptr;
+  s_bake_dist_ssbo = nullptr;
+  s_bake_nrm_ssbo = nullptr;
+  s_bake_col_ssbo = nullptr;
   s_bvh_root = -1;
   s_group_count = 0;
   s_depsgraph_to_sorted.clear();
@@ -282,7 +288,8 @@ enum ShaderIndex {
   SH_FXAA,
   SH_LP_PRUNE_COMP,
   SH_LP_MARCH_COMP,
-  SH_LP_RESOLVE_COMP,
+  SH_LP_DEBUG_COMP,
+  SH_MESH_BAKE_COMP,
   SH_COUNT,
 };
 
@@ -311,6 +318,18 @@ class SdfInstanceBase : public DrawEngine {
     int bvh_start;
     int vertex_count;
     int bvh_count;
+    /* uint4-record offset into mesh_color_gpu_data_/mesh_color_ssbo_. */
+    int color_start;
+  };
+
+  /* Per-mesh-payload bake inputs (keyed like mesh_offsets_: payload pointer
+   * for OB_MESH objects, the SDF ID for OB_SDF mesh objects). Consumed by the
+   * LP engine's mesh volume bake manager (sdf_lp_engine.cc). */
+  struct MeshBakeInfo {
+    uint64_t revision;
+    float3 bounds_min;
+    float3 bounds_max;
+    bool has_colors;
   };
 
   Vector<SDFObjectGPU> objects_;
@@ -336,6 +355,7 @@ class SdfInstanceBase : public DrawEngine {
   gpu::Shader *shade_comp_sh() { return sdf_shader_get(SH_SHADE_COMP); }
   gpu::Shader *blit_sh() { return sdf_shader_get(SH_BLIT); }
   gpu::Shader *fxaa_sh() { return sdf_shader_get(SH_FXAA); }
+  gpu::Shader *mesh_bake_sh() { return sdf_shader_get(SH_MESH_BAKE_COMP); }
 
   gpu::Texture *comp_color_tx_ = nullptr;
   gpu::Texture *comp_depth_tx_ = nullptr;
@@ -389,6 +409,67 @@ class SdfInstanceBase : public DrawEngine {
   Vector<std::shared_ptr<const SDFMeshPayload>> live_mesh_payloads_;
   gpu::StorageBuf *mesh_data_ssbo_ = nullptr;
   int mesh_data_ssbo_count_ = 0;
+
+  /* Per-triangle corner colors, parallel to the triangle records in
+   * mesh_gpu_data_ (uint4 per triangle: xyz = 3 packed RGBA8 corner colors,
+   * w = 0; a single white record for meshes without colors). */
+  Vector<uint4> mesh_color_gpu_data_;
+  gpu::StorageBuf *mesh_color_ssbo_ = nullptr;
+  int mesh_color_ssbo_count_ = 0;
+  Map<const void *, MeshBakeInfo> mesh_bake_info_;
+  /* Parallel to objects_/object_ptrs_: mesh payload key (payload pointer or
+   * SDF ID) for SDF_TYPE_MESH objects, nullptr otherwise. */
+  Vector<const void *> object_mesh_keys_;
+
+  /* ---- Mesh volume bake (dense per-mesh SDF/normal/color voxel grids) ----
+   * Three shared append-only pools, uint per element:
+   * - bake_dist: 1 uint/voxel = packHalf2x16(vec2(distance, 0)), clamped to
+   *   the narrow band (+/-band);
+   * - bake_nrm: 2 uints/voxel = packHalf2x16(vec2(n.x,n.y)) +
+   *   packHalf2x16(vec2(n.z,0)), baked smooth (corner-normal) shading normal;
+   * - bake_col: 1 uint/voxel = RGBA8 barycentric corner color (white when the
+   *   mesh has no color attribute).
+   * All three pools share the same voxel indexing: voxel (i,j,k) of a record
+   * lives at base + i + res.x*(j + res.y*k); its center is
+   * origin + (vec3(i,j,k)+0.5)*voxel_size in local UNSCALED mesh space.
+   * Shared by both engines (the GLSL fast path lives in sdf_mesh_lib.glsl and
+   * sdf_lp_common.glsl, gated on SDF_LP_MESH_FLAG_BAKED). */
+  struct MeshBakeRecord {
+    int3 res = int3(0);
+    /* First voxel index (same in all three pools). */
+    int base = 0;
+    /* Local unscaled mesh space min corner of the voxel grid. */
+    float3 origin = float3(0.0f);
+    /* Cubic voxel edge length. */
+    float voxel_size = 0.0f;
+    /* Narrow band half-width (4 * voxel_size). */
+    float band = 0.0f;
+    /* Payload revision the bake was produced from. */
+    uint64_t revision = 0;
+    /* Object sdf_voxel_resolution setting the grid was built with. */
+    int voxel_resolution = -1;
+    bool ready = false;
+  };
+
+  /* Keyed by the mesh payload key (payload pointer / SDF ID; same keys as
+   * mesh_offsets_). Records are kept for payloads that leave the scene: the
+   * pools are append-only, so a stale record just wastes its voxels until the
+   * next pool regrow. */
+  Map<const void *, MeshBakeRecord> bake_records_;
+  gpu::StorageBuf *bake_dist_ssbo_ = nullptr;
+  gpu::StorageBuf *bake_nrm_ssbo_ = nullptr;
+  gpu::StorageBuf *bake_col_ssbo_ = nullptr;
+  /* Pool capacity/usage in voxels (dist & col: 1 uint/voxel; nrm: 2). */
+  int64_t bake_pool_capacity_ = 0;
+  int64_t bake_pool_used_ = 0;
+  bool bake_overflow_warned_ = false;
+
+  /* Const accessor for the bake record of a mesh payload key (nullptr when
+   * no record exists). */
+  const MeshBakeRecord *bake_record(const void *key) const
+  {
+    return bake_records_.lookup_ptr(key);
+  }
 
   Vector<SDFGroupGPU> groups_gpu_;
   gpu::StorageBuf *group_ssbo_ = nullptr;
@@ -518,6 +599,9 @@ class SdfInstanceBase : public DrawEngine {
     mesh_gpu_data_.clear();
     mesh_offsets_.clear();
     live_mesh_payloads_.clear();
+    mesh_color_gpu_data_.clear();
+    mesh_bake_info_.clear();
+    object_mesh_keys_.clear();
     groups_gpu_.clear();
     s_depsgraph_to_sorted.clear();
     s_object_to_sorted.clear();
@@ -539,6 +623,8 @@ class SdfInstanceBase : public DrawEngine {
     SDF live_sdf = {};
     const SDF *sdf_data = nullptr;
     const void *mesh_payload_key = nullptr;
+    const SDFMeshPayload *mesh_payload = nullptr;
+    const unsigned int *mesh_corner_colors = nullptr;
     if (ob->type == OB_MESH) {
       SDFMeshRuntimeSnapshot snapshot;
       if (!BKE_sdf_mesh_runtime_snapshot(*ob, snapshot)) {
@@ -547,6 +633,8 @@ class SdfInstanceBase : public DrawEngine {
       mesh_transforms_.append(ob->object_to_world());
       live_mesh_payloads_.append(snapshot.payload);
       const SDFMeshPayload &payload = *snapshot.payload;
+      mesh_payload = snapshot.payload.get();
+      mesh_corner_colors = payload.corner_colors;
       live_sdf.sdf_type = SDF_TYPE_MESH;
       live_sdf.blend = ob->sdf_blend;
       live_sdf.blend_type = ob->sdf_blend_type;
@@ -584,6 +672,7 @@ class SdfInstanceBase : public DrawEngine {
     else if (ob->type == OB_SDF) {
       sdf_data = id_cast<const SDF *>(ob->data);
       mesh_payload_key = sdf_data;
+      mesh_corner_colors = sdf_data->mesh_corner_colors;
     }
     else {
       return;
@@ -669,7 +758,12 @@ class SdfInstanceBase : public DrawEngine {
         const size_t new_record_count = mesh_gpu_data_.size() + sdf_data->mesh_vertex_count +
                                         size_t(sdf_data->mesh_triangle_count) * 3 +
                                         size_t(sdf_data->mesh_bvh_node_count) * 2;
-        if (new_record_count * sizeof(uint4) > max_ssbo_size)
+        const size_t new_color_record_count = mesh_color_gpu_data_.size() +
+                                              (mesh_corner_colors != nullptr ?
+                                                   size_t(sdf_data->mesh_triangle_count) :
+                                                   1);
+        if (new_record_count * sizeof(uint4) > max_ssbo_size ||
+            new_color_record_count * sizeof(uint4) > max_ssbo_size)
         {
           return;
         }
@@ -715,8 +809,32 @@ class SdfInstanceBase : public DrawEngine {
                                       std::bit_cast<uint32_t>(node.bounds_max[2]),
                                       uint32_t(node.child_or_count)));
         }
+        /* Corner colors, reordered identically to the triangles above: one
+         * uint4 per triangle (xyz = 3 packed RGBA8 corner colors, w = 0), or a
+         * single white record when the mesh has no active color attribute. */
+        offsets.color_start = int(mesh_color_gpu_data_.size());
+        if (mesh_corner_colors != nullptr) {
+          for (int i = 0; i < sdf_data->mesh_triangle_count; i++) {
+            mesh_color_gpu_data_.append(uint4(mesh_corner_colors[3 * i],
+                                              mesh_corner_colors[3 * i + 1],
+                                              mesh_corner_colors[3 * i + 2],
+                                              0u));
+          }
+        }
+        else {
+          mesh_color_gpu_data_.append(uint4(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u));
+        }
         mesh_offsets_.add(mesh_payload_key, offsets);
       }
+
+      /* Bake inputs for the LP mesh volume bake (sdf_lp_engine.cc). */
+      MeshBakeInfo bake_info;
+      bake_info.revision = (mesh_payload != nullptr) ? mesh_payload->revision :
+                                                       uint64_t(sdf_data->mesh_data_version);
+      bake_info.bounds_min = float3(sdf_data->mesh_bounds_min);
+      bake_info.bounds_max = float3(sdf_data->mesh_bounds_max);
+      bake_info.has_colors = mesh_corner_colors != nullptr;
+      mesh_bake_info_.add_overwrite(mesh_payload_key, bake_info);
 
       gpu_obj.mesh_data = int4(offsets.vertex_start,
                                offsets.triangle_start,
@@ -728,6 +846,27 @@ class SdfInstanceBase : public DrawEngine {
                                     sdf_data->mesh_data_version);
       gpu_obj.mesh_bounds_min = float4(float3(sdf_data->mesh_bounds_min), 0.0f);
       gpu_obj.mesh_bounds_max = float4(float3(sdf_data->mesh_bounds_max), 0.0f);
+
+      /* Baked volume fast path (GPU-only; the CPU evaluator in
+       * sdf_cpu_eval.hh always stays analytic): when a ready bake record
+       * matches this payload's current revision AND voxel-resolution setting,
+       * flag the object and fill the baked grid fields. The revision/setting
+       * check doubles as a staleness guard: while a (re)bake is pending the
+       * object stays analytic this frame, and update_mesh_bakes() never
+       * reassigns the pool range of a record that passes this check, so the
+       * base uploaded here stays valid for the whole frame. When the flag is
+       * off the bake_* fields stay zeroed (gpu_obj is value-initialized). */
+      if (const MeshBakeRecord *rec = bake_records_.lookup_ptr(mesh_payload_key)) {
+        const int setting = std::clamp(ob->sdf_voxel_resolution, 0, 256);
+        if (rec->ready && rec->revision == bake_info.revision &&
+            rec->voxel_resolution == setting)
+        {
+          gpu_obj.mesh_settings.y |= SDF_LP_MESH_FLAG_BAKED;
+          gpu_obj.bake_origin = float4(rec->origin, rec->voxel_size);
+          gpu_obj.bake_params = float4(rec->band, 0.0f, 0.0f, 0.0f);
+          gpu_obj.bake_grid = int4(rec->res, rec->base);
+        }
+      }
     }
 
     /* Detect group parent early — needed for bevel accumulation and modifier propagation */
@@ -2018,6 +2157,7 @@ class SdfInstanceBase : public DrawEngine {
 
       object_ptrs_.append(ob);
       objects_.append(copy_obj);
+      object_mesh_keys_.append(copy_obj.sdf_type == SDF_TYPE_MESH ? mesh_payload_key : nullptr);
     }
   }
 
@@ -2928,6 +3068,14 @@ class SdfInstanceBase : public DrawEngine {
         mesh_data_hash ^= mesh_bytes[i];
         mesh_data_hash *= 0x100000001b3ULL;
       }
+      /* Corner colors ride the same dirty flag: a pure recolor leaves
+       * mesh_gpu_data_ byte-identical, so hash the color records too. */
+      const uint8_t *color_bytes = reinterpret_cast<const uint8_t *>(
+          mesh_color_gpu_data_.data());
+      for (size_t i = 0; i < mesh_color_gpu_data_.size() * sizeof(uint4); i++) {
+        mesh_data_hash ^= color_bytes[i];
+        mesh_data_hash *= 0x100000001b3ULL;
+      }
       mesh_data_changed_ = mesh_data_hash != prev_mesh_data_hash_;
       prev_mesh_data_hash_ = mesh_data_hash;
 
@@ -3065,6 +3213,9 @@ class SdfInstanceBase : public DrawEngine {
     s_group_ssbo = group_ssbo_;
     s_bvh_ssbo = bvh_nodes_ssbo_;
     s_mesh_data_ssbo = mesh_data_ssbo_;
+    s_bake_dist_ssbo = bake_dist_ssbo_;
+    s_bake_nrm_ssbo = bake_nrm_ssbo_;
+    s_bake_col_ssbo = bake_col_ssbo_;
     s_bvh_root = bvh_tree_.root();
     s_depth_tx = comp_depth_tx_;
     s_gbuf_color_tx = gbuf_color_tx_;
@@ -3453,6 +3604,26 @@ class SdfInstanceBase : public DrawEngine {
       GPU_storagebuf_update(mesh_data_ssbo_, mesh_gpu_data_.data());
     }
 
+    /* Corner color SSBO: same lifetime/dirty conditions as mesh data. */
+    const int mesh_color_count = math::max(int(mesh_color_gpu_data_.size()), 1);
+    if (mesh_color_ssbo_ != nullptr && mesh_color_ssbo_count_ != mesh_color_count) {
+      GPU_storagebuf_free(mesh_color_ssbo_);
+      mesh_color_ssbo_ = nullptr;
+    }
+    if (mesh_color_ssbo_ == nullptr) {
+      const uint4 dummy(0xFFFFFFFFu);
+      mesh_color_ssbo_ = GPU_storagebuf_create_ex(mesh_color_count * sizeof(uint4),
+                                                  mesh_color_gpu_data_.is_empty() ?
+                                                      &dummy :
+                                                      mesh_color_gpu_data_.data(),
+                                                  GPU_USAGE_DYNAMIC,
+                                                  "sdf_mesh_color_ssbo");
+      mesh_color_ssbo_count_ = mesh_color_count;
+    }
+    else if (mesh_data_changed_ && !mesh_color_gpu_data_.is_empty()) {
+      GPU_storagebuf_update(mesh_color_ssbo_, mesh_color_gpu_data_.data());
+    }
+
     const int grp_count = math::max(int(groups_gpu_.size()), 1);
     const size_t grp_buf_size = grp_count * sizeof(SDFGroupGPU);
 
@@ -3508,6 +3679,232 @@ class SdfInstanceBase : public DrawEngine {
 
     upload_extra();
   }
+
+  /* -------------------------------------------------------------------- */
+  /** \name Mesh volume bake manager
+   *
+   * Shared by both engines: (re)bakes every live mesh payload into the voxel
+   * pools; runtime sampling is the SDF_LP_MESH_FLAG_BAKED fast path in
+   * sdf_mesh_lib.glsl (classic) and sdf_lp_common.glsl (LP). Self-contained
+   * and idempotent.
+   * \{ */
+
+  /* Grow the pools until `needed` voxels fit (doubling), recreating the
+   * SSBOs. Returns true when the pools were recreated — the new buffers lost
+   * all contents, so every ready record must be re-dispatched (simple full
+   * rebuild; acceptable for this stage). */
+  bool bake_pools_ensure(int64_t needed)
+  {
+    if (needed <= bake_pool_capacity_) {
+      return false;
+    }
+    int64_t new_capacity = math::max(bake_pool_capacity_, int64_t(1) << 18);
+    while (new_capacity < needed) {
+      new_capacity *= 2;
+    }
+    if (bake_dist_ssbo_) GPU_storagebuf_free(bake_dist_ssbo_);
+    if (bake_nrm_ssbo_) GPU_storagebuf_free(bake_nrm_ssbo_);
+    if (bake_col_ssbo_) GPU_storagebuf_free(bake_col_ssbo_);
+    bake_dist_ssbo_ = GPU_storagebuf_create_ex(
+        new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_dist");
+    bake_nrm_ssbo_ = GPU_storagebuf_create_ex(
+        2 * new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_nrm");
+    bake_col_ssbo_ = GPU_storagebuf_create_ex(
+        new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_col");
+    bake_pool_capacity_ = new_capacity;
+    return true;
+  }
+
+  /* Dispatch the bake for a single record: rewrites exactly the record's
+   * voxel range (idempotent). The shader must be bound. */
+  void dispatch_mesh_bake(gpu::Shader *sh,
+                          const MeshBakeRecord &rec,
+                          const MeshOffsets &offsets,
+                          bool has_colors)
+  {
+    const int4 mesh_data(offsets.vertex_start,
+                         offsets.triangle_start,
+                         offsets.triangle_count,
+                         offsets.bvh_start);
+    const int4 res_and_base(rec.res.x, rec.res.y, rec.res.z, rec.base);
+    GPU_shader_uniform_int_ex(
+        sh, GPU_shader_get_uniform(sh, "mesh_data"), 4, 1, &mesh_data.x);
+    GPU_shader_uniform_1i(sh, "mesh_node_count", offsets.bvh_count);
+    GPU_shader_uniform_1i(sh, "color_start", offsets.color_start);
+    GPU_shader_uniform_int_ex(
+        sh, GPU_shader_get_uniform(sh, "res_and_base"), 4, 1, &res_and_base.x);
+    GPU_shader_uniform_3fv(sh, "origin", rec.origin);
+    GPU_shader_uniform_1f(sh, "voxel_size", rec.voxel_size);
+    GPU_shader_uniform_1f(sh, "band", rec.band);
+    GPU_shader_uniform_1i(sh, "has_colors", has_colors ? 1 : 0);
+    GPU_compute_dispatch(
+        sh, (rec.res.x + 3) / 4, (rec.res.y + 3) / 4, (rec.res.z + 3) / 4);
+  }
+
+  /* Per-frame update: (re)bake every live mesh payload that has no record
+   * yet, whose revision changed, or whose sdf_voxel_resolution setting
+   * changed. Called from draw_trace_pipeline, after the shared mesh SSBOs
+   * were uploaded (a payload change always flips scene_changed_, which gates
+   * both upload_objects and draw_trace_pipeline). */
+  void update_mesh_bakes()
+  {
+    if (mesh_gpu_data_.is_empty()) {
+      return;
+    }
+    gpu::Shader *sh = mesh_bake_sh();
+    if (sh == nullptr) {
+      return;
+    }
+
+    struct PendingBake {
+      const void *key;
+      /* Fully computed except `base`, assigned at commit time. */
+      MeshBakeRecord rec;
+      int64_t voxels;
+      /* Existing record with an identical grid: rewrite its range in place. */
+      bool reuse_base;
+    };
+
+    Vector<PendingBake> pending;
+    int64_t projected_used = bake_pool_used_;
+    for (int i = 0; i < int(objects_.size()); i++) {
+      if (objects_[i].sdf_type != SDF_GPU_TYPE_MESH) {
+        continue;
+      }
+      const void *key = object_mesh_keys_[i];
+      if (key == nullptr) {
+        continue;
+      }
+      const MeshBakeInfo *info = mesh_bake_info_.lookup_ptr(key);
+      if (info == nullptr || !mesh_offsets_.contains(key)) {
+        continue;
+      }
+      const int setting = std::clamp(object_ptrs_[i]->sdf_voxel_resolution, 0, 256);
+
+      const MeshBakeRecord *rec = bake_records_.lookup_ptr(key);
+      if (rec != nullptr && rec->ready && rec->revision == info->revision &&
+          rec->voxel_resolution == setting)
+      {
+        continue;
+      }
+
+      /* Grid layout: voxel_size targets R voxels across the largest bounds
+       * axis (R = object setting, 64 when 0/auto) with `margin_voxels` of
+       * padding voxels on both sides; the grid covers the bounds expanded by
+       * (band + voxel_size) on every side, band = 4 * voxel_size. */
+      constexpr int margin_voxels = 5;
+      const int res_target = std::clamp(setting > 0 ? setting : 64, 2 * margin_voxels + 8, 256);
+      const float3 extent = math::max(info->bounds_max - info->bounds_min, float3(1e-6f));
+      const float max_extent = math::reduce_max(extent);
+      const float voxel_size = max_extent / float(res_target - 2 * margin_voxels - 1);
+      const float band = 4.0f * voxel_size;
+      const float pad = band + voxel_size;
+
+      PendingBake pb;
+      pb.key = key;
+      pb.rec.res = int3(math::ceil((extent + float3(2.0f * pad)) / voxel_size));
+      pb.rec.res = math::clamp(pb.rec.res, 8, 256);
+      pb.rec.origin = info->bounds_min - float3(pad);
+      pb.rec.voxel_size = voxel_size;
+      pb.rec.band = band;
+      pb.rec.revision = info->revision;
+      pb.rec.voxel_resolution = setting;
+      pb.rec.ready = false;
+      pb.voxels = int64_t(pb.rec.res.x) * pb.rec.res.y * pb.rec.res.z;
+      pb.reuse_base = (rec != nullptr && rec->ready && rec->res == pb.rec.res);
+      if (!pb.reuse_base) {
+        projected_used += pb.voxels;
+      }
+      pending.append(pb);
+    }
+
+    if (pending.is_empty()) {
+      return;
+    }
+
+    /* The normal pool is the largest of the three (2 uints/voxel). */
+    const int64_t max_voxels = int64_t(GPU_max_storage_buffer_size()) /
+                               (2 * int64_t(sizeof(uint32_t)));
+    if (projected_used > max_voxels) {
+      if (!bake_overflow_warned_) {
+        bake_overflow_warned_ = true;
+        CLOG_WARN(&LOG,
+                  "SDF mesh bake: voxel pools would exceed the SSBO size limit "
+                  "(%d Mvoxels needed); skipping the bake. Lower the mesh voxel "
+                  "resolution",
+                  int(projected_used >> 20));
+      }
+      return;
+    }
+
+    /* Commit: insert/update records, assigning pool ranges. */
+    Vector<const void *> pending_keys;
+    for (const PendingBake &pb : pending) {
+      MeshBakeRecord &rec = bake_records_.lookup_or_add_default(pb.key);
+      MeshBakeRecord new_rec = pb.rec;
+      if (pb.reuse_base) {
+        new_rec.base = rec.base;
+      }
+      else {
+        /* Append a fresh range; the abandoned old range (if any) is wasted
+         * until the next pool regrow compacts it away (pools are
+         * append-only). */
+        new_rec.base = int(bake_pool_used_);
+        bake_pool_used_ += pb.voxels;
+      }
+      rec = new_rec;
+      pending_keys.append(pb.key);
+    }
+
+    Vector<const void *> dispatch_keys;
+    if (bake_pools_ensure(bake_pool_used_)) {
+      /* Full rebuild: the recreated buffers lost all contents. Compact: pack
+       * every record's range from zero (reclaiming abandoned holes) and
+       * re-dispatch all records (stale ones with no live mesh data are
+       * skipped below; acceptable cost for this stage). */
+      int64_t base = 0;
+      for (const auto &item : bake_records_.items()) {
+        MeshBakeRecord &rec = item.value;
+        rec.base = int(base);
+        base += int64_t(rec.res.x) * rec.res.y * rec.res.z;
+        dispatch_keys.append(item.key);
+      }
+      bake_pool_used_ = base;
+    }
+    else {
+      dispatch_keys = pending_keys;
+    }
+
+    GPU_shader_bind(sh);
+    /* Buffers referenced by dead code in sdf_lp_common.glsl (the bake only
+     * walks the mesh BVH); declared in the create info, bound for
+     * completeness. The lp_* scene buffers only exist in the LP engine —
+     * bound via the engine hook (nullptr-safe no-ops for the classic
+     * engine); the dead code that references them never executes. */
+    bind_bake_dead_ssbos(sh);
+    sdf_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
+    sdf_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
+    sdf_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
+    sdf_bind_ssbo(sh, "mesh_color_buf", mesh_color_ssbo_);
+    sdf_bind_ssbo(sh, "bake_dist", bake_dist_ssbo_);
+    sdf_bind_ssbo(sh, "bake_nrm", bake_nrm_ssbo_);
+    sdf_bind_ssbo(sh, "bake_col", bake_col_ssbo_);
+
+    for (const void *key : dispatch_keys) {
+      MeshBakeRecord *rec = bake_records_.lookup_ptr(key);
+      const MeshOffsets *offsets = mesh_offsets_.lookup_ptr(key);
+      const MeshBakeInfo *info = mesh_bake_info_.lookup_ptr(key);
+      if (rec == nullptr || offsets == nullptr || info == nullptr) {
+        continue;
+      }
+      dispatch_mesh_bake(sh, *rec, *offsets, info->has_colors);
+      rec->ready = true;
+    }
+    GPU_shader_unbind();
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+  }
+
+  /** \} */
 
   void ensure_compute_targets()
   {
@@ -3576,6 +3973,21 @@ class SdfInstanceBase : public DrawEngine {
     gbuf_normal_tx_ = GPU_texture_create_2d("sdf_gbuf_normal", tex_size.x, tex_size.y, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, nullptr);
   }
 
+  static void sdf_bind_ssbo(gpu::Shader *sh, const char *name, gpu::StorageBuf *buf)
+  {
+    if (buf == nullptr) {
+      return;
+    }
+    const int slot = GPU_shader_get_ssbo_binding(sh, name);
+    if (slot >= 0) {
+      GPU_storagebuf_bind(buf, slot);
+    }
+  }
+
+  /* Engine hook: bind the lp_* scene buffers the bake shader declares (dead
+   * code there) during update_mesh_bakes; overridden by the LP engine. */
+  virtual void bind_bake_dead_ssbos(gpu::Shader * /*sh*/) {}
+
   void bind_ssbos(gpu::Shader *sh)
   {
     if (object_ssbo_) {
@@ -3620,6 +4032,12 @@ class SdfInstanceBase : public DrawEngine {
         GPU_storagebuf_bind(mesh_data_ssbo_, slot);
       }
     }
+    /* Baked mesh volume pools (nullptr until the first bake; the
+     * SDF_LP_MESH_FLAG_BAKED flag is only set on objects with a ready
+     * record, which implies the pools exist). */
+    sdf_bind_ssbo(sh, "bake_dist", bake_dist_ssbo_);
+    sdf_bind_ssbo(sh, "bake_nrm", bake_nrm_ssbo_);
+    sdf_bind_ssbo(sh, "bake_col", bake_col_ssbo_);
   }
 
   static constexpr int kMaxTileObjects = 256;
@@ -4203,6 +4621,18 @@ class SdfInstanceBase : public DrawEngine {
     }
     if (mesh_data_ssbo_) {
       GPU_storagebuf_free(mesh_data_ssbo_);
+    }
+    if (mesh_color_ssbo_) {
+      GPU_storagebuf_free(mesh_color_ssbo_);
+    }
+    if (bake_dist_ssbo_) {
+      GPU_storagebuf_free(bake_dist_ssbo_);
+    }
+    if (bake_nrm_ssbo_) {
+      GPU_storagebuf_free(bake_nrm_ssbo_);
+    }
+    if (bake_col_ssbo_) {
+      GPU_storagebuf_free(bake_col_ssbo_);
     }
     if (group_ssbo_) {
       GPU_storagebuf_free(group_ssbo_);

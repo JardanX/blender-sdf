@@ -25,8 +25,6 @@ static_assert(SDF_LP_BLEND_SMOOTH == SDF_BLEND_SMOOTH);
 static_assert(SDF_LP_BLEND_CHAMFER == SDF_BLEND_CHAMFER);
 static_assert(SDF_LP_BLEND_ROUND == SDF_BLEND_ROUND);
 
-/* Base LP shader list; SH_LP_RESOLVE_COMP stays last so it can be sliced off
- * in the default shading mode (see engine_shader_list). */
 static constexpr int kLpShaders[] = {
     SH_NORMAL_COMP,
     SH_SHADE_COMP,
@@ -37,14 +35,15 @@ static constexpr int kLpShaders[] = {
     SH_AABB_PROJECT_COMP,
     SH_TILE_CULL_COMP,
     SH_COLOR_RESOLVE_COMP,
-    SH_LP_RESOLVE_COMP,
+    SH_LP_DEBUG_COMP,
+    SH_MESH_BAKE_COMP,
 };
 
 class LpInstance : public SdfInstanceBase {
  protected:
   gpu::Shader *lp_prune_sh() { return sdf_shader_get(SH_LP_PRUNE_COMP); }
   gpu::Shader *lp_march_sh() { return sdf_shader_get(SH_LP_MARCH_COMP); }
-  gpu::Shader *lp_resolve_sh() { return sdf_shader_get(SH_LP_RESOLVE_COMP); }
+  gpu::Shader *lp_debug_sh() { return sdf_shader_get(SH_LP_DEBUG_COMP); }
 
   /* ---- Lipschitz pruning engine state ---- */
   bool lp_enable_pruning_ = true;
@@ -100,6 +99,9 @@ class LpInstance : public SdfInstanceBase {
   int lp_prune_count_ = 0;
   bool lp_overflow_warned_ = false;
 
+  /* Mesh volume bake state (bake_records_ / bake_*_ssbo_ pools) lives in
+   * SdfInstanceBase, shared with the classic engine. */
+
  public:
   LpInstance() {}
 
@@ -111,15 +113,7 @@ class LpInstance : public SdfInstanceBase {
  protected:
   Span<const int> engine_shader_list() const override
   {
-    /* The heavy folded color+normal resolve shader only serves the LP debug
-     * shading modes (heatmap/normals); the default shaded mode reuses the
-     * classic color resolve. Slicing it off here keeps the minutes-long
-     * NVIDIA driver compile out of startup — it compiles lazily on first
-     * debug-mode use (the base re-ensures the list every frame and shows
-     * compile progress until it is ready). */
-    const int count = (lp_shading_mode_ != 0) ? int(ARRAY_SIZE(kLpShaders)) :
-                                                int(ARRAY_SIZE(kLpShaders)) - 1;
-    return Span<const int>(kLpShaders, count);
+    return Span<const int>(kLpShaders, ARRAY_SIZE(kLpShaders));
   }
 
   void sync_extra() override
@@ -217,6 +211,16 @@ class LpInstance : public SdfInstanceBase {
 #define PROF_START(name) if (profiling) { s_profiler.mark_start(name); }
 #define PROF_END()       if (profiling) { s_profiler.mark_end(); }
 
+    /* Dense per-mesh volume bakes: (re)bake any new/changed mesh payloads
+     * into the shared voxel pools before pruning/marching. Self-contained
+     * and idempotent; runtime sampling is the SDF_LP_MESH_FLAG_BAKED fast
+     * path. */
+    PROF_START("Mesh Bake");
+    GPU_debug_group_begin("SDF LP Mesh Bake");
+    update_mesh_bakes();
+    GPU_debug_group_end();
+    PROF_END();
+
     /* Lipschitz pruning path: build/refresh the pruning grid when the scene,
      * grid level or AABB changed (smart recompute; see pre_trace_hook), then
      * march against the per-cell active node lists. Shading reuses the
@@ -243,42 +247,31 @@ class LpInstance : public SdfInstanceBase {
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     PROF_END();
 
-    if (lp_shading_mode_ == 0) {
-      /* Default shaded mode: reuse the classic color+normal evaluation
-       * (per-tile candidate lists folded over the shared scene SSBOs)
-       * instead of the LP folded resolve. Besides skipping the minutes-long
-       * sdf_lp_resolve_comp driver compile, this also applies group distance
-       * modifiers, which the folded LP evaluator does not support. */
-      PROF_START("AABB Project");
-      GPU_debug_group_begin("SDF AABB Project");
-      draw_aabb_project();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-      PROF_END();
+    /* All shading modes reuse the classic color+normal evaluation (per-tile
+     * candidate lists folded over the shared scene SSBOs): the LP folded
+     * color/normal resolve is gone — besides skipping its minutes-long
+     * driver compile, the classic resolve also applies group distance
+     * modifiers, which the folded LP evaluator did not support. */
+    PROF_START("AABB Project");
+    GPU_debug_group_begin("SDF AABB Project");
+    draw_aabb_project();
+    GPU_debug_group_end();
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+    PROF_END();
 
-      PROF_START("Tile Cull");
-      GPU_debug_group_begin("SDF Tile Cull");
-      draw_tile_cull();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-      PROF_END();
+    PROF_START("Tile Cull");
+    GPU_debug_group_begin("SDF Tile Cull");
+    draw_tile_cull();
+    GPU_debug_group_end();
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+    PROF_END();
 
-      PROF_START("Color Resolve");
-      GPU_debug_group_begin("SDF Color Resolve");
-      draw_color_resolve();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
-      PROF_END();
-    }
-    else {
-      /* Debug shading modes (heatmap/normals) need the folded LP resolve. */
-      PROF_START("LP Resolve");
-      GPU_debug_group_begin("SDF LP Resolve");
-      draw_lp_resolve();
-      GPU_debug_group_end();
-      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
-      PROF_END();
-    }
+    PROF_START("Color Resolve");
+    GPU_debug_group_begin("SDF Color Resolve");
+    draw_color_resolve();
+    GPU_debug_group_end();
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    PROF_END();
 
     /* Same screen-space normal reconstruction as the classic path. The
      * finite-difference gradient the LP trace computes bands along the
@@ -292,6 +285,17 @@ class LpInstance : public SdfInstanceBase {
     GPU_debug_group_end();
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     PROF_END();
+
+    /* Debug shading modes (heatmap/normals): cheap recolor from the cell
+     * metadata / the just-computed normals — no SDF tree evaluation. */
+    if (lp_shading_mode_ != 0) {
+      PROF_START("LP Debug");
+      GPU_debug_group_begin("SDF LP Debug");
+      draw_lp_debug();
+      GPU_debug_group_end();
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      PROF_END();
+    }
 
     PROF_START("Shade");
     GPU_debug_group_begin("SDF Shade");
@@ -412,10 +416,23 @@ class LpInstance : public SdfInstanceBase {
         prim.mesh_data = obj.mesh_data;
         prim.mesh_node_count = obj.mesh_settings.z;
         prim.mesh_flags = obj.mesh_settings.y;
+        if ((obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0) {
+          /* Baked volume: reuse the unused-for-mesh box_* fields for the
+           * grid (see SDFLpPrimitive in sdf_shader_shared.hh). The record
+           * lookup already happened in object_sync — the object's bake_*
+           * fields are the single source of truth. */
+          prim.box_corners = obj.bake_origin;
+          prim.box_edges = obj.bake_params;
+          prim.box_modes = obj.bake_grid;
+        }
       }
-      prim.box_corners = obj.box_corners;
-      prim.box_edges = obj.box_edges;
-      prim.box_modes = obj.box_modes;
+      if (obj.sdf_type != SDF_GPU_TYPE_MESH ||
+          (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) == 0)
+      {
+        prim.box_corners = obj.box_corners;
+        prim.box_edges = obj.box_edges;
+        prim.box_modes = obj.box_modes;
+      }
       prim.modifier_start = obj.modifier_start;
       prim.modifier_count = obj.modifier_count;
       prim.obj_index = i;
@@ -1129,6 +1146,7 @@ class LpInstance : public SdfInstanceBase {
       lp_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
       lp_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
       lp_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
+      lp_bind_ssbo(sh, "bake_dist", bake_dist_ssbo_);
 
       GPU_shader_uniform_3fv(sh, "aabb_min", lp_aabb_min_);
       GPU_shader_uniform_3fv(sh, "aabb_max", lp_aabb_max_);
@@ -1204,6 +1222,7 @@ class LpInstance : public SdfInstanceBase {
     lp_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
     lp_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
     lp_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
+    lp_bind_ssbo(sh, "bake_dist", bake_dist_ssbo_);
 
     GPU_shader_uniform_3fv(sh, "aabb_min", lp_aabb_min_);
     GPU_shader_uniform_3fv(sh, "aabb_max", lp_aabb_max_);
@@ -1245,9 +1264,9 @@ class LpInstance : public SdfInstanceBase {
     GPU_shader_unbind();
   }
 
-  void draw_lp_resolve()
+  void draw_lp_debug()
   {
-    gpu::Shader *sh = lp_resolve_sh();
+    gpu::Shader *sh = lp_debug_sh();
     if (sh == nullptr) {
       return;
     }
@@ -1256,22 +1275,48 @@ class LpInstance : public SdfInstanceBase {
 
     GPU_shader_bind(sh);
 
-    lp_bind_common(sh, culling);
+    lp_bind_ssbo(sh, "lp_cell_meta", lp_cell_meta_ssbo_[lp_final_idx_]);
+
+    GPU_shader_uniform_3fv(sh, "aabb_min", lp_aabb_min_);
+    GPU_shader_uniform_3fv(sh, "aabb_max", lp_aabb_max_);
+    GPU_shader_uniform_1i(sh, "grid_size", culling ? (1 << lp_grid_level_) : 1);
+    GPU_shader_uniform_1i(sh, "total_num_nodes", int(lp_nodes_.size()));
+    GPU_shader_uniform_1i(sh, "culling_enabled", culling ? 1 : 0);
     GPU_shader_uniform_1i(sh, "shading_mode", lp_shading_mode_);
     GPU_shader_uniform_1f(sh, "viz_max", float(lp_colormap_max_));
+    GPU_shader_uniform_2iv(sh, "screen_size", &render_size_.x);
 
     GPU_texture_image_bind(gbuf_pos_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_pos_img"));
-    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
     GPU_texture_image_bind(gbuf_normal_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_normal_img"));
+    GPU_texture_image_bind(gbuf_color_tx_, GPU_shader_get_sampler_binding(sh, "gbuf_color_img"));
 
     const int dispatch_x = (render_size_.x + 7) / 8;
     const int dispatch_y = (render_size_.y + 7) / 8;
     GPU_compute_dispatch(sh, dispatch_x, dispatch_y, 1);
 
     GPU_texture_image_unbind(gbuf_pos_tx_);
-    GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_texture_image_unbind(gbuf_normal_tx_);
+    GPU_texture_image_unbind(gbuf_color_tx_);
     GPU_shader_unbind();
+  }
+
+  /** \} */
+
+  /* -------------------------------------------------------------------- */
+  /** \name Mesh volume bake manager
+   *
+   * The manager itself (records, pools, update) lives in SdfInstanceBase,
+   * shared with the classic engine; this hook binds the lp_* scene buffers
+   * the bake shader declares (dead code there — the bake only walks the mesh
+   * BVH).
+   * \{ */
+
+  void bind_bake_dead_ssbos(gpu::Shader *sh) override
+  {
+    lp_bind_ssbo(sh, "lp_prims", lp_prims_ssbo_);
+    lp_bind_ssbo(sh, "lp_nodes", lp_nodes_ssbo_);
+    lp_bind_ssbo(sh, "lp_binary_ops", lp_binary_ops_ssbo_);
+    lp_bind_ssbo(sh, "lp_active_in", lp_active_init_nodes_ssbo_);
   }
 
   /** \} */
@@ -1320,6 +1365,8 @@ class LpInstance : public SdfInstanceBase {
     if (lp_scratch_ssbo_) {
       GPU_storagebuf_free(lp_scratch_ssbo_);
     }
+
+    /* The bake pools are owned (and freed) by SdfInstanceBase. */
   }
 };
 
