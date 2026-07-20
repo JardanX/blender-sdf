@@ -52,6 +52,10 @@ enum {
   SDF_MESH_FLAG_ORIENTED = (1 << 1),
   SDF_MESH_FLAG_THREADED_BVH = (1 << 2),
   SDF_MESH_FLAG_CORNER_NORMALS = (1 << 3),
+  /* The base mesh shades smooth somewhere (normals domain is not Face):
+   * corner normals are continuous across triangles, so normal blending uses
+   * them directly. Flat meshes keep the geometric gradient in blend zones. */
+  SDF_MESH_FLAG_SMOOTH_NORMALS = (1 << 4),
 };
 
 /* Box corner/edge blend mode */
@@ -208,8 +212,8 @@ typedef struct SDF {
   int shell_op = 0;   /* eSDFShellOp */
   float shell_blend_top = 0.1f;
   float shell_blend_bottom = 0.1f;
-  float chamfer_k2 = 0.01f;
-  float chamfer_k3 = 0.01f;
+  float chamfer_k2 = 0.001f;
+  float chamfer_k3 = 0.001f;
   float chamfer_k4 = 0.01f;
   float chamfer_k5 = 0.01f;
   int flip_blend = 0;

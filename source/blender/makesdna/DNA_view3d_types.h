@@ -643,6 +643,7 @@ struct View3DShading {
   char sdf_engine_mode = 0;
   /* Lipschitz pruning settings (only used when sdf_engine_mode == 1). */
   char sdf_lp_enable_pruning = 1;
+  /* Legacy: pruning now recomputes automatically on scene/grid changes. */
   char sdf_lp_recompute_pruning = 1;
   /* 0 = shaded, 1 = active-node-count heatmap, 2 = normals. */
   char sdf_lp_shading_mode = 0;

@@ -54,8 +54,8 @@ typedef struct SDFGroup {
   int shell_op = 0;
   float shell_blend_top = 0.1f;
   float shell_blend_bottom = 0.1f;
-  float chamfer_k2 = 0.01f;
-  float chamfer_k3 = 0.01f;
+  float chamfer_k2 = 0.001f;
+  float chamfer_k3 = 0.001f;
   float chamfer_k4 = 0.01f;
   float chamfer_k5 = 0.01f;
   int flip_blend = 0;

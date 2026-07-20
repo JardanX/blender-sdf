@@ -263,8 +263,8 @@ void BKE_sdf_object_settings_ensure(Object &object)
   object.sdf_shell_op = SDF_SHELL_OP_UNION;
   object.sdf_shell_blend_top = 0.1f;
   object.sdf_shell_blend_bottom = 0.1f;
-  object.sdf_chamfer_k2 = 0.01f;
-  object.sdf_chamfer_k3 = 0.01f;
+  object.sdf_chamfer_k2 = 0.001f;
+  object.sdf_chamfer_k3 = 0.001f;
   object.sdf_chamfer_k4 = 0.01f;
   object.sdf_chamfer_k5 = 0.01f;
   object.sdf_settings_version = 2;

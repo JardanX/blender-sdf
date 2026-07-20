@@ -654,8 +654,8 @@ struct Object {
   int sdf_shell_op = 0;
   float sdf_shell_blend_top = 0.1f;
   float sdf_shell_blend_bottom = 0.1f;
-  float sdf_chamfer_k2 = 0.01f;
-  float sdf_chamfer_k3 = 0.01f;
+  float sdf_chamfer_k2 = 0.001f;
+  float sdf_chamfer_k3 = 0.001f;
   float sdf_chamfer_k4 = 0.01f;
   float sdf_chamfer_k5 = 0.01f;
   int sdf_flip_blend = 0;

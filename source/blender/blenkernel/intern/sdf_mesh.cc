@@ -680,6 +680,12 @@ SDFMeshBuildResult BKE_sdf_mesh_build(SDF *sdf,
   sdf->mesh_normal_mode = SDF_MESH_NORMAL_SMOOTH;
   sdf->mesh_flags = SDF_MESH_FLAG_CLOSED | SDF_MESH_FLAG_ORIENTED |
                     SDF_MESH_FLAG_THREADED_BVH | SDF_MESH_FLAG_CORNER_NORMALS;
+  /* Fully flat meshes (every face sharp) blend with the geometric gradient
+   * in CSG blend zones (corner normals jump across faces there); anything
+   * with smooth shading blends its corner normals directly. */
+  if (mesh->normals_domain(true) != bke::MeshNormalDomain::Face) {
+    sdf->mesh_flags |= SDF_MESH_FLAG_SMOOTH_NORMALS;
+  }
   sdf->blend_type = SDF_BLEND_LINEAR;
   sdf->blend = 0.0f;
   sdf->mesh_data_version++;
