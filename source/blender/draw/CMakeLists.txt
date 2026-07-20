@@ -108,6 +108,12 @@ set(SRC
   engines/sdf/sdf_engine.cc
   engines/sdf/sdf_lp_engine.cc
   engines/sdf/sdf_bvh.cc
+  engines/sdf/meshing/dcsdd_bvh.cc
+  engines/sdf/meshing/dcsdd_cell.cc
+  engines/sdf/meshing/dcsdd_contouring.cc
+  engines/sdf/meshing/dcsdd_hermite.cc
+  engines/sdf/meshing/dcsdd_refine.cc
+  engines/sdf/meshing/dcsdd_sdf.cc
   engines/external/external_engine.cc
   # gpencil draw engine sources removed (not needed for SDF)
   # but shader files kept for overlay system dependencies
@@ -232,6 +238,12 @@ set(SRC
   engines/sdf/sdf_engine_api.hh
   engines/sdf/sdf_engine_internal.hh
   engines/sdf/sdf_bvh.hh
+  engines/sdf/meshing/dcsdd_bvh.hh
+  engines/sdf/meshing/dcsdd_cell.hh
+  engines/sdf/meshing/dcsdd_contouring.hh
+  engines/sdf/meshing/dcsdd_hermite.hh
+  engines/sdf/meshing/dcsdd_refine.hh
+  engines/sdf/meshing/dcsdd_sdf.hh
   engines/sdf/sdf_meshing.hh
   engines/sdf/sdf_private.hh
   engines/sdf/sdf_shader_shared.hh
@@ -261,6 +273,7 @@ set(LIB
   PRIVATE bf::render
   PRIVATE bf::windowmanager
   PRIVATE bf::intern::atomic
+  PRIVATE bf::dependencies::eigen
   PRIVATE bf::dependencies::optional::opensubdiv
 )
 

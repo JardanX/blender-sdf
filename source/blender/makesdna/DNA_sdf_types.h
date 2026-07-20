@@ -249,7 +249,15 @@ typedef struct SDF {
   char _pad5[4] = {};
 
   float torus_angle = 6.2831853f;
-  char _pad4[4] = {};
+
+  float cylinder_edge_top = 0.0f;
+  float cylinder_edge_bottom = 0.0f;
+  float cylinder_taper = 0.0f;
+  int cylinder_edge_mode = 0;
+
+  float cone_edge_top = 0.0f;
+  float cone_edge_bottom = 0.0f;
+  char _pad_cyl_cone[4] = {};
 
   /* Text primitive (SDF_TYPE_TEXT). Persistent text state mirroring the font
    * subset of #Curve, so edit-mode can reuse #EditFont (see BKE_sdf_text.hh).
@@ -275,8 +283,8 @@ typedef struct SDF {
   /* Corner rounding radius applied at every glyph vertex. */
   float text_corner = 0.0f;
   struct CharInfo text_curinfo; /* Style for newly typed characters. */
-  char text_align_x = 0;        /* CU_ALIGN_X_* */
-  char text_align_y = 0;        /* CU_ALIGN_Y_* */
+  char text_align_x = CU_ALIGN_X_MIDDLE; /* CU_ALIGN_X_* */
+  char text_align_y = CU_ALIGN_Y_CENTER; /* CU_ALIGN_Y_* */
   char _pad_text[6] = {};
 
   int sdf_index = 0;

@@ -29,6 +29,19 @@ How it works:
   winding solves roots per arc — skipping it is the big win), and each edge additionally gets a
   free AABB test computed from its own data. Straight edges, corner fillets and arc control
   points are all accounted for in the header padding, so culling is exact, not approximate.
+- For large edge counts (whole paragraphs, >= 24 edges) the object serializes as a 2D edge BVH
+  (uber-header + internal nodes with padded AABBs and child indices, edges as leaves) plus a
+  baked 64x64 coarse signed-distance grid. Cells beyond the silhouette + bevel/edge/outline/
+  blend/clearance reach return a conservative O(1) value (never overestimating, never flipping
+  sign — the visible surface and everything near it always uses the exact BVH traversal), which
+  keeps per-query cost constant regardless of text length. The same pruning applies per node in
+  both engines.
+- The quadratic-bezier distance is computed with an exact bracketed-bisection solver instead of
+  the closed-form cube-root path, which was NaN-prone on the bezier evolute (noise around glyph
+  curves).
+- Fixed a latent bug in the pre-existing `toggleBezierRoot` (and its LP twin): bezier crossings
+  were counted with the opposite sign to straight-edge crossings, scrambling the winding of any
+  mixed line/arc contour (broken fill at thickness 0).
 - SDF properties: font (any VFont), thickness (outline stroke, `abs(d) - t/2` in the shader),
   corner bevel (rounding at original font knots between straight edges — arc joints are already
   smooth), top/bottom edge bevel, Z taper, extrusion depth (`size[2]`), plus the usual SDF bevel
@@ -3373,3 +3386,37 @@ mode switches, and no LP shader takes minutes anywhere.
 | `draw/engines/sdf/sdf_lp_engine.cc` | `draw_lp_resolve()` → `draw_lp_debug()` (runs after the shared normal pass, debug modes only); all modes run the classic color resolve; shader list static again with `SH_LP_DEBUG_COMP`. |
 | `draw/engines/sdf/sdf_engine.cc`, `sdf_engine_internal.hh` | `SH_LP_RESOLVE_COMP` → `SH_LP_DEBUG_COMP` (enum + shader name table). |
 | `draw/CMakeLists.txt`, `draw/engines/sdf/shaders/CMakeLists.txt` | Shader lists updated (also fixed the stale `sdf_lp_trace_comp.glsl` entry from the march/resolve split). |
+
+## Smooth Upscale Toggle → Preferences + LP Adaptive Resolution (2026-07-20)
+
+Moved the bilinear-filtering toggle from per-viewport shading settings (`View3DShading.sdf_smooth_upscale`) to global user preferences (`UserDef.sdf_smooth_upscale`) under **Preferences > Viewport > Quality** as "Use SDF Bilinear Filtering". The engine reads `U.sdf_smooth_upscale` instead of `s.sdf_smooth_upscale`.
+
+Also exposed `sdf_resolution_scale` and `sdf_adaptive_resolution` to the Lipschitz engine panel (previously hidden by the early return). `sdf_adaptive_precision` is intentionally not exposed to LP — the LP engine handles precision independently.
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_view3d_types.h` | Removed `sdf_smooth_upscale` field (restored padding) |
+| `makesdna/DNA_userdef_types.h` | Added `sdf_smooth_upscale` char field next to `sdf_fxaa` |
+| `makesrna/intern/rna_space.cc` | Removed `sdf_smooth_upscale` RNA property |
+| `makesrna/intern/rna_userdef.cc` | Added `sdf_smooth_upscale` RNA property as "Use SDF Bilinear Filtering" |
+| `scripts/startup/bl_ui/properties_render.py` | Removed `sdf_smooth_upscale` from classic panel; added `sdf_resolution_scale` + `sdf_adaptive_resolution` to LP panel |
+| `scripts/startup/bl_ui/space_userpref.py` | Added `sdf_smooth_upscale` checkbox to Viewport > Quality panel |
+| `draw/engines/sdf/sdf_engine_internal.hh` | `smooth_upscale_` reads from `U.sdf_smooth_upscale` instead of `s.sdf_smooth_upscale` |
+
+## Cylinder + Cone Edge Bevel and Taper (2026-07-20)
+
+Added edge bevel (top/bottom) and taper support for CYLINDER and CONE primitives, following the same pattern as the BOX edge chamfer system. The cylinder gets `cylinder_edge_top`, `cylinder_edge_bottom`, `cylinder_taper`, and `cylinder_edge_mode`. The cone gets `cone_edge_top` and `cone_edge_bottom` (taper is intrinsic to the cone frustum shape).
+
+GPU data is packed into the existing `box_edges`/`box_modes` fields on `SDFObjectGPU`, so no GPU struct changes were needed. New GLSL functions `sdAdvancedCylinder` and `sdAdvancedConeFrustum` mirror the same edge-blend math as `sdAdvancedBox`.
+
+| File | Change |
+|------|--------|
+| `makesdna/DNA_sdf_types.h` | Added `cylinder_edge_top`, `cylinder_edge_bottom`, `cylinder_taper`, `cylinder_edge_mode`, `cone_edge_top`, `cone_edge_bottom` |
+| `makesdna/DNA_sdf_defaults.h` | Defaults for the new fields |
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | Added `sdAdvancedCylinder()` and `sdAdvancedConeFrustum()`; updated dispatch for CYLINDER and CONE to check and use advanced paths |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | Added `lp_sd_advanced_cylinder()` and `lp_sd_advanced_cone_frustum()`; updated dispatch |
+| `draw/engines/sdf/shaders/sdf_grad_lib.glsl` | CYLINDER/CONE gradient fallback to finite-difference when advanced params present |
+| `draw/engines/sdf/sdf_engine_internal.hh` | GPU data packing for cylinder/cone edge/taper into `box_edges`/`box_modes` |
+| `draw/engines/sdf/sdf_cpu_eval.hh` | CPU eval path with advanced cylinder/cone support |
+| `makesrna/intern/rna_sdf.cc` | RNA properties for cylinder and cone edge bevel/taper |
+| `scripts/startup/bl_ui/properties_data_sdf.py` | Added `draw_cylinder()`/`draw_cone()` panels; added CYLINDER/CONE to Property panel poll |

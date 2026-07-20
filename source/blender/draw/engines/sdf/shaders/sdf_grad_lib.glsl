@@ -669,9 +669,27 @@ float4 evalPrimitiveGrad(float3 local_pos, SDFObjectGPU obj, float ray_epsilon)
          ? sdgSphere(local_pos, r.x) : sdgEllipsoid(local_pos, r);
   }
   else if (obj.sdf_type == SDF_GPU_TYPE_CYLINDER) {
+    if ((obj.box_edges.x + obj.box_edges.y + obj.box_edges.z + obj.box_edges.w) > 0.001f) {
+      float eps = 0.0005f;
+      float dx = evalPrimitiveOnly(obj, local_pos + float3(eps, 0.0f, 0.0f));
+      float dy = evalPrimitiveOnly(obj, local_pos + float3(0.0f, eps, 0.0f));
+      float dz = evalPrimitiveOnly(obj, local_pos + float3(0.0f, 0.0f, eps));
+      float3 g = float3(dx - actual_dist, dy - actual_dist, dz - actual_dist) / eps;
+      float gl = max(length(g), 1e-8f);
+      return float4(actual_dist, g / gl);
+    }
     dg = sdgCylinder(local_pos, r);
   }
   else if (obj.sdf_type == SDF_GPU_TYPE_CONE) {
+    if ((obj.box_edges.x + obj.box_edges.y) > 0.001f) {
+      float eps = 0.0005f;
+      float dx = evalPrimitiveOnly(obj, local_pos + float3(eps, 0.0f, 0.0f));
+      float dy = evalPrimitiveOnly(obj, local_pos + float3(0.0f, eps, 0.0f));
+      float dz = evalPrimitiveOnly(obj, local_pos + float3(0.0f, 0.0f, eps));
+      float3 g = float3(dx - actual_dist, dy - actual_dist, dz - actual_dist) / eps;
+      float gl = max(length(g), 1e-8f);
+      return float4(actual_dist, g / gl);
+    }
     dg = sdgConeFrustum(local_pos, r.x, r.z, r.y);
   }
   else if (obj.sdf_type == SDF_GPU_TYPE_CAPSULE) {

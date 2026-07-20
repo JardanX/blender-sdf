@@ -607,7 +607,7 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         sdf = context.sdf
-        return sdf and sdf.sdf_type in ('BOX', 'NGON', 'TORUS', 'POLYGON')
+        return sdf and sdf.sdf_type in ('BOX', 'CYLINDER', 'CONE', 'NGON', 'TORUS', 'POLYGON')
 
     def draw(self, context):
         layout = self.layout
@@ -619,6 +619,10 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             self.draw_torus(layout, sdf)
         elif sdf.sdf_type == 'POLYGON':
             self.draw_polygon(layout, sdf)
+        elif sdf.sdf_type == 'CYLINDER':
+            self.draw_cylinder(layout, sdf)
+        elif sdf.sdf_type == 'CONE':
+            self.draw_cone(layout, sdf)
         else:
             self.draw_box(layout, sdf)
 
@@ -658,6 +662,32 @@ class DATA_PT_sdf_property(SDFButtonsPanel, Panel):
             row = layout.row(align=True)
             row.prop(sdf, "box_corner_mode", text="Corners")
             row.prop(sdf, "box_edge_mode", text="Edges")
+
+    @staticmethod
+    def draw_cylinder(layout, sdf):
+        layout.label(text="Edge Chamfer")
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(sdf, "cylinder_edge_top", text="Top")
+        row.prop(sdf, "cylinder_edge_bottom", text="Bottom")
+
+        layout.separator()
+
+        layout.prop(sdf, "cylinder_taper")
+
+        has_shape = (sdf.cylinder_edge_top + sdf.cylinder_edge_bottom
+                     + abs(sdf.cylinder_taper)) > 0.001
+        if has_shape:
+            layout.separator()
+            layout.prop(sdf, "cylinder_edge_mode", text="Edges")
+
+    @staticmethod
+    def draw_cone(layout, sdf):
+        layout.label(text="Edge Chamfer")
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(sdf, "cone_edge_top", text="Top")
+        row.prop(sdf, "cone_edge_bottom", text="Bottom")
 
     @staticmethod
     def draw_torus(layout, sdf):

@@ -1196,7 +1196,8 @@ struct UserDef {
   char preferences_display_type =
       USER_TEMP_SPACE_DISPLAY_WINDOW; /* eUserpref_TempSpaceDisplayType */
   char sdf_fxaa = 0;
-  char _pad18[6] = {};
+  char sdf_smooth_upscale = 1;
+  char _pad18[5] = {};
 
   short sequencer_proxy_setup = USER_SEQ_PROXY_SETUP_AUTOMATIC; /* eUserpref_SeqProxySetup */
   short _pad1 = {};

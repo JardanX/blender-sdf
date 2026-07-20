@@ -386,14 +386,24 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
           /* CPU eval doesn't support polygon — use polygon point bounds directly. */
           float3 mn(1e30f), mx(-1e30f);
           if (obj.polygon_point_count > 0) {
-            for (int pi = 0; pi < obj.polygon_point_count; pi++) {
-              int idx = obj.polygon_point_start + pi;
-              if (idx >= 0 && idx < s_polygon_pts_count) {
-                float2 vi(s_polygon_pts_cpu[idx].vi_edge.x, s_polygon_pts_cpu[idx].vi_edge.y);
-                mn.x = std::min(mn.x, vi.x);
-                mn.y = std::min(mn.y, vi.y);
-                mx.x = std::max(mx.x, vi.x);
-                mx.y = std::max(mx.y, vi.y);
+            if (s_polygon_pts_cpu[obj.polygon_point_start].arc_bounds.w <= -2.5f) {
+              /* BVH mode: the root node holds the padded 2D bounds. */
+              int root = int(s_polygon_pts_cpu[obj.polygon_point_start].arc_data.x);
+              mn.x = s_polygon_pts_cpu[root].vi_edge.x;
+              mn.y = s_polygon_pts_cpu[root].vi_edge.y;
+              mx.x = s_polygon_pts_cpu[root].arc_data.x;
+              mx.y = s_polygon_pts_cpu[root].arc_data.y;
+            }
+            else {
+              for (int pi = 0; pi < obj.polygon_point_count; pi++) {
+                int idx = obj.polygon_point_start + pi;
+                if (idx >= 0 && idx < s_polygon_pts_count) {
+                  float2 vi(s_polygon_pts_cpu[idx].vi_edge.x, s_polygon_pts_cpu[idx].vi_edge.y);
+                  mn.x = std::min(mn.x, vi.x);
+                  mn.y = std::min(mn.y, vi.y);
+                  mx.x = std::max(mx.x, vi.x);
+                  mx.y = std::max(mx.y, vi.y);
+                }
               }
             }
           }

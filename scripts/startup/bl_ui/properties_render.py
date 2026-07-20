@@ -223,6 +223,9 @@ class RENDER_PT_proximity_raymarcher(Panel):
 
         if shading.sdf_engine_mode == 'LIPSCHITZ':
             col = layout.column()
+            col.prop(shading, "sdf_resolution_scale", slider=True)
+            col.prop(shading, "sdf_adaptive_resolution")
+            col.separator()
             col.prop(shading, "sdf_lp_enable_pruning")
             col.prop(shading, "sdf_lp_grid_level")
             col.prop(shading, "sdf_lp_aabb_auto")

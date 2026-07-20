@@ -293,6 +293,30 @@ bool sdfMeshLastWorldNormals(SDFObjectGPU obj,
     geometric_normal = float3(0.0f);
     return false;
   }
+  /* Near-surface hits only: the baked smooth normal is defined by the
+   * fine grid. When the last sample fell outside it (blend-zone hits,
+   * whose distance came from the coarse far grid or the box fallback)
+   * there is no baked normal — return false so the caller falls back to
+   * the field gradient (sdfAnalyticWorldNormals) like the analytic
+   * primitives, instead of shading with the constant out-of-grid
+   * fallback. */
+  int vi;
+  int stride_y;
+  int stride_z;
+  float3 f;
+  if (!sdfBakedGridCoords(obj.bake_origin.xyz,
+                          obj.bake_origin.w,
+                          obj.bake_grid.xyz,
+                          g_sdf_mesh_last_baked_pos,
+                          vi,
+                          stride_y,
+                          stride_z,
+                          f))
+  {
+    shading_normal = float3(0.0f);
+    geometric_normal = float3(0.0f);
+    return false;
+  }
   /* Baked volume: fetch the baked smooth normal at the last sampled
    * position and return it as both shading and geometric normal. */
   float3 n = sdfBakedNormal(obj.bake_origin.xyz,

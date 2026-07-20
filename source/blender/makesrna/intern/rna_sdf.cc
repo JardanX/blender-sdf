@@ -1054,6 +1054,52 @@ static void rna_def_sdf(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Height", "Cone half-height");
   RNA_def_property_update(prop, 0, "rna_SDF_update");
 
+  prop = RNA_def_property(srna, "cylinder_edge_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cylinder_edge_top");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Edge Top", "Top edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cylinder_edge_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cylinder_edge_bottom");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Edge Bottom", "Bottom edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cylinder_taper", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cylinder_taper");
+  RNA_def_property_range(prop, -1.0f, 1.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Taper", "Taper factor (positive tapers top, negative tapers bottom)");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cylinder_edge_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "cylinder_edge_mode");
+  RNA_def_property_enum_items(prop, rna_enum_sdf_box_mode_items);
+  RNA_def_property_ui_text(prop, "Edges", "Edge blend mode");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cone_edge_top", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cone_edge_top");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Edge Top", "Top edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
+  prop = RNA_def_property(srna, "cone_edge_bottom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cone_edge_bottom");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 1.0f, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Edge Bottom", "Bottom edge chamfer radius");
+  RNA_def_property_update(prop, 0, "rna_SDF_update");
+
   prop = RNA_def_property(srna, "capsule_radius", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_funcs(prop, "rna_SDF_capsule_radius_get", "rna_SDF_capsule_radius_set", nullptr);
   RNA_def_property_range(prop, 0.001f, FLT_MAX);

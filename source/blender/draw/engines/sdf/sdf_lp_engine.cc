@@ -442,6 +442,13 @@ class LpInstance : public SdfInstanceBase {
         prim.box_edges = obj.box_edges;
         prim.box_modes = obj.box_modes;
       }
+      if (obj.sdf_type == SDF_GPU_TYPE_POLYGON) {
+        /* box_corners.zw are unused by polygons: carry the blend/clearance
+         * reach for the coarse-grid slack (lp_sd_polygon_2d_bvh). */
+        float blend_reach = (obj.blend_type != 0) ? obj.blend : 0.0f;
+        prim.box_corners.z = math::max(blend_reach, obj.max_group_blend);
+        prim.box_corners.w = obj.clearance;
+      }
       prim.modifier_start = obj.modifier_start;
       prim.modifier_count = obj.modifier_count;
       prim.obj_index = i;

@@ -415,6 +415,13 @@ void main()
     bool obj_normal_valid;
     if (obj.sdf_type == SDF_GPU_TYPE_MESH && sdfMeshModifiersPreserveNormal(obj)) {
       obj_normal_valid = sdfMeshLastWorldNormals(obj, obj_normal, obj_gradient);
+      if (!obj_normal_valid && (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0) {
+        /* Blend-zone hit (outside the fine bake grid): no baked smooth
+         * normal — use the field gradient (the widened FD stencil below
+         * smooths the coarse grid's trilinear staircase), so CSG normal
+         * blending gets a real gradient. */
+        obj_normal_valid = sdfAnalyticWorldNormals(obj, eval_pos, obj_normal, obj_gradient);
+      }
     }
     else if (obj.sdf_type != SDF_GPU_TYPE_MESH) {
       obj_normal_valid = sdfAnalyticWorldNormals(obj, eval_pos, obj_normal, obj_gradient);
