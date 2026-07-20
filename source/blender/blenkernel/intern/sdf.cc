@@ -9,9 +9,11 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_material_types.h"
+#include "DNA_curve_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_sdf_types.h"
+#include "DNA_vfont_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
@@ -30,6 +32,7 @@
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
 
 #include "GPU_batch.hh"
 
@@ -76,9 +79,17 @@ static void sdf_copy_data(Main *bmain,
   sdf_dst->mesh_corner_colors = MEM_dupalloc(sdf_src->mesh_corner_colors);
   BLI_duplicatelist(&sdf_dst->modifiers, &sdf_src->modifiers);
   BLI_duplicatelist(&sdf_dst->polygon_points, &sdf_src->polygon_points);
+  sdf_dst->text = MEM_dupalloc(sdf_src->text);
+  sdf_dst->text_strinfo = MEM_dupalloc(sdf_src->text_strinfo);
   sdf_dst->runtime = new bke::SDFRuntime();
   sdf_dst->runtime->proxy_batch = nullptr;
   sdf_dst->runtime->proxy_hash = 0;
+  /* Share the edit-mode text store like #Curve::editfont (owned by the
+   * original, see BKE_sdf_text.hh). */
+  if (sdf_src->runtime) {
+    sdf_dst->runtime->text_curve = sdf_src->runtime->text_curve;
+    sdf_dst->runtime->text_curve_owned = false;
+  }
 
   if (bmain) {
     sdf_dst->sdf_index = BKE_sdf_next_index(bmain);
@@ -97,8 +108,14 @@ static void sdf_free_data(ID *id)
   sdf_array_free(sdf->mesh_bvh_nodes);
   sdf_array_free(sdf->mesh_corner_colors);
   MEM_SAFE_DELETE(sdf->mat);
-  if (sdf->runtime && sdf->runtime->proxy_batch) {
-    GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
+  MEM_SAFE_DELETE(sdf->text);
+  MEM_SAFE_DELETE(sdf->text_strinfo);
+  if (sdf->runtime) {
+    BKE_sdf_text_edit_curve_free(sdf);
+    delete sdf->runtime->text_cache;
+    if (sdf->runtime->proxy_batch) {
+      GPU_batch_discard(static_cast<gpu::Batch *>(sdf->runtime->proxy_batch));
+    }
   }
   delete sdf->runtime;
 }
@@ -112,6 +129,7 @@ static void sdf_foreach_id(ID *id, LibraryForeachIDData *data)
   for (SDFModifier *mod = static_cast<SDFModifier *>(sdf->modifiers.first); mod; mod = mod->next) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mod->mirror_ob, IDWALK_CB_NOP);
   }
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, sdf->text_font, IDWALK_CB_USER);
 }
 
 static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
@@ -131,6 +149,12 @@ static void sdf_blend_write(BlendWriter *writer, ID *id, const void *id_address)
   }
   writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFModifier>(), &sdf->modifiers);
   writer->write_struct_list_by_id(dna::sdna_struct_id_get<SDFPolygonPoint>(), &sdf->polygon_points);
+  if (sdf->sdf_type == SDF_TYPE_TEXT) {
+    BLO_write_string(writer, sdf->text);
+    if (sdf->text_strinfo) {
+      writer->write_struct_array(sdf->text_len_char32 + 1, sdf->text_strinfo);
+    }
+  }
 }
 
 static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
@@ -151,6 +175,23 @@ static void sdf_blend_read_data(BlendDataReader *reader, ID *id)
   }
   BLO_read_struct_list(reader, SDFModifier, &sdf->modifiers);
   BLO_read_struct_list(reader, SDFPolygonPoint, &sdf->polygon_points);
+
+  if (sdf->sdf_type == SDF_TYPE_TEXT) {
+    BLO_read_string(reader, &sdf->text);
+    CLAMP(sdf->text_len_char32, 0, INT_MAX - 4);
+    BLO_read_struct_array(reader, CharInfo, sdf->text_len_char32 + 1, &sdf->text_strinfo);
+    if (sdf->text == nullptr) {
+      sdf->text_len = 0;
+      sdf->text_len_char32 = 0;
+    }
+    else if (sdf->text_len == 0) {
+      sdf->text_len = strlen(sdf->text);
+    }
+    if (sdf->text_strinfo == nullptr) {
+      sdf->text_strinfo = MEM_new_array<CharInfo>(sdf->text_len_char32 + 1,
+                                                         "sdf text strinfo");
+    }
+  }
 
   if (sdf->mesh_bvh_node_count > 0 && !BKE_sdf_mesh_bvh_make_stackless(sdf)) {
     BKE_sdf_mesh_clear(sdf);

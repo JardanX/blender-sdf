@@ -58,6 +58,21 @@
     .polygon_is_line = 0, \
     .polygon_line_thickness = 0.1f, \
     .torus_angle = ((float)M_PI * 2.0f), \
+    .text_len = 0, \
+    .text_len_char32 = 0, \
+    .text_pos = 0, \
+    .text_selstart = 0, \
+    .text_selend = 0, \
+    .text_size = 1.0f, \
+    .text_spacing = 1.0f, \
+    .text_linedist = 1.0f, \
+    .text_shear = 0.0f, \
+    .text_xof = 0.0f, \
+    .text_yof = 0.0f, \
+    .text_thickness = 0.0f, \
+    .text_corner = 0.0f, \
+    .text_align_x = 0, \
+    .text_align_y = 0, \
     .sdf_index = 0, \
   }
 

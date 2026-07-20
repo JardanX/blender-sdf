@@ -10,6 +10,7 @@
 #pragma once
 
 #include "DNA_ID.h"
+#include "DNA_curve_types.h"
 #include "DNA_defs.h"
 
 #ifdef __cplusplus
@@ -39,6 +40,9 @@ typedef enum eSDFType {
   SDF_TYPE_NGON = 6,
   SDF_TYPE_POLYGON = 7,
   SDF_TYPE_MESH = 8,
+  /* Analytic text: glyph outlines (from #VFont via the Curve text layout)
+   * evaluated through the polygon SDF path. Editable like a text object. */
+  SDF_TYPE_TEXT = 9,
   SDF_TYPE_GROUP = 100,
 } eSDFType;
 
@@ -246,6 +250,34 @@ typedef struct SDF {
 
   float torus_angle = 6.2831853f;
   char _pad4[4] = {};
+
+  /* Text primitive (SDF_TYPE_TEXT). Persistent text state mirroring the font
+   * subset of #Curve, so edit-mode can reuse #EditFont (see BKE_sdf_text.hh).
+   * Top/bottom edge bevel, taper and edge mode reuse the polygon_* fields;
+   * extrusion depth is size[2]. */
+  char *text = nullptr;
+  struct CharInfo *text_strinfo = nullptr;
+  struct VFont *text_font = nullptr;
+  int text_len = 0;        /* UTF-8 bytes (excluding terminator). */
+  int text_len_char32 = 0; /* Code-point count. */
+  int text_pos = 0;        /* Cursor position (edit-mode storage). */
+  int text_selstart = 0;
+  int text_selend = 0;
+  char _pad_text0[4] = {};
+  float text_size = 1.0f;     /* Font size (#Curve::fsize). */
+  float text_spacing = 1.0f;  /* Character spacing factor. */
+  float text_linedist = 1.0f; /* Line spacing factor. */
+  float text_shear = 0.0f;    /* Italic shear. */
+  float text_xof = 0.0f;
+  float text_yof = 0.0f;
+  /* 0 = filled glyphs, >0 = outline stroke width (analytic, abs(d)-t/2). */
+  float text_thickness = 0.0f;
+  /* Corner rounding radius applied at every glyph vertex. */
+  float text_corner = 0.0f;
+  struct CharInfo text_curinfo; /* Style for newly typed characters. */
+  char text_align_x = 0;        /* CU_ALIGN_X_* */
+  char text_align_y = 0;        /* CU_ALIGN_Y_* */
+  char _pad_text[6] = {};
 
   int sdf_index = 0;
   char _pad_sg[4] = {};

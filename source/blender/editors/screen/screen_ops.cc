@@ -62,6 +62,7 @@
 #include "ED_anim_api.hh"
 #include "ED_armature.hh"
 #include "ED_buttons.hh"
+#include "ED_curve.hh"
 #include "ED_fileselect.hh"
 #include "ED_image.hh"
 #include "ED_keyframes_keylist.hh"
@@ -730,6 +731,13 @@ bool ED_operator_editfont(bContext *C)
   Object *obedit = CTX_data_edit_object(C);
   if (obedit && obedit->type == OB_FONT) {
     if ((id_cast<Curve *>(obedit->data))->editfont) {
+      return true;
+    }
+  }
+  else if (obedit && obedit->type == OB_SDF) {
+    /* SDF text primitive edits via a runtime Curve (BKE_sdf_text.hh). */
+    const Curve *cu = ED_curve_editfont_curve_get(obedit);
+    if (cu && cu->editfont) {
       return true;
     }
   }

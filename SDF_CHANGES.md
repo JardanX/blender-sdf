@@ -3,6 +3,56 @@
 > What we changed and why, so you don't have to dig through 30+ files.
 > Base: Blender `v5.0-release` tag.
 
+## SDF Text Primitive (SDF_TYPE_TEXT)
+
+Added an analytic text SDF: the glyph outlines of a text body are evaluated as an exact signed
+distance field — no rasterization, no voxel grid. Text is added via **Add > SDF Text** (below the
+SDF submenu, separate from the primitives) and edited live in the viewport with **Tab**, exactly
+like a regular text object (typing, cursor, selection, undo).
+
+How it works:
+
+- Text state (UTF-8 body, per-char info, font, size, spacing, alignment) lives on the `SDF`
+  data-block. At draw sync, Blender's own text layout (`BKE_vfont_to_curve_nubase`) produces the
+  glyph Bezier outlines, which are converted to straight + **exact quadratic-arc edges**
+  (degree-elevated TrueType conics are detected exactly; true cubics are fit with quadratic arcs
+  by endpoint-tangent intersection with recursive midpoint splitting). The result is cached on the
+  SDF runtime and only rebuilt when the text state changes — outlines are smooth analytic curves,
+  not polyline approximations.
+- The contours feed the existing polygon SDF SSBO path: edges close per-contour, so glyph holes
+  ('o', 'a', 'e', …) work through the non-zero winding rule. GPU evaluation is the analytic
+  polygon SDF (native quadratic-bezier edge support in `sdPolygon2D`/`sdPolygon2DRounded`) —
+  cost is one edge loop per glyph, no per-glyph objects, CSG/blending/modifiers compose as with
+  any other primitive.
+- Shader-side culling keeps close-ups fast: every contour carries a header entry with a padded
+  AABB and edge count, so whole glyph contours are skipped for both distance and winding (bezier
+  winding solves roots per arc — skipping it is the big win), and each edge additionally gets a
+  free AABB test computed from its own data. Straight edges, corner fillets and arc control
+  points are all accounted for in the header padding, so culling is exact, not approximate.
+- SDF properties: font (any VFont), thickness (outline stroke, `abs(d) - t/2` in the shader),
+  corner bevel (rounding at original font knots between straight edges — arc joints are already
+  smooth), top/bottom edge bevel, Z taper, extrusion depth (`size[2]`), plus the usual SDF bevel
+  rounding.
+- Edit mode reuses Blender's `EditFont` machinery unchanged: a runtime `Curve` (never in Main)
+  mirrors the SDF text state while editing; the text is stored back to the SDF data-block on
+  exit/flush. Cursor and selection overlays are shared with text objects.
+
+| File | Change |
+|------|--------|
+| `DNA_sdf_types.h`, `DNA_sdf_defaults.h` | `SDF_TYPE_TEXT`, persistent text state fields. |
+| `BKE_sdf_text.hh`, `intern/sdf_text.cc` | Text layout/tessellation to contours, runtime edit-curve lifecycle. |
+| `intern/sdf.cc` | Copy/free/foreach-id/blend read-write for the text state. |
+| `sdf_engine_internal.hh` | Multi-contour polygon SSBO ingestion, text sync + AABBs. |
+| `sdf_lib.glsl`, `sdf_lp_common.glsl` | Outline-stroke (thickness) term in the polygon eval. |
+| `editfont.cc`, `editfont_undo.cc`, `vfont_curve.cc`, `object_edit.cc`, `object_modes.cc`, `object.cc`, `context.cc`, `screen_ops.cc` | EditFont/keymap/undo/mode plumbing reused for SDF text. |
+| `overlay_text.hh`, `overlay_instance.cc`, `overlay_sdf.hh`, `draw_handle.hh`, `view3d_select.cc`, `outliner_draw.cc` | Cursor/selection overlay, bounds, icons. |
+| `rna_sdf.cc`, `object_sdf.cc`, `object_ops.cc`, `space_view3d.py`, `properties_data_sdf.py` | RNA properties, Add > SDF Text operator, properties panel. |
+
+Known limitations: single text box (no text-frame editing), CPU evaluator falls back to a box
+(like the polygon primitive), per-character font styles (bold/italic faces) are not exposed.
+
+---
+
 ## CSG Color, Clearance, and Paint
 
 Push and Avoid retain their physical blend controls while keeping hard color ownership. Their new

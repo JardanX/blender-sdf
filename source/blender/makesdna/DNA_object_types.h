@@ -756,14 +756,15 @@ struct ObHook {
         OB_ARMATURE, \
         OB_CURVES, \
         OB_POINTCLOUD, \
-        OB_GREASE_PENCIL))
+        OB_GREASE_PENCIL, \
+        OB_SDF))
 
 #define OB_TYPE_SUPPORT_PARVERT(_type) \
   (ELEM(_type, OB_MESH, OB_SURF, OB_CURVES_LEGACY, OB_LATTICE))
 
 /** Matches #OB_TYPE_SUPPORT_EDITMODE. */
 #define OB_DATA_SUPPORT_EDITMODE(_type) \
-  (ELEM(_type, ID_ME, ID_CU_LEGACY, ID_MB, ID_LT, ID_AR, ID_CV, ID_GP))
+  (ELEM(_type, ID_ME, ID_CU_LEGACY, ID_MB, ID_LT, ID_AR, ID_CV, ID_GP, ID_SF))
 
 /* is this ID type used as object data */
 #define OB_DATA_SUPPORT_ID(_id_type) \

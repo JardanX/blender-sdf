@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <functional>
 
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -26,6 +27,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_sdf.hh"
+#include "BKE_sdf_text.hh"
 #include "BKE_studiolight.h"
 
 #include "DEG_depsgraph_query.hh"
@@ -434,7 +436,7 @@ class SdfInstanceBase : public DrawEngine {
    * origin + (vec3(i,j,k)+0.5)*voxel_size in local UNSCALED mesh space.
    * Shared by both engines (the GLSL fast path lives in sdf_mesh_lib.glsl and
    * sdf_lp_common.glsl, gated on SDF_LP_MESH_FLAG_BAKED). */
-  struct MeshBakeRecord {
+  struct MeshBakeGrid {
     int3 res = int3(0);
     /* First voxel index (same in all three pools). */
     int base = 0;
@@ -444,11 +446,40 @@ class SdfInstanceBase : public DrawEngine {
     float voxel_size = 0.0f;
     /* Narrow band half-width (4 * voxel_size). */
     float band = 0.0f;
-    /* Payload revision the bake was produced from. */
-    uint64_t revision = 0;
-    /* Object sdf_voxel_resolution setting the grid was built with. */
-    int voxel_resolution = -1;
+    /* Coarse far-field level (fp32, unclamped out to the blend reach;
+     * cres.x == 0 when the scene has no blends). */
+    int3 cres = int3(0);
+    int cbase = 0;
+    float3 corigin = float3(0.0f);
+    float cvoxel = 0.0f;
+    /* Bake completion of the two levels. */
     bool ready = false;
+    bool cready = false;
+  };
+
+  struct MeshBakeRecord {
+    /* The grid the runtime samples. Stays valid while a rebake is in flight
+     * — mesh objects never disappear during rebakes; the stale shape renders
+     * until the new bake flips in. */
+    MeshBakeGrid live;
+    /* Payload revision / object sdf_voxel_resolution setting / scene blend
+     * reach the live grid was produced from. */
+    uint64_t revision = 0;
+    int voxel_resolution = -1;
+    float reach = 0.0f;
+    /* The grid being baked (work_active while incomplete). Flips into
+     * `live` when both levels complete. Always baked into FRESH pool
+     * ranges — never in place, so the live grid is never corrupted
+     * mid-bake. */
+    MeshBakeGrid work;
+    uint64_t w_revision = 0;
+    int w_setting = -1;
+    float w_reach = 0.0f;
+    /* Progressive bake progress of the work grid (absolute z of the next
+     * unbaked slice per level). */
+    int next_z = 0;
+    int next_cz = 0;
+    bool work_active = false;
   };
 
   /* Keyed by the mesh payload key (payload pointer / SDF ID; same keys as
@@ -469,6 +500,39 @@ class SdfInstanceBase : public DrawEngine {
   const MeshBakeRecord *bake_record(const void *key) const
   {
     return bake_records_.lookup_ptr(key);
+  }
+
+  /* Set or clear the baked-volume fields of a mesh object from the current
+   * bake records. The flag is set whenever the record's LIVE grid is
+   * complete — the live grid stays valid while a rebake is in flight (the
+   * stale shape renders until the new bake flips in; mesh objects never
+   * disappear during rebakes). Only the very first bake of a payload leaves
+   * the object invisible. Returns true when the object changed. */
+  bool apply_baked_fields(SDFObjectGPU &gpu_obj, const void *key) const
+  {
+    const int old_flags = gpu_obj.mesh_settings.y;
+    const int4 old_grid = gpu_obj.bake_grid;
+    const int4 old_cgrid = gpu_obj.bake_coarse_grid;
+    gpu_obj.mesh_settings.y &= ~SDF_LP_MESH_FLAG_BAKED;
+    gpu_obj.bake_origin = float4(0.0f);
+    gpu_obj.bake_params = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    gpu_obj.bake_grid = int4(0);
+    gpu_obj.bake_coarse_origin = float4(0.0f);
+    gpu_obj.bake_coarse_grid = int4(0);
+    if (const MeshBakeRecord *rec = bake_records_.lookup_ptr(key)) {
+      if (rec->live.ready) {
+        gpu_obj.mesh_settings.y |= SDF_LP_MESH_FLAG_BAKED;
+        gpu_obj.bake_origin = float4(rec->live.origin, rec->live.voxel_size);
+        gpu_obj.bake_params = float4(rec->live.band, 0.0f, 0.0f, 0.0f);
+        gpu_obj.bake_grid = int4(rec->live.res, rec->live.base);
+        if (rec->live.cready && rec->live.cres.x > 0) {
+          gpu_obj.bake_coarse_origin = float4(rec->live.corigin, rec->live.cvoxel);
+          gpu_obj.bake_coarse_grid = int4(rec->live.cres, rec->live.cbase);
+        }
+      }
+    }
+    return gpu_obj.mesh_settings.y != old_flags || gpu_obj.bake_grid != old_grid ||
+           gpu_obj.bake_coarse_grid != old_cgrid;
   }
 
   Vector<SDFGroupGPU> groups_gpu_;
@@ -667,7 +731,12 @@ class SdfInstanceBase : public DrawEngine {
       copy_v4_v4(live_sdf.color, ob->color);
       live_sdf.sdf_index = ob->sdf_index;
       sdf_data = &live_sdf;
-      mesh_payload_key = snapshot.payload.get();
+      /* Bake record key: the ORIGINAL object — stable across depsgraph
+       * rebuilds. Keying by the payload pointer (as before) lost the bake
+       * record every time the payload was rebuilt (edit-mode entry/exit,
+       * modifier re-evaluation), making the mesh vanish until the fresh
+       * bake completed. */
+      mesh_payload_key = DEG_get_original(ob);
     }
     else if (ob->type == OB_SDF) {
       sdf_data = id_cast<const SDF *>(ob->data);
@@ -694,6 +763,16 @@ class SdfInstanceBase : public DrawEngine {
     if (sdf_data->sdf_type == SDF_TYPE_GROUP) {
       group_empties_.append(ob);
       return;
+    }
+
+    /* Text: tessellate glyph outlines once (runtime-cached); used for the
+     * AABB and the polygon SSBO ingestion below. Empty text renders nothing. */
+    const SDFTextContours *text_contours = nullptr;
+    if (sdf_data->sdf_type == SDF_TYPE_TEXT) {
+      text_contours = BKE_sdf_text_get_contours(ob);
+      if (text_contours == nullptr) {
+        return;
+      }
     }
 
     if (!frustum_valid_) {
@@ -848,25 +927,12 @@ class SdfInstanceBase : public DrawEngine {
       gpu_obj.mesh_bounds_max = float4(float3(sdf_data->mesh_bounds_max), 0.0f);
 
       /* Baked volume fast path (GPU-only; the CPU evaluator in
-       * sdf_cpu_eval.hh always stays analytic): when a ready bake record
-       * matches this payload's current revision AND voxel-resolution setting,
-       * flag the object and fill the baked grid fields. The revision/setting
-       * check doubles as a staleness guard: while a (re)bake is pending the
-       * object stays analytic this frame, and update_mesh_bakes() never
-       * reassigns the pool range of a record that passes this check, so the
-       * base uploaded here stays valid for the whole frame. When the flag is
-       * off the bake_* fields stay zeroed (gpu_obj is value-initialized). */
-      if (const MeshBakeRecord *rec = bake_records_.lookup_ptr(mesh_payload_key)) {
-        const int setting = std::clamp(ob->sdf_voxel_resolution, 0, 256);
-        if (rec->ready && rec->revision == bake_info.revision &&
-            rec->voxel_resolution == setting)
-        {
-          gpu_obj.mesh_settings.y |= SDF_LP_MESH_FLAG_BAKED;
-          gpu_obj.bake_origin = float4(rec->origin, rec->voxel_size);
-          gpu_obj.bake_params = float4(rec->band, 0.0f, 0.0f, 0.0f);
-          gpu_obj.bake_grid = int4(rec->res, rec->base);
-        }
-      }
+       * sdf_cpu_eval.hh always stays analytic): flag the object and fill the
+       * baked grid fields from the record's live grid. The live grid stays
+       * attached while a rebake is in flight; update_mesh_bakes() re-resolves
+       * these fields after any flip and re-uploads the object buffer, so the
+       * pool base uploaded here never goes stale mid-frame. */
+      apply_baked_fields(gpu_obj, mesh_payload_key);
     }
 
     /* Detect group parent early — needed for bevel accumulation and modifier propagation */
@@ -1006,6 +1072,15 @@ class SdfInstanceBase : public DrawEngine {
                                sdf_data->polygon_line_thickness * 0.5f :
                                0.0f;
           local_extent = float3(max_x + line_pad, max_y + line_pad, sz.z);
+          break;
+        }
+        case SDF_TYPE_TEXT: {
+          float ext_x = math::max(fabsf(text_contours->bounds_min.x),
+                                  fabsf(text_contours->bounds_max.x));
+          float ext_y = math::max(fabsf(text_contours->bounds_min.y),
+                                  fabsf(text_contours->bounds_max.y));
+          float stroke_pad = sdf_data->text_thickness * 0.5f + sdf_data->text_corner;
+          local_extent = float3(ext_x + stroke_pad, ext_y + stroke_pad, sz.z);
           break;
         }
         default:
@@ -1206,217 +1281,424 @@ class SdfInstanceBase : public DrawEngine {
                                  math::max(-ngon_taper, 0.0f));
       gpu_obj.box_modes = int4(0, sdf_data->ngon_edge_mode, sdf_data->ngon_sides, 0);
     }
-    else if (sdf_data->sdf_type == SDF_TYPE_POLYGON) {
+    else if (sdf_data->sdf_type == SDF_TYPE_POLYGON || sdf_data->sdf_type == SDF_TYPE_TEXT) {
+      const bool is_text = (sdf_data->sdf_type == SDF_TYPE_TEXT);
       float poly_taper = sdf_data->polygon_taper;
       gpu_obj.polygon_point_start = int(polygon_points_.size());
       gpu_obj.polygon_point_count = 0;
 
       /* Per-axis XY scale so S+X / S+Y stretch the polygon */
       float corner_scale = math::min(scale.x, scale.y);
-      Vector<float2> pts;
-      Vector<float> crn;
-      for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
-        pts.append(float2(pt->co[0] * scale.x, pt->co[1] * scale.y));
-        crn.append(pt->corner * corner_scale);
+
+      /* Closed contours with per-point corner radii and optional quadratic
+       * arc edges. The DNA polygon is a single straight-edge contour
+       * (optionally line-expanded); text contributes one contour per glyph
+       * loop with exact quadratic arcs (holes work via opposite winding). */
+      struct IngestContour {
+        Vector<float2> pts;
+        Vector<float2> ctrls;
+        Vector<char> is_arc;
+        Vector<float> crn;
+      };
+      Vector<IngestContour> contours;
+      if (is_text) {
+        for (const SDFTextContour &src : text_contours->contours) {
+          IngestContour ct;
+          const int n = int(src.points.size());
+          for (int i = 0; i < n; i++) {
+            ct.pts.append(float2(src.points[i].x * scale.x, src.points[i].y * scale.y));
+            ct.ctrls.append(float2(src.ctrls[i].x * scale.x, src.ctrls[i].y * scale.y));
+            ct.is_arc.append(src.is_arc[i]);
+            /* Corner rounding only at original font knots between two
+             * straight edges (arc joints are already smooth). */
+            const bool roundable = (src.is_knot[i] != 0) && (src.is_arc[i] == 0) &&
+                                   (src.is_arc[(i - 1 + n) % n] == 0);
+            ct.crn.append(roundable ? sdf_data->text_corner * corner_scale : 0.0f);
+          }
+          contours.append(std::move(ct));
+        }
       }
-      int pc = int(pts.size());
+      else {
+        IngestContour ct;
+        Vector<float2> &pts = ct.pts;
+        Vector<float> &crn = ct.crn;
+        for (const SDFPolygonPoint *pt = static_cast<const SDFPolygonPoint *>(sdf_data->polygon_points.first); pt; pt = pt->next) {
+          pts.append(float2(pt->co[0] * scale.x, pt->co[1] * scale.y));
+          crn.append(pt->corner * corner_scale);
+        }
+        int pc = int(pts.size());
 
-      /* Line mode: expand polyline into thick polygon */
-      if (sdf_data->polygon_is_line && pc >= 2) {
-        float half_t = sdf_data->polygon_line_thickness * 0.5f *
-                       math::min(scale.x, scale.y);
+        /* Line mode: expand polyline into thick polygon */
+        if (sdf_data->polygon_is_line && pc >= 2) {
+          float half_t = sdf_data->polygon_line_thickness * 0.5f *
+                         math::min(scale.x, scale.y);
 
-        Vector<float2> left_side(pc);
-        Vector<float2> right_side(pc);
-        Vector<float> left_crn(pc);
-        Vector<float> right_crn(pc);
+          Vector<float2> left_side(pc);
+          Vector<float2> right_side(pc);
+          Vector<float> left_crn(pc);
+          Vector<float> right_crn(pc);
 
-        for (int i = 0; i < pc; i++) {
-          float2 n_prev(0.0f), n_next(0.0f);
-          if (i > 0) {
-            float2 d = math::normalize(pts[i] - pts[i - 1]);
-            n_prev = float2(-d.y, d.x);
-          }
-          if (i < pc - 1) {
-            float2 d = math::normalize(pts[i + 1] - pts[i]);
-            n_next = float2(-d.y, d.x);
-          }
-
-          if (i == 0) {
-            left_side[i] = pts[i] + n_next * half_t;
-            right_side[i] = pts[i] - n_next * half_t;
-            left_crn[i] = 0.0f;
-            right_crn[i] = 0.0f;
-          }
-          else if (i == pc - 1) {
-            left_side[i] = pts[i] + n_prev * half_t;
-            right_side[i] = pts[i] - n_prev * half_t;
-            left_crn[i] = 0.0f;
-            right_crn[i] = 0.0f;
-          }
-          else {
-            /* Miter at interior vertex */
-            float2 miter = math::normalize(n_prev + n_next);
-            float dot_val = math::dot(miter, n_prev);
-            if (fabsf(dot_val) < 0.1f) {
-              dot_val = (dot_val >= 0.0f) ? 0.1f : -0.1f;
+          for (int i = 0; i < pc; i++) {
+            float2 n_prev(0.0f), n_next(0.0f);
+            if (i > 0) {
+              float2 d = math::normalize(pts[i] - pts[i - 1]);
+              n_prev = float2(-d.y, d.x);
             }
-            float miter_len = half_t / dot_val;
-            float max_miter = half_t * 3.0f;
-            miter_len = math::clamp(miter_len, -max_miter, max_miter);
+            if (i < pc - 1) {
+              float2 d = math::normalize(pts[i + 1] - pts[i]);
+              n_next = float2(-d.y, d.x);
+            }
 
-            left_side[i] = pts[i] + miter * miter_len;
-            right_side[i] = pts[i] - miter * miter_len;
-
-            /* Determine which side is outer/inner based on turn direction.
-               Left normal = (-d.y, d.x). For a left turn (cross > 0),
-               the outside of the curve is the RIGHT side (pts - normal). */
-            float2 d_prev = math::normalize(pts[i] - pts[i - 1]);
-            float2 d_next = math::normalize(pts[i + 1] - pts[i]);
-            float cross_val = d_prev.x * d_next.y - d_prev.y * d_next.x;
-
-            if (cross_val > 0.0f) {
-              left_crn[i] = math::max(crn[i] - half_t, 0.0f);
-              right_crn[i] = crn[i] + half_t;
+            if (i == 0) {
+              left_side[i] = pts[i] + n_next * half_t;
+              right_side[i] = pts[i] - n_next * half_t;
+              left_crn[i] = 0.0f;
+              right_crn[i] = 0.0f;
+            }
+            else if (i == pc - 1) {
+              left_side[i] = pts[i] + n_prev * half_t;
+              right_side[i] = pts[i] - n_prev * half_t;
+              left_crn[i] = 0.0f;
+              right_crn[i] = 0.0f;
             }
             else {
-              left_crn[i] = crn[i] + half_t;
-              right_crn[i] = math::max(crn[i] - half_t, 0.0f);
+              /* Miter at interior vertex */
+              float2 miter = math::normalize(n_prev + n_next);
+              float dot_val = math::dot(miter, n_prev);
+              if (fabsf(dot_val) < 0.1f) {
+                dot_val = (dot_val >= 0.0f) ? 0.1f : -0.1f;
+              }
+              float miter_len = half_t / dot_val;
+              float max_miter = half_t * 3.0f;
+              miter_len = math::clamp(miter_len, -max_miter, max_miter);
+
+              left_side[i] = pts[i] + miter * miter_len;
+              right_side[i] = pts[i] - miter * miter_len;
+
+              /* Determine which side is outer/inner based on turn direction.
+               Left normal = (-d.y, d.x). For a left turn (cross > 0),
+               the outside of the curve is the RIGHT side (pts - normal). */
+              float2 d_prev = math::normalize(pts[i] - pts[i - 1]);
+              float2 d_next = math::normalize(pts[i + 1] - pts[i]);
+              float cross_val = d_prev.x * d_next.y - d_prev.y * d_next.x;
+
+              if (cross_val > 0.0f) {
+                left_crn[i] = math::max(crn[i] - half_t, 0.0f);
+                right_crn[i] = crn[i] + half_t;
+              }
+              else {
+                left_crn[i] = crn[i] + half_t;
+                right_crn[i] = math::max(crn[i] - half_t, 0.0f);
+              }
             }
           }
+
+          /* Build expanded polygon: left forward, right backward */
+          Vector<float2> expanded_pts;
+          Vector<float> expanded_crn;
+          expanded_pts.reserve(2 * pc);
+          expanded_crn.reserve(2 * pc);
+
+          for (int i = 0; i < pc; i++) {
+            expanded_pts.append(left_side[i]);
+            expanded_crn.append(left_crn[i]);
+          }
+          for (int i = pc - 1; i >= 0; i--) {
+            expanded_pts.append(right_side[i]);
+            expanded_crn.append(right_crn[i]);
+          }
+
+          pts = std::move(expanded_pts);
+          crn = std::move(expanded_crn);
         }
 
-        /* Build expanded polygon: left forward, right backward */
-        Vector<float2> expanded_pts;
-        Vector<float> expanded_crn;
-        expanded_pts.reserve(2 * pc);
-        expanded_crn.reserve(2 * pc);
-
-        for (int i = 0; i < pc; i++) {
-          expanded_pts.append(left_side[i]);
-          expanded_crn.append(left_crn[i]);
-        }
-        for (int i = pc - 1; i >= 0; i--) {
-          expanded_pts.append(right_side[i]);
-          expanded_crn.append(right_crn[i]);
-        }
-
-        pts = std::move(expanded_pts);
-        crn = std::move(expanded_crn);
-        pc = int(pts.size());
+        ct.is_arc = Vector<char>(ct.pts.size(), char(0));
+        contours.append(std::move(ct));
       }
 
       float max_corner = 0.0f;
-      for (int i = 0; i < pc; i++) {
-        max_corner = math::max(max_corner, crn[i]);
-      }
 
-      /* Radius clamping pre-pass */
-      Vector<float> half_angles(pc);
-      Vector<float> tan_halfs(pc);
-      for (int i = 0; i < pc; i++) {
-        int ip = (i - 1 + pc) % pc;
-        int j = (i + 1) % pc;
-        float2 to_prev = math::normalize(pts[ip] - pts[i]);
-        float2 to_next = math::normalize(pts[j] - pts[i]);
-        float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
-        half_angles[i] = acosf(cos_theta) * 0.5f;
-        tan_halfs[i] = tanf(half_angles[i]);
-      }
+      /* Build each contour's GPU edges into a temp list, then serialize
+       * either flat (contour headers + edges, cheap for few edges) or as a
+       * 2D edge BVH (sub-linear for whole paragraphs) — see sdPolygon2D and
+       * sdPolygon2DBVH in sdf_lib.glsl. */
+      struct ContourEdges {
+        Vector<SDFPolygonPointGPU> edges;
+        Vector<float2> leaf_min;
+        Vector<float2> leaf_max;
+        float pad;
+      };
+      Vector<ContourEdges> built;
+      int total_edges = 0;
 
-      for (int i = 0; i < pc; i++) {
-        int j = (i + 1) % pc;
-        float edge_len = math::length(pts[j] - pts[i]);
-        if (edge_len < 1e-6f) {
+      for (IngestContour &ct : contours) {
+        Vector<float2> &pts = ct.pts;
+        Vector<float> &crn = ct.crn;
+        int pc = int(pts.size());
+        if (pc < 3) {
           continue;
         }
-        float t_i = (tan_halfs[i] > 1e-6f) ? crn[i] / tan_halfs[i] : 0.0f;
-        float t_j = (tan_halfs[j] > 1e-6f) ? crn[j] / tan_halfs[j] : 0.0f;
-        if (t_i + t_j > edge_len) {
-          float scale = edge_len / (t_i + t_j);
-          crn[i] *= scale;
-          crn[j] *= scale;
+
+        for (int i = 0; i < pc; i++) {
+          max_corner = math::max(max_corner, crn[i]);
         }
+
+        /* Radius clamping pre-pass */
+        Vector<float> half_angles(pc);
+        Vector<float> tan_halfs(pc);
+        for (int i = 0; i < pc; i++) {
+          int ip = (i - 1 + pc) % pc;
+          int j = (i + 1) % pc;
+          float2 to_prev = math::normalize(pts[ip] - pts[i]);
+          float2 to_next = math::normalize(pts[j] - pts[i]);
+          float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
+          half_angles[i] = acosf(cos_theta) * 0.5f;
+          tan_halfs[i] = tanf(half_angles[i]);
+        }
+
+        for (int i = 0; i < pc; i++) {
+          int j = (i + 1) % pc;
+          float edge_len = math::length(pts[j] - pts[i]);
+          if (edge_len < 1e-6f) {
+            continue;
+          }
+          float t_i = (tan_halfs[i] > 1e-6f) ? crn[i] / tan_halfs[i] : 0.0f;
+          float t_j = (tan_halfs[j] > 1e-6f) ? crn[j] / tan_halfs[j] : 0.0f;
+          if (t_i + t_j > edge_len) {
+            float scale = edge_len / (t_i + t_j);
+            crn[i] *= scale;
+            crn[j] *= scale;
+          }
+        }
+
+        /* Precompute per-edge data */
+        ContourEdges ce;
+        ce.pad = 1e-4f;
+        for (int i = 0; i < pc; i++) {
+          ce.pad = math::max(ce.pad, crn[i]);
+        }
+
+        for (int i = 0; i < pc; i++) {
+          int j = (i + 1) % pc;
+          int ip = (i - 1 + pc) % pc;
+
+          /* Quadratic arc edge (glyph outlines): vertex/control/end packing,
+           * corner arcs only exist between straight edges (crn == 0 here). */
+          if (ct.is_arc[i]) {
+            SDFPolygonPointGPU gpu_pt = {};
+            gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, ct.ctrls[i].x, ct.ctrls[i].y);
+            gpu_pt.arc_data = float4(pts[j].x, pts[j].y, 0.0f, 0.0f);
+            gpu_pt.arc_bounds = float4(1.0f, 0.0f, 0.0f, -1.0f);
+            ce.edges.append(gpu_pt);
+            float2 mn = math::min(pts[i], math::min(ct.ctrls[i], pts[j])) - float2(ce.pad);
+            float2 mx = math::max(pts[i], math::max(ct.ctrls[i], pts[j])) + float2(ce.pad);
+            ce.leaf_min.append(mn);
+            ce.leaf_max.append(mx);
+            continue;
+          }
+
+          float2 edge = pts[j] - pts[i];
+          float edge_len = math::length(edge);
+
+          SDFPolygonPointGPU gpu_pt = {};
+          gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, edge.x, edge.y);
+
+          float R_signed = 0.0f;
+          float2 C = pts[i];
+          float t_trim_start = 0.0f;
+          float t_trim_end = 1.0f;
+          float ang_mid = 0.0f;
+          float ang_half = 0.0f;
+
+          /* Recompute half-angle/tan for clamped radii */
+          float2 to_prev = math::normalize(pts[ip] - pts[i]);
+          float2 to_next = math::normalize(pts[j] - pts[i]);
+          float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
+          float half = acosf(cos_theta) * 0.5f;
+          float sin_half = sinf(half);
+          float tan_half = tanf(half);
+
+          if (crn[i] > 0.001f && pc >= 3 && sin_half > 0.01f && tan_half > 1e-6f) {
+            float2 bisector = math::normalize(to_prev + to_next);
+            float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
+
+            float inset_dist = crn[i] / sin_half;
+            C = pts[i] + bisector * inset_dist;
+
+            R_signed = (cross_val > 0.0f) ? -crn[i] : crn[i];
+
+            /* Trim start on this edge */
+            if (edge_len > 1e-6f) {
+              t_trim_start = crn[i] / (tan_half * edge_len);
+            }
+
+            /* Arc angular bounds */
+            float2 tangent_start = pts[i] + math::normalize(edge) * (crn[i] / tan_half);
+            float2 dir_start = math::normalize(tangent_start - C);
+            float2 tangent_prev_end = pts[i] + to_prev * (crn[i] / tan_half);
+            float2 dir_prev_end = math::normalize(tangent_prev_end - C);
+
+            float a1 = atan2f(dir_prev_end.y, dir_prev_end.x);
+            float a2 = atan2f(dir_start.y, dir_start.x);
+
+            float diff = a2 - a1;
+            diff -= 6.2831853f * floorf((diff + 3.1415927f) / 6.2831853f);
+            ang_mid = a1 + diff * 0.5f;
+            ang_half = fabsf(diff) * 0.5f;
+          }
+
+          /* Trim end on this edge (from next vertex's rounding) */
+          if (crn[j] > 0.001f && pc >= 3) {
+            float2 to_prev_j = math::normalize(pts[i] - pts[j]);
+            float2 to_next_j = math::normalize(pts[(j + 1) % pc] - pts[j]);
+            float cos_theta_j = math::clamp(math::dot(to_prev_j, to_next_j), -0.999f, 0.999f);
+            float tan_half_j = tanf(acosf(cos_theta_j) * 0.5f);
+            if (edge_len > 1e-6f && tan_half_j > 1e-6f) {
+              t_trim_end = 1.0f - crn[j] / (tan_half_j * edge_len);
+            }
+          }
+
+          gpu_pt.arc_data = float4(R_signed, C.x, C.y, t_trim_start);
+          gpu_pt.arc_bounds = float4(t_trim_end, ang_mid, ang_half, 0.0f);
+
+          ce.edges.append(gpu_pt);
+          float2 mn = math::min(pts[i], pts[j]) - float2(ce.pad);
+          float2 mx = math::max(pts[i], pts[j]) + float2(ce.pad);
+          ce.leaf_min.append(mn);
+          ce.leaf_max.append(mx);
+        }
+        total_edges += int(ce.edges.size());
+        built.append(std::move(ce));
       }
 
-      /* Precompute per-edge data */
-      for (int i = 0; i < pc; i++) {
-        int j = (i + 1) % pc;
-        int ip = (i - 1 + pc) % pc;
-
-        float2 edge = pts[j] - pts[i];
-        float edge_len = math::length(edge);
-
-        SDFPolygonPointGPU gpu_pt = {};
-        gpu_pt.vi_edge = float4(pts[i].x, pts[i].y, edge.x, edge.y);
-
-        float R_signed = 0.0f;
-        float2 C = pts[i];
-        float t_trim_start = 0.0f;
-        float t_trim_end = 1.0f;
-        float ang_mid = 0.0f;
-        float ang_half = 0.0f;
-
-        /* Recompute half-angle/tan for clamped radii */
-        float2 to_prev = math::normalize(pts[ip] - pts[i]);
-        float2 to_next = math::normalize(pts[j] - pts[i]);
-        float cos_theta = math::clamp(math::dot(to_prev, to_next), -0.999f, 0.999f);
-        float half = acosf(cos_theta) * 0.5f;
-        float sin_half = sinf(half);
-        float tan_half = tanf(half);
-
-        if (crn[i] > 0.001f && pc >= 3 && sin_half > 0.01f && tan_half > 1e-6f) {
-          float2 bisector = math::normalize(to_prev + to_next);
-          float cross_val = to_prev.x * to_next.y - to_prev.y * to_next.x;
-
-          float inset_dist = crn[i] / sin_half;
-          C = pts[i] + bisector * inset_dist;
-
-          R_signed = (cross_val > 0.0f) ? -crn[i] : crn[i];
-
-          /* Trim start on this edge */
-          if (edge_len > 1e-6f) {
-            t_trim_start = crn[i] / (tan_half * edge_len);
+      /* Serialize: flat contour layout for few edges, 2D edge BVH for many. */
+      if (total_edges < 24) {
+        for (ContourEdges &ce : built) {
+          /* Contour header: padded AABB + edge count for shader-side culling. */
+          float2 cmin(1e30f), cmax(-1e30f);
+          for (int i = 0; i < ce.leaf_min.size(); i++) {
+            cmin = math::min(cmin, ce.leaf_min[i]);
+            cmax = math::max(cmax, ce.leaf_max[i]);
           }
-
-          /* Arc angular bounds */
-          float2 tangent_start = pts[i] + math::normalize(edge) * (crn[i] / tan_half);
-          float2 dir_start = math::normalize(tangent_start - C);
-          float2 tangent_prev_end = pts[i] + to_prev * (crn[i] / tan_half);
-          float2 dir_prev_end = math::normalize(tangent_prev_end - C);
-
-          float a1 = atan2f(dir_prev_end.y, dir_prev_end.x);
-          float a2 = atan2f(dir_start.y, dir_start.x);
-
-          float diff = a2 - a1;
-          diff -= 6.2831853f * floorf((diff + 3.1415927f) / 6.2831853f);
-          ang_mid = a1 + diff * 0.5f;
-          ang_half = fabsf(diff) * 0.5f;
+          SDFPolygonPointGPU header = {};
+          header.vi_edge = float4(cmin.x, cmin.y, 0.0f, 0.0f);
+          header.arc_data = float4(cmax.x, cmax.y, 0.0f, 0.0f);
+          header.arc_bounds = float4(float(ce.edges.size()), 0.0f, 0.0f, -2.0f);
+          polygon_points_.append(header);
+          gpu_obj.polygon_point_count++;
+          for (const SDFPolygonPointGPU &e : ce.edges) {
+            polygon_points_.append(e);
+            gpu_obj.polygon_point_count++;
+          }
+        }
+      }
+      else if (total_edges > 0) {
+        /* 2D edge BVH: node entries (arc_bounds.w == -3) with child indices
+         * into the same array; leaves are the edges built above. Node
+         * indices are serialized before leaves; the uber-header at
+         * polygon_point_start points at the root. */
+        struct NodeRec {
+          float2 mn, mx;
+          /* >= 0: index into nodes; < 0: -(leaf index) - 1. */
+          int left, right;
+        };
+        Vector<NodeRec> nodes;
+        Vector<int> order(total_edges);
+        for (int i = 0; i < total_edges; i++) {
+          order[i] = i;
         }
 
-        /* Trim end on this edge (from next vertex's rounding) */
-        if (crn[j] > 0.001f && pc >= 3) {
-          float2 to_prev_j = math::normalize(pts[i] - pts[j]);
-          float2 to_next_j = math::normalize(pts[(j + 1) % pc] - pts[j]);
-          float cos_theta_j = math::clamp(math::dot(to_prev_j, to_next_j), -0.999f, 0.999f);
-          float tan_half_j = tanf(acosf(cos_theta_j) * 0.5f);
-          if (edge_len > 1e-6f && tan_half_j > 1e-6f) {
-            t_trim_end = 1.0f - crn[j] / (tan_half_j * edge_len);
+        /* Flatten leaves across contours. */
+        Vector<const SDFPolygonPointGPU *> leaf_ptrs(total_edges);
+        Vector<float2> leaf_mn(total_edges), leaf_mx(total_edges);
+        {
+          int li = 0;
+          for (const ContourEdges &ce : built) {
+            for (int i = 0; i < ce.edges.size(); i++) {
+              leaf_ptrs[li] = &ce.edges[i];
+              leaf_mn[li] = ce.leaf_min[i];
+              leaf_mx[li] = ce.leaf_max[i];
+              li++;
+            }
           }
         }
 
-        gpu_pt.arc_data = float4(R_signed, C.x, C.y, t_trim_start);
-        gpu_pt.arc_bounds = float4(t_trim_end, ang_mid, ang_half, 0.0f);
+        std::function<int(int, int)> build = [&](int lo, int hi) -> int {
+          float2 mn(1e30f), mx(-1e30f);
+          for (int i = lo; i < hi; i++) {
+            mn = math::min(mn, leaf_mn[order[i]]);
+            mx = math.max(mx, leaf_mx[order[i]]);
+          }
+          NodeRec rec;
+          rec.mn = mn;
+          rec.mx = mx;
+          const int count = hi - lo;
+          if (count <= 2) {
+            rec.left = -order[lo] - 1;
+            rec.right = (count == 2) ? (-order[lo + 1] - 1) : rec.left;
+          }
+          else {
+            const int axis = (mx.x - mn.x) >= (mx.y - mn.y) ? 0 : 1;
+            const int mid = (lo + hi) / 2;
+            std::nth_element(order.begin() + lo,
+                             order.begin() + mid,
+                             order.begin() + hi,
+                             [&](int a, int b) {
+                               return (leaf_mn[a][axis] + leaf_mx[a][axis]) <
+                                      (leaf_mn[b][axis] + leaf_mx[b][axis]);
+                             });
+            rec.left = build(lo, mid);
+            rec.right = build(mid, hi);
+          }
+          nodes.append(rec);
+          return int(nodes.size()) - 1;
+        };
+        const int root = build(0, total_edges);
 
-        polygon_points_.append(gpu_pt);
+        const int base = gpu_obj.polygon_point_start;
+        const int num_nodes = int(nodes.size());
+        SDFPolygonPointGPU uber = {};
+        uber.arc_data = float4(float(base + 1 + root), 0.0f, 0.0f, 0.0f);
+        uber.arc_bounds = float4(0.0f, 0.0f, 0.0f, -3.0f);
+        polygon_points_.append(uber);
         gpu_obj.polygon_point_count++;
+
+        for (const NodeRec &n : nodes) {
+          SDFPolygonPointGPU e = {};
+          e.vi_edge = float4(n.mn.x, n.mn.y, 0.0f, 0.0f);
+          e.arc_data = float4(n.mx.x, n.mx.y, 0.0f, 0.0f);
+          auto remap = [&](int ref) -> float {
+            if (ref >= 0) {
+              return float(base + 1 + ref);
+            }
+            return float(base + 1 + num_nodes + (-ref - 1));
+          };
+          e.arc_bounds = float4(remap(n.left), remap(n.right), 0.0f, -3.0f);
+          polygon_points_.append(e);
+          gpu_obj.polygon_point_count++;
+        }
+        for (int i = 0; i < total_edges; i++) {
+          polygon_points_.append(*leaf_ptrs[i]);
+          gpu_obj.polygon_point_count++;
+        }
       }
+
       gpu_obj.box_corners = float4(max_corner, 0.0f, 0.0f, 0.0f);
       gpu_obj.box_edges = float4(sdf_data->polygon_edge_top,
                                  sdf_data->polygon_edge_bottom,
                                  math::max(poly_taper, 0.0f),
                                  math::max(-poly_taper, 0.0f));
       gpu_obj.box_modes = int4(0, sdf_data->polygon_edge_mode, 0, 0);
+
+      if (is_text) {
+        /* Text evaluates through the polygon GPU path (multi-contour outlines
+         * with the non-zero winding rule). box_corners.y carries the optional
+         * outline stroke half-width (0 = filled glyphs). */
+        gpu_obj.sdf_type = SDF_GPU_TYPE_POLYGON;
+        float half_thickness = sdf_data->text_thickness * 0.5f * corner_scale;
+        gpu_obj.box_corners.y = half_thickness;
+        gpu_obj.box_modes.z = (half_thickness > 0.0f) ? 1 : 0;
+      }
     }
     else if (sdf_data->sdf_type == SDF_TYPE_TORUS) {
       float angle_rad = sdf_data->torus_angle;
@@ -1636,6 +1918,15 @@ class SdfInstanceBase : public DrawEngine {
                          sdf_data->polygon_line_thickness * 0.5f :
                          0.0f;
           base_local_extent = float3(max_x + lp, max_y + lp, sz.z);
+          break;
+        }
+        case SDF_TYPE_TEXT: {
+          float ext_x = math::max(fabsf(text_contours->bounds_min.x),
+                                  fabsf(text_contours->bounds_max.x));
+          float ext_y = math::max(fabsf(text_contours->bounds_min.y),
+                                  fabsf(text_contours->bounds_max.y));
+          float stroke_pad = sdf_data->text_thickness * 0.5f + sdf_data->text_corner;
+          base_local_extent = float3(ext_x + stroke_pad, ext_y + stroke_pad, sz.z);
           break;
         }
         default:
@@ -2049,6 +2340,19 @@ class SdfInstanceBase : public DrawEngine {
           case SDF_TYPE_CONE: {
             float r = std::max(copy_sz.x, copy_sz.z), h = copy_sz.y;
             copy_local_extent = float3(r + copy_pad, r + copy_pad, h + copy_pad);
+            break;
+          }
+          case SDF_TYPE_TEXT: {
+            float ext_x = math::max(fabsf(text_contours->bounds_min.x),
+                                    fabsf(text_contours->bounds_max.x)) *
+                          copy_scale.x;
+            float ext_y = math::max(fabsf(text_contours->bounds_min.y),
+                                    fabsf(text_contours->bounds_max.y)) *
+                          copy_scale.y;
+            float stroke_pad = sdf_data->text_thickness * 0.5f + sdf_data->text_corner;
+            copy_local_extent = float3(ext_x + stroke_pad + copy_pad,
+                                       ext_y + stroke_pad + copy_pad,
+                                       copy_sz.z + copy_pad);
             break;
           }
           default:
@@ -3689,10 +3993,20 @@ class SdfInstanceBase : public DrawEngine {
    * and idempotent.
    * \{ */
 
+  /* Total bake pool budget in voxels (dist+col 1 uint/voxel, nrm 2: 16
+   * bytes/voxel -> 1 GiB at 64 Mvoxels). The previous cap derived from
+   * GPU_max_storage_buffer_size allowed multi-gigabyte pools and VRAM OOM
+   * crashes at high resolutions. */
+  static constexpr int64_t kMaxBakePoolVoxels = int64_t(64) << 20;
+  /* Progressive bake budget: voxels baked per frame. A full 256^3 bake is
+   * spread over ~8 frames; objects stay analytic until their bake completes,
+   * so editing a mesh never stalls the viewport on one giant dispatch. */
+  static constexpr int64_t kBakeVoxelsPerFrame = int64_t(2) << 20;
+
   /* Grow the pools until `needed` voxels fit (doubling), recreating the
    * SSBOs. Returns true when the pools were recreated — the new buffers lost
-   * all contents, so every ready record must be re-dispatched (simple full
-   * rebuild; acceptable for this stage). */
+   * all contents, so every ready record must be re-dispatched. On allocation
+   * failure the old pools are kept (returns false; capacity unchanged). */
   bool bake_pools_ensure(int64_t needed)
   {
     if (needed <= bake_pool_capacity_) {
@@ -3702,71 +4016,117 @@ class SdfInstanceBase : public DrawEngine {
     while (new_capacity < needed) {
       new_capacity *= 2;
     }
+    gpu::StorageBuf *dist = GPU_storagebuf_create_ex(
+        new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_dist");
+    gpu::StorageBuf *nrm = GPU_storagebuf_create_ex(
+        2 * new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_nrm");
+    gpu::StorageBuf *col = GPU_storagebuf_create_ex(
+        new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_col");
+    if (dist == nullptr || nrm == nullptr || col == nullptr) {
+      if (dist) GPU_storagebuf_free(dist);
+      if (nrm) GPU_storagebuf_free(nrm);
+      if (col) GPU_storagebuf_free(col);
+      CLOG_WARN(&LOG,
+                "SDF mesh bake: failed to allocate %d Mvoxel pools; keeping the "
+                "current pools. Lower the mesh voxel resolution",
+                int(new_capacity >> 20));
+      return false;
+    }
     if (bake_dist_ssbo_) GPU_storagebuf_free(bake_dist_ssbo_);
     if (bake_nrm_ssbo_) GPU_storagebuf_free(bake_nrm_ssbo_);
     if (bake_col_ssbo_) GPU_storagebuf_free(bake_col_ssbo_);
-    bake_dist_ssbo_ = GPU_storagebuf_create_ex(
-        new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_dist");
-    bake_nrm_ssbo_ = GPU_storagebuf_create_ex(
-        2 * new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_nrm");
-    bake_col_ssbo_ = GPU_storagebuf_create_ex(
-        new_capacity * sizeof(uint32_t), nullptr, GPU_USAGE_DYNAMIC, "sdf_bake_col");
+    bake_dist_ssbo_ = dist;
+    bake_nrm_ssbo_ = nrm;
+    bake_col_ssbo_ = col;
     bake_pool_capacity_ = new_capacity;
     return true;
   }
 
-  /* Dispatch the bake for a single record: rewrites exactly the record's
-   * voxel range (idempotent). The shader must be bound. */
+  /* Dispatch one z-slice range of the bake for a single grid: rewrites
+   * voxels [0,res) x [0,res) x [z_begin, z_begin+z_count) of the grid's
+   * range (idempotent). dist_only skips the normal/color pool writes
+   * (coarse far-field level). The shader must be bound. */
   void dispatch_mesh_bake(gpu::Shader *sh,
-                          const MeshBakeRecord &rec,
+                          int3 res,
+                          int base,
+                          float3 origin,
+                          float voxel_size,
+                          float band,
+                          bool dist_only,
                           const MeshOffsets &offsets,
-                          bool has_colors)
+                          bool has_colors,
+                          int z_begin,
+                          int z_count)
   {
     const int4 mesh_data(offsets.vertex_start,
                          offsets.triangle_start,
                          offsets.triangle_count,
                          offsets.bvh_start);
-    const int4 res_and_base(rec.res.x, rec.res.y, rec.res.z, rec.base);
+    const int4 res_and_base(res.x, res.y, res.z, base);
     GPU_shader_uniform_int_ex(
         sh, GPU_shader_get_uniform(sh, "mesh_data"), 4, 1, &mesh_data.x);
     GPU_shader_uniform_1i(sh, "mesh_node_count", offsets.bvh_count);
     GPU_shader_uniform_1i(sh, "color_start", offsets.color_start);
     GPU_shader_uniform_int_ex(
         sh, GPU_shader_get_uniform(sh, "res_and_base"), 4, 1, &res_and_base.x);
-    GPU_shader_uniform_3fv(sh, "origin", rec.origin);
-    GPU_shader_uniform_1f(sh, "voxel_size", rec.voxel_size);
-    GPU_shader_uniform_1f(sh, "band", rec.band);
+    GPU_shader_uniform_3fv(sh, "origin", origin);
+    GPU_shader_uniform_1f(sh, "voxel_size", voxel_size);
+    GPU_shader_uniform_1f(sh, "band", band);
     GPU_shader_uniform_1i(sh, "has_colors", has_colors ? 1 : 0);
-    GPU_compute_dispatch(
-        sh, (rec.res.x + 3) / 4, (rec.res.y + 3) / 4, (rec.res.z + 3) / 4);
+    GPU_shader_uniform_1i(sh, "z_offset", z_begin);
+    GPU_shader_uniform_1i(sh, "dist_only", dist_only ? 1 : 0);
+    GPU_compute_dispatch(sh, (res.x + 3) / 4, (res.y + 3) / 4, (z_count + 3) / 4);
   }
 
   /* Per-frame update: (re)bake every live mesh payload that has no record
    * yet, whose revision changed, or whose sdf_voxel_resolution setting
    * changed. Called from draw_trace_pipeline, after the shared mesh SSBOs
    * were uploaded (a payload change always flips scene_changed_, which gates
-   * both upload_objects and draw_trace_pipeline). */
-  void update_mesh_bakes()
+   * both upload_objects and draw_trace_pipeline).
+   * Returns true when the baked fields of objects_ changed (records flipped
+   * to ready or pool ranges were reassigned): the LP engine must rebuild its
+   * CSG tree then (make_leaf captures the baked fields into lp_prims_). */
+  bool update_mesh_bakes()
   {
+    /* The trace/prune/march shaders declare the bake pools unconditionally
+     * (the baked-volume sampler is compiled in even when no object uses it),
+     * and on Vulkan every declared SSBO binding must have a buffer bound —
+     * binding nothing hits the unreachable-code assert in
+     * vk_descriptor_set.cc and writes a null descriptor. Keep minimal pools
+     * allocated even with no live meshes. */
+    bake_pools_ensure(1);
     if (mesh_gpu_data_.is_empty()) {
-      return;
+      return false;
     }
     gpu::Shader *sh = mesh_bake_sh();
     if (sh == nullptr) {
-      return;
+      return false;
     }
 
-    struct PendingBake {
-      const void *key;
-      /* Fully computed except `base`, assigned at commit time. */
-      MeshBakeRecord rec;
-      int64_t voxels;
-      /* Existing record with an identical grid: rewrite its range in place. */
-      bool reuse_base;
-    };
+    /* Scene blend reach: the coarse far-field level covers the mesh bounds
+     * plus this distance, so CSG blends of any radius up to it see a true
+     * distance field (blends beyond it soften instead of breaking). */
+    const float reach = max_blend_ + max_shell_distance_;
 
-    Vector<PendingBake> pending;
-    int64_t projected_used = bake_pool_used_;
+    /* ---- 1. Flip completed work grids into live. The abandoned old live
+     * ranges stay allocated until the next compaction (pools are
+     * append-only). ---- */
+    for (const auto &item : bake_records_.items()) {
+      MeshBakeRecord &rec = item.value;
+      if (rec.work_active && rec.work.ready &&
+          (rec.work.cres.x == 0 || rec.work.cready))
+      {
+        rec.live = rec.work;
+        rec.revision = rec.w_revision;
+        rec.voxel_resolution = rec.w_setting;
+        rec.reach = rec.w_reach;
+        rec.work_active = false;
+      }
+    }
+
+    /* ---- 2. (Re)start work grids for payloads whose desired grid differs
+     * from the live one. ---- */
+    bool any_started = false;
     for (int i = 0; i < int(objects_.size()); i++) {
       if (objects_[i].sdf_type != SDF_GPU_TYPE_MESH) {
         continue;
@@ -3782,16 +4142,25 @@ class SdfInstanceBase : public DrawEngine {
       const int setting = std::clamp(object_ptrs_[i]->sdf_voxel_resolution, 0, 256);
 
       const MeshBakeRecord *rec = bake_records_.lookup_ptr(key);
-      if (rec != nullptr && rec->ready && rec->revision == info->revision &&
-          rec->voxel_resolution == setting)
+      /* Live grid up to date: nothing to do. */
+      if (rec != nullptr && rec->revision == info->revision &&
+          rec->voxel_resolution == setting && rec->reach == reach)
+      {
+        continue;
+      }
+      /* Already baking exactly this grid: the progressive dispatch below
+       * finishes it; restarting would throw away progress every frame. */
+      if (rec != nullptr && rec->work_active && rec->w_revision == info->revision &&
+          rec->w_setting == setting && rec->w_reach == reach)
       {
         continue;
       }
 
-      /* Grid layout: voxel_size targets R voxels across the largest bounds
-       * axis (R = object setting, 64 when 0/auto) with `margin_voxels` of
-       * padding voxels on both sides; the grid covers the bounds expanded by
-       * (band + voxel_size) on every side, band = 4 * voxel_size. */
+      /* Fine grid layout: voxel_size targets R voxels across the largest
+       * bounds axis (R = object setting, 64 when 0/auto) with
+       * `margin_voxels` of padding voxels on both sides; the grid covers the
+       * bounds expanded by (band + voxel_size) on every side,
+       * band = 4 * voxel_size. */
       constexpr int margin_voxels = 5;
       const int res_target = std::clamp(setting > 0 ? setting : 64, 2 * margin_voxels + 8, 256);
       const float3 extent = math::max(info->bounds_max - info->bounds_min, float3(1e-6f));
@@ -3800,108 +4169,304 @@ class SdfInstanceBase : public DrawEngine {
       const float band = 4.0f * voxel_size;
       const float pad = band + voxel_size;
 
-      PendingBake pb;
-      pb.key = key;
-      pb.rec.res = int3(math::ceil((extent + float3(2.0f * pad)) / voxel_size));
-      pb.rec.res = math::clamp(pb.rec.res, 8, 256);
-      pb.rec.origin = info->bounds_min - float3(pad);
-      pb.rec.voxel_size = voxel_size;
-      pb.rec.band = band;
-      pb.rec.revision = info->revision;
-      pb.rec.voxel_resolution = setting;
-      pb.rec.ready = false;
-      pb.voxels = int64_t(pb.rec.res.x) * pb.rec.res.y * pb.rec.res.z;
-      pb.reuse_base = (rec != nullptr && rec->ready && rec->res == pb.rec.res);
-      if (!pb.reuse_base) {
-        projected_used += pb.voxels;
-      }
-      pending.append(pb);
-    }
+      MeshBakeRecord &r = bake_records_.lookup_or_add_default(key);
+      r.w_revision = info->revision;
+      r.w_setting = setting;
+      r.w_reach = reach;
+      r.work.res = math::clamp(int3(math::ceil((extent + float3(2.0f * pad)) / voxel_size)),
+                               8,
+                               256);
+      r.work.origin = info->bounds_min - float3(pad);
+      r.work.voxel_size = voxel_size;
+      r.work.band = band;
 
-    if (pending.is_empty()) {
-      return;
-    }
-
-    /* The normal pool is the largest of the three (2 uints/voxel). */
-    const int64_t max_voxels = int64_t(GPU_max_storage_buffer_size()) /
-                               (2 * int64_t(sizeof(uint32_t)));
-    if (projected_used > max_voxels) {
-      if (!bake_overflow_warned_) {
-        bake_overflow_warned_ = true;
-        CLOG_WARN(&LOG,
-                  "SDF mesh bake: voxel pools would exceed the SSBO size limit "
-                  "(%d Mvoxels needed); skipping the bake. Lower the mesh voxel "
-                  "resolution",
-                  int(projected_used >> 20));
-      }
-      return;
-    }
-
-    /* Commit: insert/update records, assigning pool ranges. */
-    Vector<const void *> pending_keys;
-    for (const PendingBake &pb : pending) {
-      MeshBakeRecord &rec = bake_records_.lookup_or_add_default(pb.key);
-      MeshBakeRecord new_rec = pb.rec;
-      if (pb.reuse_base) {
-        new_rec.base = rec.base;
+      /* Coarse far-field level: ~48 cells across the padded bounds, fp32
+       * unclamped distance out to the blend reach. Skipped (cres = 0) when
+       * the scene has no blends at all. */
+      if (reach > 0.0f) {
+        const float pad_c = reach + pad;
+        const float3 extent_c = extent + float3(2.0f * pad_c);
+        const float cvoxel = math::reduce_max(extent_c) / 48.0f;
+        r.work.cres = math::clamp(int3(math::ceil(extent_c / cvoxel)), 8, 64);
+        r.work.corigin = info->bounds_min - float3(pad_c);
+        r.work.cvoxel = cvoxel;
       }
       else {
-        /* Append a fresh range; the abandoned old range (if any) is wasted
-         * until the next pool regrow compacts it away (pools are
-         * append-only). */
-        new_rec.base = int(bake_pool_used_);
-        bake_pool_used_ += pb.voxels;
+        r.work.cres = int3(0);
+        r.work.cbase = 0;
       }
-      rec = new_rec;
-      pending_keys.append(pb.key);
+
+      /* Fresh pool ranges — the live grid is never rewritten mid-bake. When
+       * only the blend reach changed (payload and fine grid identical), the
+       * live fine bake doubles as the work fine bake (same for the coarse
+       * level when its grid is unchanged), so only the coarse level
+       * rebakes. When RETARGETING an in-flight bake (continuous editing),
+       * reuse the work ranges — appending a fresh range every revision
+       * would thrash the pool into compaction. */
+      const bool content_same = r.live.ready && r.revision == info->revision &&
+                                r.voxel_resolution == setting;
+      if (content_same && r.live.res == r.work.res) {
+        r.work.base = r.live.base;
+        r.work.ready = true;
+        r.next_z = r.work.res.z;
+      }
+      else if (rec != nullptr && rec->work_active && rec->work.res == r.work.res) {
+        r.work.base = rec->work.base;
+        r.work.ready = false;
+        r.next_z = 0;
+      }
+      else {
+        r.work.base = int(bake_pool_used_);
+        bake_pool_used_ += int64_t(r.work.res.x) * r.work.res.y * r.work.res.z;
+        r.work.ready = false;
+        r.next_z = 0;
+      }
+      if (r.work.cres.x > 0) {
+        if (content_same && r.live.cready && r.live.cres == r.work.cres) {
+          r.work.cbase = r.live.cbase;
+          r.work.cready = true;
+          r.next_cz = r.work.cres.z;
+        }
+        else if (rec != nullptr && rec->work_active && rec->work.cres == r.work.cres) {
+          r.work.cbase = rec->work.cbase;
+          r.work.cready = false;
+          r.next_cz = 0;
+        }
+        else {
+          r.work.cbase = int(bake_pool_used_);
+          bake_pool_used_ += int64_t(r.work.cres.x) * r.work.cres.y * r.work.cres.z;
+          r.work.cready = false;
+          r.next_cz = 0;
+        }
+      }
+      else {
+        r.work.cready = false;
+        r.next_cz = 0;
+      }
+      r.work_active = !(r.work.ready && (r.work.cres.x == 0 || r.work.cready));
+      /* Nothing to bake (grids identical to live): flip immediately. */
+      if (!r.work_active) {
+        r.live = r.work;
+        r.revision = r.w_revision;
+        r.voxel_resolution = r.w_setting;
+        r.reach = r.w_reach;
+      }
+      any_started = true;
     }
 
-    Vector<const void *> dispatch_keys;
-    if (bake_pools_ensure(bake_pool_used_)) {
-      /* Full rebuild: the recreated buffers lost all contents. Compact: pack
-       * every record's range from zero (reclaiming abandoned holes) and
-       * re-dispatch all records (stale ones with no live mesh data are
-       * skipped below; acceptable cost for this stage). */
-      int64_t base = 0;
+    if (any_started) {
+      /* Budget/compaction: when the append-only layout overflows the pool
+       * budget, drop records with no live mesh data and repack the survivors
+       * from zero (reclaiming abandoned ranges), then mark everything for
+       * rebake (the old bases' data is unreachable after the repack).
+       * Records that still do not fit are removed; their objects stay
+       * invisible. */
+      if (bake_pool_used_ > kMaxBakePoolVoxels) {
+        Vector<const void *> stale;
+        for (const auto &item : bake_records_.items()) {
+          if (!mesh_offsets_.contains(item.key)) {
+            stale.append(item.key);
+          }
+        }
+        for (const void *key : stale) {
+          bake_records_.remove(key);
+        }
+        int64_t base = 0;
+        for (const auto &item : bake_records_.items()) {
+          MeshBakeRecord &rec = item.value;
+          /* Repack: work range (or live when no work) gets fresh bases;
+           * everything must rebake into them. */
+          if (rec.work_active) {
+            rec.live.ready = false;
+            rec.live.cready = false;
+          }
+          else {
+            rec.work = rec.live;
+            rec.w_revision = rec.revision;
+            rec.w_setting = rec.voxel_resolution;
+            rec.w_reach = rec.reach;
+            rec.live.ready = false;
+            rec.live.cready = false;
+            rec.work_active = true;
+          }
+          rec.work.base = int(base);
+          rec.work.ready = false;
+          rec.next_z = 0;
+          base += int64_t(rec.work.res.x) * rec.work.res.y * rec.work.res.z;
+          if (rec.work.cres.x > 0) {
+            rec.work.cbase = int(base);
+            rec.work.cready = false;
+            rec.next_cz = 0;
+            base += int64_t(rec.work.cres.x) * rec.work.cres.y * rec.work.cres.z;
+          }
+        }
+        bake_pool_used_ = base;
+        while (bake_pool_used_ > kMaxBakePoolVoxels && !bake_records_.is_empty()) {
+          /* Drop the largest record until the rest fits the budget. */
+          const void *largest_key = nullptr;
+          int64_t largest_voxels = -1;
+          for (const auto &item : bake_records_.items()) {
+            const MeshBakeGrid &g = item.value.work_active ? item.value.work : item.value.live;
+            const int64_t v = int64_t(g.res.x) * g.res.y * g.res.z +
+                              int64_t(g.cres.x) * g.cres.y * g.cres.z;
+            if (v > largest_voxels) {
+              largest_voxels = v;
+              largest_key = item.key;
+            }
+          }
+          bake_records_.remove(largest_key);
+          bake_pool_used_ -= largest_voxels;
+        }
+        if (!bake_overflow_warned_) {
+          bake_overflow_warned_ = true;
+          CLOG_WARN(&LOG,
+                    "SDF mesh bake: voxel pool budget (%d Mvoxels) exceeded; "
+                    "some meshes stay invisible. Lower the mesh voxel "
+                    "resolution",
+                    int(kMaxBakePoolVoxels >> 20));
+        }
+      }
+
+      if (bake_pools_ensure(bake_pool_used_)) {
+        /* The recreated buffers lost all contents: every record must rebake
+         * (progressively — no single-frame stall). Records with no work in
+         * flight get their live grid restarted as work; objects go
+         * invisible until the rebake lands (regrow is rare). */
+        for (const auto &item : bake_records_.items()) {
+          MeshBakeRecord &rec = item.value;
+          if (!rec.work_active) {
+            rec.work = rec.live;
+            rec.w_revision = rec.revision;
+            rec.w_setting = rec.voxel_resolution;
+            rec.w_reach = rec.reach;
+            rec.work_active = true;
+          }
+          rec.work.ready = false;
+          rec.work.cready = false;
+          rec.next_z = 0;
+          rec.next_cz = 0;
+          rec.live.ready = false;
+          rec.live.cready = false;
+        }
+      }
+    }
+
+    /* Progressive dispatch: advance every work grid by the per-frame voxel
+     * budget, one or more z-slices at a time. Skipped while the pools are
+     * too small for the committed layout (allocation failure): records stay
+     * unready and the objects keep their previous live grid. */
+    bool any_unready = false;
+    for (const auto &item : bake_records_.items()) {
+      if (item.value.work_active) {
+        any_unready = true;
+        break;
+      }
+    }
+    if (any_unready && bake_pool_capacity_ >= bake_pool_used_ &&
+        bake_dist_ssbo_ != nullptr)
+    {
+      GPU_shader_bind(sh);
+      /* Buffers referenced by dead code in sdf_lp_common.glsl (the bake only
+       * walks the mesh BVH); declared in the create info, bound for
+       * completeness. The lp_* scene buffers only exist in the LP engine —
+       * bound via the engine hook (nullptr-safe no-ops for the classic
+       * engine); the dead code that references them never executes. */
+      bind_bake_dead_ssbos(sh);
+      sdf_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
+      sdf_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
+      sdf_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
+      sdf_bind_ssbo(sh, "mesh_color_buf", mesh_color_ssbo_);
+      sdf_bind_ssbo(sh, "bake_dist", bake_dist_ssbo_);
+      sdf_bind_ssbo(sh, "bake_nrm", bake_nrm_ssbo_);
+      sdf_bind_ssbo(sh, "bake_col", bake_col_ssbo_);
+
+      int64_t budget = kBakeVoxelsPerFrame;
       for (const auto &item : bake_records_.items()) {
+        if (budget <= 0) {
+          break;
+        }
         MeshBakeRecord &rec = item.value;
-        rec.base = int(base);
-        base += int64_t(rec.res.x) * rec.res.y * rec.res.z;
-        dispatch_keys.append(item.key);
+        if (!rec.work_active) {
+          continue;
+        }
+        const MeshOffsets *offsets = mesh_offsets_.lookup_ptr(item.key);
+        const MeshBakeInfo *info = mesh_bake_info_.lookup_ptr(item.key);
+        if (offsets == nullptr || info == nullptr) {
+          continue;
+        }
+        /* Coarse far-field level first (tiny): fp32 unclamped distance,
+         * distance pool only. */
+        if (rec.work.cres.x > 0 && !rec.work.cready) {
+          const int64_t cslice = int64_t(rec.work.cres.x) * rec.work.cres.y;
+          while (rec.next_cz < rec.work.cres.z && budget > 0) {
+            const int z_left = rec.work.cres.z - rec.next_cz;
+            const int z_count = int(
+                std::min<int64_t>(z_left, std::max<int64_t>(budget / cslice, 1)));
+            dispatch_mesh_bake(sh,
+                               rec.work.cres,
+                               rec.work.cbase,
+                               rec.work.corigin,
+                               rec.work.cvoxel,
+                               60000.0f,
+                               true,
+                               *offsets,
+                               info->has_colors,
+                               rec.next_cz,
+                               z_count);
+            rec.next_cz += z_count;
+            budget -= z_count * cslice;
+          }
+          if (rec.next_cz >= rec.work.cres.z) {
+            rec.work.cready = true;
+          }
+        }
+        if (!rec.work.ready) {
+          const int64_t slice_voxels = int64_t(rec.work.res.x) * rec.work.res.y;
+          while (rec.next_z < rec.work.res.z && budget > 0) {
+            const int z_left = rec.work.res.z - rec.next_z;
+            const int z_count = int(std::min<int64_t>(
+                z_left, std::max<int64_t>(budget / slice_voxels, 1)));
+            dispatch_mesh_bake(sh,
+                               rec.work.res,
+                               rec.work.base,
+                               rec.work.origin,
+                               rec.work.voxel_size,
+                               rec.work.band,
+                               false,
+                               *offsets,
+                               info->has_colors,
+                               rec.next_z,
+                               z_count);
+            rec.next_z += z_count;
+            budget -= z_count * slice_voxels;
+          }
+          if (rec.next_z >= rec.work.res.z) {
+            rec.work.ready = true;
+          }
+        }
       }
-      bake_pool_used_ = base;
-    }
-    else {
-      dispatch_keys = pending_keys;
+      GPU_shader_unbind();
+      GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     }
 
-    GPU_shader_bind(sh);
-    /* Buffers referenced by dead code in sdf_lp_common.glsl (the bake only
-     * walks the mesh BVH); declared in the create info, bound for
-     * completeness. The lp_* scene buffers only exist in the LP engine —
-     * bound via the engine hook (nullptr-safe no-ops for the classic
-     * engine); the dead code that references them never executes. */
-    bind_bake_dead_ssbos(sh);
-    sdf_bind_ssbo(sh, "sdf_modifiers", modifier_ssbo_);
-    sdf_bind_ssbo(sh, "polygon_points", polygon_ssbo_);
-    sdf_bind_ssbo(sh, "mesh_data_buf", mesh_data_ssbo_);
-    sdf_bind_ssbo(sh, "mesh_color_buf", mesh_color_ssbo_);
-    sdf_bind_ssbo(sh, "bake_dist", bake_dist_ssbo_);
-    sdf_bind_ssbo(sh, "bake_nrm", bake_nrm_ssbo_);
-    sdf_bind_ssbo(sh, "bake_col", bake_col_ssbo_);
-
-    for (const void *key : dispatch_keys) {
-      MeshBakeRecord *rec = bake_records_.lookup_ptr(key);
-      const MeshOffsets *offsets = mesh_offsets_.lookup_ptr(key);
-      const MeshBakeInfo *info = mesh_bake_info_.lookup_ptr(key);
-      if (rec == nullptr || offsets == nullptr || info == nullptr) {
+    /* The dispatch may have (re)assigned pool ranges (regrow compaction or
+     * fresh appends) and work grids may have flipped to live: re-resolve the
+     * baked fields of every mesh object and re-upload the object buffer when
+     * anything changed, so the flags/bases uploaded earlier this frame never
+     * reference stale ranges. */
+    bool objects_changed = false;
+    for (int i = 0; i < int(objects_.size()); i++) {
+      if (objects_[i].sdf_type != SDF_GPU_TYPE_MESH || object_mesh_keys_[i] == nullptr) {
         continue;
       }
-      dispatch_mesh_bake(sh, *rec, *offsets, info->has_colors);
-      rec->ready = true;
+      objects_changed |= apply_baked_fields(objects_[i], object_mesh_keys_[i]);
     }
-    GPU_shader_unbind();
-    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
+    if (objects_changed && object_ssbo_ != nullptr &&
+        object_ssbo_count_ == int(objects_.size()))
+    {
+      GPU_storagebuf_update(object_ssbo_, objects_.data());
+    }
+    return objects_changed;
   }
 
   /** \} */

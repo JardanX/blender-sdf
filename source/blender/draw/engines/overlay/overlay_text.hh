@@ -11,7 +11,10 @@
 #include "BLI_math_color.h"
 #include "BLI_math_matrix.hh"
 
+#include "BKE_sdf_text.hh"
 #include "BKE_vfont.hh"
+
+#include "DNA_sdf_types.h"
 
 #include "overlay_base.hh"
 
@@ -108,7 +111,19 @@ class Text : Overlay {
       return;
     }
 
-    const Curve &cu = DRW_object_get_data_for_drawing<Curve>(*ob_ref.object);
+    const Curve *cu_p;
+    if (ob_ref.object->type == OB_SDF) {
+      /* SDF text primitive: the edit text lives on a runtime Curve shared
+       * with the evaluated SDF copies (see BKE_sdf_text.hh). */
+      cu_p = BKE_sdf_text_edit_curve_get(id_cast<const SDF *>(ob_ref.object->data));
+      if (cu_p == nullptr || cu_p->editfont == nullptr) {
+        return;
+      }
+    }
+    else {
+      cu_p = &DRW_object_get_data_for_drawing<Curve>(*ob_ref.object);
+    }
+    const Curve &cu = *cu_p;
     add_select(manager, cu, ob_ref.object->object_to_world());
     add_cursor(manager, cu, ob_ref.object->object_to_world());
     add_boxes(res, cu, ob_ref.object->object_to_world());

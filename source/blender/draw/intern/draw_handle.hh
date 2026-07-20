@@ -391,6 +391,9 @@ class ObjectRef {
           return ctx_mode == CTX_MODE_EDIT_LATTICE;
         case OB_FONT:
           return ctx_mode == CTX_MODE_EDIT_TEXT;
+        case OB_SDF:
+          /* SDF text primitive reuses the text editing mode. */
+          return ctx_mode == CTX_MODE_EDIT_TEXT;
         case OB_CURVES:
           return ctx_mode == CTX_MODE_EDIT_CURVES;
         case OB_POINTCLOUD:

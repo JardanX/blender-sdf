@@ -29,10 +29,12 @@
 
 #include "DNA_curve_types.h"
 #include "DNA_object_types.h"
+#include "DNA_sdf_types.h"
 #include "DNA_vfont_types.h"
 
 #include "BKE_anim_path.h"
 #include "BKE_curve.hh"
+#include "BKE_sdf_text.hh"
 #include "BKE_object_types.hh"
 #include "BKE_vfont.hh"
 #include "BKE_vfontdata.hh"
@@ -718,7 +720,8 @@ static bool vfont_to_curve(Object *ob,
   /* NOTE: do calculations including the trailing `\0` of a string
    * because the cursor can be at that location. */
 
-  BLI_assert(ob == nullptr || ob->type == OB_FONT);
+  /* OB_SDF: allowed for the SDF text primitive (BKE_sdf_text.hh). */
+  BLI_assert(ob == nullptr || ELEM(ob->type, OB_FONT, OB_SDF));
 
   /* Read-file ensures non-null, must have become null at run-time, this is a bug! */
   if (UNLIKELY(!(cu.str && cu.tb && (ef ? ef->textbufinfo : cu.strinfo)))) {
@@ -1916,8 +1919,23 @@ bool BKE_vfont_to_curve_ex(Object *ob,
 
 int BKE_vfont_cursor_to_text_index(Object *ob, const float2 &cursor_location)
 {
-  Curve &cu = *id_cast<Curve *>(ob->data);
-  ListBaseT<Nurb> *r_nubase = &cu.nurb;
+  /* OB_SDF: the SDF text primitive keeps its edit text on a runtime Curve
+   * (BKE_sdf_text.hh); use a local nubase so nothing is leaked into it. */
+  Curve *cu_p;
+  ListBaseT<Nurb> nubase_local = {nullptr, nullptr};
+  ListBaseT<Nurb> *r_nubase;
+  if (ob->type == OB_SDF) {
+    cu_p = BKE_sdf_text_edit_curve_get(id_cast<const SDF *>(ob->data));
+    if (cu_p == nullptr) {
+      return -1;
+    }
+    r_nubase = &nubase_local;
+  }
+  else {
+    cu_p = id_cast<Curve *>(ob->data);
+    r_nubase = &cu_p->nurb;
+  }
+  Curve &cu = *cu_p;
 
   /* TODO: iterating to calculate the scale can be avoided. */
   VFontToCurveIter data = {};
@@ -1945,6 +1963,8 @@ int BKE_vfont_cursor_to_text_index(Object *ob, const float2 &cursor_location)
                               nullptr);
   } while (data.ok && ELEM(data.status, VFONT_TO_CURVE_SCALE_ONCE, VFONT_TO_CURVE_BISECT));
 
+  BKE_nurbList_free(&nubase_local);
+
   return cursor_params.r_string_offset;
 }
 
@@ -1953,7 +1973,9 @@ int BKE_vfont_cursor_to_text_index(Object *ob, const float2 &cursor_location)
 
 bool BKE_vfont_to_curve_nubase(Object *ob, const eEditFontMode mode, ListBaseT<Nurb> *r_nubase)
 {
-  BLI_assert(ob->type == OB_FONT);
+  /* OB_SDF: the SDF text primitive passes a temporary object wrapping its
+   * runtime text curve (see BKE_sdf_text.hh). */
+  BLI_assert(ELEM(ob->type, OB_FONT, OB_SDF));
   const Curve &cu = *id_cast<const Curve *>(ob->data);
   return BKE_vfont_to_curve_ex(
       ob, cu, mode, r_nubase, nullptr, nullptr, nullptr, nullptr, nullptr);
@@ -1961,6 +1983,20 @@ bool BKE_vfont_to_curve_nubase(Object *ob, const eEditFontMode mode, ListBaseT<N
 
 bool BKE_vfont_to_curve(Object *ob, const eEditFontMode mode)
 {
+  if (ob->type == OB_SDF) {
+    /* SDF text (BKE_sdf_text.hh): the edit text lives on a runtime Curve and
+     * the SDF engine tessellates from the layout, so the generated nurbs are
+     * discarded — this call only updates cursor/selection state. */
+    Curve *cu = BKE_sdf_text_edit_curve_get(id_cast<const SDF *>(ob->data));
+    if (cu == nullptr) {
+      return false;
+    }
+    ListBaseT<Nurb> nubase = {nullptr, nullptr};
+    const bool ok = BKE_vfont_to_curve_ex(
+        ob, *cu, mode, &nubase, nullptr, nullptr, nullptr, nullptr, nullptr);
+    BKE_nurbList_free(&nubase);
+    return ok;
+  }
   Curve &cu = *id_cast<Curve *>(ob->data);
   return BKE_vfont_to_curve_ex(
       ob, cu, mode, &cu.nurb, nullptr, nullptr, nullptr, nullptr, nullptr);

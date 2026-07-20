@@ -12,6 +12,7 @@
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_sdf_types.h"
 
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -143,6 +144,15 @@ bool mode_compat_test(const Object *ob, eObjectMode mode)
                   OB_MODE_WEIGHT_GREASE_PENCIL | OB_MODE_VERTEX_GREASE_PENCIL))
       {
         return true;
+      }
+      break;
+    case OB_SDF:
+      /* Only the SDF text primitive has an edit mode (EditFont-based). */
+      if (mode & OB_MODE_EDIT) {
+        const SDF *sdf = reinterpret_cast<const SDF *>(ob->data);
+        if (sdf && sdf->sdf_type == SDF_TYPE_TEXT) {
+          return true;
+        }
       }
       break;
   }

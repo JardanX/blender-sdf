@@ -30,8 +30,7 @@
  *
  * Expects the including shader to declare (via its CREATE_INFO):
  *   lp_prims[], lp_nodes[], lp_binary_ops[], lp_active_in[] (uint: node word;
- *   parent indices live in a separate prune-only array), polygon_points[],
- *   mesh_data_buf[]
+ *   parent indices live in a separate prune-only array), polygon_points[]
  */
 
 /* Cell indexing and heatmap helpers (shared with the debug colorize pass,
@@ -756,11 +755,13 @@ void lp_toggle_bezier_root(float t,
   float2 q = u * u * a + 2.0f * u * t * b + t * t * c;
   float2 v = 2.0f * (u * (b - a) + t * (c - b));
   float cr = v.x * (p.y - q.y) - v.y * (p.x - q.x);
+  /* Sign must match the straight-edge rule: an upward crossing to the right
+   * of p increments the winding (see lp_sd_polygon_2d). */
   if (v.y > 0.0f && p.y != c.y && cr > 0.0f) {
-    winding--;
+    winding++;
   }
   if (v.y < 0.0f && p.y != a.y && cr < 0.0f) {
-    winding++;
+    winding--;
   }
 }
 
@@ -795,65 +796,47 @@ void lp_toggle_bezier_winding(float2 a,
 }
 
 /* Arbitrary polygon 2D SDF with straight + bezier edges (identical to
- * sdPolygon2D). Exact distance, 1-Lipschitz. */
-float lp_sd_polygon_2d(float2 p, int ps, int pc)
+ * sdPolygon2D, including the contour-header AABB culling). Exact distance,
+ * 1-Lipschitz. */
+float lp_sd_polygon_2d_bvh(float2 p, int ps, float corner_pad)
 {
   float d = 1e20f;
   int winding = 0;
-  for (int i = 0; i < pc; i++) {
-    float4 ed = polygon_points[ps + i].vi_edge;
-    float4 ab = polygon_points[ps + i].arc_bounds;
-    float2 vi = ed.xy;
+  int stack[64];
+  int sp = 0;
+  stack[sp++] = int(polygon_points[ps].arc_data.x);
+  while (sp > 0) {
+    int ni = stack[--sp];
+    float4 ed = polygon_points[ni].vi_edge;
+    float4 ab = polygon_points[ni].arc_bounds;
 
+    if (ab.w <= -2.5f) {
+      float2 cmin = ed.xy;
+      float2 cmax = polygon_points[ni].arc_data.xy;
+      bool need_winding = (cmax.x > p.x) && (p.y >= cmin.y) && (p.y <= cmax.y);
+      float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+      float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+      if (need_winding || box_d < d) {
+        stack[sp++] = int(ab.x);
+        stack[sp++] = int(ab.y);
+      }
+      continue;
+    }
+
+    float4 ad = polygon_points[ni].arc_data;
     if (ab.w < 0.0f) {
-      float4 ad = polygon_points[ps + i].arc_data;
+      float2 vi = ed.xy;
       float2 ctrl = ed.zw;
       float2 end_pt = ad.xy;
 
-      /* AABB cull */
-      float2 bmin = min(min(vi, ctrl), end_pt);
-      float2 bmax = max(max(vi, ctrl), end_pt);
-      float2 dbox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
-      float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
-      if (box_d < d) {
+      float2 bmin = min(min(vi, ctrl), end_pt) - float2(corner_pad);
+      float2 bmax = max(max(vi, ctrl), end_pt) + float2(corner_pad);
+      float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+      float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+      if (ebox_d < d) {
         d = min(d, lp_sd_bezier_2d(vi, ctrl, end_pt, p));
       }
-
       lp_toggle_bezier_winding(vi, ctrl, end_pt, p, winding);
-    }
-    else {
-      /* Straight segment */
-      float2 e = ed.zw;
-      float2 w = p - vi;
-      float2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0f, 1.0f);
-      d = min(d, length(b));
-
-      /* Winding number (non-zero rule) */
-      float vj_y = vi.y + e.y;
-      float cross_val = e.x * w.y - e.y * w.x;
-      if (vi.y <= p.y && vj_y > p.y && cross_val > 0.0f) {
-        winding++;
-      }
-      if (vi.y > p.y && vj_y <= p.y && cross_val < 0.0f) {
-        winding--;
-      }
-    }
-  }
-  return (winding != 0) ? -d : d;
-}
-
-/* Corner-rounded variant (identical to sdPolygon2DRounded): straight edges are
- * trimmed and joined by exact arc fillets. Still an exact 1-Lipschitz SDF. */
-float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc)
-{
-  float d = 1e20f;
-  int winding = 0;
-
-  for (int i = 0; i < pc; i++) {
-    float4 ed = polygon_points[ps + i].vi_edge;
-    float4 ad = polygon_points[ps + i].arc_data;
-    float4 ab = polygon_points[ps + i].arc_bounds;
-    if (ab.w < 0.0f) {
       continue;
     }
 
@@ -863,16 +846,20 @@ float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc)
     float t_start = ad.w, t_end = ab.x;
     float ang_mid = ab.y, ang_half = ab.z;
 
-    /* Trimmed edge: distance + winding */
     float2 seg_a = vi + edge * t_start;
     float2 seg_b = vi + edge * t_end;
     float2 seg_dir = seg_b - seg_a;
     float seg_len_sq = dot(seg_dir, seg_dir);
     if (seg_len_sq > 1e-10f) {
       float2 w = p - seg_a;
-      float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
-      d = min(d, length(w - seg_dir * t));
-
+      float2 ebox_min = min(seg_a, seg_b) - float2(corner_pad);
+      float2 ebox_max = max(seg_a, seg_b) + float2(corner_pad);
+      float2 ebox = abs(p - 0.5f * (ebox_min + ebox_max)) - 0.5f * (ebox_max - ebox_min);
+      float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+      if (ebox_d < d) {
+        float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+        d = min(d, length(w - seg_dir * t));
+      }
       float cross_val = seg_dir.x * w.y - seg_dir.y * w.x;
       if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) {
         winding++;
@@ -882,7 +869,6 @@ float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc)
       }
     }
 
-    /* Arc: distance + winding */
     if (R > 0.001f) {
       float2 to_p = p - C;
       float dist_c = length(to_p);
@@ -899,7 +885,6 @@ float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc)
         d = min(d, min(length(p - ep1), length(p - ep2)));
       }
 
-      /* Arc winding: find crossings of arc with horizontal ray y=p.y, x>p.x */
       float k = (p.y - C.y) / R;
       if (abs(k) < 1.0f) {
         float asin_k = asin(k);
@@ -921,6 +906,218 @@ float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc)
       }
     }
   }
+  return (winding != 0) ? -d : d;
+}
+
+float lp_sd_polygon_2d(float2 p, int ps, int pc, float corner_pad)
+{
+  if (polygon_points[ps].arc_bounds.w <= -2.5f) {
+    return lp_sd_polygon_2d_bvh(p, ps, corner_pad);
+  }
+  float d = 1e20f;
+  int winding = 0;
+  int i = 0;
+  while (i < pc) {
+    float4 hb = polygon_points[ps + i].arc_bounds;
+    int ec = int(hb.x);
+    float2 cmin = polygon_points[ps + i].vi_edge.xy;
+    float2 cmax = polygon_points[ps + i].arc_data.xy;
+
+    bool need_winding = (cmax.x > p.x) && (p.y >= cmin.y) && (p.y <= cmax.y);
+    float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+    float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+    bool need_dist = box_d < d;
+
+    if (need_winding || need_dist) {
+      for (int e = i + 1; e <= i + ec; e++) {
+        float4 ed = polygon_points[ps + e].vi_edge;
+        float4 ab = polygon_points[ps + e].arc_bounds;
+        float2 vi = ed.xy;
+
+        if (ab.w < 0.0f) {
+          float4 ad = polygon_points[ps + e].arc_data;
+          float2 ctrl = ed.zw;
+          float2 end_pt = ad.xy;
+
+          if (need_dist) {
+            float2 bmin = min(min(vi, ctrl), end_pt) - float2(corner_pad);
+            float2 bmax = max(max(vi, ctrl), end_pt) + float2(corner_pad);
+            float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              d = min(d, lp_sd_bezier_2d(vi, ctrl, end_pt, p));
+            }
+          }
+          if (need_winding) {
+            lp_toggle_bezier_winding(vi, ctrl, end_pt, p, winding);
+          }
+        }
+        else {
+          float2 ev = ed.zw;
+          if (need_dist) {
+            float2 vj = vi + ev;
+            float2 bmin = min(vi, vj) - float2(corner_pad);
+            float2 bmax = max(vi, vj) + float2(corner_pad);
+            float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              float2 w = p - vi;
+              float2 b = w - ev * clamp(dot(w, ev) / dot(ev, ev), 0.0f, 1.0f);
+              d = min(d, length(b));
+            }
+          }
+          if (need_winding) {
+            float2 w = p - vi;
+            float vj_y = vi.y + ev.y;
+            float cross_val = ev.x * w.y - ev.y * w.x;
+            if (vi.y <= p.y && vj_y > p.y && cross_val > 0.0f) {
+              winding++;
+            }
+            if (vi.y > p.y && vj_y <= p.y && cross_val < 0.0f) {
+              winding--;
+            }
+          }
+        }
+      }
+    }
+    i += ec + 1;
+  }
+  return (winding != 0) ? -d : d;
+}
+
+/* Corner-rounded variant (identical to sdPolygon2DRounded, including the
+ * contour-header AABB culling): straight edges are trimmed and joined by
+ * exact arc fillets. Still an exact 1-Lipschitz SDF. */
+float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc, float corner_pad)
+{
+  if (polygon_points[ps].arc_bounds.w <= -2.5f) {
+    return lp_sd_polygon_2d_bvh(p, ps, corner_pad);
+  }
+  float d = 1e20f;
+  int winding = 0;
+
+  int i = 0;
+  while (i < pc) {
+    float4 hb = polygon_points[ps + i].arc_bounds;
+    int ec = int(hb.x);
+    float2 cmin = polygon_points[ps + i].vi_edge.xy;
+    float2 cmax = polygon_points[ps + i].arc_data.xy;
+
+    bool need_winding = (cmax.x > p.x) && (p.y >= cmin.y) && (p.y <= cmax.y);
+    float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+    float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+    bool need_dist = box_d < d;
+
+    if (need_winding || need_dist) {
+      for (int e = i + 1; e <= i + ec; e++) {
+        float4 ed = polygon_points[ps + e].vi_edge;
+        float4 ad = polygon_points[ps + e].arc_data;
+        float4 ab = polygon_points[ps + e].arc_bounds;
+
+        if (ab.w < 0.0f) {
+          /* Quadratic bezier edge: no corner trimming (corner arcs only exist
+           * between straight edges), just distance + winding. */
+          float2 vi = ed.xy;
+          float2 ctrl = ed.zw;
+          float2 end_pt = ad.xy;
+
+          if (need_dist) {
+            float2 bmin = min(min(vi, ctrl), end_pt);
+            float2 bmax = max(max(vi, ctrl), end_pt);
+            float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              d = min(d, lp_sd_bezier_2d(vi, ctrl, end_pt, p));
+            }
+          }
+          if (need_winding) {
+            lp_toggle_bezier_winding(vi, ctrl, end_pt, p, winding);
+          }
+          continue;
+        }
+
+        float2 vi = ed.xy, edge = ed.zw;
+        float R_signed = ad.x, R = abs(R_signed);
+        float2 C = ad.yz;
+        float t_start = ad.w, t_end = ab.x;
+        float ang_mid = ab.y, ang_half = ab.z;
+
+        /* Trimmed edge: distance + winding */
+        float2 seg_a = vi + edge * t_start;
+        float2 seg_b = vi + edge * t_end;
+        float2 seg_dir = seg_b - seg_a;
+        float seg_len_sq = dot(seg_dir, seg_dir);
+        if (seg_len_sq > 1e-10f) {
+          float2 w = p - seg_a;
+          if (need_dist) {
+            float2 ebox_min = min(seg_a, seg_b) - float2(corner_pad);
+            float2 ebox_max = max(seg_a, seg_b) + float2(corner_pad);
+            float2 ebox = abs(p - 0.5f * (ebox_min + ebox_max)) -
+                          0.5f * (ebox_max - ebox_min);
+            float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+            if (ebox_d < d) {
+              float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+              d = min(d, length(w - seg_dir * t));
+            }
+          }
+          if (need_winding) {
+            float cross_val = seg_dir.x * w.y - seg_dir.y * w.x;
+            if (seg_a.y <= p.y && seg_b.y > p.y && cross_val > 0.0f) {
+              winding++;
+            }
+            if (seg_a.y > p.y && seg_b.y <= p.y && cross_val < 0.0f) {
+              winding--;
+            }
+          }
+        }
+
+        /* Arc: distance + winding */
+        if (R > 0.001f && (need_dist || need_winding)) {
+          float2 to_p = p - C;
+          float dist_c = length(to_p);
+
+          if (need_dist) {
+            float ang_p = atan(to_p.y, to_p.x);
+            float ang_diff = ang_p - ang_mid;
+            ang_diff -= 6.2831853f * floor((ang_diff + 3.1415927f) / 6.2831853f);
+
+            if (abs(ang_diff) <= ang_half) {
+              d = min(d, abs(dist_c - R));
+            }
+            else {
+              float2 ep1 = C + R * float2(cos(ang_mid - ang_half), sin(ang_mid - ang_half));
+              float2 ep2 = C + R * float2(cos(ang_mid + ang_half), sin(ang_mid + ang_half));
+              d = min(d, min(length(p - ep1), length(p - ep2)));
+            }
+          }
+
+          if (need_winding) {
+            /* Arc winding: find crossings of arc with horizontal ray y=p.y, x>p.x */
+            float k = (p.y - C.y) / R;
+            if (abs(k) < 1.0f) {
+              float asin_k = asin(k);
+              int dir = (R_signed > 0.0f) ? 1 : -1;
+
+              float th = asin_k;
+              float td = th - ang_mid;
+              td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+              if (abs(td) <= ang_half && C.x + R * cos(th) > p.x) {
+                winding += dir;
+              }
+
+              th = 3.1415927f - asin_k;
+              td = th - ang_mid;
+              td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+              if (abs(td) <= ang_half && C.x + R * cos(th) > p.x) {
+                winding -= dir;
+              }
+            }
+          }
+        }
+      }
+    }
+    i += ec + 1;
+  }
 
   return (winding != 0) ? -d : d;
 }
@@ -937,7 +1134,9 @@ float lp_sd_advanced_polygon(float3 p,
                              float tapTop,
                              float tapBot,
                              int edgeMode,
-                             float taperH)
+                             float taperH,
+                             float outline_hw,
+                             float corner_pad)
 {
   float zn = clamp(p.z / max(taperH, 0.001f), -1.0f, 1.0f);
   float t = (zn + 1.0f) * 0.5f;
@@ -946,7 +1145,11 @@ float lp_sd_advanced_polygon(float3 p,
   float slope = (tapTop + tapBot) / (2.0f * max(taperH, 0.001f));
   float lipschitz = sqrt(1.0f + slope * slope);
 
-  float d2d = lp_sd_polygon_2d_rounded(p.xy / tapFactor, ps, pc) * tapFactor;
+  float d2d = lp_sd_polygon_2d_rounded(p.xy / tapFactor, ps, pc, corner_pad) * tapFactor;
+  /* Outline stroke mode (SDF text thickness): abs keeps the field 1-Lipschitz. */
+  if (outline_hw > 0.0f) {
+    d2d = abs(d2d) - outline_hw;
+  }
 
   float dz = abs(p.z) - halfH;
   float edgeR = (p.z > 0.0f) ? edgeTop * halfH : edgeBot * halfH;
@@ -1039,37 +1242,104 @@ float lp_baked_f16(uint h)
   return ((h & 0x8000u) != 0u) ? -f : f;
 }
 
-/* Baked signed distance at p (unscaled local mesh space). Far path: the
- * point-to-volume-AABB distance — a proven conservative lower bound (the
- * mesh lies strictly inside the padded volume box), no pool reads. Near
- * path: manual trilinear over 8 fp16 corner distances, scaled by 0.95 as a
- * Lipschitz safety margin for fp16 quantization + interpolation error. */
-float lp_baked_sample(float3 origin, float voxel_size, int3 res, int base, float3 p)
+/* Distance decode for one pool entry (identical to sdfBakedDistAt in
+ * sdf_mesh_lib.glsl): fine grids store fp16 in the low half-word, the coarse
+ * far-field grid stores full fp32 (fp16 quantization at blend-reach scale
+ * bands wide blend zones). */
+float lp_baked_dist_at(int vi, bool fp32)
+{
+  uint u = bake_dist[vi];
+  return fp32 ? uintBitsToFloat(u) : lp_baked_f16(u & 0xFFFFu);
+}
+
+/* Trilinear sample of ONE baked grid (fine or coarse), with the sign-flip
+ * guard (identical to sdfBakedGridSample in sdf_mesh_lib.glsl): across a
+ * Voronoi boundary between opposing-orientation features the baked field
+ * jumps +a -> -b without a true zero crossing; trilinear would ramp through
+ * zero and paint a phantom surface across the gap. A real surface crossing a
+ * cell always puts some corner within sqrt(3)/2*voxel of it, so a sign
+ * disagreement with min|d_corner| > voxel_size is always a phantom: return
+ * the conservative positive lower bound instead. Returns false when p is
+ * outside the voxel-center range. */
+bool lp_baked_grid_sample(
+    float3 origin, float voxel_size, int3 res, int base, bool fp32, float3 p, out float d)
 {
   float3 uvw = (p - origin) / voxel_size - 0.5f;
   float3 resf = float3(res);
   if (any(lessThan(uvw, float3(-0.5f))) || any(greaterThan(uvw, resf - 0.5f))) {
-    float3 box_max = origin + resf * voxel_size;
-    float3 delta = max(origin - p, max(p - box_max, float3(0.0f)));
-    return length(delta);
+    return false;
   }
   int3 i0 = clamp(int3(floor(uvw)), int3(0), res - 2);
   float3 f = clamp(uvw - float3(i0), float3(0.0f), float3(1.0f));
   int stride_y = res.x;
   int stride_z = res.x * res.y;
   int vi = base + i0.x + i0.y * stride_y + i0.z * stride_z;
-  float d000 = lp_baked_f16(bake_dist[vi] & 0xFFFFu);
-  float d100 = lp_baked_f16(bake_dist[vi + 1] & 0xFFFFu);
-  float d010 = lp_baked_f16(bake_dist[vi + stride_y] & 0xFFFFu);
-  float d110 = lp_baked_f16(bake_dist[vi + stride_y + 1] & 0xFFFFu);
-  float d001 = lp_baked_f16(bake_dist[vi + stride_z] & 0xFFFFu);
-  float d101 = lp_baked_f16(bake_dist[vi + stride_z + 1] & 0xFFFFu);
-  float d011 = lp_baked_f16(bake_dist[vi + stride_y + stride_z] & 0xFFFFu);
-  float d111 = lp_baked_f16(bake_dist[vi + stride_y + stride_z + 1] & 0xFFFFu);
-  float d = mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
-                mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y),
-                f.z);
-  return d * 0.95f;
+  float d000 = lp_baked_dist_at(vi, fp32);
+  float d100 = lp_baked_dist_at(vi + 1, fp32);
+  float d010 = lp_baked_dist_at(vi + stride_y, fp32);
+  float d110 = lp_baked_dist_at(vi + stride_y + 1, fp32);
+  float d001 = lp_baked_dist_at(vi + stride_z, fp32);
+  float d101 = lp_baked_dist_at(vi + stride_z + 1, fp32);
+  float d011 = lp_baked_dist_at(vi + stride_y + stride_z, fp32);
+  float d111 = lp_baked_dist_at(vi + stride_y + stride_z + 1, fp32);
+  float min_abs = min(min(min(abs(d000), abs(d100)), min(abs(d010), abs(d110))),
+                      min(min(abs(d001), abs(d101)), min(abs(d011), abs(d111))));
+  if (min_abs > voxel_size) {
+    bool neg0 = d000 < 0.0f;
+    bool disagree = (neg0 != (d100 < 0.0f)) || (neg0 != (d010 < 0.0f)) ||
+                    (neg0 != (d110 < 0.0f)) || (neg0 != (d001 < 0.0f)) ||
+                    (neg0 != (d101 < 0.0f)) || (neg0 != (d011 < 0.0f)) ||
+                    (neg0 != (d111 < 0.0f));
+    if (disagree) {
+      d = min_abs - 0.87f * voxel_size;
+      return true;
+    }
+  }
+  d = mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+          mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y),
+          f.z);
+  return true;
+}
+
+/* Baked signed distance at p (unscaled local mesh space), 3-way (identical
+ * to sdfBakedSample in sdf_mesh_lib.glsl — keep in sync): fine grid while
+ * its value is NOT clamped; coarse grid (unclamped fp32, out to the scene
+ * blend reach) everywhere else inside it — CSG blends of any radius see a
+ * true distance field, and deferring to it at the fine clamp keeps the field
+ * continuous (a clamp step would paint the fine volume's box skin into wide
+ * color blends); beyond that the point-to-MESH-BOUNDS distance (the fine
+ * volume box shrunk by pad = band + voxel_size) — a conservative lower bound
+ * that never vanishes along a ray outside the grids. Grid reads are scaled
+ * by 0.95 as a Lipschitz safety margin for interpolation error. */
+float lp_baked_sample(float3 origin,
+                      float voxel_size,
+                      float band,
+                      int3 res,
+                      int base,
+                      float3 corigin,
+                      float cvoxel,
+                      int3 cres,
+                      int cbase,
+                      float3 p)
+{
+  float d;
+  const bool have_fine = lp_baked_grid_sample(origin, voxel_size, res, base, false, p, d);
+  if (have_fine && abs(d) < 0.99f * band) {
+    return d * 0.95f;
+  }
+  float dc;
+  if (cres.x > 0 && lp_baked_grid_sample(corigin, cvoxel, cres, cbase, true, p, dc)) {
+    return dc * 0.95f;
+  }
+  if (have_fine) {
+    /* No coarse level (scene has no blends): clamped fine value. */
+    return d * 0.95f;
+  }
+  float pad = band + voxel_size;
+  float3 inner_min = origin + float3(pad);
+  float3 inner_max = origin + float3(res) * voxel_size - float3(pad);
+  float3 delta = max(inner_min - p, max(p - inner_max, float3(0.0f)));
+  return length(delta);
 }
 
 float lp_mesh_point_aabb_dist_sq(float3 p, float3 bounds_min, float3 bounds_max)
@@ -1234,14 +1504,6 @@ float3 lp_mesh_feature_normal(int4 mesh_data,
   return normalize(cross(b - a, c - a));
 }
 
-/* Last mesh hit on this thread (written by lp_sd_triangle_mesh), mirroring
- * the classic engine's g_sdf_mesh_last_*: lets the trace pass derive the
- * geometric/smooth normal from the winning triangle instead of paying for 4
- * finite-difference gradient evaluations per pixel. */
-int g_lp_mesh_last_triangle;
-float3 g_lp_mesh_last_barycentric;
-float3 g_lp_mesh_last_geometric_normal;
-
 bool lp_mesh_nearest(int4 mesh_data,
                      int mesh_node_count,
                      float4 mesh_scale,
@@ -1351,41 +1613,6 @@ bool lp_mesh_nearest(int4 mesh_data,
     g_lp_mesh_hint_triangles[cache_slot] = triangle_index;
   }
   return triangle_index >= 0;
-}
-
-/* Signed distance to a triangle mesh (identical to sdTriangleMesh). Also
- * records the winning triangle + hit data in g_lp_mesh_last_*, kept for
- * parity with the classic mesh library. */
-float lp_sd_triangle_mesh(float3 p, int4 mesh_data, int mesh_node_count, float4 mesh_scale)
-{
-  g_lp_mesh_last_triangle = -1;
-  float distance_squared;
-  int triangle_index;
-  float3 closest_point;
-  float3 barycentric;
-  float3 feature_normal;
-  if (!lp_mesh_nearest(mesh_data,
-                       mesh_node_count,
-                       mesh_scale,
-                       p,
-                       distance_squared,
-                       triangle_index,
-                       closest_point,
-                       barycentric,
-                       feature_normal))
-  {
-    return 1e10f;
-  }
-  float sign_value = dot(p - closest_point, feature_normal) < 0.0f ? -1.0f : 1.0f;
-  g_lp_mesh_last_triangle = triangle_index;
-  g_lp_mesh_last_barycentric = barycentric;
-  /* Near the surface (d < 1e-4) the p-closest displacement is floating-point
-   * noise, so use the feature normal: on a face interior it IS the exact SDF
-   * gradient, and it is stable. */
-  g_lp_mesh_last_geometric_normal = distance_squared > 1e-8f ?
-                                        normalize(p - closest_point) * sign_value :
-                                        feature_normal;
-  return sqrt(max(distance_squared, 0.0f)) * sign_value;
 }
 
 /** \} */
@@ -1802,23 +2029,22 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
   float3 r = prim.size.xyz;
   float dist;
   if (prim.type == SDF_GPU_TYPE_MESH) {
-    if ((prim.mesh_flags & SDF_LP_MESH_FLAG_BAKED) != 0) {
-      /* Baked volume fast path: sample at lp / scale (the analytic path
-       * scale-multiplies the vertices; dividing maps into the unscaled
-       * volume frame) and convert back with the min-scale factor (exact for
-       * uniform scale, conservative otherwise). The baked grid lives in the
-       * prim's unused-for-mesh box_* fields (see sdf_shader_shared.hh). */
-      dist = lp_baked_sample(prim.box_corners.xyz,
-                             prim.box_corners.w,
-                             prim.box_modes.xyz,
-                             prim.box_modes.w,
-                             lp / prim.scale.xyz) *
-             min(min(prim.scale.x, prim.scale.y), prim.scale.z);
-    }
-    else {
-      /* Mesh vertices carry the object scale themselves (classic parity). */
-      dist = lp_sd_triangle_mesh(lp, prim.mesh_data, prim.mesh_node_count, prim.scale);
-    }
+    /* Mesh-to-SDF is bake-only at runtime (the analytic BVH path was
+     * removed): sample the baked volume. Without the BAKED flag (bake
+     * pending) the object is invisible — return a huge distance. */
+    dist = ((prim.mesh_flags & SDF_LP_MESH_FLAG_BAKED) != 0) ?
+               lp_baked_sample(prim.box_corners.xyz,
+                               prim.box_corners.w,
+                               prim.box_edges.x,
+                               prim.box_modes.xyz,
+                               prim.box_modes.w,
+                               prim.coarse_origin.xyz,
+                               prim.coarse_origin.w,
+                               prim.coarse_grid.xyz,
+                               prim.coarse_grid.w,
+                               lp / prim.scale.xyz) *
+                   min(min(prim.scale.x, prim.scale.y), prim.scale.z) :
+               1e30f;
   }
   else {
     lp /= prim.scale.xyz;
@@ -1869,14 +2095,29 @@ float lp_eval_prim_base(float3 p, SDFLpPrimitive prim)
       float tapTop = prim.box_edges.z;
       float tapBot = prim.box_edges.w;
       int edgeMode = prim.box_modes.y;
+      /* Outline stroke half-width (SDF text thickness; 0 = filled). */
+      float outline_hw = (prim.box_modes.z != 0) ? prim.box_corners.y : 0.0f;
       if (pc >= 3) {
         if ((edgeTop + edgeBot + tapTop + tapBot) > 0.001f || prim.box_corners.x > 0.001f) {
-          dist = lp_sd_advanced_polygon(
-              lp, r.z, ps, pc, edgeTop, edgeBot, tapTop, tapBot, edgeMode, r.z);
+          dist = lp_sd_advanced_polygon(lp,
+                                        r.z,
+                                        ps,
+                                        pc,
+                                        edgeTop,
+                                        edgeBot,
+                                        tapTop,
+                                        tapBot,
+                                        edgeMode,
+                                        r.z,
+                                        outline_hw,
+                                        prim.auxf);
         }
         else {
-          float d2d = (prim.auxf > 0.001f) ? lp_sd_polygon_2d_rounded(lp.xy, ps, pc) :
-                                             lp_sd_polygon_2d(lp.xy, ps, pc);
+          float d2d = (prim.auxf > 0.001f) ? lp_sd_polygon_2d_rounded(lp.xy, ps, pc, prim.auxf) :
+                                             lp_sd_polygon_2d(lp.xy, ps, pc, 0.0f);
+          if (outline_hw > 0.0f) {
+            d2d = abs(d2d) - outline_hw;
+          }
           float dz = abs(lp.z) - r.z;
           float2 dd = float2(d2d, dz);
           dist = length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
@@ -1957,9 +2198,6 @@ float lp_apply_distance_modifiers(float dist, float3 p, SDFLpPrimitive prim)
       }
     }
     else if (mtype == SDF_LP_MOD_ROUND) {
-      dist -= smod.params.x;
-    }
-    else if (mtype == SDF_LP_MOD_BEVEL && prim.type == SDF_GPU_TYPE_MESH) {
       dist -= smod.params.x;
     }
     else if (mtype == SDF_LP_MOD_DISPLACE) {
@@ -2130,10 +2368,19 @@ float lp_list_eval_obj_id(float3 p, int count, int base)
         obj_id = (t >= 0.5f) ? right_id : left_id;
       }
       else {
+        /* Dominant-operand id, mirroring the classic per-op rules
+         * (sdf_trace_comp.glsl:193-221: SUBTRACT takes the right id when
+         * -d2 > d1, INTERSECT when d2 > d1, i.e. the max-form winner). The
+         * mix factor must NOT be scaled by s: negating it forced v.y <= 0
+         * for every SUBTRACT/INTERSECT (and the SUB/INTER forms SHELL
+         * desugars into), pinning the id to the left operand — carved
+         * surfaces took the base object's id in unculled cells but the true
+         * winner's id in cells where the prune pass culled the op, which
+         * made the edge-detect outline follow the pruning grid. */
         float s = lp_op_sign(op);
         float k = lp_op_blend_factor(op);
-        float2 v = s * lp_smin_blend(s * left_val, s * right_val, k);
-        obj_id = (v.y < 0.5f) ? left_id : right_id;
+        float m = lp_smin_blend(s * left_val, s * right_val, k).y;
+        obj_id = (m < 0.5f) ? left_id : right_id;
       }
     }
     else if (node.type == SDF_LP_NODETYPE_OFFSET) {
@@ -2159,5 +2406,109 @@ float lp_list_eval_obj_id(float3 p, int count, int base)
   return i_stack[0];
 }
 #endif /* SDF_LP_NO_LIST_EVAL */
+
+#ifdef SDF_LP_INIT_LIST
+/* Full-tree evaluation against the serialized init list (lp_active_init).
+ * The SDF_LP_FALLBACK_LIST path MUST use these, not lp_list_eval(p,
+ * total_num_nodes, 0): with culling enabled lp_active_in is the per-level
+ * POOL buffer (per-cell lists at arbitrary offsets), so reading it from
+ * base 0 evaluates the first N pool entries — a garbage tree of
+ * concatenated cell lists, and objects vanish exactly when the scene
+ * overflows the prune pools. Bodies mirror the lp_active_in variants
+ * above; keep in sync. */
+float lp_list_eval_init(float3 p, int count)
+{
+  float stack[SDF_LP_STACK_DEPTH];
+  int stack_idx = 0;
+
+  for (int i = 0; i < count; i++) {
+    uint active_node = lp_active_init[i];
+    SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
+
+    float d;
+    if (node.type == SDF_LP_NODETYPE_BINARY) {
+      float left_val = stack[stack_idx - 2];
+      float right_val = stack[stack_idx - 1];
+      stack_idx -= 2;
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      d = lp_binary_op_eval(opw, left_val, right_val);
+    }
+    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
+      d = stack[stack_idx - 1] + lp_offset_node_value(node);
+      stack_idx -= 1;
+    }
+    else {
+      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
+      d = lp_eval_prim(p, prim);
+    }
+
+    d *= lp_active_node_sign(active_node);
+    if (stack_idx >= SDF_LP_STACK_DEPTH) {
+      return 1e20f;
+    }
+    stack[stack_idx++] = d;
+  }
+
+  return stack[0];
+}
+
+float lp_list_eval_obj_id_init(float3 p, int count)
+{
+  float d_stack[SDF_LP_STACK_DEPTH];
+  float i_stack[SDF_LP_STACK_DEPTH];
+  int stack_idx = 0;
+
+  for (int i = 0; i < count; i++) {
+    uint active_node = lp_active_init[i];
+    SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
+
+    float d;
+    float obj_id;
+    if (node.type == SDF_LP_NODETYPE_BINARY) {
+      float left_val = d_stack[stack_idx - 2];
+      float right_val = d_stack[stack_idx - 1];
+      float left_id = i_stack[stack_idx - 2];
+      float right_id = i_stack[stack_idx - 1];
+      stack_idx -= 2;
+      uint4 opw = lp_binary_ops[node.idx_in_type];
+      uint op = opw.x;
+      d = lp_binary_op_eval(opw, left_val, right_val);
+      if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
+        float cb = lp_op_blend_factor(op);
+        float t = (cb > 0.0f) ?
+                      1.0f - smoothstep(-cb, cb, right_val) :
+                      ((right_val < 0.0f) ? 1.0f : 0.0f);
+        obj_id = (t >= 0.5f) ? right_id : left_id;
+      }
+      else {
+        float s = lp_op_sign(op);
+        float k = lp_op_blend_factor(op);
+        float m = lp_smin_blend(s * left_val, s * right_val, k).y;
+        obj_id = (m < 0.5f) ? left_id : right_id;
+      }
+    }
+    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
+      d = d_stack[stack_idx - 1] + lp_offset_node_value(node);
+      obj_id = i_stack[stack_idx - 1];
+      stack_idx -= 1;
+    }
+    else {
+      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
+      d = lp_eval_prim(p, prim);
+      obj_id = prim.color.w;
+    }
+
+    d *= lp_active_node_sign(active_node);
+    if (stack_idx >= SDF_LP_STACK_DEPTH) {
+      return -1.0f;
+    }
+    d_stack[stack_idx] = d;
+    i_stack[stack_idx] = obj_id;
+    stack_idx++;
+  }
+
+  return i_stack[0];
+}
+#endif /* SDF_LP_INIT_LIST */
 
 /** \} */
