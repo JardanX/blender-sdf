@@ -145,12 +145,16 @@ bool sdfBakedGridSample(
 }
 
 /* Baked signed distance at p (unscaled local mesh space), 3-way:
- * 1. fine grid (narrow band, full detail) while its value is NOT clamped;
+ * 1. fine grid (narrow band, full detail) while its value is NOT affected
+ *    by the fp16 clamp: the clamp flattens the field, and the flattening
+ *    contaminates trilinear cells from ~sqrt(3) voxels inside the clamp —
+ *    defer before that (band - 1.75 voxels) or the sampled value AND its
+ *    gradient break (a discontinuity ring at the frontier);
  * 2. coarse grid (unclamped fp32, out to the scene blend reach) everywhere
  *    else inside it — CSG blends of any radius see a true distance field,
- *    and deferring to it at the fine clamp keeps the field continuous: a
- *    clamp step here would paint the fine volume's box skin into wide color
- *    blends;
+ *    and deferring to it ahead of the fine clamp keeps the field AND its
+ *    gradient continuous: a clamp step here would paint the fine volume's
+ *    box skin into wide color blends;
  * 3. otherwise the point-to-MESH-BOUNDS distance (the fine volume box
  *    shrunk by pad = band + voxel_size on every side) — a conservative
  *    lower bound on the true distance that, unlike the volume-box distance,
@@ -174,7 +178,7 @@ float sdfBakedSample(float3 origin,
   float d;
   const bool have_fine = sdfBakedGridSample(origin, voxel_size, res, base, false, p, d);
   fine_d = have_fine ? d : 1e30f;
-  if (have_fine && abs(d) < 0.99f * band) {
+  if (have_fine && abs(d) < band - 1.75f * voxel_size) {
     return d * 0.95f;
   }
   float dc;

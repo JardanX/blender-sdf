@@ -220,6 +220,43 @@ TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_color_resolve_comp.glsl")
 GPU_SHADER_CREATE_END()
 
+/* LP variant of the color resolve: identical buffers/constants, but the
+ * SDF_LP_TETRA_NORMALS define swaps the 6-tap central-difference position
+ * stencil in sdfAnalyticWorldNormals for the tetrahedron 4-tap form
+ * (iquilezles.org/articles/normalsSDF). Only the LP engine instantiates it
+ * (SH_LP_COLOR_RESOLVE_COMP in kLpShaders); the classic engine keeps the
+ * central-difference shader above. */
+GPU_SHADER_CREATE_INFO(sdf_lp_color_resolve_comp)
+LOCAL_GROUP_SIZE(8, 8)
+DO_STATIC_COMPILATION()
+DEFINE_VALUE("SDF_LP_TETRA_NORMALS", "1")
+DEFINE_VALUE("kTileSize", "8")
+DEFINE_VALUE("kMaxTileObjects", "256")
+STORAGE_BUF(0, read, SDFObjectGPU, objects[])
+STORAGE_BUF(1, read, SDFModifierGPU, sdf_modifiers[])
+STORAGE_BUF(2, read, SDFGroupGPU, groups[])
+STORAGE_BUF(3, read, SdfAabbNodeGPU, aabb_nodes[])
+STORAGE_BUF(5, read, int, tile_prim_counts[])
+STORAGE_BUF(6, read, int, tile_prim_lists[])
+STORAGE_BUF(8, read, SDFPolygonPointGPU, polygon_points[])
+STORAGE_BUF(10, read, SDFObjectAABB, object_aabbs[])
+STORAGE_BUF(9, read, uint4, mesh_data_buf[])
+STORAGE_BUF(11, read, uint, bake_dist[])
+STORAGE_BUF(12, read, uint, bake_nrm[])
+STORAGE_BUF(13, read, uint, bake_col[])
+IMAGE(0, SFLOAT_32_32_32_32, read, image2D, gbuf_pos_img)
+IMAGE(1, SFLOAT_16_16_16_16, read_write, image2D, gbuf_color_img)
+IMAGE(2, SFLOAT_16_16_16_16, write, image2D, gbuf_normal_img)
+PUSH_CONSTANT(int, object_count)
+PUSH_CONSTANT(int, group_count)
+PUSH_CONSTANT(float, sdf_ray_epsilon)
+PUSH_CONSTANT(int, use_bvh)
+PUSH_CONSTANT(int, bvh_root)
+PUSH_CONSTANT(int2, screen_size)
+TYPEDEF_SOURCE("sdf_shader_shared.hh")
+COMPUTE_SOURCE("sdf_color_resolve_comp.glsl")
+GPU_SHADER_CREATE_END()
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

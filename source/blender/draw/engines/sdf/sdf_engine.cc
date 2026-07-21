@@ -40,6 +40,7 @@ static constexpr const char *s_shader_info_names[SH_COUNT] = {
     "sdf_lp_march_comp",
     "sdf_lp_debug_comp",
     "sdf_mesh_bake_comp",
+    "sdf_lp_color_resolve_comp",
 };
 
 static gpu::StaticShader s_shaders[SH_COUNT];
@@ -725,17 +726,20 @@ std::string sdf_bake_to_mesh(int grid_res,
     return "DC-SDD produced no surface (empty scene or resolution too low)";
   }
 
+  /* extract_mesh_from_cells emits quads (F.cols()==4): triangulate. */
+  Eigen::MatrixXi TriF = meshing::triangulate_v1(F, V);
+
   /* Guarantee outward orientation: flip all triangles if the signed volume is negative. */
   double signed_volume = 0.0;
-  for (int f = 0; f < F.rows(); f++) {
-    const Eigen::Vector3d v0 = V.row(F(f, 0)).transpose();
-    const Eigen::Vector3d v1 = V.row(F(f, 1)).transpose();
-    const Eigen::Vector3d v2 = V.row(F(f, 2)).transpose();
+  for (int f = 0; f < TriF.rows(); f++) {
+    const Eigen::Vector3d v0 = V.row(TriF(f, 0)).transpose();
+    const Eigen::Vector3d v1 = V.row(TriF(f, 1)).transpose();
+    const Eigen::Vector3d v2 = V.row(TriF(f, 2)).transpose();
     signed_volume += v0.dot(v1.cross(v2)) / 6.0;
   }
   if (signed_volume < 0.0) {
-    for (int f = 0; f < F.rows(); f++) {
-      std::swap(F(f, 1), F(f, 2));
+    for (int f = 0; f < TriF.rows(); f++) {
+      std::swap(TriF(f, 1), TriF(f, 2));
     }
   }
 
@@ -744,9 +748,9 @@ std::string sdf_bake_to_mesh(int grid_res,
     out_positions[i] = float3(float(V(i, 0)), float(V(i, 1)), float(V(i, 2)));
   }
 
-  out_tris.reserve(F.rows());
-  for (int f = 0; f < F.rows(); f++) {
-    const int a = F(f, 0), b = F(f, 1), c = F(f, 2);
+  out_tris.reserve(TriF.rows());
+  for (int f = 0; f < TriF.rows(); f++) {
+    const int a = TriF(f, 0), b = TriF(f, 1), c = TriF(f, 2);
     if (a >= 0 && a < vert_count && b >= 0 && b < vert_count && c >= 0 && c < vert_count) {
       out_tris.append(int3(a, b, c));
     }

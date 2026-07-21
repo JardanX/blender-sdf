@@ -3433,6 +3433,18 @@ Fix: removed the `on_segment` guard. The signed perpendicular distance via `dot(
 | `draw/engines/sdf/shaders/sdf_lp_common.glsl` | Removed `on_segment` guard from `lp_sd_advanced_cone_frustum` |
 | `draw/engines/sdf/sdf_cpu_eval.hh` | Removed `on_segment` guard from `sdAdvancedConeFrustum` |
 
+### Cone Bevel Fix — Cap Distance (disk SDF → slab distance)
+
+The `d_cap` value in `sdAdvancedConeFrustum` computed the signed distance to the **cap disk** (including the radial excess `q.x - cap_r`), not the signed distance to the **cap plane** (`abs(q.y) - h`). The cone frustum is the intersection of two half-spaces: the slanted cone side and the slab `|z| < h`. Its exact signed distance is `max(d_side, d_cap)`. The disk SDF caused points between the caps but outside the cap radius to return an artificially inflated value, overestimating the SDF and producing incorrect normals near the caps.
+
+Fix: replaced the multi-branch disk-SDF with the slab distance `abs(q.y) - h`, and the non-bevel return path from the box formula (`length(max(dd,0)) + min(max(dd.x,dd.y),0)`) to `max(d_side, d_cap)`.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/shaders/sdf_lib.glsl` | `d_cap` disk SDF → slab distance; non-bevel return → `max(d_side, d_cap)`; `cap_r` → `rt`/`rb` in `edgeR` |
+| `draw/engines/sdf/shaders/sdf_lp_common.glsl` | Same |
+| `draw/engines/sdf/sdf_cpu_eval.hh` | Same |
+
 ---
 
 ## CPU DC-SDD Meshing — Replace GPU Dual Contouring

@@ -69,10 +69,13 @@ def interval_prune(nodes, root, aabb_min, aabb_max, gs, max_cells=40000):
             cl = b_l - a_h > dom_k
         skip[:, idx] = cr | cl
         dl[:, idx] = cl
-    # far: interval excludes zero
+    # far: interval clears zero by more than the cell diagonal (2R margin,
+    # sdf_lp_prune_comp.glsl far-field block: without it the stored step
+    # z = lo/scene_l collapses to ~0 at the far shell and the march stalls).
+    R = np.linalg.norm(cs) * 0.5
     rlo, rhi = lo[root], hi[root]
     scene_l = nodes[root]["lip"]
-    far = (rlo > 0) | (rhi < 0)
+    far = (rlo > 2.0 * R) | (rhi < -2.0 * R)
     far_val = np.where(rlo > 0, rlo / scene_l, np.where(rhi < 0, rhi / scene_l, 0.0))
     return dict(lo=lo, hi=hi, skip=skip, dl=dl, far=far, far_val=far_val,
                 centers=centers, cs=cs, gs=gs, aabb_min=aabb_min, aabb_max=aabb_max)

@@ -1750,21 +1750,9 @@ float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
   float d_side_sign = dot(diff, outward_normal);
   float d_side = (d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
 
-  float cap_r = (q.y < 0.0f) ? rb : rt;
-  float d_cap_r = q.x - cap_r;
-  float d_cap_z = abs(q.y) - h;
-  float d_cap;
-  if (d_cap_r < 0.0f && d_cap_z < 0.0f) {
-    d_cap = max(d_cap_r, d_cap_z);
-  }
-  else {
-    float2 cap_dd = float2(max(d_cap_r, 0.0f), max(d_cap_z, 0.0f));
-    d_cap = length(cap_dd);
-    if (d_cap_r > 0.0f && d_cap_z < 0.0f) { d_cap = d_cap_r; }
-    if (d_cap_z > 0.0f && d_cap_r < 0.0f) { d_cap = d_cap_z; }
-  }
+  float d_cap = abs(q.y) - h;
 
-  float edgeR = (q.y > 0.0f) ? edgeTop * min(cap_r, h) : edgeBot * min(cap_r, h);
+  float edgeR = (q.y > 0.0f) ? edgeTop * min(rt, h) : edgeBot * min(rb, h);
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
       float2 dd = float2(d_side + edgeR, d_cap + edgeR);
@@ -1785,8 +1773,7 @@ float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
     }
   }
   else {
-    float2 dd = float2(d_side, d_cap);
-    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    return max(d_side, d_cap);
   }
 }
 

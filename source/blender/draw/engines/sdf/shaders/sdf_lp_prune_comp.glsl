@@ -15,13 +15,16 @@
  * A binary op child is culled when its whole interval clears the sibling's
  * by more than the blend radius k: the dominated subtree cannot win the
  * min()/max() anywhere inside the cell and the op reduces to the exact
- * winner there. Cells whose root interval excludes zero are "far field" and
- * only store a constant lower bound on the distance to the surface,
+ * winner there. Cells whose root interval clears zero by more than the cell
+ * diagonal (lo > 2R, resp. hi < -2R) are "far field" and only store a
+ * constant lower bound on the distance to the surface,
  * lo/scene_l (resp. hi/scene_l), where scene_l is the full tree's Lipschitz
  * constant — the field-to-distance conversion the ROUND fillet needs (its
  * field can exceed the true distance by up to sqrt(n) along fillet crests
  * of parallel surfaces, so un-divided |d| steps overshoot thin features;
- * see sdf_lp_march_comp.glsl). The interval form keeps dominance and
+ * see sdf_lp_march_comp.glsl). The 2R margin keeps the stored step bounded
+ * below by 2R/scene_l so the march can never asymptotically stall in the
+ * far shell around a surface. The interval form keeps dominance and
  * far-cell culling effective for ROUND / many-object scenes, where the old
  * center value +- (Ll+Lr)*R form degraded with the sqrt-composed per-node
  * Lipschitz constants.
@@ -262,10 +265,17 @@ void main()
    * to the surface. The interval already proves the cell has no zero
    * crossing (lo > 0 or hi < 0) and |f| >= lo (resp. |hi|) inside it;
    * dividing by scene_l turns that field bound into a distance bound (see
-   * above). Strictly tighter than the old sign(d)*((|d| - 2*L*R)/scene_l)
-   * form: the interval lo/hi is always at least as tight as
-   * value(center) -+ L*R, and much tighter once ROUND constants compound. */
-  if (lo > 0.0f || hi < 0.0f) {
+   * above). The 2R margin is NOT optional: the march consumes the constant
+   * as a step length, and far cells form a closed shell around every
+   * surface — with a bare lo > 0 test the shell's inner cells have
+   * lo ~ 0, the step lo/scene_l collapses, and the ray crawls
+   * asymptotically without ever reaching a near (list) cell, burning
+   * max_steps and missing (blocky, cell-aligned holes). lo > 2R guarantees
+   * z >= 2R/scene_l, so a ray crosses any far cell in at most scene_l
+   * steps. Still ~root_l times tighter than the old
+   * abs(d_center) > 2*root_l*R form it replaces, since the interval lo/hi
+   * never uses the compounded per-node Lipschitz constants. */
+  if (lo > 2.0f * R || hi < -2.0f * R) {
     lp_cell_meta_out[cell_idx].x = 0;
     lp_cell_meta_out[cell_idx].z = floatBitsToInt(((lo > 0.0f) ? lo : hi) / scene_l);
     return;

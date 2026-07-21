@@ -503,21 +503,9 @@ float lp_sd_advanced_cone_frustum(float3 p, float rb, float rt, float h,
   float d_side_sign = dot(diff, outward_normal);
   float d_side = (d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
 
-  float cap_r = (q.y < 0.0f) ? rb : rt;
-  float d_cap_r = q.x - cap_r;
-  float d_cap_z = abs(q.y) - h;
-  float d_cap;
-  if (d_cap_r < 0.0f && d_cap_z < 0.0f) {
-    d_cap = max(d_cap_r, d_cap_z);
-  }
-  else {
-    float2 cap_dd = float2(max(d_cap_r, 0.0f), max(d_cap_z, 0.0f));
-    d_cap = length(cap_dd);
-    if (d_cap_r > 0.0f && d_cap_z < 0.0f) { d_cap = d_cap_r; }
-    if (d_cap_z > 0.0f && d_cap_r < 0.0f) { d_cap = d_cap_z; }
-  }
+  float d_cap = abs(q.y) - h;
 
-  float edgeR = (q.y > 0.0f) ? edgeTop * min(cap_r, h) : edgeBot * min(cap_r, h);
+  float edgeR = (q.y > 0.0f) ? edgeTop * min(rt, h) : edgeBot * min(rb, h);
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
       float2 dd = float2(d_side + edgeR, d_cap + edgeR);
@@ -538,8 +526,7 @@ float lp_sd_advanced_cone_frustum(float3 p, float rb, float rt, float h,
     }
   }
   else {
-    float2 dd = float2(d_side, d_cap);
-    return length(max(dd, float2(0.0f))) + min(max(dd.x, dd.y), 0.0f);
+    return max(d_side, d_cap);
   }
 }
 
@@ -1458,14 +1445,18 @@ bool lp_baked_grid_sample(
 
 /* Baked signed distance at p (unscaled local mesh space), 3-way (identical
  * to sdfBakedSample in sdf_mesh_lib.glsl — keep in sync): fine grid while
- * its value is NOT clamped; coarse grid (unclamped fp32, out to the scene
- * blend reach) everywhere else inside it — CSG blends of any radius see a
- * true distance field, and deferring to it at the fine clamp keeps the field
- * continuous (a clamp step would paint the fine volume's box skin into wide
- * color blends); beyond that the point-to-MESH-BOUNDS distance (the fine
- * volume box shrunk by pad = band + voxel_size) — a conservative lower bound
- * that never vanishes along a ray outside the grids. Grid reads are scaled
- * by 0.95 as a Lipschitz safety margin for interpolation error. */
+ * its value is NOT affected by the fp16 clamp (the clamp flattens the
+ * field, and the flattening contaminates trilinear cells from ~sqrt(3)
+ * voxels inside the clamp — defer before that, at band - 1.75 voxels, or
+ * the sampled value and its gradient break in a discontinuity ring);
+ * coarse grid (unclamped fp32, out to the scene blend reach) everywhere
+ * else inside it — CSG blends of any radius see a true distance field, and
+ * deferring to it ahead of the fine clamp keeps the field continuous (a
+ * clamp step would paint the fine volume's box skin into wide color
+ * blends); beyond that the point-to-MESH-BOUNDS distance (the fine volume
+ * box shrunk by pad = band + voxel_size) — a conservative lower bound that
+ * never vanishes along a ray outside the grids. Grid reads are scaled by
+ * 0.95 as a Lipschitz safety margin for interpolation error. */
 float lp_baked_sample(float3 origin,
                       float voxel_size,
                       float band,
@@ -1479,7 +1470,7 @@ float lp_baked_sample(float3 origin,
 {
   float d;
   const bool have_fine = lp_baked_grid_sample(origin, voxel_size, res, base, false, p, d);
-  if (have_fine && abs(d) < 0.99f * band) {
+  if (have_fine && abs(d) < band - 1.75f * voxel_size) {
     return d * 0.95f;
   }
   float dc;
@@ -2450,7 +2441,14 @@ float lp_eval_prim(float3 p, SDFLpPrimitive prim)
  * per-axis closest point (clamp of the origin) and the max at the per-axis
  * farthest bound. The local cell box is the componentwise AABB of the
  * transformed world cell (conservative under rotation, exact without).
- * Everything else (advanced shapes, meshes, modifiers) falls back to
+ * Baked meshes get a SOUND lower bound from the shrunk bake bounds (the
+ * same conservative bound lp_baked_sample uses for its own far path): the
+ * baked field is piecewise trilinear with a piecewise-constant sign-flip
+ * guard — discontinuous across guard cells, so NO finite Lipschitz constant
+ * makes center +- lip*R safe there (a guard cell's constant can sit far
+ * above the interpolated field one voxel away; with the tight interval
+ * prune that wrongly far-culls whole cells and cuts blocky chunks out of
+ * the mesh). Everything else (advanced shapes, modifiers) falls back to
  * value(center) +- lip*R, the same bound the center-based prune used for
  * every node. Used by the prune pass (sdf_lp_prune_comp.glsl): op intervals
  * compose exactly on top of these leaf intervals because lp_binary_op_eval
@@ -2460,20 +2458,20 @@ float lp_eval_prim(float3 p, SDFLpPrimitive prim)
 float2 lp_prim_interval(float3 cell_center, float3 cell_half, float R, SDFLpPrimitive prim, float lip)
 {
   float3 d4 = cell_center - prim.position.xyz;
+  float3 cl = float3(dot(prim.m_row0, float4(d4, 1.0f)),
+                     dot(prim.m_row1, float4(d4, 1.0f)),
+                     dot(prim.m_row2, float4(d4, 1.0f))) /
+              prim.scale.xyz;
+  float3 hl = float3(dot(abs(prim.m_row0.xyz), cell_half),
+                     dot(abs(prim.m_row1.xyz), cell_half),
+                     dot(abs(prim.m_row2.xyz), cell_half)) /
+              prim.scale.xyz;
+  float3 lo3 = cl - hl;
+  float3 hi3 = cl + hl;
   if (prim.modifier_count == 0 &&
       (prim.type == SDF_GPU_TYPE_SPHERE || prim.type == SDF_GPU_TYPE_BOX))
   {
     float3 r = prim.size.xyz;
-    float3 cl = float3(dot(prim.m_row0, float4(d4, 1.0f)),
-                       dot(prim.m_row1, float4(d4, 1.0f)),
-                       dot(prim.m_row2, float4(d4, 1.0f))) /
-                prim.scale.xyz;
-    float3 hl = float3(dot(abs(prim.m_row0.xyz), cell_half),
-                       dot(abs(prim.m_row1.xyz), cell_half),
-                       dot(abs(prim.m_row2.xyz), cell_half)) /
-                prim.scale.xyz;
-    float3 lo3 = cl - hl;
-    float3 hi3 = cl + hl;
     float3 closest = clamp(float3(0.0f), lo3, hi3);
     float3 farthest = max(abs(lo3), abs(hi3));
     if (prim.type == SDF_GPU_TYPE_SPHERE && abs(r.x - r.y) < 0.0001f &&
@@ -2489,6 +2487,27 @@ float2 lp_prim_interval(float3 cell_center, float3 cell_half, float R, SDFLpPrim
       return prim.scale.w *
              (float2(lp_sd_box(closest, r), lp_sd_box(farthest, r)) - prim.size.w);
     }
+  }
+  if (prim.type == SDF_GPU_TYPE_MESH && prim.modifier_count == 0 &&
+      (prim.mesh_flags & SDF_LP_MESH_FLAG_BAKED) != 0)
+  {
+    /* Sound lo: cells entirely outside the shrunk bake bounds use the
+     * cell-to-bounds distance (mesh lies inside, so the field everywhere in
+     * the cell is >= this); cells touching the bounds can contain interior
+     * field, bounded below by the closed-mesh inradius bound (half the
+     * bounds diagonal plus the bake pad). Same local frame and scale
+     * products as the baked evaluation. hi keeps the center-based form
+     * (overestimates only weaken culling, never invalidate it). */
+    float pad = prim.box_edges.x + prim.box_corners.w;
+    float3 b_lo = prim.box_corners.xyz + float3(pad);
+    float3 b_hi = prim.box_corners.xyz + prim.box_modes.xyz * prim.box_corners.w - float3(pad);
+    float3 gap = max(max(b_lo - hi3, lo3 - b_hi), float3(0.0f));
+    bool outside = any(greaterThan(gap, float3(0.0f)));
+    float lo = outside ? length(gap) :
+                         -(0.5f * length(b_hi - b_lo) + pad);
+    lo = lo * min(min(prim.scale.x, prim.scale.y), prim.scale.z) * prim.scale.w;
+    float d = lp_eval_prim(cell_center, prim);
+    return float2(lo - prim.size.w * prim.scale.w, d + lip * R);
   }
   float d = lp_eval_prim(cell_center, prim);
   return float2(d - lip * R, d + lip * R);
