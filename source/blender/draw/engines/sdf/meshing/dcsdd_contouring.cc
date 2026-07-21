@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -597,9 +598,24 @@ void extract_mesh_from_cells(const std::vector<Cell> &cells,
     }
 
     if (!found) {
-      std::cout << "Warning: No hermite normal found for edge at cell (" << cell_i << ","
-                << cell_j << "," << cell_k << ")\n";
-      exit(EXIT_FAILURE);
+      /* Port addition (replaces the original exit(EXIT_FAILURE)): fall back to the
+       * grid gradient at the edge midpoint; if that degenerates, use the edge
+       * direction — the QEF regularization tolerates an imperfect normal. */
+      const Eigen::Vector3d mid = 0.5 * (v0 + v1);
+      const Eigen::Vector3d origin = GV.row(0).cast<double>();
+      const double spacing = (GV.row(1) - GV.row(0)).norm();
+      const int gi = std::clamp(int(std::lround((mid.x() - origin.x()) / spacing)), 0, resX - 1);
+      const int gj = std::clamp(int(std::lround((mid.y() - origin.y()) / spacing)), 0, resY - 1);
+      const int gk = std::clamp(int(std::lround((mid.z() - origin.z()) / spacing)), 0, resZ - 1);
+      Eigen::Vector3d g = gradientAt(GV, S, gi, gj, gk, resX, resY, resZ);
+      if (g.squaredNorm() < 1e-20) {
+        g = (v1 - v0).normalized();
+      }
+      else {
+        g.normalize();
+      }
+      hermite_normals_list.push_back(g);
+      return false;
     }
 
     return found;
@@ -1299,19 +1315,31 @@ void contouring(const Eigen::VectorXf &S,
         std::cout << "\n[contouring] Outer iteration " << (outer_iter + 1) << " / "
                   << options.outer_iters << std::endl;
       }
+      auto phase_t0 = std::chrono::steady_clock::now();
+      auto phase_log = [&](const char *name) {
+        if (options.verbose) {
+          const auto now = std::chrono::steady_clock::now();
+          std::cout << "[contouring] " << name << " took "
+                    << std::chrono::duration<double>(now - phase_t0).count() << " s" << std::endl;
+          phase_t0 = now;
+        }
+      };
 
       /* Triangulate F. */
       Eigen::MatrixXi TriF = triangulate_v1(F, V);
+      phase_log("triangulate");
 
       if (options.verbose) {
         std::cout << "[contouring] Assigning spheres..." << std::endl;
       }
       assign_spheres_to_cells(S, GV, V, F, cells, resX, resY, resZ, options.batch_size, TriF);
+      phase_log("assign_spheres");
 
       if (options.verbose) {
         std::cout << "[contouring] Computing intersections..." << std::endl;
       }
       compute_face_cell_intersections(cells, resX, resY, resZ, options.new_face_pos_weight);
+      phase_log("face_cell_intersections");
 
       if (options.hermite_update && outer_iter > 0) {
         if (options.verbose) {
@@ -1325,6 +1353,7 @@ void contouring(const Eigen::VectorXf &S,
                                           options.new_hermite_pos_weight,
                                           true,
                                           options.verbose);
+        phase_log("hermite_update");
       }
 
       if (options.verbose) {
@@ -1342,6 +1371,12 @@ void contouring(const Eigen::VectorXf &S,
 
           c.prev_outer_vertex = c.vertex;
 
+          /* Convergence exit relative to the cell size: 2e-3 of the cell
+           * diagonal is far below voxel precision (and below what the
+           * hermite data can resolve), so iterating further only burns time. */
+          const double inner_tol =
+              2e-3 * (c.corners.row(6) - c.corners.row(0)).norm();
+
           for (int inner_iter = 0; inner_iter < options.inner_iters; ++inner_iter) {
             c.prev_vertex = c.vertex;
             refine_vertex_from_face_intersections(c);
@@ -1352,7 +1387,7 @@ void contouring(const Eigen::VectorXf &S,
                              options.svd_threshold,
                              options.verbose);
             }
-            if ((c.vertex - c.prev_vertex).norm() < 1e-6) {
+            if ((c.vertex - c.prev_vertex).norm() < inner_tol) {
               break;
             }
           }
@@ -1361,7 +1396,9 @@ void contouring(const Eigen::VectorXf &S,
       });
 
       /* Re-extract mesh after sphere assignment. */
+      phase_log("vertex_update");
       extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
+      phase_log("extract_mesh");
 
       /* Sum the energy from all cells, print it, and check for convergence. */
       const double total_energy = show_total_energy(cells, options.verbose);

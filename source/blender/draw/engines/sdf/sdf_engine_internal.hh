@@ -292,6 +292,7 @@ enum ShaderIndex {
   SH_LP_MARCH_COMP,
   SH_LP_DEBUG_COMP,
   SH_MESH_BAKE_COMP,
+  SH_LP_COLOR_RESOLVE_COMP,
   SH_COUNT,
 };
 
@@ -352,7 +353,10 @@ class SdfInstanceBase : public DrawEngine {
   gpu::Shader *aabb_project_sh() { return sdf_shader_get(SH_AABB_PROJECT_COMP); }
   gpu::Shader *tile_cull_sh() { return sdf_shader_get(SH_TILE_CULL_COMP); }
   gpu::Shader *cone_march_sh() { return sdf_shader_get(SH_CONE_MARCH_COMP); }
-  gpu::Shader *color_resolve_sh() { return sdf_shader_get(SH_COLOR_RESOLVE_COMP); }
+  /* Virtual: the LP engine overrides it to instantiate the tetrahedron
+   * 4-tap normal variant (sdf_lp_color_resolve_comp); the classic engine
+   * keeps the 6-tap central-difference shader. */
+  virtual gpu::Shader *color_resolve_sh() { return sdf_shader_get(SH_COLOR_RESOLVE_COMP); }
   gpu::Shader *normal_comp_sh() { return sdf_shader_get(SH_NORMAL_COMP); }
   gpu::Shader *shade_comp_sh() { return sdf_shader_get(SH_SHADE_COMP); }
   gpu::Shader *blit_sh() { return sdf_shader_get(SH_BLIT); }
@@ -384,6 +388,19 @@ class SdfInstanceBase : public DrawEngine {
   int scroll_cooldown_ = 0;
   int idle_frames_ = 0;
   bool compute_valid_ = false;
+  /* Set by object_sync when an SDF-enabled mesh has no valid bake payload
+   * (payload builds can commit a few frames late — depsgraph rebuilds on
+   * undo, shading-only re-evaluations like auto-smooth toggles). draw()
+   * keeps requesting redraws (throttled by mesh_sync_retry_) until the
+   * object syncs again, instead of leaving it invisible until the user
+   * moves the view. */
+  bool mesh_sync_missing_ = false;
+  /* Consecutive frames spent waiting on mesh_sync_missing_ with no scene
+   * change arriving; capped so a permanently invalid mesh (degenerate /
+   * non-orientable — the payload build fails every evaluation) cannot
+   * spin the redraw loop forever. */
+  int mesh_sync_retry_ = 0;
+  static constexpr int kMeshSyncRetryFrames = 120;
   uint64_t prev_data_hash_ = 0;
   uint64_t prev_mesh_hash_ = 0;
   uint64_t prev_mesh_data_hash_ = 0;
@@ -445,7 +462,7 @@ class SdfInstanceBase : public DrawEngine {
     float3 origin = float3(0.0f);
     /* Cubic voxel edge length. */
     float voxel_size = 0.0f;
-    /* Narrow band half-width (4 * voxel_size). */
+    /* Narrow band half-width (6 * voxel_size). */
     float band = 0.0f;
     /* Coarse far-field level (fp32, unclamped out to the blend reach;
      * cres.x == 0 when the scene has no blends). */
@@ -680,6 +697,7 @@ class SdfInstanceBase : public DrawEngine {
     max_shell_distance_ = 0.0f;
     step_factor_ = 0.85f;
     frustum_valid_ = false;
+    mesh_sync_missing_ = false;
 
   }
 
@@ -695,6 +713,16 @@ class SdfInstanceBase : public DrawEngine {
     if (ob->type == OB_MESH) {
       SDFMeshRuntimeSnapshot snapshot;
       if (!BKE_sdf_mesh_runtime_snapshot(*ob, snapshot)) {
+        /* SDF-enabled mesh without a valid payload: the payload is built
+         * by mesh_data_update on the evaluated object, which can commit a
+         * few frames late (depsgraph rebuilds on undo, shading-only
+         * re-evaluations like auto-smooth toggles). Flag it so draw()
+         * keeps requesting redraws until the object syncs again —
+         * otherwise the mesh stays invisible until the user moves the
+         * view. */
+        if (BKE_sdf_object_is_enabled(*ob)) {
+          mesh_sync_missing_ = true;
+        }
         return;
       }
       mesh_transforms_.append(ob->object_to_world());
@@ -3676,12 +3704,28 @@ class SdfInstanceBase : public DrawEngine {
 
     bool res_changed = (render_size_ != prev_render_size_);
     bool force_compute = (G.debug & G_DEBUG_GPU_SDF) != 0;
+    /* Retry bookkeeping for mesh_sync_missing_ (see the member comment): a
+     * fresh missing state (a scene change just arrived) resets the budget;
+     * a static scene that stays missing eventually stops the redraw loop
+     * so a permanently invalid mesh cannot spin it forever. */
+    if (scene_changed_ || !mesh_sync_missing_) {
+      mesh_sync_retry_ = 0;
+    }
+    else {
+      mesh_sync_retry_++;
+    }
+    const bool mesh_sync_pending = mesh_sync_missing_ &&
+                                   mesh_sync_retry_ <= kMeshSyncRetryFrames;
     /* bake_in_flight(): keep the pipeline running while a progressive mesh
      * bake has slices left — a static scene would otherwise never re-run
      * the pipeline, stalling the bake (and the mesh's first appearance
-     * after conversion) until the view changes. */
+     * after conversion) until the view changes. bake_stuck_exists() is
+     * the catch-all counterpart: any missed invalidation trigger
+     * (auto-smooth, undo, ...) recovers one frame later instead of
+     * waiting for a view move. */
     bool need_compute = force_compute || !compute_valid_ || scene_changed_ || view_changed_ ||
-                         res_changed || shading_changed || bake_in_flight();
+                         res_changed || shading_changed || bake_in_flight() ||
+                         bake_stuck_exists() || mesh_sync_pending;
 
     if (need_compute) {
       draw_trace_pipeline(profiling);
@@ -3727,10 +3771,12 @@ class SdfInstanceBase : public DrawEngine {
     DRW_submission_end();
 
     if ((G.debug & G_DEBUG_GPU_SDF) ||
-        (adaptive_resolution_ && render_size_ != texture_size_) || bake_in_flight())
+        (adaptive_resolution_ && render_size_ != texture_size_) || bake_in_flight() ||
+        bake_stuck_exists() || mesh_sync_pending)
     {
-      /* The bake_in_flight() arm keeps redraws coming until every
-       * progressive mesh bake has flipped ready (see need_compute above). */
+      /* The bake_in_flight() / bake_stuck_exists() / mesh_sync_pending
+       * arms keep redraws coming until every mesh bake is ready and every
+       * SDF mesh has synced (see need_compute above). */
       DRW_viewport_request_redraw();
     }
 
@@ -4323,6 +4369,27 @@ class SdfInstanceBase : public DrawEngine {
     return false;
   }
 
+  /* Catch-all counterpart to bake_in_flight: true when a synced mesh
+   * object has no ready live bake AND no bake in flight — a stuck state
+   * any missed invalidation trigger (auto-smooth toggle, undo, future
+   * depsgraph paths) can leave behind. update_mesh_bakes phase 2 restarts
+   * the bake on the next pipeline run, so draw() treats this exactly like
+   * bake_in_flight (need_compute + redraw) and ANY stuck record
+   * self-heals a frame later instead of waiting for a view move. */
+  bool bake_stuck_exists() const
+  {
+    for (int i = 0; i < int(objects_.size()); i++) {
+      if (objects_[i].sdf_type != SDF_GPU_TYPE_MESH || object_mesh_keys_[i] == nullptr) {
+        continue;
+      }
+      const MeshBakeRecord *rec = bake_records_.lookup_ptr(object_mesh_keys_[i]);
+      if (rec == nullptr || (!rec->live.ready && !rec->work_active)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /* Per-frame update: (re)bake every live mesh payload that has no record
    * yet, whose revision changed, or whose sdf_voxel_resolution setting
    * changed. Called from draw_trace_pipeline, after the shared mesh SSBOs
@@ -4390,9 +4457,15 @@ class SdfInstanceBase : public DrawEngine {
       const int setting = std::clamp(object_ptrs_[i]->sdf_voxel_resolution, 0, 256);
 
       const MeshBakeRecord *rec = bake_records_.lookup_ptr(key);
-      /* Live grid up to date: nothing to do. */
-      if (rec != nullptr && rec->revision == info->revision &&
-          rec->voxel_resolution == setting && rec->reach == reach)
+      /* Live grid up to date AND COMPLETE: nothing to do. The readiness
+       * check makes records self-healing: any path that loses the live
+       * grid without starting work (a missed invalidation trigger) gets
+       * its bake restarted here on the next pipeline run — draw()'s
+       * bake_stuck_exists() catch-all guarantees that run happens. */
+      if (rec != nullptr && rec->live.ready &&
+          (rec->live.cres.x == 0 || rec->live.cready) &&
+          rec->revision == info->revision && rec->voxel_resolution == setting &&
+          rec->reach == reach)
       {
         continue;
       }
@@ -4408,13 +4481,19 @@ class SdfInstanceBase : public DrawEngine {
        * bounds axis (R = object setting, 64 when 0/auto) with
        * `margin_voxels` of padding voxels on both sides; the grid covers the
        * bounds expanded by (band + voxel_size) on every side,
-       * band = 4 * voxel_size. */
+       * band = 6 * voxel_size. The stored band must reach well past the
+       * fine -> coarse defer distance (band - 1.75 voxels, see
+       * sdfBakedSample): the fp16 clamp flattens the field, and that
+       * flattening contaminates trilinear cells from ~sqrt(3) voxels INSIDE
+       * the clamp — with 4 voxels the usable fine range ended up at ~2.3
+       * voxels and the defer sampled clamp-distorted values, painting a
+       * value+gradient discontinuity ring at the frontier. */
       constexpr int margin_voxels = 5;
       const int res_target = std::clamp(setting > 0 ? setting : 64, 2 * margin_voxels + 8, 256);
       const float3 extent = math::max(info->bounds_max - info->bounds_min, float3(1e-6f));
       const float max_extent = math::reduce_max(extent);
       const float voxel_size = max_extent / float(res_target - 2 * margin_voxels - 1);
-      const float band = 4.0f * voxel_size;
+      const float band = 6.0f * voxel_size;
       const float pad = band + voxel_size;
 
       MeshBakeRecord &r = bake_records_.lookup_or_add_default(key);
@@ -4467,7 +4546,7 @@ class SdfInstanceBase : public DrawEngine {
       r.work.res = work_res;
       r.work.origin = work_origin;
       r.work.voxel_size = work_voxel;
-      r.work.band = 4.0f * work_voxel;
+      r.work.band = 6.0f * work_voxel;
 
       /* Coarse far-field level: ~48 cells across the padded bounds, fp32
        * unclamped distance out to the blend reach. Skipped (cres = 0) when
@@ -4478,8 +4557,9 @@ class SdfInstanceBase : public DrawEngine {
        * voxels that error breaks the 1.5-Lipschitz step bound the LP
        * marcher relies on near the fine -> coarse defer boundary
        * (overshoot -> torn patches in wide blends). Capped at 8 fine
-       * voxels the error stays below half the narrow band for any surface
-       * the fine grid resolves (>= 4 voxels per curvature radius). */
+       * voxels the error at the defer boundary (band - 1.75 voxels) stays
+       * below half the distance for any surface the fine grid resolves
+       * (>= 4 voxels per curvature radius). */
       if (reach > 0.0f) {
         const float pad_c = reach + r.work.band + work_voxel;
         const float3 extent_c = extent + float3(2.0f * pad_c);
@@ -4526,10 +4606,19 @@ class SdfInstanceBase : public DrawEngine {
        * pre-flip live grid kept in `work`) when its size matches — a fresh
        * append every completed bake would thrash the pool into compaction.
        * The spare is only valid while no bake is in flight and must not
-       * alias the live range (the reach-only fast path shares it). */
+       * alias the live range (the reach-only fast path shares it).
+       * NOTE: "grid is unchanged" means the FULL layout — res AND origin
+       * AND voxel pitch. cres alone is not enough: at large blend reach
+       * cres saturates at 48^3 (the extent_c/48 term always wins), so any
+       * further reach change keeps cres identical while cvoxel/corigin
+       * move; sharing the live coarse range then references data baked for
+       * a different layout without rebaking — the deferred samples read a
+       * spatially scrambled field (blocky tearing across the whole mesh). */
       const bool content_same = r.live.ready && r.revision == info->revision &&
                                 r.voxel_resolution == setting;
-      if (content_same && r.live.res == r.work.res) {
+      if (content_same && r.live.res == r.work.res &&
+          r.live.origin == r.work.origin && r.live.voxel_size == r.work.voxel_size)
+      {
         r.work.base = r.live.base;
         r.work.ready = true;
         r.next_z = r.work.res.z;
@@ -4553,7 +4642,9 @@ class SdfInstanceBase : public DrawEngine {
         r.next_z = 0;
       }
       if (r.work.cres.x > 0) {
-        if (content_same && r.live.cready && r.live.cres == r.work.cres) {
+        if (content_same && r.live.cready && r.live.cres == r.work.cres &&
+            r.live.cvoxel == r.work.cvoxel && r.live.corigin == r.work.corigin)
+        {
           r.work.cbase = r.live.cbase;
           r.work.cready = true;
           r.next_cz = r.work.cres.z;

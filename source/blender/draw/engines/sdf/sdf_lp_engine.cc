@@ -34,7 +34,7 @@ static constexpr int kLpShaders[] = {
     SH_LP_MARCH_COMP,
     SH_AABB_PROJECT_COMP,
     SH_TILE_CULL_COMP,
-    SH_COLOR_RESOLVE_COMP,
+    SH_LP_COLOR_RESOLVE_COMP,
     SH_LP_DEBUG_COMP,
     SH_MESH_BAKE_COMP,
 };
@@ -44,6 +44,9 @@ class LpInstance : public SdfInstanceBase {
   gpu::Shader *lp_prune_sh() { return sdf_shader_get(SH_LP_PRUNE_COMP); }
   gpu::Shader *lp_march_sh() { return sdf_shader_get(SH_LP_MARCH_COMP); }
   gpu::Shader *lp_debug_sh() { return sdf_shader_get(SH_LP_DEBUG_COMP); }
+  /* LP instantiates the tetrahedron 4-tap normal variant of the shared
+   * color-resolve pass (SDF_LP_TETRA_NORMALS); classic keeps 6-tap. */
+  gpu::Shader *color_resolve_sh() override { return sdf_shader_get(SH_LP_COLOR_RESOLVE_COMP); }
 
   /* ---- Lipschitz pruning engine state ---- */
   bool lp_enable_pruning_ = true;

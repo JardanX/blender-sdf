@@ -116,21 +116,9 @@ inline float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
   float d_side_sign = math::dot(diff, outward_normal);
   float d_side = (d_side_sign < 0.0f) ? -d_side_abs : d_side_abs;
 
-  float cap_r = (q.y < 0.0f) ? rb : rt;
-  float d_cap_r = q.x - cap_r;
-  float d_cap_z = fabsf(q.y) - h;
-  float d_cap;
-  if (d_cap_r < 0.0f && d_cap_z < 0.0f) {
-    d_cap = std::max(d_cap_r, d_cap_z);
-  }
-  else {
-    float2 cap_dd = float2(std::max(d_cap_r, 0.0f), std::max(d_cap_z, 0.0f));
-    d_cap = math::length(cap_dd);
-    if (d_cap_r > 0.0f && d_cap_z < 0.0f) { d_cap = d_cap_r; }
-    if (d_cap_z > 0.0f && d_cap_r < 0.0f) { d_cap = d_cap_z; }
-  }
+  float d_cap = fabsf(q.y) - h;
 
-  float edgeR = (q.y > 0.0f) ? edgeTop * std::min(cap_r, h) : edgeBot * std::min(cap_r, h);
+  float edgeR = (q.y > 0.0f) ? edgeTop * std::min(rt, h) : edgeBot * std::min(rb, h);
   if (edgeR > 0.001f) {
     if (edgeMode == 0) {
       float2 dd = float2(d_side + edgeR, d_cap + edgeR);
@@ -152,9 +140,7 @@ inline float sdAdvancedConeFrustum(float3 p, float rb, float rt, float h,
     }
   }
   else {
-    float2 dd = float2(d_side, d_cap);
-    return math::length(math::max(dd, float2(0.0f))) +
-           std::min(std::max(dd.x, dd.y), 0.0f);
+    return std::max(d_side, d_cap);
   }
 }
 

@@ -74,7 +74,13 @@ bool sdfAnalyticWorldNormals(SDFObjectGPU obj,
       (obj.mesh_settings.y & SDF_LP_MESH_FLAG_BAKED) != 0)
   {
     const float min_scale = min(min(obj.obj_scale.x, obj.obj_scale.y), obj.obj_scale.z);
-    if (abs(g_sdf_mesh_last_baked_fine_dist) < obj.bake_params.x) {
+    /* Same threshold as the sampler's fine -> coarse defer
+     * (sdfBakedSample: band - 1.75 voxels): below it the FD taps read the
+     * fine grid, above it the coarse far grid — the stencil must follow
+     * the field actually being differentiated. */
+    if (abs(g_sdf_mesh_last_baked_fine_dist) <
+        obj.bake_params.x - 1.75f * obj.bake_origin.w)
+    {
       /* Fine-grid region (including the baked-normal cross-fade zone): a
        * ray-epsilon-wide stencil sees the trilinear/fp16 staircase of the
        * fine field. Widen past the fine voxel so the finite difference
@@ -90,9 +96,26 @@ bool sdfAnalyticWorldNormals(SDFObjectGPU obj,
       e = max(e, obj.bake_coarse_origin.w * min_scale * 1.5f);
     }
   }
+#ifdef SDF_LP_TETRA_NORMALS
+  /* Tetrahedron 4-tap gradient (iquilezles.org/articles/normalsSDF) for the
+   * LP engine's variant of this pass: 4 distance evaluations instead of the
+   * classic 6-tap central differences. h plays the same role (and value) as
+   * the central stencil's e; the k-swizzle taps are the tetra corners, and
+   * the weighted sum is 4*h*grad(f) — dividing by 4h keeps the same
+   * gradient magnitude convention as the central form (downstream checks
+   * len^2/NaN and normalizes). The 1D operand perturbations inside
+   * sdfCSGNormalWeights are unrelated and stay central. */
+  const float h = e;
+  const float2 k = float2(1.0f, -1.0f);
+  geometric_normal = (k.xyy * sdfObjectDistanceAtPosition(obj, position + k.xyy * h) +
+                      k.yyx * sdfObjectDistanceAtPosition(obj, position + k.yyx * h) +
+                      k.yxy * sdfObjectDistanceAtPosition(obj, position + k.yxy * h) +
+                      k.xxx * sdfObjectDistanceAtPosition(obj, position + k.xxx * h)) /
+                     (4.0f * h);
+#else
   float3 ex = float3(e, 0.0f, 0.0f);
   float3 ey = float3(0.0f, e, 0.0f);
-  float3 ez = float3(0.0f, e, 0.0f);
+  float3 ez = float3(0.0f, 0.0f, e);
   geometric_normal = float3(
                          sdfObjectDistanceAtPosition(obj, position + ex) -
                              sdfObjectDistanceAtPosition(obj, position - ex),
@@ -101,6 +124,7 @@ bool sdfAnalyticWorldNormals(SDFObjectGPU obj,
                          sdfObjectDistanceAtPosition(obj, position + ez) -
                              sdfObjectDistanceAtPosition(obj, position - ez)) /
                      (2.0f * e);
+#endif
   float normal_len_squared = dot(geometric_normal, geometric_normal);
   if (normal_len_squared <= 1e-12f || any(isnan(geometric_normal))) {
     shading_normal = float3(0.0f);
@@ -431,8 +455,9 @@ void main()
          * contribute its gradient too — a hard switch between the two
          * quantities reads as a shading cut across the fillet. The fade
          * keys on the raw fine-grid distance of the eval position: full
-         * baked normal within ~2 voxels of the surface, full gradient at
-         * the narrow band edge and beyond. */
+         * baked normal within ~2 voxels of the surface, full gradient
+         * from half the narrow band — well before the fine -> coarse
+         * defer, so the fade never crosses a sampling boundary. */
         const float fine_d = abs(g_sdf_mesh_last_baked_fine_dist);
         float3 baked_n;
         float3 baked_g;
@@ -440,7 +465,7 @@ void main()
         float3 fd_n;
         float3 fd_g;
         const bool fd_ok = sdfAnalyticWorldNormals(obj, eval_pos, fd_n, fd_g);
-        float fade = smoothstep(2.0f * obj.bake_origin.w, obj.bake_params.x, fine_d);
+        float fade = smoothstep(2.0f * obj.bake_origin.w, 0.5f * obj.bake_params.x, fine_d);
         fade = baked_ok ? (fd_ok ? fade : 0.0f) : 1.0f;
         if (baked_ok || fd_ok) {
           float3 n = mix(baked_n, fd_n, fade);

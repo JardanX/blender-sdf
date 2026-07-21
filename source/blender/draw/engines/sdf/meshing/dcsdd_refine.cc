@@ -102,16 +102,17 @@ void closest_points_on_mesh(const Eigen::MatrixXd &V_mesh,
     closest_points_out = C;
   }
   else if (C.rows() > 0) {
-    std::cerr << "Error: Mismatch in number of closest points returned." << std::endl;
-    exit(1);
+    /* Port addition (replaces exit(1)): keep the default (input targets) on
+     * mismatch instead of killing the process. Unreachable with TriMeshBVH,
+     * which always returns one row per query. */
+    std::cerr << "Warning: Mismatch in number of closest points returned." << std::endl;
   }
 
   if (I.size() == targets.rows()) {
     face_indices_out = I;
   }
   else if (I.size() > 0) {
-    std::cerr << "Error: Mismatch in number of face indices returned." << std::endl;
-    exit(1);
+    std::cerr << "Warning: Mismatch in number of face indices returned." << std::endl;
   }
 }
 
