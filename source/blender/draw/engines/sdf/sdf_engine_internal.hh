@@ -424,6 +424,17 @@ class SdfInstanceBase : public DrawEngine {
   gpu::StorageBuf *polygon_ssbo_ = nullptr;
   int polygon_ssbo_count_ = 0;
 
+  /* Text ingestion cache (BVH + coarse grid bake is expensive; keyed by the
+   * SDF data pointer, validated by the text-state/layout hash). Persists
+   * across begin_sync — only the serialized entries are re-uploaded. */
+  struct TextGpuCache {
+    uint64_t key = 0;
+    int num_nodes = 0;
+    int num_index_ints = 0;
+    Vector<SDFPolygonPointGPU> entries;
+  };
+  Map<const void *, TextGpuCache> text_gpu_cache_;
+
   Vector<uint4> mesh_gpu_data_;
   Map<const void *, MeshOffsets> mesh_offsets_;
   Vector<std::shared_ptr<const SDFMeshPayload>> live_mesh_payloads_;
@@ -644,6 +655,9 @@ class SdfInstanceBase : public DrawEngine {
 
   /** Called at the end of end_sync (LP: rebuild the CSG tree). */
   virtual void sync_extra() {}
+  /** Called right before compaction in end_sync (LP: hash full object list
+   * before frustum culling removes invisible objects). */
+  virtual void sync_extra_pre_compact() {}
   /** Called from sync_sdf_settings (LP: read its viewport settings). */
   virtual void sync_engine_settings(const View3DShading & /*s*/) {}
   /** Called at the end of upload_objects (LP: upload the CSG tree buffers). */
@@ -652,6 +666,14 @@ class SdfInstanceBase : public DrawEngine {
   virtual void pre_trace_hook() {}
   /** Fold engine-specific settings into the shading-change hash. */
   virtual void hash_shading_extra(uint64_t & /*sh*/) {}
+  /** Whether end_sync should build/update the BVH (LP engine is tree-native
+   * and doesn't use the BVH — skipping saves the O(n log n) rebuild). */
+  virtual bool uses_bvh() const { return true; }
+  /** Whether end_sync should run the visibility frustum cull, compaction, and
+   * AABB expansion pipeline (classic engine needs it for BVH/tile culling; the
+   * LP engine handles per-cell culling in the prune grid and skips this entire
+   * O(n) per-frame pass to keep the CPU free). */
+  virtual bool needs_visibility_compaction() const { return true; }
   /** Effective lighting for the shade pass (LP debug modes force pass-through). */
   virtual int effective_lighting(int lighting)
   {
@@ -1624,13 +1646,42 @@ class SdfInstanceBase : public DrawEngine {
         }
       }
       else if (total_edges > 0) {
+        /* Per-contour padded bounds for pruning the bake evaluation. */
+        Vector<float4> contour_bb;
+        contour_bb.reserve(contours.size());
+        for (const IngestContour &ct : contours) {
+          float2 cmn(1e30f), cmx(-1e30f);
+          for (int i = 0; i < ct.pts.size(); i++) {
+            cmn = math::min(cmn, ct.pts[i]);
+            cmx = math::max(cmx, ct.pts[i]);
+            if (ct.is_arc[i]) {
+              cmn = math::min(cmn, ct.ctrls[i]);
+              cmx = math::max(cmx, ct.ctrls[i]);
+            }
+          }
+          const float pad = 1e-4f;
+          contour_bb.append(float4(cmn.x - pad, cmn.y - pad, cmx.x + pad, cmx.y + pad));
+        }
+
         /* Exact 2D SDF of the built contours (straight + quadratic arc
          * edges), used to bake the coarse far-field grid. Mirrors
          * sdPolygon2D in sdf_lib.glsl (including its winding rule). */
         auto eval_d2d_exact = [&](float2 p) -> float {
           float d = 1e20f;
           int winding = 0;
-          for (const IngestContour &ct : contours) {
+          for (int ci = 0; ci < contours.size(); ci++) {
+            const IngestContour &ct = contours[ci];
+            /* Contour pruning (same rule as the shader): skip when the
+             * contour cannot beat the distance nor contribute winding. */
+            const float2 cmn(contour_bb[ci].x, contour_bb[ci].y);
+            const float2 cmx(contour_bb[ci].z, contour_bb[ci].w);
+            const bool need_w = (cmx.x > p.x) && (p.y >= cmn.y) && (p.y <= cmx.y);
+            const float2 dbox = math::abs(p - 0.5f * (cmn + cmx)) - 0.5f * (cmx - cmn);
+            const float box_d = math::length(math::max(dbox, float2(0.0f))) +
+                                math::min(math::max(dbox.x, dbox.y), 0.0f);
+            if (!need_w && box_d >= d) {
+              continue;
+            }
             const int pc = int(ct.pts.size());
             for (int i = 0; i < pc; i++) {
               const int j = (i + 1) % pc;
@@ -1731,21 +1782,6 @@ class SdfInstanceBase : public DrawEngine {
           }
           return (winding != 0) ? -d : d;
         };
-        /* 2D edge BVH: node entries (arc_bounds.w == -3) with child indices
-         * into the same array; leaves are the edges built above. Node
-         * indices are serialized before leaves; the uber-header at
-         * polygon_point_start points at the root. */
-        struct NodeRec {
-          float2 mn, mx;
-          /* >= 0: index into nodes; < 0: -(leaf index) - 1. */
-          int left, right;
-        };
-        Vector<NodeRec> nodes;
-        Vector<int> order(total_edges);
-        for (int i = 0; i < total_edges; i++) {
-          order[i] = i;
-        }
-
         /* Flatten leaves across contours. */
         Vector<const SDFPolygonPointGPU *> leaf_ptrs(total_edges);
         Vector<float2> leaf_mn(total_edges), leaf_mx(total_edges);
@@ -1761,6 +1797,19 @@ class SdfInstanceBase : public DrawEngine {
           }
         }
 
+        /* 2D edge BVH over the leaves, shared by the polygon layout (primary
+         * structure) and the text grid layout (exact fallback past the ring
+         * cap — see sdPolygon2DGrid). Child refs: >= 0 index into nodes,
+         * < 0: -(leaf index) - 1. */
+        struct NodeRec {
+          float2 mn, mx;
+          int left, right;
+        };
+        Vector<NodeRec> nodes;
+        Vector<int> order(total_edges);
+        for (int i = 0; i < total_edges; i++) {
+          order[i] = i;
+        }
         std::function<int(int, int)> build = [&](int lo, int hi) -> int {
           /* Single leaf: no node, reference the leaf directly (a node with two
            * identical children would double-count its winding). */
@@ -1796,92 +1845,800 @@ class SdfInstanceBase : public DrawEngine {
           nodes.append(rec);
           return int(nodes.size()) - 1;
         };
-        const int root = build(0, total_edges);
 
-        const int base = gpu_obj.polygon_point_start;
-        const int num_nodes = int(nodes.size());
-        SDFPolygonPointGPU uber = {};
-        uber.arc_data = float4(float(base + 1 + root), 0.0f, 0.0f, 0.0f);
-        uber.arc_bounds = float4(0.0f, 0.0f, 0.0f, -3.0f);
-        polygon_points_.append(uber);
-        gpu_obj.polygon_point_count++;
-
-        for (const NodeRec &n : nodes) {
-          SDFPolygonPointGPU e = {};
-          e.vi_edge = float4(n.mn.x, n.mn.y, 0.0f, 0.0f);
-          e.arc_data = float4(n.mx.x, n.mx.y, 0.0f, 0.0f);
-          auto remap = [&](int ref) -> float {
-            if (ref >= 0) {
-              return float(base + 1 + ref);
+        if (is_text) {
+          /* Text: coarse far-field grid + per-cell edge lists
+           * (sdPolygon2DGrid in sdf_lib.glsl). Far cells return the
+           * conservative grid value; boundary cells evaluate only their few
+           * overlapping edges with the exact winding from a precomputed
+           * per-corner integer plus L-path crossings — no traversal, so the
+           * per-query cost stays constant regardless of the text length. */
+          TextGpuCache *cache = nullptr;
+          uint64_t ingest_key = 0;
+          if (sdf_data->runtime) {
+            ingest_key = sdf_data->runtime->text_cache_hash;
+            auto mixf = [&](float f) {
+              uint32_t b;
+              memcpy(&b, &f, sizeof(b));
+              ingest_key = (ingest_key ^ uint64_t(b)) * 0x100000001b3ULL;
+            };
+            mixf(scale.x);
+            mixf(scale.y);
+            mixf(sdf_data->text_corner);
+            mixf(sdf_data->polygon_edge_top);
+            mixf(sdf_data->polygon_edge_bottom);
+            mixf(sdf_data->polygon_taper);
+            mixf(float(sdf_data->polygon_edge_mode));
+            if (text_gpu_cache_.size() > 32) {
+              text_gpu_cache_.clear();
             }
-            return float(base + 1 + num_nodes + (-ref - 1));
-          };
-          e.arc_bounds = float4(remap(n.left), remap(n.right), 0.0f, -3.0f);
-          polygon_points_.append(e);
-          gpu_obj.polygon_point_count++;
-        }
-        for (int i = 0; i < total_edges; i++) {
-          polygon_points_.append(*leaf_ptrs[i]);
-          gpu_obj.polygon_point_count++;
-        }
+            cache = &text_gpu_cache_.lookup_or_add_default(sdf_data);
+          }
 
-        /* Coarse far-field grid: conservative signed-distance values on a
-         * 64x64 cell grid (12 values packed per entry). The shader uses the
-         * cell value only when it provably cannot affect any visible surface
-         * (beyond the silhouette + bevel/edge/outline/blend reach), otherwise
-         * it falls back to the exact BVH traversal — quality is untouched,
-         * far-field cost is O(1) regardless of the edge count. */
-        const int GRID_RES = 64;
-        float2 gmn(1e30f), gmx(-1e30f);
-        for (int i = 0; i < total_edges; i++) {
-          gmn = math::min(gmn, leaf_mn[i]);
-          gmx = math::max(gmx, leaf_mx[i]);
-        }
-        gmn -= float2(max_corner + 1e-3f);
-        gmx += float2(max_corner + 1e-3f);
-        const float cell = math::max(gmx.x - gmn.x, gmx.y - gmn.y) / float(GRID_RES);
-        const float half_diag = cell * 0.70710678f;
-        const int grid_first = int(polygon_points_.size());
-        {
-          SDFPolygonPointGPU ge = {};
-          int slot = 0;
-          auto flush = [&]() {
-            if (slot > 0) {
-              polygon_points_.append(ge);
-              gpu_obj.polygon_point_count++;
-              ge = {};
-              slot = 0;
+          const bool cache_hit = cache && cache->key == ingest_key &&
+                                 !cache->entries.is_empty();
+          Vector<SDFPolygonPointGPU> baked_local;
+          int index_int_count = 0;
+          int num_nodes = 0;
+          if (!cache_hit) {
+            Vector<SDFPolygonPointGPU> &baked = cache ? cache->entries : baked_local;
+            baked.clear();
+
+            SDFPolygonPointGPU uber = {};
+            uber.arc_bounds = float4(0.0f, 0.0f, 0.0f, -4.0f);
+            baked.append(uber);
+            for (int i = 0; i < total_edges; i++) {
+              baked.append(*leaf_ptrs[i]);
             }
-          };
-          for (int gy = 0; gy < GRID_RES; gy++) {
-            for (int gx = 0; gx < GRID_RES; gx++) {
-              const float2 p(gmn.x + (float(gx) + 0.5f) * cell,
-                             gmn.y + (float(gy) + 0.5f) * cell);
-              const float dc = eval_d2d_exact(p);
-              const float v = (dc >= 0.0f) ? (dc - half_diag) : (dc + half_diag);
-              if (slot < 4) {
-                ge.vi_edge[slot] = v;
+
+            float2 gmn(1e30f), gmx(-1e30f);
+            for (int i = 0; i < total_edges; i++) {
+              gmn = math::min(gmn, leaf_mn[i]);
+              gmx = math::max(gmx, leaf_mx[i]);
+            }
+            gmn -= float2(max_corner + 1e-3f);
+            gmx += float2(max_corner + 1e-3f);
+            const float extent = math::max(gmx.x - gmn.x, gmx.y - gmn.y);
+
+            /* Single fine cell grid: the resolution scales with the edge
+             * count so per-cell lists stay at ~1-2 edges no matter how much
+             * text there is, and every cell center gets an exact signed
+             * value baked through the cell lists themselves (below). */
+            double avg_len = 0.0;
+            for (int i = 0; i < total_edges; i++) {
+              avg_len += math::length(leaf_mx[i] - leaf_mn[i]);
+            }
+            avg_len /= math::max(total_edges, 1);
+            const float target_cell = float(avg_len) * 0.75f + 1e-6f;
+            const int GRID_RES = math::clamp(int(extent / target_cell + 0.5f), 64, 384);
+            const float cell = extent / float(GRID_RES);
+            const float half_diag = cell * 0.70710678f;
+
+            /* Leaf distance mirroring sdPolygonLeafDist (no ebox culling;
+             * beziers via the golden-section sampler). Used to bake the
+             * per-cell-center values and by the SDF_TEXT_VERIFY self-check. */
+            auto leaf_dist_cpu = [&](int li, float2 p) -> float {
+              const SDFPolygonPointGPU &e = baked[1 + li];
+              float d = 1e20f;
+              if (e.arc_bounds.w < 0.0f) {
+                const float2 a(e.vi_edge.x, e.vi_edge.y);
+                const float2 b(e.vi_edge.z, e.vi_edge.w);
+                const float2 c(e.arc_data.x, e.arc_data.y);
+                auto quad_pt = [&](float t) -> float2 {
+                  const float u = 1.0f - t;
+                  return a * (u * u) + b * (2.0f * u * t) + c * (t * t);
+                };
+                float best_t = 0.0f, best_d = 1e30f;
+                for (int k = 0; k <= 16; k++) {
+                  const float t = float(k) / 16.0f;
+                  const float dd = math::distance_squared(quad_pt(t), p);
+                  if (dd < best_d) {
+                    best_d = dd;
+                    best_t = t;
+                  }
+                }
+                float lo = math::max(0.0f, best_t - 1.0f / 16.0f);
+                float hi = math::min(1.0f, best_t + 1.0f / 16.0f);
+                for (int it = 0; it < 24; it++) {
+                  const float m1 = lo + (hi - lo) * 0.381966f;
+                  const float m2 = hi - (hi - lo) * 0.381966f;
+                  if (math::distance_squared(quad_pt(m1), p) <
+                      math::distance_squared(quad_pt(m2), p))
+                  {
+                    hi = m2;
+                  }
+                  else {
+                    lo = m1;
+                  }
+                }
+                return sqrtf(math::min(
+                    best_d, math::distance_squared(quad_pt(0.5f * (lo + hi)), p)));
               }
-              else if (slot < 8) {
-                ge.arc_data[slot - 4] = v;
+              const float2 vi(e.vi_edge.x, e.vi_edge.y), edge(e.vi_edge.z, e.vi_edge.w);
+              const float R = fabsf(e.arc_data.x);
+              const float2 C(e.arc_data.y, e.arc_data.z);
+              const float2 seg_a = vi + edge * e.arc_data.w;
+              const float2 seg_b = vi + edge * e.arc_bounds.x;
+              const float2 seg_dir = seg_b - seg_a;
+              const float seg_len_sq = math::dot(seg_dir, seg_dir);
+              if (seg_len_sq > 1e-10f) {
+                const float2 w = p - seg_a;
+                const float t = math::clamp(math::dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+                d = math::min(d, math::length(w - seg_dir * t));
               }
-              else {
-                ge.arc_bounds[slot - 8] = v;
+              if (R > 0.001f) {
+                const float ang_mid = e.arc_bounds.y, ang_half = e.arc_bounds.z;
+                const float2 to_p = p - C;
+                const float dist_c = math::length(to_p);
+                float ang_diff = atan2f(to_p.y, to_p.x) - ang_mid;
+                ang_diff -= 6.2831853f * floorf((ang_diff + 3.1415927f) / 6.2831853f);
+                if (fabsf(ang_diff) <= ang_half) {
+                  d = math::min(d, fabsf(dist_c - R));
+                }
+                else {
+                  const float2 ep1 = C + R * float2(cosf(ang_mid - ang_half),
+                                                  sinf(ang_mid - ang_half));
+                  const float2 ep2 = C + R * float2(cosf(ang_mid + ang_half),
+                                                  sinf(ang_mid + ang_half));
+                  d = math::min(d, math::min(math::distance(p, ep1), math::distance(p, ep2)));
+                }
               }
-              if (++slot == 12) {
-                flush();
+              return d;
+            };
+
+            /* Horizontal-sweep winding events at height y: (x, delta) pairs.
+             * Runs over the BUILT leaves (trimmed straight segments + corner
+             * fillet arcs + beziers), i.e. the exact rounded path the shader
+             * evaluates — the corner integers must match the shader's
+             * winding semantics, and rounding near a vertex genuinely
+             * changes which side a nearby cell corner is on. */
+            auto sweep_events = [&](float y, Vector<float2> &ev) {
+              for (int i = 0; i < total_edges; i++) {
+                const SDFPolygonPointGPU &e = *leaf_ptrs[i];
+                if (e.arc_bounds.w < 0.0f) {
+                  /* Quadratic bezier edge (same rule as eval_winding_int). */
+                  const float2 a(e.vi_edge.x, e.vi_edge.y);
+                  const float2 b(e.vi_edge.z, e.vi_edge.w);
+                  const float2 c(e.arc_data.x, e.arc_data.y);
+                  const float A = a.y - 2.0f * b.y + c.y;
+                  const float B = 2.0f * (b.y - a.y);
+                  const float C = a.y - y;
+                  float roots[2];
+                  int nroots = 0;
+                  if (fabsf(A) < 1e-4f) {
+                    if (fabsf(B) > 1e-12f) {
+                      roots[nroots++] = -C / B;
+                    }
+                  }
+                  else {
+                    const float disc = B * B - 4.0f * A * C;
+                    if (disc > 0.0f) {
+                      const float s = sqrtf(disc);
+                      roots[nroots++] = (-B - s) / (2.0f * A);
+                      roots[nroots++] = (-B + s) / (2.0f * A);
+                    }
+                  }
+                  for (int r = 0; r < nroots; r++) {
+                    const float t = roots[r];
+                    if (t < 0.0f || t > 1.0f) {
+                      continue;
+                    }
+                    const float u = 1.0f - t;
+                    const float qx = a.x * (u * u) + b.x * (2.0f * u * t) + c.x * (t * t);
+                    const float vy = 2.0f * (u * (b.y - a.y) + t * (c.y - b.y));
+                    if (vy > 0.0f && y != c.y) {
+                      ev.append(float2(qx, 1.0f));
+                    }
+                    else if (vy < 0.0f && y != a.y) {
+                      ev.append(float2(qx, -1.0f));
+                    }
+                  }
+                  continue;
+                }
+                const float2 vi(e.vi_edge.x, e.vi_edge.y), edge(e.vi_edge.z, e.vi_edge.w);
+                const float R_signed = e.arc_data.x;
+                const float R = fabsf(R_signed);
+                const float2 C(e.arc_data.y, e.arc_data.z);
+                const float2 seg_a = vi + edge * e.arc_data.w;
+                const float2 seg_b = vi + edge * e.arc_bounds.x;
+                /* Trimmed straight segment. */
+                if (seg_a.y <= y && seg_b.y > y) {
+                  ev.append(float2(
+                      seg_a.x + (seg_b.x - seg_a.x) * (y - seg_a.y) / (seg_b.y - seg_a.y),
+                      1.0f));
+                }
+                else if (seg_a.y > y && seg_b.y <= y) {
+                  ev.append(float2(
+                      seg_a.x + (seg_b.x - seg_a.x) * (y - seg_a.y) / (seg_b.y - seg_a.y),
+                      -1.0f));
+                }
+                /* Corner fillet arc (same rule as the shader's L-path). */
+                if (R > 0.001f) {
+                  const float ang_mid = e.arc_bounds.y, ang_half = e.arc_bounds.z;
+                  const int adir = (R_signed > 0.0f) ? 1 : -1;
+                  const float k = (y - C.y) / R;
+                  if (fabsf(k) < 1.0f) {
+                    const float th0 = asinf(k);
+                    for (int e2 = 0; e2 < 2; e2++) {
+                      const float th = (e2 == 0) ? th0 : 3.1415927f - th0;
+                      float td = th - ang_mid;
+                      td -= 6.2831853f * floorf((td + 3.1415927f) / 6.2831853f);
+                      if (fabsf(td) <= ang_half) {
+                        const float xc = C.x + R * cosf(th);
+                        /* Tangent y at the crossing: adir * cos(th) * R. */
+                        ev.append(float2(xc, (float(adir) * cosf(th) > 0.0f) ? 1.0f : -1.0f));
+                      }
+                    }
+                  }
+                }
               }
+            };
+
+            /* Per-cell edge lists: edge AABBs rasterized into the grid
+             * (O(edges x cover) instead of O(cells x edges)). */
+            Vector<int> dir(GRID_RES * GRID_RES * 3, 0);
+            Vector<int> index_list;
+            {
+              Vector<int> counts(GRID_RES * GRID_RES, 0);
+              auto overlap_range = [&](int i, int &x0, int &y0, int &x1, int &y1) {
+                x0 = math::clamp(int(floorf((leaf_mn[i].x - gmn.x) / cell)), 0, GRID_RES - 1);
+                y0 = math::clamp(int(floorf((leaf_mn[i].y - gmn.y) / cell)), 0, GRID_RES - 1);
+                x1 = math::clamp(int(floorf((leaf_mx[i].x - gmn.x) / cell)), 0, GRID_RES - 1);
+                y1 = math::clamp(int(floorf((leaf_mx[i].y - gmn.y) / cell)), 0, GRID_RES - 1);
+              };
+              for (int i = 0; i < total_edges; i++) {
+                int x0, y0, x1, y1;
+                overlap_range(i, x0, y0, x1, y1);
+                for (int gy = y0; gy <= y1; gy++) {
+                  for (int gx = x0; gx <= x1; gx++) {
+                    counts[gy * GRID_RES + gx]++;
+                  }
+                }
+              }
+              int acc = 0;
+              for (int ci = 0; ci < GRID_RES * GRID_RES; ci++) {
+                dir[ci * 3 + 0] = acc;
+                dir[ci * 3 + 1] = counts[ci];
+                acc += counts[ci];
+              }
+              index_list.resize(acc);
+              Vector<int> cursor(GRID_RES * GRID_RES, 0);
+              for (int i = 0; i < total_edges; i++) {
+                int x0, y0, x1, y1;
+                overlap_range(i, x0, y0, x1, y1);
+                for (int gy = y0; gy <= y1; gy++) {
+                  for (int gx = x0; gx <= x1; gx++) {
+                    const int ci = gy * GRID_RES + gx;
+                    index_list[dir[ci * 3 + 0] + cursor[ci]++] = i;
+                  }
+                }
+              }
+            }
+
+            /* Corner winding integers via one sorted sweep per row. */
+            {
+              Vector<float2> ev;
+              for (int gy = 0; gy < GRID_RES; gy++) {
+                const float y = gmn.y + float(gy) * cell;
+                ev.clear();
+                sweep_events(y, ev);
+                std::sort(ev.begin(), ev.end(), [](const float2 &a, const float2 &b) {
+                  return a.x > b.x;
+                });
+                int e = 0;
+                int w = 0;
+                for (int gx = GRID_RES - 1; gx >= 0; gx--) {
+                  const float x = gmn.x + float(gx) * cell;
+                  while (e < ev.size() && ev[e].x > x) {
+                    w += int(ev[e].y);
+                    e++;
+                  }
+                  dir[(gy * GRID_RES + gx) * 3 + 2] = w;
+                }
+              }
+            }
+            /* Exact signed value at every cell center, evaluated through the
+             * cell lists themselves (own cell + progressive rings, the same
+             * rule the shader uses at runtime). The magnitude is then shrunk
+             * by the cell half-diagonal plus the corner-fillet reach and
+             * clamped at zero: conservative, and the sign can never flip —
+             * cells within reach of the outline bake to 0 and always land in
+             * the exact band. Capped cells (no edge within the ring cap) keep
+             * the conservative lower bound, which is all the far field needs. */
+            const int value_first = int(baked.size());
+            {
+              SDFPolygonPointGPU ge = {};
+              int slot = 0;
+              auto flush = [&]() {
+                if (slot > 0) {
+                  baked.append(ge);
+                  ge = {};
+                  slot = 0;
+                }
+              };
+              Vector<float2> ev;
+              const int kmax = math::min(GRID_RES, 8);
+              for (int gy = 0; gy < GRID_RES; gy++) {
+                const float cy = gmn.y + (float(gy) + 0.5f) * cell;
+                ev.clear();
+                sweep_events(cy, ev);
+                std::sort(ev.begin(), ev.end(), [](const float2 &a, const float2 &b) {
+                  return a.x > b.x;
+                });
+                int e = 0;
+                int w = 0;
+                for (int gx = GRID_RES - 1; gx >= 0; gx--) {
+                  const float cx = gmn.x + (float(gx) + 0.5f) * cell;
+                  while (e < ev.size() && ev[e].x > cx) {
+                    w += int(ev[e].y);
+                    e++;
+                  }
+                  const int ci = gy * GRID_RES + gx;
+                  const float2 p(cx, cy);
+                  const float db = cell * 0.5f;
+                  float d = 1e20f;
+                  const int off = dir[ci * 3 + 0], cnt = dir[ci * 3 + 1];
+                  for (int k = 0; k < cnt; k++) {
+                    d = math::min(d, leaf_dist_cpu(index_list[off + k], p));
+                  }
+                  for (int k = 1; k <= kmax && d > float(k - 1) * cell + db; k++) {
+                    for (int oy = -k; oy <= k; oy++) {
+                      for (int ox = -k; ox <= k; ox++) {
+                        if (math::max(abs(ox), abs(oy)) != k) {
+                          continue;
+                        }
+                        const int nx = gx + ox, ny = gy + oy;
+                        if (nx < 0 || ny < 0 || nx >= GRID_RES || ny >= GRID_RES) {
+                          continue;
+                        }
+                        const int nci = ny * GRID_RES + nx;
+                        const int noff = dir[nci * 3 + 0], ncnt = dir[nci * 3 + 1];
+                        for (int e2 = 0; e2 < ncnt; e2++) {
+                          d = math::min(d, leaf_dist_cpu(index_list[noff + e2], p));
+                        }
+                      }
+                    }
+                  }
+                  d = math::min(d, float(kmax) * cell + db);
+                  const float dc = (w != 0) ? -d : d;
+                  const float mag = math::max(fabsf(dc) - half_diag - max_corner, 0.0f);
+                  const float v = (dc >= 0.0f) ? mag : -mag;
+                  if (slot < 4) {
+                    ge.vi_edge[slot] = v;
+                  }
+                  else if (slot < 8) {
+                    ge.arc_data[slot - 4] = v;
+                  }
+                  else {
+                    ge.arc_bounds[slot - 8] = v;
+                  }
+                  if (++slot == 12) {
+                    flush();
+                  }
+                }
+              }
+              flush();
+            }
+
+            const int dir_first = int(baked.size());
+            for (int i = 0; i < dir.size(); i += 12) {
+              SDFPolygonPointGPU ge = {};
+              for (int k = 0; k < 12 && i + k < dir.size(); k++) {
+                const float fv = float(dir[i + k]);
+                if (k < 4) {
+                  ge.vi_edge[k] = fv;
+                }
+                else if (k < 8) {
+                  ge.arc_data[k - 4] = fv;
+                }
+                else {
+                  ge.arc_bounds[k - 8] = fv;
+                }
+              }
+              baked.append(ge);
+            }
+            const int index_first = int(baked.size());
+            for (int i = 0; i < index_list.size(); i += 12) {
+              SDFPolygonPointGPU ge = {};
+              for (int k = 0; k < 12 && i + k < index_list.size(); k++) {
+                const float fv = float(index_list[i + k]);
+                if (k < 4) {
+                  ge.vi_edge[k] = fv;
+                }
+                else if (k < 8) {
+                  ge.arc_data[k - 4] = fv;
+                }
+                else {
+                  ge.arc_bounds[k - 8] = fv;
+                }
+              }
+              baked.append(ge);
+            }
+            index_int_count = int(index_list.size());
+
+            /* Distance-only fallback BVH for points whose nearest edge is
+             * past the ring cap (large blend reach, scaled-down text): the
+             * grid keeps the hot near-surface path at O(1), the BVH keeps
+             * the mid band exact in O(log n) no matter the text scale. */
+            const int bvh_root = build(0, total_edges);
+            num_nodes = int(nodes.size());
+            const int bvh_first = int(baked.size());
+            for (const NodeRec &n : nodes) {
+              SDFPolygonPointGPU e = {};
+              e.vi_edge = float4(n.mn.x, n.mn.y, 0.0f, 0.0f);
+              e.arc_data = float4(n.mx.x, n.mx.y, 0.0f, 0.0f);
+              auto remap = [&](int ref) -> float {
+                return (ref >= 0) ? float(bvh_first + ref) : float(1 + (-ref - 1));
+              };
+              e.arc_bounds = float4(remap(n.left), remap(n.right), 0.0f, -3.0f);
+              baked.append(e);
+            }
+            const float bvh_root_ref = (bvh_root >= 0) ? float(bvh_first + bvh_root) :
+                                                         float(1 + (-bvh_root - 1));
+
+            baked[0].vi_edge = float4(gmn.x, gmn.y, cell, float(GRID_RES));
+            baked[0].arc_data = float4(
+                float(value_first), float(dir_first), float(index_first), 1.0f);
+            baked[0].arc_bounds = float4(float(total_edges), bvh_root_ref, 0.0f, -4.0f);
+
+            /* Numeric self-check of the whole cell-list scheme against the
+             * brute-force exact eval (SDF_TEXT_VERIFY=1): corner-winding
+             * parity, distance coverage of the rasterized lists + ring
+             * expansion, and far-field value conservativeness. */
+            if (getenv("SDF_TEXT_VERIFY")) {
+              /* Pointwise winding of the rounded path (same crossing rule as
+               * the sweep; validates the sweep bookkeeping per corner). */
+              auto winding_int_rounded = [&](float2 p) -> int {
+                Vector<float2> ev;
+                sweep_events(p.y, ev);
+                int w = 0;
+                for (const float2 &e : ev) {
+                  if (e.x > p.x) {
+                    w += int(e.y);
+                  }
+                }
+                return w;
+              };
+
+              int w_mismatch = 0;
+              for (int ci = 0; ci < GRID_RES * GRID_RES; ci++) {
+                const float2 cpt(gmn.x + float(ci % GRID_RES) * cell,
+                                 gmn.y + float(ci / GRID_RES) * cell);
+                if (dir[ci * 3 + 2] != winding_int_rounded(cpt)) {
+                  w_mismatch++;
+                }
+              }
+
+              double max_err = 0.0;
+              int sign_mismatch = 0, cons_viol = 0, cons_viol_out = 0, empty_ret = 0;
+              int val_sign_bad = 0, val_overest = 0;
+              int max_cnt = 0, max_ring = 0;
+              for (int ci = 0; ci < GRID_RES * GRID_RES; ci++) {
+                max_cnt = math::max(max_cnt, dir[ci * 3 + 1]);
+              }
+              /* Packed far-field value reader (12 floats per entry). */
+              auto baked_value = [&](int ci) -> float {
+                const SDFPolygonPointGPU &e = baked[value_first + ci / 12];
+                const int c = ci % 12;
+                return (c < 4) ? e.vi_edge[c] :
+                       (c < 8) ? e.arc_data[c - 4] :
+                                 e.arc_bounds[c - 8];
+              };
+              const float VERIFY_SLACK = 0.02f;
+              const int NS = 120;
+              for (int sy = 0; sy < NS; sy++) {
+                for (int sx = 0; sx < NS; sx++) {
+                  const float2 p(gmn.x - 0.1f * extent +
+                                     (float(sx) + 0.5f) / NS * 1.2f * extent,
+                                 gmn.y - 0.1f * extent +
+                                     (float(sy) + 0.5f) / NS * 1.2f * extent);
+                  /* GPU mirror: clamped cell + progressive rings. */
+                  int gx = int(floorf((p.x - gmn.x) / cell));
+                  int gy = int(floorf((p.y - gmn.y) / cell));
+                  const bool inside = (gx >= 0 && gy >= 0 && gx < GRID_RES && gy < GRID_RES);
+                  gx = math::clamp(gx, 0, GRID_RES - 1);
+                  gy = math::clamp(gy, 0, GRID_RES - 1);
+                  const float2 cp(gmn.x + float(gx) * cell, gmn.y + float(gy) * cell);
+                  const float2 cmax = cp + float2(cell);
+                  float db;
+                  if (inside) {
+                    db = math::min(
+                        math::min(p.x - cp.x, cmax.x - p.x),
+                        math::min(p.y - cp.y, cmax.y - p.y));
+                  }
+                  else {
+                    db = math::length(math::max(
+                        math::max(cp - p, p - cmax), float2(0.0f)));
+                  }
+                  float d = 1e20f;
+                  int ring = 0;
+                  {
+                    const int ci = gy * GRID_RES + gx;
+                    const int off = dir[ci * 3 + 0], cnt = dir[ci * 3 + 1];
+                    for (int k = 0; k < cnt; k++) {
+                      d = math::min(d, leaf_dist_cpu(index_list[off + k], p));
+                    }
+                  }
+                  const int kmax = math::min(GRID_RES, 3);
+                  for (int k = 1;
+                       k <= kmax && d > (inside ? (float(k - 1) * cell + db) :
+                                                  math::max(float(k - 1) * cell, db));
+                       k++)
+                  {
+                    ring = k;
+                    for (int oy = -k; oy <= k; oy++) {
+                      for (int ox = -k; ox <= k; ox++) {
+                        if (math::max(abs(ox), abs(oy)) != k) {
+                          continue;
+                        }
+                        const int nx = gx + ox, ny = gy + oy;
+                        if (nx < 0 || ny < 0 || nx >= GRID_RES || ny >= GRID_RES) {
+                          continue;
+                        }
+                        const int nci = ny * GRID_RES + nx;
+                        /* Cell-rect cull (same as the shader). */
+                        const float2 nmin(gmn.x + float(nx) * cell, gmn.y + float(ny) * cell);
+                        const float2 nmax = nmin + float2(cell);
+                        const float2 rb = math::max(
+                            math::max(nmin - p, p - nmax), float2(0.0f));
+                        if (math::dot(rb, rb) >= d * d) {
+                          continue;
+                        }
+                        const int off = dir[nci * 3 + 0], cnt = dir[nci * 3 + 1];
+                        for (int e2 = 0; e2 < cnt; e2++) {
+                          d = math::min(d, leaf_dist_cpu(index_list[off + e2], p));
+                        }
+                      }
+                    }
+                  }
+                  const float cap = inside ? (float(kmax) * cell + db) :
+                                             math::max(float(kmax) * cell, db);
+                  const bool fell_back = d > cap;
+                  max_ring = math::max(max_ring, ring);
+                  float d_full = 1e20f;
+                  for (int i = 0; i < total_edges; i++) {
+                    d_full = math::min(d_full, leaf_dist_cpu(i, p));
+                  }
+                  if (fell_back) {
+                    /* What the distance-only BVH returns: exact. */
+                    d = d_full;
+                  }
+                  if (d > 1e10f) {
+                    empty_ret++;
+                  }
+                  const double err = double(d) - double(d_full);
+                  max_err = math::max(max_err, err);
+                  if (err > 1e-5 * extent + 1e-9) {
+                    cons_viol++;
+                    if (!inside) {
+                      cons_viol_out++;
+                    }
+                  }
+                  /* Far-field value: conservative and sign-safe wherever it
+                   * would be returned (|cv| > slack). */
+                  if (inside) {
+                    const float cv = baked_value(gy * GRID_RES + gx);
+                    if (fabsf(cv) > VERIFY_SLACK) {
+                      const float d_true = (winding_int_rounded(p) != 0) ? -d_full : d_full;
+                      if ((cv < 0.0f) != (d_true < 0.0f)) {
+                        val_sign_bad++;
+                      }
+                      if (fabsf(cv) > fabsf(d_true) + 1e-5f * extent + 1e-9f) {
+                        val_overest++;
+                      }
+                    }
+                  }
+                  /* Topology: away from the outline (past the corner reach)
+                   * the unrounded exact eval and the rounded-path winding
+                   * must agree on the sign. */
+                  const float dc_ref = eval_d2d_exact(p);
+                  if (fabsf(dc_ref) > max_corner + 1e-3f &&
+                      (dc_ref < 0.0f) != (winding_int_rounded(p) != 0))
+                  {
+                    sign_mismatch++;
+                  }
+                }
+              }
+              printf(
+                  "SDF_TEXT_VERIFY: edges=%d fine_res=%d max_cnt=%d max_ring=%d "
+                  "corner_winding_mismatch=%d empty_return=%d dist_overest=%d (outside=%d) "
+                  "max_overestimate=%.3g signcheck(exact_vs_rounded_winding)=%d "
+                  "value_sign_bad=%d value_overest=%d\n",
+                  total_edges,
+                  GRID_RES,
+                  max_cnt,
+                  max_ring,
+                  w_mismatch,
+                  empty_ret,
+                  cons_viol,
+                  cons_viol_out,
+                  max_err,
+                  sign_mismatch,
+                  val_sign_bad,
+                  val_overest);
+            }
+
+            if (cache) {
+              cache->key = ingest_key;
+              cache->num_nodes = num_nodes;
+              cache->num_index_ints = index_int_count;
             }
           }
-          flush();
+
+          /* Replay with absolute offsets (uber index fields, leaf indices,
+           * BVH root + child refs). */
+          const Vector<SDFPolygonPointGPU> &src = cache ? cache->entries : baked_local;
+          const int n_index_ints = cache ? cache->num_index_ints : index_int_count;
+          const int n_nodes = cache ? cache->num_nodes : num_nodes;
+          const int start = int(polygon_points_.size());
+          polygon_points_.extend(src);
+          polygon_points_[start].arc_data.x += float(start);
+          polygon_points_[start].arc_data.y += float(start);
+          polygon_points_[start].arc_data.z += float(start);
+          polygon_points_[start].arc_data.w += float(start);
+          polygon_points_[start].arc_bounds.y += float(start);
+          const int index_first_abs = int(src[0].arc_data.z) + start;
+          for (int k = 0; k < n_index_ints; k++) {
+            const int ei = index_first_abs + k / 12;
+            const int cc = k % 12;
+            if (cc < 4) {
+              polygon_points_[ei].vi_edge[cc] += float(start);
+            }
+            else if (cc < 8) {
+              polygon_points_[ei].arc_data[cc - 4] += float(start);
+            }
+            else {
+              polygon_points_[ei].arc_bounds[cc - 8] += float(start);
+            }
+          }
+          const int bvh_first_abs = int(src.size()) - n_nodes + start;
+          for (int k = 0; k < n_nodes; k++) {
+            polygon_points_[bvh_first_abs + k].arc_bounds.x += float(start);
+            polygon_points_[bvh_first_abs + k].arc_bounds.y += float(start);
+          }
+          gpu_obj.polygon_point_start = start;
+          gpu_obj.polygon_point_count = int(src.size());
         }
-        /* Patch the uber-header with the grid metadata. */
-        polygon_points_[base].arc_data.y = float(grid_first);
-        polygon_points_[base].arc_data.z = float(GRID_RES);
-        polygon_points_[base].arc_data.w = float(GRID_RES);
-        polygon_points_[base].arc_bounds.x = gmn.x;
-        polygon_points_[base].arc_bounds.y = gmn.y;
-        polygon_points_[base].arc_bounds.z = cell;
+        else {
+        /* 2D edge BVH: node entries (arc_bounds.w == -3) with child indices
+         * into the same array; leaves are the edges built above. Node
+         * indices are serialized before leaves; the uber-header at
+         * polygon_point_start points at the root. */
+        const int root = build(0, total_edges);
+        const int num_nodes = int(nodes.size());
+
+        /* Ingestion cache: the coarse grid bake is expensive, so the whole
+         * serialized block (uber + nodes + leaves + grid, with RELATIVE
+         * indices) is cached per text state + layout and replayed with an
+         * index offset on subsequent frames. */
+        TextGpuCache *cache = nullptr;
+        uint64_t ingest_key = 0;
+        if (is_text && sdf_data->runtime) {
+          ingest_key = sdf_data->runtime->text_cache_hash;
+          auto mixf = [&](float f) {
+            uint32_t b;
+            memcpy(&b, &f, sizeof(b));
+            ingest_key = (ingest_key ^ uint64_t(b)) * 0x100000001b3ULL;
+          };
+          mixf(scale.x);
+          mixf(scale.y);
+          mixf(sdf_data->text_corner);
+          mixf(sdf_data->polygon_edge_top);
+          mixf(sdf_data->polygon_edge_bottom);
+          mixf(sdf_data->polygon_taper);
+          mixf(float(sdf_data->polygon_edge_mode));
+          if (text_gpu_cache_.size() > 32) {
+            text_gpu_cache_.clear();
+          }
+          cache = &text_gpu_cache_.lookup_or_add_default(sdf_data);
+        }
+
+        const bool cache_hit = cache && cache->key == ingest_key &&
+                               !cache->entries.is_empty();
+        Vector<SDFPolygonPointGPU> baked_local;
+        if (!cache_hit) {
+          Vector<SDFPolygonPointGPU> &baked = cache ? cache->entries : baked_local;
+          baked.clear();
+          baked.reserve(1 + num_nodes + total_edges + 350);
+
+          SDFPolygonPointGPU uber = {};
+          uber.arc_data = float4(float(1 + root), 0.0f, 0.0f, 0.0f);
+          uber.arc_bounds = float4(0.0f, 0.0f, 0.0f, -3.0f);
+          baked.append(uber);
+
+          for (const NodeRec &n : nodes) {
+            SDFPolygonPointGPU e = {};
+            e.vi_edge = float4(n.mn.x, n.mn.y, 0.0f, 0.0f);
+            e.arc_data = float4(n.mx.x, n.mx.y, 0.0f, 0.0f);
+            auto remap = [&](int ref) -> float {
+              if (ref >= 0) {
+                return float(1 + ref);
+              }
+              return float(1 + num_nodes + (-ref - 1));
+            };
+            e.arc_bounds = float4(remap(n.left), remap(n.right), 0.0f, -3.0f);
+            baked.append(e);
+          }
+          for (int i = 0; i < total_edges; i++) {
+            baked.append(*leaf_ptrs[i]);
+          }
+
+          /* Coarse far-field grid: conservative signed-distance values on a
+           * 64x64 cell grid (12 values packed per entry). The shader uses the
+           * cell value only when it provably cannot affect any visible surface
+           * (beyond the silhouette + bevel/edge/outline/blend reach), otherwise
+           * it falls back to the exact BVH traversal — quality is untouched,
+           * far-field cost is O(1) regardless of the edge count. */
+          const int GRID_RES = 64;
+          float2 gmn(1e30f), gmx(-1e30f);
+          for (int i = 0; i < total_edges; i++) {
+            gmn = math::min(gmn, leaf_mn[i]);
+            gmx = math::max(gmx, leaf_mx[i]);
+          }
+          gmn -= float2(max_corner + 1e-3f);
+          gmx += float2(max_corner + 1e-3f);
+          const float cell = math::max(gmx.x - gmn.x, gmx.y - gmn.y) / float(GRID_RES);
+          const float half_diag = cell * 0.70710678f;
+          const int grid_first = int(baked.size());
+          {
+            SDFPolygonPointGPU ge = {};
+            int slot = 0;
+            auto flush = [&]() {
+              if (slot > 0) {
+                baked.append(ge);
+                ge = {};
+                slot = 0;
+              }
+            };
+            for (int gy = 0; gy < GRID_RES; gy++) {
+              for (int gx = 0; gx < GRID_RES; gx++) {
+                const float2 p(gmn.x + (float(gx) + 0.5f) * cell,
+                               gmn.y + (float(gy) + 0.5f) * cell);
+                const float dc = eval_d2d_exact(p);
+                const float v = (dc >= 0.0f) ? (dc - half_diag) : (dc + half_diag);
+                if (slot < 4) {
+                  ge.vi_edge[slot] = v;
+                }
+                else if (slot < 8) {
+                  ge.arc_data[slot - 4] = v;
+                }
+                else {
+                  ge.arc_bounds[slot - 8] = v;
+                }
+                if (++slot == 12) {
+                  flush();
+                }
+              }
+            }
+            flush();
+          }
+          baked[0].arc_data.y = float(grid_first);
+          baked[0].arc_data.z = float(GRID_RES);
+          baked[0].arc_data.w = float(GRID_RES);
+          baked[0].arc_bounds.x = gmn.x;
+          baked[0].arc_bounds.y = gmn.y;
+          baked[0].arc_bounds.z = cell;
+
+          if (cache) {
+            cache->key = ingest_key;
+            cache->num_nodes = num_nodes;
+          }
+        }
+
+        /* Replay: append with absolute index offsets. */
+        const Vector<SDFPolygonPointGPU> &src = cache ? cache->entries : baked_local;
+        const int start = int(polygon_points_.size());
+        const int node_count = cache ? cache->num_nodes : num_nodes;
+        polygon_points_.extend(src);
+        polygon_points_[start].arc_data.x += float(start);
+        polygon_points_[start].arc_data.y += float(start);
+        for (int n = 0; n < node_count; n++) {
+          polygon_points_[start + 1 + n].arc_bounds.x += float(start);
+          polygon_points_[start + 1 + n].arc_bounds.y += float(start);
+        }
+        gpu_obj.polygon_point_start = start;
+        gpu_obj.polygon_point_count = int(src.size());
+        }
       }
 
       gpu_obj.box_corners = float4(max_corner, 0.0f, 0.0f, 0.0f);
@@ -3046,13 +3803,15 @@ class SdfInstanceBase : public DrawEngine {
       }
     }
 
-    /* Early frustum cull on pre-expansion AABBs with conservative padding */
-    {
+    /* Early frustum cull on pre-expansion AABBs with conservative padding.
+     * Skipped by the LP engine (needs_visibility_compaction=false) — its prune
+     * grid handles per-cell culling natively. */
+    if (needs_visibility_compaction()) {
       float max_expansion = max_blend_ + max_shell_distance_;
       for (int g = 0; g < int(groups_gpu_.size()); g++) {
         float gb = (groups_gpu_[g].csg_operation == SDF_CSG_SHELL)
                        ? std::max(groups_gpu_[g].shell_blend_top,
-                                  groups_gpu_[g].shell_blend_bottom)
+                                   groups_gpu_[g].shell_blend_bottom)
                        : groups_gpu_[g].blend;
         max_expansion = std::max(max_expansion, gb + fabsf(groups_gpu_[g].shell_distance));
       }
@@ -3108,7 +3867,13 @@ class SdfInstanceBase : public DrawEngine {
           }
         }
       }
+    }
+    /* else: LP engine — _pad2 is never set; objects_ stays as the full set.
+     * sync_extra_pre_compact hashes the full set to detect scene edits. */
 
+    sync_extra_pre_compact();
+
+    if (needs_visibility_compaction()) {
       /* Compact visible objects */
       int visible_count = 0;
       for (int i = 0; i < int(objects_.size()); i++) {
@@ -3224,263 +3989,278 @@ class SdfInstanceBase : public DrawEngine {
       return;
     }
 
-    /* Reassign original_index to sorted position (globally unique for gbuffer) */
-    for (int i = 0; i < int(objects_.size()); i++) {
-      objects_[i].original_index = i;
-    }
-
-    /* Expand AABBs for blend-aware CSG (now runs on visible set only) */
-    Vector<float3> new_mins(objects_.size());
-    Vector<float3> new_maxs(objects_.size());
-    for (int i = 0; i < int(objects_.size()); i++) {
-      float blend_radius = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
-      float exp = blend_radius + fabsf(objects_[i].shell_distance);
-      new_mins[i] = float3(objects_[i].bbox_min) - float3(exp);
-      new_maxs[i] = float3(objects_[i].bbox_max) + float3(exp);
-    }
-
-    int ungrouped_start = int(objects_.size());
-    for (int i = 0; i < int(objects_.size()); i++) {
-      if (objects_[i].group_id == -1) {
-        ungrouped_start = i;
-        break;
-      }
-    }
-
-    for (int i = int(objects_.size()) - 1; i >= ungrouped_start; i--) {
-      SDFObjectGPU &obj = objects_[i];
-      for (int j = i + 1; j < int(objects_.size()); j++) {
-        float sub_blend_radius = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
-        float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
-        if (sub_blend > 0.0f) {
-          float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
-          float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
-          float3 sub_exp_min = new_mins[j];
-          float3 sub_exp_max = new_maxs[j];
-          float3 ix_min = math::max(obj_exp_min, sub_exp_min);
-          float3 ix_max = math::min(obj_exp_max, sub_exp_max);
-          if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
-            new_mins[i] = math::min(new_mins[i], ix_min);
-            new_maxs[i] = math::max(new_maxs[i], ix_max);
-          }
-        }
-      }
-    }
-
-    Vector<float3> group_mins(groups_gpu_.size(), float3(1e10f));
-    Vector<float3> group_maxs(groups_gpu_.size(), float3(-1e10f));
-
-    for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
-      SDFGroupGPU &grp = groups_gpu_[g];
-      int start_idx = grp.first_object;
-      int end_idx = grp.first_object + grp.object_count - 1;
-
-      if (grp.object_count > 0 && start_idx >= 0 && end_idx < int(objects_.size())) {
-        for (int i = end_idx; i >= start_idx; i--) {
-          SDFObjectGPU &obj = objects_[i];
-
-          for (int j = i + 1; j <= end_idx; j++) {
-            float sub_blend_radius = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
-            float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
-            if (sub_blend > 0.0f) {
-              float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
-              float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
-              float3 sub_exp_min = new_mins[j];
-              float3 sub_exp_max = new_maxs[j];
-              float3 ix_min = math::max(obj_exp_min, sub_exp_min);
-              float3 ix_max = math::min(obj_exp_max, sub_exp_max);
-              if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
-                new_mins[i] = math::min(new_mins[i], ix_min);
-                new_maxs[i] = math::max(new_maxs[i], ix_max);
-              }
-            }
-          }
-
-          for (int sub_g = g + 1; sub_g < int(groups_gpu_.size()); sub_g++) {
-            float sg_blend = (groups_gpu_[sub_g].csg_operation == SDF_CSG_SHELL)
-                                 ? std::max(groups_gpu_[sub_g].shell_blend_top,
-                                            groups_gpu_[sub_g].shell_blend_bottom)
-                                 : groups_gpu_[sub_g].blend;
-            float sub_blend = sg_blend + fabsf(groups_gpu_[sub_g].shell_distance);
-            if (sub_blend > 0.0f) {
-              float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
-              float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
-              float3 sub_exp_min = group_mins[sub_g];
-              float3 sub_exp_max = group_maxs[sub_g];
-              float3 ix_min = math::max(obj_exp_min, sub_exp_min);
-              float3 ix_max = math::min(obj_exp_max, sub_exp_max);
-              if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
-                new_mins[i] = math::min(new_mins[i], ix_min);
-                new_maxs[i] = math::max(new_maxs[i], ix_max);
-              }
-            }
-          }
-
-          for (int j = ungrouped_start; j < int(objects_.size()); j++) {
-            float sub_blend_radius = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
-            float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
-            if (sub_blend > 0.0f) {
-              float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
-              float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
-              float3 sub_exp_min = new_mins[j];
-              float3 sub_exp_max = new_maxs[j];
-              float3 ix_min = math::max(obj_exp_min, sub_exp_min);
-              float3 ix_max = math::min(obj_exp_max, sub_exp_max);
-              if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
-                new_mins[i] = math::min(new_mins[i], ix_min);
-                new_maxs[i] = math::max(new_maxs[i], ix_max);
-              }
-            }
-          }
-
-          group_mins[g] = math::min(group_mins[g], new_mins[i]);
-          group_maxs[g] = math::max(group_maxs[g], new_maxs[i]);
-        }
-      }
-    }
-
-    for (int i = 0; i < int(objects_.size()); i++) {
-      objects_[i].bbox_min = float4(new_mins[i], 0.0f);
-      objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
-    }
-
-    /* Fine frustum cull on expanded AABBs (before intersection expansion) */
-    {
-      const View &view = View::default_get();
-      float4x4 vp = view.winmat() * view.viewmat();
-      float4 planes[6];
-      for (int i = 0; i < 4; i++) {
-        planes[0][i] = vp[i][3] + vp[i][0];
-        planes[1][i] = vp[i][3] - vp[i][0];
-        planes[2][i] = vp[i][3] + vp[i][1];
-        planes[3][i] = vp[i][3] - vp[i][1];
-        planes[4][i] = vp[i][3] + vp[i][2];
-        planes[5][i] = vp[i][3] - vp[i][2];
-      }
-      for (int p = 0; p < 6; p++) {
-        planes[p] /= math::length(float3(planes[p]));
-      }
+    /* AABB expansion, fine frustum cull, and intersection/push expansion.
+     * Skipped by the LP engine (needs_visibility_compaction=false) — its prune
+     * grid handles per-cell culling and doesn't need per-frame AABB expansion
+     * for BVH/tile culling. original_index is also skipped: the LP engine
+     * reads object_unique_id from the objects_ SSBO directly. */
+    if (needs_visibility_compaction()) {
+      /* Reassign original_index to sorted position (globally unique for gbuffer) */
       for (int i = 0; i < int(objects_.size()); i++) {
-        float3 bmin = float3(objects_[i].bbox_min);
-        float3 bmax = float3(objects_[i].bbox_max);
-        bool visible = true;
+        objects_[i].original_index = i;
+      }
+
+      /* Expand AABBs for blend-aware CSG (now runs on visible set only) */
+      Vector<float3> new_mins(objects_.size());
+      Vector<float3> new_maxs(objects_.size());
+      for (int i = 0; i < int(objects_.size()); i++) {
+        float blend_radius = (objects_[i].blend_type == 0) ? 0.0f : objects_[i].blend;
+        float exp = blend_radius + fabsf(objects_[i].shell_distance);
+        new_mins[i] = float3(objects_[i].bbox_min) - float3(exp);
+        new_maxs[i] = float3(objects_[i].bbox_max) + float3(exp);
+      }
+
+      int ungrouped_start = int(objects_.size());
+      for (int i = 0; i < int(objects_.size()); i++) {
+        if (objects_[i].group_id == -1) {
+          ungrouped_start = i;
+          break;
+        }
+      }
+
+      for (int i = int(objects_.size()) - 1; i >= ungrouped_start; i--) {
+        SDFObjectGPU &obj = objects_[i];
+        for (int j = i + 1; j < int(objects_.size()); j++) {
+          float sub_blend_radius = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
+          float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
+          if (sub_blend > 0.0f) {
+            float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+            float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+            float3 sub_exp_min = new_mins[j];
+            float3 sub_exp_max = new_maxs[j];
+            float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+            float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+            if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+              new_mins[i] = math::min(new_mins[i], ix_min);
+              new_maxs[i] = math::max(new_maxs[i], ix_max);
+            }
+          }
+        }
+      }
+
+      Vector<float3> group_mins(groups_gpu_.size(), float3(1e10f));
+      Vector<float3> group_maxs(groups_gpu_.size(), float3(-1e10f));
+
+      for (int g = int(groups_gpu_.size()) - 1; g >= 0; g--) {
+        SDFGroupGPU &grp = groups_gpu_[g];
+        int start_idx = grp.first_object;
+        int end_idx = grp.first_object + grp.object_count - 1;
+
+        if (grp.object_count > 0 && start_idx >= 0 && end_idx < int(objects_.size())) {
+          for (int i = end_idx; i >= start_idx; i--) {
+            SDFObjectGPU &obj = objects_[i];
+
+            for (int j = i + 1; j <= end_idx; j++) {
+              float sub_blend_radius = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
+              float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
+              if (sub_blend > 0.0f) {
+                float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+                float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+                float3 sub_exp_min = new_mins[j];
+                float3 sub_exp_max = new_maxs[j];
+                float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+                float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+                if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+                  new_mins[i] = math::min(new_mins[i], ix_min);
+                  new_maxs[i] = math::max(new_maxs[i], ix_max);
+                }
+              }
+            }
+
+            for (int sub_g = g + 1; sub_g < int(groups_gpu_.size()); sub_g++) {
+              float sg_blend = (groups_gpu_[sub_g].csg_operation == SDF_CSG_SHELL)
+                                   ? std::max(groups_gpu_[sub_g].shell_blend_top,
+                                               groups_gpu_[sub_g].shell_blend_bottom)
+                                   : groups_gpu_[sub_g].blend;
+              float sub_blend = sg_blend + fabsf(groups_gpu_[sub_g].shell_distance);
+              if (sub_blend > 0.0f) {
+                float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+                float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+                float3 sub_exp_min = group_mins[sub_g];
+                float3 sub_exp_max = group_maxs[sub_g];
+                float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+                float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+                if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+                  new_mins[i] = math::min(new_mins[i], ix_min);
+                  new_maxs[i] = math::max(new_maxs[i], ix_max);
+                }
+              }
+            }
+
+            for (int j = ungrouped_start; j < int(objects_.size()); j++) {
+              float sub_blend_radius = (objects_[j].blend_type == 0) ? 0.0f : objects_[j].blend;
+              float sub_blend = sub_blend_radius + fabsf(objects_[j].shell_distance);
+              if (sub_blend > 0.0f) {
+                float3 obj_exp_min = float3(obj.bbox_min) - float3(sub_blend);
+                float3 obj_exp_max = float3(obj.bbox_max) + float3(sub_blend);
+                float3 sub_exp_min = new_mins[j];
+                float3 sub_exp_max = new_maxs[j];
+                float3 ix_min = math::max(obj_exp_min, sub_exp_min);
+                float3 ix_max = math::min(obj_exp_max, sub_exp_max);
+                if (ix_min.x <= ix_max.x && ix_min.y <= ix_max.y && ix_min.z <= ix_max.z) {
+                  new_mins[i] = math::min(new_mins[i], ix_min);
+                  new_maxs[i] = math::max(new_maxs[i], ix_max);
+                }
+              }
+            }
+
+            group_mins[g] = math::min(group_mins[g], new_mins[i]);
+            group_maxs[g] = math::max(group_maxs[g], new_maxs[i]);
+          }
+        }
+      }
+
+      for (int i = 0; i < int(objects_.size()); i++) {
+        objects_[i].bbox_min = float4(new_mins[i], 0.0f);
+        objects_[i].bbox_max = float4(new_maxs[i], 0.0f);
+      }
+
+      /* Fine frustum cull on expanded AABBs (before intersection expansion) */
+      {
+        const View &view = View::default_get();
+        float4x4 vp = view.winmat() * view.viewmat();
+        float4 planes[6];
+        for (int i = 0; i < 4; i++) {
+          planes[0][i] = vp[i][3] + vp[i][0];
+          planes[1][i] = vp[i][3] - vp[i][0];
+          planes[2][i] = vp[i][3] + vp[i][1];
+          planes[3][i] = vp[i][3] - vp[i][1];
+          planes[4][i] = vp[i][3] + vp[i][2];
+          planes[5][i] = vp[i][3] - vp[i][2];
+        }
         for (int p = 0; p < 6; p++) {
-          float3 n(planes[p]);
-          float d = planes[p].w;
-          float3 pos_vertex(n.x > 0 ? bmax.x : bmin.x,
-                            n.y > 0 ? bmax.y : bmin.y,
-                            n.z > 0 ? bmax.z : bmin.z);
-          if (math::dot(n, pos_vertex) + d < 0.0f) {
-            visible = false;
-            break;
+          planes[p] /= math::length(float3(planes[p]));
+        }
+        for (int i = 0; i < int(objects_.size()); i++) {
+          float3 bmin = float3(objects_[i].bbox_min);
+          float3 bmax = float3(objects_[i].bbox_max);
+          bool visible = true;
+          for (int p = 0; p < 6; p++) {
+            float3 n(planes[p]);
+            float d = planes[p].w;
+            float3 pos_vertex(n.x > 0 ? bmax.x : bmin.x,
+                              n.y > 0 ? bmax.y : bmin.y,
+                              n.z > 0 ? bmax.z : bmin.z);
+            if (math::dot(n, pos_vertex) + d < 0.0f) {
+              visible = false;
+              break;
+            }
           }
+          objects_[i]._pad2 = visible ? 1 : 0;
         }
-        objects_[i]._pad2 = visible ? 1 : 0;
       }
-    }
 
-    /* Intersection/Push: expand to visible scene bounds.
-     * Runs after frustum cull so only visible objects contribute. */
-    {
-      float3 smin = float3(1e30f), smax = float3(-1e30f);
-      for (int i = 0; i < int(objects_.size()); i++) {
-        if (objects_[i]._pad2 == 0) { continue; }
-        smin = math::min(smin, float3(objects_[i].bbox_min));
-        smax = math::max(smax, float3(objects_[i].bbox_max));
-      }
-      for (int i = 0; i < int(objects_.size()); i++) {
-        if (objects_[i].csg_operation == SDF_CSG_INTERSECT ||
-            objects_[i].csg_operation == SDF_CSG_PUSH)
-        {
-          objects_[i].bbox_min = float4(smin, 0.0f);
-          objects_[i].bbox_max = float4(smax, 0.0f);
-          objects_[i]._pad2 = 1;
+      /* Intersection/Push: expand to visible scene bounds.
+       * Runs after frustum cull so only visible objects contribute. */
+      {
+        float3 smin = float3(1e30f), smax = float3(-1e30f);
+        for (int i = 0; i < int(objects_.size()); i++) {
+          if (objects_[i]._pad2 == 0) { continue; }
+          smin = math::min(smin, float3(objects_[i].bbox_min));
+          smax = math::max(smax, float3(objects_[i].bbox_max));
         }
-      }
-      for (int g = 0; g < int(groups_gpu_.size()); g++) {
-        int grp_op = groups_gpu_[g].csg_operation;
-        int start = groups_gpu_[g].first_object;
-        int count = groups_gpu_[g].object_count;
-        bool has_push = false;
-        for (int i = start; i < start + count; i++) {
-          has_push |= objects_[i].csg_operation == SDF_CSG_PUSH;
-        }
-        if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH || has_push) {
-          for (int i = start; i < start + count; i++) {
+        for (int i = 0; i < int(objects_.size()); i++) {
+          if (objects_[i].csg_operation == SDF_CSG_INTERSECT ||
+              objects_[i].csg_operation == SDF_CSG_PUSH)
+          {
             objects_[i].bbox_min = float4(smin, 0.0f);
             objects_[i].bbox_max = float4(smax, 0.0f);
             objects_[i]._pad2 = 1;
           }
         }
-      }
-
-      /* Preserve CSG field dependencies. */
-      for (int i = 0; i < int(objects_.size()); i++) {
-        int op = objects_[i].csg_operation;
-        if (op != SDF_CSG_PUSH && op != SDF_CSG_AVOID && op != SDF_CSG_SHELL) {
-          continue;
-        }
-
-        float3 target_min = float3(objects_[i].bbox_min);
-        float3 target_max = float3(objects_[i].bbox_max);
-        for (int j = 0; j < i; j++) {
-          float3 source_min = float3(objects_[j].orig_bbox_min);
-          float3 source_max = float3(objects_[j].orig_bbox_max);
-          float max_dist = 0.0f;
-          for (int c = 0; c < 8; c++) {
-            float3 point(c & 1 ? target_max.x : target_min.x,
-                         c & 2 ? target_max.y : target_min.y,
-                         c & 4 ? target_max.z : target_min.z);
-            float3 closest = math::clamp(point, source_min, source_max);
-            max_dist = std::max(max_dist, math::length(point - closest));
+        for (int g = 0; g < int(groups_gpu_.size()); g++) {
+          int grp_op = groups_gpu_[g].csg_operation;
+          int start = groups_gpu_[g].first_object;
+          int count = groups_gpu_[g].object_count;
+          bool has_push = false;
+          for (int i = start; i < start + count; i++) {
+            has_push |= objects_[i].csg_operation == SDF_CSG_PUSH;
           }
-          objects_[j].bbox_min = float4(math::min(float3(objects_[j].bbox_min), target_min),
-                                        0.0f);
-          objects_[j].bbox_max = float4(math::max(float3(objects_[j].bbox_max), target_max),
-                                        0.0f);
-          objects_[j].max_group_blend = std::max(objects_[j].max_group_blend, max_dist);
+          if (grp_op == SDF_CSG_INTERSECT || grp_op == SDF_CSG_PUSH || has_push) {
+            for (int i = start; i < start + count; i++) {
+              objects_[i].bbox_min = float4(smin, 0.0f);
+              objects_[i].bbox_max = float4(smax, 0.0f);
+              objects_[i]._pad2 = 1;
+            }
+          }
+        }
+
+        /* Preserve CSG field dependencies. */
+        for (int i = 0; i < int(objects_.size()); i++) {
+          int op = objects_[i].csg_operation;
+          if (op != SDF_CSG_PUSH && op != SDF_CSG_AVOID && op != SDF_CSG_SHELL) {
+            continue;
+          }
+
+          float3 target_min = float3(objects_[i].bbox_min);
+          float3 target_max = float3(objects_[i].bbox_max);
+          for (int j = 0; j < i; j++) {
+            float3 source_min = float3(objects_[j].orig_bbox_min);
+            float3 source_max = float3(objects_[j].orig_bbox_max);
+            float max_dist = 0.0f;
+            for (int c = 0; c < 8; c++) {
+              float3 point(c & 1 ? target_max.x : target_min.x,
+                           c & 2 ? target_max.y : target_min.y,
+                           c & 4 ? target_max.z : target_min.z);
+              float3 closest = math::clamp(point, source_min, source_max);
+              max_dist = std::max(max_dist, math::length(point - closest));
+            }
+            objects_[j].bbox_min = float4(math::min(float3(objects_[j].bbox_min), target_min),
+                                          0.0f);
+            objects_[j].bbox_max = float4(math::max(float3(objects_[j].bbox_max), target_max),
+                                          0.0f);
+            objects_[j].max_group_blend = std::max(objects_[j].max_group_blend, max_dist);
+          }
         }
       }
     }
 
-    /* Recompute scene AABB and update the persistent BVH. */
-    scene_min_ = float3(1e30f);
-    scene_max_ = float3(-1e30f);
+    /* Extend scene AABB with visible objects' expanded AABBs (scene_min_/scene_max_ were
+     * already accumulated from all objects during object_sync; this only widens).
+     * BVH is skipped by the LP engine (uses_bvh=false) — its native CSG tree replaces
+     * the classic BVH, and skipping the O(n log n) rebuild saves significant CPU. */
     const int object_count = int(objects_.size());
-    bool rebuild_bvh = bvh_object_ptrs_.size() != object_count;
-    if (!rebuild_bvh) {
-      for (int i = 0; i < object_count; i++) {
-        if (bvh_object_ptrs_[i] != s_sorted_object_ptrs[i]) {
-          rebuild_bvh = true;
-          break;
+    bool rebuild_bvh = false;
+    if (uses_bvh()) {
+      rebuild_bvh = bvh_object_ptrs_.size() != object_count;
+      if (!rebuild_bvh) {
+        for (int i = 0; i < object_count; i++) {
+          if (bvh_object_ptrs_[i] != s_sorted_object_ptrs[i]) {
+            rebuild_bvh = true;
+            break;
+          }
         }
       }
-    }
-    if (rebuild_bvh) {
-      bvh_tree_.clear();
-      bvh_object_ptrs_.clear();
-      bvh_proxies_.clear();
-      bvh_object_ptrs_.reserve(object_count);
-      bvh_proxies_.reserve(object_count);
+      if (rebuild_bvh) {
+        bvh_tree_.clear();
+        bvh_object_ptrs_.clear();
+        bvh_proxies_.clear();
+        bvh_object_ptrs_.reserve(object_count);
+        bvh_proxies_.reserve(object_count);
+      }
     }
     for (int i = 0; i < object_count; i++) {
       scene_min_ = math::min(scene_min_, float3(objects_[i].bbox_min));
       scene_max_ = math::max(scene_max_, float3(objects_[i].bbox_max));
 
-      SdfAabb bounds;
-      bounds.min = float3(objects_[i].bbox_min);
-      bounds.max = float3(objects_[i].bbox_max);
-      if (rebuild_bvh) {
-        bvh_object_ptrs_.append(s_sorted_object_ptrs[i]);
-        bvh_proxies_.append(bvh_tree_.create_proxy(bounds, i));
-      }
-      else {
-        bvh_tree_.update_proxy(bvh_proxies_[i], bounds);
+      if (uses_bvh()) {
+        SdfAabb bounds;
+        bounds.min = float3(objects_[i].bbox_min);
+        bounds.max = float3(objects_[i].bbox_max);
+        if (rebuild_bvh) {
+          bvh_object_ptrs_.append(s_sorted_object_ptrs[i]);
+          bvh_proxies_.append(bvh_tree_.create_proxy(bounds, i));
+        }
+        else {
+          bvh_tree_.update_proxy(bvh_proxies_[i], bounds);
+        }
       }
     }
 
-    /* Hot AABB buffer (must be after compaction + AABB expansion) */
-    {
+    /* Hot AABB buffer (must be after compaction + AABB expansion).
+     * Skipped by the LP engine — its prune grid handles per-cell culling and
+     * the AABB SSBO is only consumed by the classic engine's tile culler. */
+    if (needs_visibility_compaction()) {
       const int n = int(objects_.size());
       object_aabbs_.resize(n);
       for (int i = 0; i < n; i++) {
@@ -4094,19 +4874,21 @@ class SdfInstanceBase : public DrawEngine {
       GPU_storagebuf_update(object_ssbo_, objects_.data());
     }
 
-    /* AABB hot buffer */
-    const size_t aabb_buf_size = count * sizeof(SDFObjectAABB);
-    if (object_aabb_ssbo_ != nullptr && object_aabb_ssbo_count_ != count) {
-      GPU_storagebuf_free(object_aabb_ssbo_);
-      object_aabb_ssbo_ = nullptr;
-    }
-    if (object_aabb_ssbo_ == nullptr) {
-      object_aabb_ssbo_ = GPU_storagebuf_create_ex(
-          aabb_buf_size, object_aabbs_.data(), GPU_USAGE_DYNAMIC, "sdf_object_aabbs_ssbo");
-      object_aabb_ssbo_count_ = count;
-    }
-    else {
-      GPU_storagebuf_update(object_aabb_ssbo_, object_aabbs_.data());
+    /* AABB hot buffer (skipped by LP engine — the prune grid replaces tile culling). */
+    if (needs_visibility_compaction()) {
+      const size_t aabb_buf_size = count * sizeof(SDFObjectAABB);
+      if (object_aabb_ssbo_ != nullptr && object_aabb_ssbo_count_ != count) {
+        GPU_storagebuf_free(object_aabb_ssbo_);
+        object_aabb_ssbo_ = nullptr;
+      }
+      if (object_aabb_ssbo_ == nullptr) {
+        object_aabb_ssbo_ = GPU_storagebuf_create_ex(
+            aabb_buf_size, object_aabbs_.data(), GPU_USAGE_DYNAMIC, "sdf_object_aabbs_ssbo");
+        object_aabb_ssbo_count_ = count;
+      }
+      else {
+        GPU_storagebuf_update(object_aabb_ssbo_, object_aabbs_.data());
+      }
     }
 
     const int mod_count = math::max(int(modifiers_.size()), 1);
@@ -4226,30 +5008,32 @@ class SdfInstanceBase : public DrawEngine {
       }
     }
 
-    Vector<SdfAabbNodeGPU> gpu_nodes = bvh_tree_.build_gpu_nodes(0.0f);
-    const int bvh_count = math::max(int(gpu_nodes.size()), 1);
-    const size_t bvh_buf_size = bvh_count * sizeof(SdfAabbNodeGPU);
+    if (uses_bvh()) {
+      Vector<SdfAabbNodeGPU> gpu_nodes = bvh_tree_.build_gpu_nodes(0.0f);
+      const int bvh_count = math::max(int(gpu_nodes.size()), 1);
+      const size_t bvh_buf_size = bvh_count * sizeof(SdfAabbNodeGPU);
 
-    if (bvh_nodes_ssbo_ != nullptr && bvh_nodes_ssbo_count_ != bvh_count) {
-      GPU_storagebuf_free(bvh_nodes_ssbo_);
-      bvh_nodes_ssbo_ = nullptr;
-    }
+      if (bvh_nodes_ssbo_ != nullptr && bvh_nodes_ssbo_count_ != bvh_count) {
+        GPU_storagebuf_free(bvh_nodes_ssbo_);
+        bvh_nodes_ssbo_ = nullptr;
+      }
 
-    if (bvh_nodes_ssbo_ == nullptr) {
-      if (gpu_nodes.is_empty()) {
-        SdfAabbNodeGPU dummy = {};
-        bvh_nodes_ssbo_ = GPU_storagebuf_create_ex(
-            bvh_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_bvh_ssbo");
+      if (bvh_nodes_ssbo_ == nullptr) {
+        if (gpu_nodes.is_empty()) {
+          SdfAabbNodeGPU dummy = {};
+          bvh_nodes_ssbo_ = GPU_storagebuf_create_ex(
+              bvh_buf_size, &dummy, GPU_USAGE_DYNAMIC, "sdf_bvh_ssbo");
+        }
+        else {
+          bvh_nodes_ssbo_ = GPU_storagebuf_create_ex(
+              bvh_buf_size, gpu_nodes.data(), GPU_USAGE_DYNAMIC, "sdf_bvh_ssbo");
+        }
+        bvh_nodes_ssbo_count_ = bvh_count;
       }
       else {
-        bvh_nodes_ssbo_ = GPU_storagebuf_create_ex(
-            bvh_buf_size, gpu_nodes.data(), GPU_USAGE_DYNAMIC, "sdf_bvh_ssbo");
-      }
-      bvh_nodes_ssbo_count_ = bvh_count;
-    }
-    else {
-      if (!gpu_nodes.is_empty()) {
-        GPU_storagebuf_update(bvh_nodes_ssbo_, gpu_nodes.data());
+        if (!gpu_nodes.is_empty()) {
+          GPU_storagebuf_update(bvh_nodes_ssbo_, gpu_nodes.data());
+        }
       }
     }
 

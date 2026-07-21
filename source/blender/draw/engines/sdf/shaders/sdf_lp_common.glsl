@@ -839,7 +839,7 @@ float lp_sd_bezier_2d(float2 A, float2 B, float2 C, float2 pos)
     if (flo * fhi > 0.0f) {
       continue;
     }
-    for (int it = 0; it < 24; it++) {
+    for (int it = 0; it < 12; it++) {
       float mid = 0.5f * (lo + hi);
       float2 qm = A + (u + v * mid) * mid - p;
       float fm = dot(qm, u + 2.0f * v * mid);
@@ -912,6 +912,344 @@ void lp_toggle_bezier_winding(float2 a,
       lp_toggle_bezier_root((-B + s) / (2.0f * A), a, b, c, p, winding);
     }
   }
+}
+
+/* Packed-slot readers and per-cell edge-list evaluation for SDF text
+ * (identical to sdGridSlotF / sdPolygon2DGrid in sdf_lib.glsl). */
+float lp_sd_grid_slot_f(int first, int idx)
+{
+  SDFPolygonPointGPU e = polygon_points[first + idx / 12];
+  int c = idx % 12;
+  return (c < 4) ? e.vi_edge[c] : (c < 8) ? e.arc_data[c - 4] : e.arc_bounds[c - 8];
+}
+int lp_sd_grid_slot_i(int first, int idx)
+{
+  return int(lp_sd_grid_slot_f(first, idx));
+}
+
+float lp_sd_polygon_leaf_dist(int li, float2 p, float corner_pad)
+{
+  float4 ed = polygon_points[li].vi_edge;
+  float4 ad = polygon_points[li].arc_data;
+  float4 ab = polygon_points[li].arc_bounds;
+  float d = 1e20f;
+
+  if (ab.w < 0.0f) {
+    float2 vi = ed.xy;
+    float2 ctrl = ed.zw;
+    float2 end_pt = ad.xy;
+    float2 bmin = min(min(vi, ctrl), end_pt) - float2(corner_pad);
+    float2 bmax = max(max(vi, ctrl), end_pt) + float2(corner_pad);
+    float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+    float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+    if (ebox_d < d) {
+      d = min(d, lp_sd_bezier_2d(vi, ctrl, end_pt, p));
+    }
+    return d;
+  }
+
+  float2 vi = ed.xy, edge = ed.zw;
+  float R_signed = ad.x, R = abs(R_signed);
+  float2 C = ad.yz;
+  float t_start = ad.w, t_end = ab.x;
+  float ang_mid = ab.y, ang_half = ab.z;
+
+  float2 seg_a = vi + edge * t_start;
+  float2 seg_b = vi + edge * t_end;
+  float2 seg_dir = seg_b - seg_a;
+  float seg_len_sq = dot(seg_dir, seg_dir);
+  if (seg_len_sq > 1e-10f) {
+    float2 w = p - seg_a;
+    float2 ebox_min = min(seg_a, seg_b) - float2(corner_pad);
+    float2 ebox_max = max(seg_a, seg_b) + float2(corner_pad);
+    float2 ebox = abs(p - 0.5f * (ebox_min + ebox_max)) - 0.5f * (ebox_max - ebox_min);
+    float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+    if (ebox_d < d) {
+      float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+      d = min(d, length(w - seg_dir * t));
+    }
+  }
+
+  if (R > 0.001f) {
+    float2 to_p = p - C;
+    float dist_c = length(to_p);
+    float ang_p = atan(to_p.y, to_p.x);
+    float ang_diff = ang_p - ang_mid;
+    ang_diff -= 6.2831853f * floor((ang_diff + 3.1415927f) / 6.2831853f);
+    if (abs(ang_diff) <= ang_half) {
+      d = min(d, abs(dist_c - R));
+    }
+    else {
+      float2 ep1 = C + R * float2(cos(ang_mid - ang_half), sin(ang_mid - ang_half));
+      float2 ep2 = C + R * float2(cos(ang_mid + ang_half), sin(ang_mid + ang_half));
+      d = min(d, min(length(p - ep1), length(p - ep2)));
+    }
+  }
+  return d;
+}
+
+void lp_sd_polygon_cell_winding(int li, float2 cp, float2 p, inout int winding)
+{
+  float4 ed = polygon_points[li].vi_edge;
+  float4 ad = polygon_points[li].arc_data;
+  float4 ab = polygon_points[li].arc_bounds;
+  float sx = (p.x >= cp.x) ? 1.0f : -1.0f;
+  float sy = (p.y >= cp.y) ? 1.0f : -1.0f;
+
+  if (ab.w < 0.0f) {
+    float2 a = ed.xy, b = ed.zw, c = ad.xy;
+    {
+      float A = a.y - 2.0f * b.y + c.y;
+      float B = 2.0f * (b.y - a.y);
+      float C0 = a.y - cp.y;
+      float roots[2];
+      int nr = 0;
+      if (abs(A) < 1e-8f) {
+        if (abs(B) > 1e-12f) { roots[nr++] = -C0 / B; }
+      }
+      else {
+        float disc = B * B - 4.0f * A * C0;
+        if (disc > 0.0f) {
+          float s = sqrt(disc);
+          roots[nr++] = (-B - s) / (2.0f * A);
+          roots[nr++] = (-B + s) / (2.0f * A);
+        }
+      }
+      for (int r = 0; r < nr; r++) {
+        float t = roots[r];
+        if (t <= 0.0f || t > 1.0f) { continue; }
+        float u = 1.0f - t;
+        float qx = u * u * a.x + 2.0f * u * t * b.x + t * t * c.x;
+        if ((sx > 0.0f && qx > cp.x && qx <= p.x) ||
+            (sx < 0.0f && qx < cp.x && qx >= p.x))
+        {
+          float vy = 2.0f * (u * (b.y - a.y) + t * (c.y - b.y));
+          winding += int(sx) * ((vy > 0.0f) ? -1 : 1);
+        }
+      }
+    }
+    {
+      float A = a.x - 2.0f * b.x + c.x;
+      float B = 2.0f * (b.x - a.x);
+      float C0 = a.x - p.x;
+      float roots[2];
+      int nr = 0;
+      if (abs(A) < 1e-8f) {
+        if (abs(B) > 1e-12f) { roots[nr++] = -C0 / B; }
+      }
+      else {
+        float disc = B * B - 4.0f * A * C0;
+        if (disc > 0.0f) {
+          float s = sqrt(disc);
+          roots[nr++] = (-B - s) / (2.0f * A);
+          roots[nr++] = (-B + s) / (2.0f * A);
+        }
+      }
+      for (int r = 0; r < nr; r++) {
+        float t = roots[r];
+        if (t <= 0.0f || t > 1.0f) { continue; }
+        float u = 1.0f - t;
+        float qy = u * u * a.y + 2.0f * u * t * b.y + t * t * c.y;
+        if ((sy > 0.0f && qy > cp.y && qy <= p.y) ||
+            (sy < 0.0f && qy < cp.y && qy >= p.y))
+        {
+          float vx = 2.0f * (u * (b.x - a.x) + t * (c.x - b.x));
+          winding += int(sy) * ((vx > 0.0f) ? 1 : -1);
+        }
+      }
+    }
+    return;
+  }
+
+  float2 vi = ed.xy, edge = ed.zw;
+  float R_signed = ad.x, R = abs(R_signed);
+  float2 C = ad.yz;
+  float ang_mid = ab.y, ang_half = ab.z;
+  float2 seg_a = vi + edge * ad.w;
+  float2 seg_b = vi + edge * ab.x;
+
+  if ((seg_a.y <= cp.y) != (seg_b.y <= cp.y)) {
+    float t = (cp.y - seg_a.y) / (seg_b.y - seg_a.y);
+    float xc = seg_a.x + (seg_b.x - seg_a.x) * t;
+    if ((sx > 0.0f && xc > cp.x && xc <= p.x) ||
+        (sx < 0.0f && xc < cp.x && xc >= p.x))
+    {
+      winding += int(sx) * ((seg_b.y > seg_a.y) ? -1 : 1);
+    }
+  }
+  if ((seg_a.x <= p.x) != (seg_b.x <= p.x)) {
+    float t = (p.x - seg_a.x) / (seg_b.x - seg_a.x);
+    float yc = seg_a.y + (seg_b.y - seg_a.y) * t;
+    if ((sy > 0.0f && yc > cp.y && yc <= p.y) ||
+        (sy < 0.0f && yc < cp.y && yc >= p.y))
+    {
+      winding += int(sy) * ((seg_b.x > seg_a.x) ? 1 : -1);
+    }
+  }
+
+  if (R > 0.001f) {
+    int dir = (R_signed > 0.0f) ? 1 : -1;
+    float k = (cp.y - C.y) / R;
+    if (abs(k) < 1.0f) {
+      float th0 = asin(k);
+      for (int e = 0; e < 2; e++) {
+        float th = (e == 0) ? th0 : 3.1415927f - th0;
+        float td = th - ang_mid;
+        td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+        float xc = C.x + R * cos(th);
+        if (abs(td) <= ang_half &&
+            ((sx > 0.0f && xc > cp.x && xc <= p.x) ||
+             (sx < 0.0f && xc < cp.x && xc >= p.x)))
+        {
+          float ty = float(dir) * cos(th);
+          winding += int(sx) * ((ty > 0.0f) ? -1 : 1);
+        }
+      }
+    }
+    k = (p.x - C.x) / R;
+    if (abs(k) < 1.0f) {
+      float th0 = acos(k);
+      for (int e = 0; e < 2; e++) {
+        float th = (e == 0) ? th0 : -th0;
+        float td = th - ang_mid;
+        td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+        float yc = C.y + R * sin(th);
+        if (abs(td) <= ang_half &&
+            ((sy > 0.0f && yc > cp.y && yc <= p.y) ||
+             (sy < 0.0f && yc < cp.y && yc >= p.y)))
+        {
+          float tx = -float(dir) * sin(th);
+          winding += int(sy) * ((tx > 0.0f) ? 1 : -1);
+        }
+      }
+    }
+  }
+}
+
+/* Coarse far-field grid + per-cell edge lists (identical to
+ * sdPolygon2DGrid). */
+/* Distance-only edge-BVH traversal (see sdPolygon2DBVHDist in sdf_lib.glsl). */
+float lp_sd_polygon_2d_bvh_dist(float2 p, int root, float corner_pad)
+{
+  float d = 1e20f;
+  int stack[64];
+  int sp = 0;
+  stack[sp++] = root;
+  while (sp > 0) {
+    int ni = stack[--sp];
+    float4 ed = polygon_points[ni].vi_edge;
+    float4 ab = polygon_points[ni].arc_bounds;
+    if (ab.w <= -2.5f) {
+      float2 cmin = ed.xy;
+      float2 cmax = polygon_points[ni].arc_data.xy;
+      float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+      float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+      if (box_d < d) {
+        stack[sp++] = int(ab.x);
+        stack[sp++] = int(ab.y);
+      }
+      continue;
+    }
+    d = min(d, lp_sd_polygon_leaf_dist(ni, p, corner_pad));
+  }
+  return d;
+}
+
+float lp_sd_polygon_2d_grid(float2 p, int ps, float corner_pad, float grid_slack)
+{
+  float4 uv = polygon_points[ps].vi_edge;
+  float4 ud = polygon_points[ps].arc_data;
+  float2 gmn = uv.xy;
+  float cell = uv.z;
+  int gres = int(uv.w);
+  int value_first = int(ud.x);
+  int dir_first = int(ud.y);
+  int index_first = int(ud.z);
+  int leaf_first = int(ud.w);
+
+  /* Far field: baked conservative center value (see sdPolygon2DGrid). */
+  int2 gco = int2(floor((p - gmn) / cell));
+  bool inside = (gco.x >= 0 && gco.y >= 0 && gco.x < gres && gco.y < gres);
+  if (inside) {
+    float cv = lp_sd_grid_slot_f(value_first, gco.y * gres + gco.x);
+    if (abs(cv) > grid_slack) {
+      return cv;
+    }
+  }
+  else {
+    float2 db = max(max(gmn - p, p - (gmn + float2(gres) * cell)), float2(0.0f));
+    float dd = length(db);
+    if (dd > grid_slack) {
+      return dd;
+    }
+  }
+
+  /* Exact band: own-cell edges + L-path winding, then progressive rings
+   * until every closer edge is guaranteed scanned. */
+  int2 gc = clamp(gco, int2(0), int2(gres - 1));
+  float2 cp = gmn + float2(gc) * cell;
+  int ci = gc.y * gres + gc.x;
+  int off = lp_sd_grid_slot_i(dir_first, ci * 3 + 0);
+  int cnt = lp_sd_grid_slot_i(dir_first, ci * 3 + 1);
+  int winding = inside ? lp_sd_grid_slot_i(dir_first, ci * 3 + 2) : 0;
+  float d = 1e20f;
+  for (int k = 0; k < cnt; k++) {
+    int li = leaf_first + lp_sd_grid_slot_i(index_first, off + k);
+    d = min(d, lp_sd_polygon_leaf_dist(li, p, corner_pad));
+    if (inside) {
+      lp_sd_polygon_cell_winding(li, cp, p, winding);
+    }
+  }
+
+  float2 cmax = cp + float2(cell);
+  float db;
+  if (inside) {
+    db = min(min(p.x - cp.x, cmax.x - p.x), min(p.y - cp.y, cmax.y - p.y));
+  }
+  else {
+    db = length(max(max(cp - p, p - cmax), float2(0.0f)));
+  }
+  /* Ring cap is deliberately small; past it the exact distance comes from
+   * the distance-only edge BVH (root in arc_bounds.y), so the per-query
+   * cost stays bounded no matter the blend reach or the text scale. */
+  const int kmax = min(gres, 3);
+  for (int k = 1; k <= kmax &&
+                 d > (inside ? (float(k - 1) * cell + db) : max(float(k - 1) * cell, db));
+      k++)
+  {
+    for (int oy = -k; oy <= k; oy++) {
+      for (int ox = -k; ox <= k; ox++) {
+        if (max(abs(ox), abs(oy)) != k) {
+          continue;
+        }
+        int2 nc = gc + int2(ox, oy);
+        if (nc.x < 0 || nc.y < 0 || nc.x >= gres || nc.y >= gres) {
+          continue;
+        }
+        /* Cell-rect cull (see sdPolygon2DGrid). */
+        float2 nmin = gmn + float2(nc) * cell;
+        float2 nmax = nmin + float2(cell);
+        float2 rb = max(max(nmin - p, p - nmax), float2(0.0f));
+        if (dot(rb, rb) >= d * d) {
+          continue;
+        }
+        int nci = nc.y * gres + nc.x;
+        int noff = lp_sd_grid_slot_i(dir_first, nci * 3 + 0);
+        int ncnt = lp_sd_grid_slot_i(dir_first, nci * 3 + 1);
+        for (int e = 0; e < ncnt; e++) {
+          int li = leaf_first + lp_sd_grid_slot_i(index_first, noff + e);
+          d = min(d, lp_sd_polygon_leaf_dist(li, p, corner_pad));
+        }
+      }
+    }
+  }
+  if (d > (inside ? (float(kmax) * cell + db) : max(float(kmax) * cell, db))) {
+    /* Nearest edge past the ring cap: exact BVH distance (see
+     * sdPolygon2DGrid for why the corner integer still gives the sign). */
+    d = lp_sd_polygon_2d_bvh_dist(p, int(polygon_points[ps].arc_bounds.y), corner_pad);
+  }
+
+  return (winding != 0) ? -d : d;
 }
 
 /* Arbitrary polygon 2D SDF with straight + bezier edges (identical to
@@ -1051,6 +1389,9 @@ float lp_sd_polygon_2d_bvh(float2 p, int ps, float corner_pad, float grid_slack)
 
 float lp_sd_polygon_2d(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
+  if (polygon_points[ps].arc_bounds.w <= -3.5f) {
+    return lp_sd_polygon_2d_grid(p, ps, corner_pad, grid_slack);
+  }
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
     return lp_sd_polygon_2d_bvh(p, ps, corner_pad, grid_slack);
   }
@@ -1130,6 +1471,9 @@ float lp_sd_polygon_2d(float2 p, int ps, int pc, float corner_pad, float grid_sl
  * exact arc fillets. Still an exact 1-Lipschitz SDF. */
 float lp_sd_polygon_2d_rounded(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
+  if (polygon_points[ps].arc_bounds.w <= -3.5f) {
+    return lp_sd_polygon_2d_grid(p, ps, corner_pad, grid_slack);
+  }
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
     return lp_sd_polygon_2d_bvh(p, ps, corner_pad, grid_slack);
   }
@@ -2548,13 +2892,16 @@ float lp_offset_node_value(SDFLpNode node)
  * init loop costs SDF_LP_STACK_DEPTH writes on every trace step.
  * Trace-pass only: the prune pass runs its own forward pass. */
 #ifndef SDF_LP_NO_LIST_EVAL
-float lp_list_eval(float3 p, int count, int base)
+/* Internal: merged list eval that reads from either lp_active_in (base + i)
+ * or lp_active_init (i) based on use_init. Single function body avoids
+ * duplicating the whole loop + all callees for the init-list code path. */
+float lp_list_eval_impl(float3 p, int count, int base, bool use_init)
 {
   float stack[SDF_LP_STACK_DEPTH];
   int stack_idx = 0;
 
   for (int i = 0; i < count; i++) {
-    uint active_node = lp_active_in[base + i];
+    uint active_node = use_init ? lp_active_init[i] : lp_active_in[base + i];
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
     float d;
@@ -2582,20 +2929,29 @@ float lp_list_eval(float3 p, int count, int base)
   }
 
   return stack[0];
+}
+
+float lp_list_eval(float3 p, int count, int base)
+{
+  return lp_list_eval_impl(p, count, base, false);
+}
+
+float lp_list_eval_init(float3 p, int count)
+{
+  return lp_list_eval_impl(p, count, 0, true);
 }
 
 /* Folded dominant-object id: lp_list_eval with the winning leaf's object
  * index tracked alongside the distance (PAINT/blend dominant-operand rules).
  * The march pass uses it to seed gbuf_color.a for picking. */
-float lp_list_eval_obj_id(float3 p, int count, int base)
+float lp_list_eval_obj_id_impl(float3 p, int count, int base, bool use_init)
 {
   float d_stack[SDF_LP_STACK_DEPTH];
   float i_stack[SDF_LP_STACK_DEPTH];
-  /* No stack initialization: see lp_list_eval. */
   int stack_idx = 0;
 
   for (int i = 0; i < count; i++) {
-    uint active_node = lp_active_in[base + i];
+    uint active_node = use_init ? lp_active_init[i] : lp_active_in[base + i];
     SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
 
     float d;
@@ -2610,7 +2966,6 @@ float lp_list_eval_obj_id(float3 p, int count, int base)
       uint op = opw.x;
       d = lp_binary_op_eval(opw, left_val, right_val);
       if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
-        /* Paint only recolors where the right operand is inside-ish. */
         float cb = lp_op_blend_factor(op);
         float t = (cb > 0.0f) ?
                       1.0f - smoothstep(-cb, cb, right_val) :
@@ -2618,15 +2973,6 @@ float lp_list_eval_obj_id(float3 p, int count, int base)
         obj_id = (t >= 0.5f) ? right_id : left_id;
       }
       else {
-        /* Dominant-operand id, mirroring the classic per-op rules
-         * (sdf_trace_comp.glsl:193-221: SUBTRACT takes the right id when
-         * -d2 > d1, INTERSECT when d2 > d1, i.e. the max-form winner). The
-         * mix factor must NOT be scaled by s: negating it forced v.y <= 0
-         * for every SUBTRACT/INTERSECT (and the SUB/INTER forms SHELL
-         * desugars into), pinning the id to the left operand — carved
-         * surfaces took the base object's id in unculled cells but the true
-         * winner's id in cells where the prune pass culled the op, which
-         * made the edge-detect outline follow the pruning grid. */
         float s = lp_op_sign(op);
         float k = lp_op_blend_factor(op);
         float m = lp_smin_blend(s * left_val, s * right_val, k).y;
@@ -2655,110 +3001,16 @@ float lp_list_eval_obj_id(float3 p, int count, int base)
 
   return i_stack[0];
 }
-#endif /* SDF_LP_NO_LIST_EVAL */
 
-#ifdef SDF_LP_INIT_LIST
-/* Full-tree evaluation against the serialized init list (lp_active_init).
- * The SDF_LP_FALLBACK_LIST path MUST use these, not lp_list_eval(p,
- * total_num_nodes, 0): with culling enabled lp_active_in is the per-level
- * POOL buffer (per-cell lists at arbitrary offsets), so reading it from
- * base 0 evaluates the first N pool entries — a garbage tree of
- * concatenated cell lists, and objects vanish exactly when the scene
- * overflows the prune pools. Bodies mirror the lp_active_in variants
- * above; keep in sync. */
-float lp_list_eval_init(float3 p, int count)
+float lp_list_eval_obj_id(float3 p, int count, int base)
 {
-  float stack[SDF_LP_STACK_DEPTH];
-  int stack_idx = 0;
-
-  for (int i = 0; i < count; i++) {
-    uint active_node = lp_active_init[i];
-    SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
-
-    float d;
-    if (node.type == SDF_LP_NODETYPE_BINARY) {
-      float left_val = stack[stack_idx - 2];
-      float right_val = stack[stack_idx - 1];
-      stack_idx -= 2;
-      uint4 opw = lp_binary_ops[node.idx_in_type];
-      d = lp_binary_op_eval(opw, left_val, right_val);
-    }
-    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
-      d = stack[stack_idx - 1] + lp_offset_node_value(node);
-      stack_idx -= 1;
-    }
-    else {
-      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
-      d = lp_eval_prim(p, prim);
-    }
-
-    d *= lp_active_node_sign(active_node);
-    if (stack_idx >= SDF_LP_STACK_DEPTH) {
-      return 1e20f;
-    }
-    stack[stack_idx++] = d;
-  }
-
-  return stack[0];
+  return lp_list_eval_obj_id_impl(p, count, base, false);
 }
 
 float lp_list_eval_obj_id_init(float3 p, int count)
 {
-  float d_stack[SDF_LP_STACK_DEPTH];
-  float i_stack[SDF_LP_STACK_DEPTH];
-  int stack_idx = 0;
-
-  for (int i = 0; i < count; i++) {
-    uint active_node = lp_active_init[i];
-    SDFLpNode node = lp_nodes[lp_active_node_index(active_node)];
-
-    float d;
-    float obj_id;
-    if (node.type == SDF_LP_NODETYPE_BINARY) {
-      float left_val = d_stack[stack_idx - 2];
-      float right_val = d_stack[stack_idx - 1];
-      float left_id = i_stack[stack_idx - 2];
-      float right_id = i_stack[stack_idx - 1];
-      stack_idx -= 2;
-      uint4 opw = lp_binary_ops[node.idx_in_type];
-      uint op = opw.x;
-      d = lp_binary_op_eval(opw, left_val, right_val);
-      if (lp_op_csg(op) == SDF_LP_CSG_PAINT) {
-        float cb = lp_op_blend_factor(op);
-        float t = (cb > 0.0f) ?
-                      1.0f - smoothstep(-cb, cb, right_val) :
-                      ((right_val < 0.0f) ? 1.0f : 0.0f);
-        obj_id = (t >= 0.5f) ? right_id : left_id;
-      }
-      else {
-        float s = lp_op_sign(op);
-        float k = lp_op_blend_factor(op);
-        float m = lp_smin_blend(s * left_val, s * right_val, k).y;
-        obj_id = (m < 0.5f) ? left_id : right_id;
-      }
-    }
-    else if (node.type == SDF_LP_NODETYPE_OFFSET) {
-      d = d_stack[stack_idx - 1] + lp_offset_node_value(node);
-      obj_id = i_stack[stack_idx - 1];
-      stack_idx -= 1;
-    }
-    else {
-      SDFLpPrimitive prim = lp_prims[node.idx_in_type];
-      d = lp_eval_prim(p, prim);
-      obj_id = prim.color.w;
-    }
-
-    d *= lp_active_node_sign(active_node);
-    if (stack_idx >= SDF_LP_STACK_DEPTH) {
-      return -1.0f;
-    }
-    d_stack[stack_idx] = d;
-    i_stack[stack_idx] = obj_id;
-    stack_idx++;
-  }
-
-  return i_stack[0];
+  return lp_list_eval_obj_id_impl(p, count, 0, true);
 }
-#endif /* SDF_LP_INIT_LIST */
+#endif /* SDF_LP_NO_LIST_EVAL */
 
 /** \} */

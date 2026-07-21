@@ -110,7 +110,9 @@ void assign_spheres_to_cells(const Eigen::VectorXf &S,
                              int resY,
                              int resZ,
                              int batch_size,
-                             Eigen::MatrixXi &TriF);
+                             Eigen::MatrixXi &TriF,
+                             const std::pair<std::vector<int>, std::vector<int>> *precomputed =
+                                 nullptr);
 
 void compute_face_cell_intersections(std::vector<Cell> &cells,
                                      int resX,

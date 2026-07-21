@@ -17,27 +17,34 @@ int lp_cell_num_active(int cell_idx)
 
 float lp_sdf(float3 p, int cell_idx, out bool near_field)
 {
+  int count;
+  int base;
+  bool use_init = false;
   if (culling_enabled == 0) {
     near_field = true;
-    /* Culling off: lp_active_in IS the init list (engine binding). */
-    return lp_list_eval(p, total_num_nodes, 0);
+    count = total_num_nodes;
+    base = 0;
   }
-  /* Single meta load: num_active (x), list offset (y), far value (z). */
-  int4 meta = lp_cell_meta[cell_idx];
-  int num_active = meta.x;
-  if (num_active == SDF_LP_FALLBACK_LIST) {
-    /* Cell overflowed the dynamic pools during pruning: full tree eval.
-     * Must read the init list — lp_active_in is the per-level pool buffer
-     * here, NOT the tree serialization (see lp_list_eval_init). */
-    near_field = true;
-    return lp_list_eval_init(p, total_num_nodes);
+  else {
+    int4 meta = lp_cell_meta[cell_idx];
+    int num_active = meta.x;
+    if (num_active == SDF_LP_FALLBACK_LIST) {
+      near_field = true;
+      count = total_num_nodes;
+      base = 0;
+      use_init = true;
+    }
+    else if (num_active == 0) {
+      near_field = false;
+      return intBitsToFloat(meta.z);
+    }
+    else {
+      near_field = true;
+      count = num_active;
+      base = meta.y;
+    }
   }
-  if (num_active == 0) {
-    near_field = false;
-    return intBitsToFloat(meta.z);
-  }
-  near_field = true;
-  return lp_list_eval(p, num_active, meta.y);
+  return lp_list_eval_impl(p, count, base, use_init);
 }
 
 /* Dominant-object id at p (seed for gbuf_color.a, consumed by object
@@ -45,14 +52,25 @@ float lp_sdf(float3 p, int cell_idx, out bool near_field)
  * evaluate the full tree (rare; costs one eval). */
 float lp_sdf_obj_id(float3 p, int cell_idx)
 {
+  int count;
+  int base;
+  bool use_init = false;
   if (culling_enabled == 0) {
-    return lp_list_eval_obj_id(p, total_num_nodes, 0);
+    count = total_num_nodes;
+    base = 0;
   }
-  int4 meta = lp_cell_meta[cell_idx];
-  int num_active = meta.x;
-  if (num_active == SDF_LP_FALLBACK_LIST || num_active == 0) {
-    /* Init list, not the pool buffer: see lp_sdf. */
-    return lp_list_eval_obj_id_init(p, total_num_nodes);
+  else {
+    int4 meta = lp_cell_meta[cell_idx];
+    int num_active = meta.x;
+    if (num_active == SDF_LP_FALLBACK_LIST || num_active == 0) {
+      count = total_num_nodes;
+      base = 0;
+      use_init = true;
+    }
+    else {
+      count = num_active;
+      base = meta.y;
+    }
   }
-  return lp_list_eval_obj_id(p, num_active, meta.y);
+  return lp_list_eval_obj_id_impl(p, count, base, use_init);
 }

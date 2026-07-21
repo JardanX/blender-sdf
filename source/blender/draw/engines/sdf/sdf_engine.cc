@@ -397,7 +397,16 @@ bool sdf_object_bbox_get(int sdf_index, const float3 &hint_pos,
           /* CPU eval doesn't support polygon — use polygon point bounds directly. */
           float3 mn(1e30f), mx(-1e30f);
           if (obj.polygon_point_count > 0) {
-            if (s_polygon_pts_cpu[obj.polygon_point_start].arc_bounds.w <= -2.5f) {
+            const float uber_w = s_polygon_pts_cpu[obj.polygon_point_start].arc_bounds.w;
+            if (uber_w <= -3.5f) {
+              /* Grid mode (SDF text): the uber holds origin + cell + res. */
+              const SDFPolygonPointGPU &ub = s_polygon_pts_cpu[obj.polygon_point_start];
+              mn.x = ub.vi_edge.x;
+              mn.y = ub.vi_edge.y;
+              mx.x = ub.vi_edge.x + ub.vi_edge.z * ub.vi_edge.w;
+              mx.y = ub.vi_edge.y + ub.vi_edge.z * ub.vi_edge.w;
+            }
+            else if (uber_w <= -2.5f) {
               /* BVH mode: the root node holds the padded 2D bounds. */
               int root = int(s_polygon_pts_cpu[obj.polygon_point_start].arc_data.x);
               mn.x = s_polygon_pts_cpu[root].vi_edge.x;

@@ -83,6 +83,13 @@ class LpInstance : public SdfInstanceBase {
   gpu::StorageBuf *lp_active_count_ssbo_ = nullptr; /* 32 ints: active + tmp counters. */
   gpu::StorageBuf *lp_tmp_ssbo_ = nullptr;
   gpu::StorageBuf *lp_scratch_ssbo_ = nullptr;
+  /* Allocation sizes for the tree SSBOs (grow-only, avoids free+recreate
+   * in lp_upload_tree every time upload_extra fires). */
+  int64_t lp_nodes_alloc_ = 0;
+  int64_t lp_prims_alloc_ = 0;
+  int64_t lp_ops_alloc_ = 0;
+  int64_t lp_init_nodes_alloc_ = 0;
+  int64_t lp_init_parents_alloc_ = 0;
 
   int lp_grid_size_ = 0; /* Allocated grid resolution per axis (0 = unallocated). */
   int64_t lp_active_capacity_ = 0;
@@ -91,6 +98,13 @@ class LpInstance : public SdfInstanceBase {
   bool lp_grid_dirty_ = true;
   int lp_grid_level_built_ = 0; /* Grid level the current results were built with. */
   int lp_final_idx_ = 0; /* Ping-pong slot holding the final level results. */
+  /* Tree version counter: incremented when lp_build_tree() changes its output.
+   * The LP prune grid is cached and only rebuilt when this version changes. */
+  int lp_tree_version_ = 0;
+  int lp_built_tree_version_ = -1;
+  uint64_t lp_tree_hash_ = 0;
+  uint64_t lp_objects_hash_ = 0;
+  bool lp_tree_needs_rebuild_ = true;
   float3 lp_aabb_min_ = float3(0.0f);
   float3 lp_aabb_max_ = float3(0.0f);
   /* Overflow stats read back after prune rebuilds (cells that fell back
@@ -119,9 +133,47 @@ class LpInstance : public SdfInstanceBase {
     return Span<const int>(kLpShaders, ARRAY_SIZE(kLpShaders));
   }
 
+  bool uses_bvh() const override { return false; }
+  bool needs_visibility_compaction() const override { return false; }
+
+  void sync_extra_pre_compact() override
+  {
+    /* Hash the FULL objects_ data (before frustum culling removes invisible
+     * objects). During camera navigation the full set is stable; only scene
+     * edits (add/remove/modify objects) change the hash. _pad2 and
+     * original_index are zeroed — they change with visibility/sorting but
+     * don't affect the tree. sync_extra() reads the flag and rebuilds. */
+    uint64_t h = 0xcbf29ce484222325ULL;
+    auto hash_add = [&](const void *d, size_t sz) {
+      const uint8_t *p = static_cast<const uint8_t *>(d);
+      for (size_t i = 0; i < sz; i++) {
+        h ^= p[i];
+        h *= 0x100000001b3ULL;
+      }
+    };
+    for (auto &obj : objects_) {
+      int saved_oi = obj.original_index;
+      int saved_p2 = obj._pad2;
+      obj.original_index = 0;
+      obj._pad2 = 0;
+      hash_add(&obj, sizeof(SDFObjectGPU));
+      obj.original_index = saved_oi;
+      obj._pad2 = saved_p2;
+    }
+    hash_add(modifiers_.data(), modifiers_.size() * sizeof(SDFModifierGPU));
+    hash_add(groups_gpu_.data(), groups_gpu_.size() * sizeof(SDFGroupGPU));
+    hash_add(polygon_points_.data(), polygon_points_.size() * sizeof(SDFPolygonPointGPU));
+    lp_tree_needs_rebuild_ = (h != lp_objects_hash_);
+    lp_objects_hash_ = h;
+  }
+
   void sync_extra() override
   {
-    lp_build_tree();
+    if (lp_tree_needs_rebuild_) {
+      lp_tree_needs_rebuild_ = false;
+      lp_build_tree();
+      lp_upload_tree();
+    }
   }
 
   void sync_engine_settings(const View3DShading &s) override
@@ -169,16 +221,21 @@ class LpInstance : public SdfInstanceBase {
       want_max = math::max(want_max, want_min + float3(1e-4f));
     }
 
+    /* Only rebuild the LP prune grid when the CSG tree content, grid level, or
+     * AABB actually changed. Camera navigation (view_changed_) does NOT
+     * invalidate the grid — the pruning is a world-space structure. This is
+     * how the reference LipschitzPruning implementation caches the grid across
+     * view changes. */
+    const bool tree_changed = (lp_tree_version_ != lp_built_tree_version_);
     if (lvl != lp_grid_level_built_ || want_min != lp_aabb_min_ || want_max != lp_aabb_max_ ||
-        scene_changed_ || mesh_changed_ || mesh_data_changed_)
+        tree_changed)
     {
       if (!lp_grid_dirty_) {
         CLOG_INFO(&LOG,
-                  "SDF LP grid invalidated: level %d->%d, aabb_changed=%d, scene_changed=%d, "
-                  "mesh_changed=%d, mesh_data_changed=%d",
+                  "SDF LP grid invalidated: level %d->%d, aabb_changed=%d, tree_version %d->%d",
                   lp_grid_level_built_, lvl,
                   int(want_min != lp_aabb_min_ || want_max != lp_aabb_max_),
-                  int(scene_changed_), int(mesh_changed_), int(mesh_data_changed_));
+                  lp_built_tree_version_, lp_tree_version_);
       }
       lp_grid_dirty_ = true;
       lp_aabb_min_ = want_min;
@@ -1018,6 +1075,41 @@ class LpInstance : public SdfInstanceBase {
       lp_active_init_nodes_.clear();
       lp_active_init_parents_.clear();
     }
+
+    /* Increment the tree version only when the serialized output actually
+     * differs from the last build. This gates the LP prune rebuild. Hash
+     * the tree-relevant data that determines the SDF field; trivial changes
+     * (e.g. color-only) that don't affect field values will NOT trigger a
+     * prune rebuild, but the color resolve still picks them up from the
+     * shared scene SSBOs. */
+    uint64_t new_hash = 0xcbf29ce484222325ULL;
+    auto hash_add = [&](const void *data, size_t size) {
+      const uint8_t *p = static_cast<const uint8_t *>(data);
+      for (size_t i = 0; i < size; i++) {
+        new_hash ^= p[i];
+        new_hash *= 0x100000001b3ULL;
+      }
+    };
+    hash_add(lp_nodes_.data(), lp_nodes_.size() * sizeof(SDFLpNode));
+    hash_add(lp_binary_ops_.data(), lp_binary_ops_.size() * sizeof(uint4));
+    /* Hash primitives excluding non-field fields: color (shading-only, but
+     * picked up from the shared scene SSBOs by the color resolve pass) and
+     * obj_index (non-deterministic loop index that changes with visibility
+     * culling, causing spurious prune rebuilds during camera navigation).
+     * Hashed in two ranges: [0, color) and [type, obj_index). */
+    if (!lp_prims_.is_empty()) {
+      constexpr size_t kColorOff = offsetof(SDFLpPrimitive, color);
+      constexpr size_t kTypeOff = offsetof(SDFLpPrimitive, type);
+      constexpr size_t kObjOff = offsetof(SDFLpPrimitive, obj_index);
+      hash_add(lp_prims_.data(), lp_prims_.size() * kColorOff);
+      for (const auto &prim : lp_prims_) {
+        hash_add((const uint8_t *)&prim + kTypeOff, kObjOff - kTypeOff);
+      }
+    }
+    if (new_hash != lp_tree_hash_) {
+      lp_tree_version_++;
+      lp_tree_hash_ = new_hash;
+    }
   }
 
   void lp_upload_tree()
@@ -1031,29 +1123,35 @@ class LpInstance : public SdfInstanceBase {
     const int64_t num_prims = math::max(int64_t(lp_prims_.size()), int64_t(1));
     const int64_t num_ops = math::max(int64_t(lp_binary_ops_.size()), int64_t(1));
 
-    if (lp_nodes_ssbo_) GPU_storagebuf_free(lp_nodes_ssbo_);
-    lp_nodes_ssbo_ = GPU_storagebuf_create_ex(num_nodes * sizeof(SDFLpNode),
-                                              lp_nodes_.is_empty() ? &dummy_node : lp_nodes_.data(),
-                                              GPU_USAGE_DYNAMIC, "sdf_lp_nodes");
-    if (lp_prims_ssbo_) GPU_storagebuf_free(lp_prims_ssbo_);
-    lp_prims_ssbo_ = GPU_storagebuf_create_ex(num_prims * sizeof(SDFLpPrimitive),
-                                              lp_prims_.is_empty() ? &dummy_prim : lp_prims_.data(),
-                                              GPU_USAGE_DYNAMIC, "sdf_lp_prims");
-    if (lp_binary_ops_ssbo_) GPU_storagebuf_free(lp_binary_ops_ssbo_);
-    lp_binary_ops_ssbo_ = GPU_storagebuf_create_ex(
-        num_ops * sizeof(uint4),
-        lp_binary_ops_.is_empty() ? &dummy_u4 : lp_binary_ops_.data(),
-        GPU_USAGE_DYNAMIC, "sdf_lp_binary_ops");
-    if (lp_active_init_nodes_ssbo_) GPU_storagebuf_free(lp_active_init_nodes_ssbo_);
-    lp_active_init_nodes_ssbo_ = GPU_storagebuf_create_ex(
-        num_nodes * sizeof(uint32_t),
-        lp_active_init_nodes_.is_empty() ? &dummy_u : lp_active_init_nodes_.data(),
-        GPU_USAGE_DYNAMIC, "sdf_lp_active_init_nodes");
-    if (lp_active_init_parents_ssbo_) GPU_storagebuf_free(lp_active_init_parents_ssbo_);
-    lp_active_init_parents_ssbo_ = GPU_storagebuf_create_ex(
-        num_nodes * sizeof(uint32_t),
-        lp_active_init_parents_.is_empty() ? &dummy_u : lp_active_init_parents_.data(),
-        GPU_USAGE_DYNAMIC, "sdf_lp_active_init_parents");
+    /* Track allocated sizes to avoid free+recreate when unchanged. */
+    auto upload_buf = [&](gpu::StorageBuf *&buf, int64_t &cur_size, int64_t needed,
+                          const void *data, const char *name) {
+      if (buf != nullptr && needed <= cur_size) {
+        GPU_storagebuf_update(buf, data);
+        return;
+      }
+      if (buf) GPU_storagebuf_free(buf);
+      cur_size = needed;
+      buf = GPU_storagebuf_create_ex(needed, data, GPU_USAGE_DYNAMIC, name);
+    };
+
+    int64_t nsize = num_nodes * sizeof(SDFLpNode);
+    int64_t psize = num_prims * sizeof(SDFLpPrimitive);
+    int64_t osize = num_ops * sizeof(uint4);
+    int64_t isize = num_nodes * sizeof(uint32_t);
+
+    upload_buf(lp_nodes_ssbo_, lp_nodes_alloc_, nsize,
+               lp_nodes_.is_empty() ? &dummy_node : lp_nodes_.data(), "sdf_lp_nodes");
+    upload_buf(lp_prims_ssbo_, lp_prims_alloc_, psize,
+               lp_prims_.is_empty() ? &dummy_prim : lp_prims_.data(), "sdf_lp_prims");
+    upload_buf(lp_binary_ops_ssbo_, lp_ops_alloc_, osize,
+               lp_binary_ops_.is_empty() ? &dummy_u4 : lp_binary_ops_.data(), "sdf_lp_binary_ops");
+    upload_buf(lp_active_init_nodes_ssbo_, lp_init_nodes_alloc_, isize,
+               lp_active_init_nodes_.is_empty() ? &dummy_u : lp_active_init_nodes_.data(),
+               "sdf_lp_active_init_nodes");
+    upload_buf(lp_active_init_parents_ssbo_, lp_init_parents_alloc_, isize,
+               lp_active_init_parents_.is_empty() ? &dummy_u : lp_active_init_parents_.data(),
+               "sdf_lp_active_init_parents");
   }
 
   /* Ensure grid buffers are allocated for (at least) the given grid level.
@@ -1064,27 +1162,19 @@ class LpInstance : public SdfInstanceBase {
     const int64_t num_cells = int64_t(gs) * gs * gs;
     const int64_t num_nodes = math::max(int64_t(lp_nodes_.size()), int64_t(1));
 
-    /* Active list streams: far-field cells store nothing, so a small multiple
-     * of the cell count is plenty for typical scenes; the shader clamps writes
-     * to the capacity as a safety net. ROUND-blend-heavy scenes need much more
-     * headroom: the sqrt-composed per-node Lipschitz constants (root ~ sqrt(n)
-     * for n nested ROUND ops) widen every dominance band, so near cells keep
-     * most of the tree — a 20-object all-ROUND scene at 64^3 emits ~2.4M
-     * entries, overflowing the old 2M pool and forcing most near cells onto
-     * the full-tree fallback path (measured in tools/sdf_lp/scene_sim.py). */
-    int64_t active_entries = math::max(num_cells * 8, int64_t(1) << 22);
-    active_entries = math::min(active_entries, int64_t(1) << 26);
+    /* Active-list pool: flat size based on grid cells × a conservative
+     * per-cell average (512 entries). Independent of the tree size so pool
+     * never reallocates as objects are added/removed. Capped at 256M for
+     * VRAM sanity. The resize-on-overflow handler in draw_lp_prune()
+     * grows the pool when actual usage exceeds it. */
+    int64_t active_entries = math::max(num_cells * 512, int64_t(1) << 25);
+    active_entries = math::min(active_entries, int64_t(1) << 28);
 
-    /* Scratch is allocated per workgroup and only for non-trivial cells; the
-     * worst case is cells_total * num_nodes, capped at a reasonable bound. */
-    int64_t cells_total = 0;
-    for (int lvl = 2; lvl <= grid_level; lvl += 2) {
-      const int64_t g = int64_t(1) << lvl;
-      cells_total += g * g * g;
-    }
-    int64_t tmp_entries = cells_total * num_nodes;
-    tmp_entries = math::min(tmp_entries, int64_t(1) << 26);
-    tmp_entries = math::max(tmp_entries, int64_t(1) << 16);
+    /* Tmp pool: same flat formula. Each cell allocates 512 entries, but only
+     * near-field cells with >1 nodes do so, and far-field cells take 0.
+     * The resize-on-overflow handler grows the pool as needed. */
+    int64_t tmp_entries = math::max(num_cells * 512, int64_t(1) << 25);
+    tmp_entries = math::min(tmp_entries, int64_t(1) << 28);
 
     if (lp_active_nodes_ssbo_[0] != nullptr && gs <= lp_grid_size_ &&
         active_entries <= lp_active_capacity_ && tmp_entries <= lp_tmp_capacity_)
@@ -1191,49 +1281,54 @@ class LpInstance : public SdfInstanceBase {
     }
     GPU_shader_unbind();
     lp_final_idx_ = in_idx;
-    lp_grid_valid_ = true;
     lp_grid_level_built_ = lp_grid_level_;
+    lp_built_tree_version_ = lp_tree_version_;
 
-    /* Read back overflow stats (cleared to zero at the top of this pass).
-     * GPU_storagebuf_read is a synchronous stall, so only pay it when the
-     * numbers are actually consumed: profiled frames, verbose logging, or
-     * the periodic sample feeding the always-visible overflow warning. */
-    lp_stat_active_overflow_ = 0;
-    lp_stat_tmp_overflow_ = 0;
-    const bool want_stats = s_profile_pending || CLOG_CHECK(&LOG, CLG_LEVEL_INFO) ||
-                            ((++lp_prune_count_ & 31) == 0);
-    if (want_stats) {
-      int32_t counters[32];
-      GPU_memory_barrier(GPU_BARRIER_BUFFER_UPDATE);
-      GPU_storagebuf_read(lp_active_count_ssbo_, counters);
-      lp_stat_active_overflow_ = counters[SDF_LP_STAT_ACTIVE_OVERFLOW];
-      lp_stat_tmp_overflow_ = counters[SDF_LP_STAT_TMP_OVERFLOW];
+    /* Always read back counters to detect overflow. If any pool was exceeded,
+     * double the capacity and invalidate the grid — the next frame re-runs
+     * the prune with the larger pool. This guarantees eventual convergence
+     * to a pool that fits the scene. */
+    int32_t counters[32];
+    GPU_memory_barrier(GPU_BARRIER_BUFFER_UPDATE);
+    GPU_storagebuf_read(lp_active_count_ssbo_, counters);
+    lp_stat_active_overflow_ = counters[SDF_LP_STAT_ACTIVE_OVERFLOW];
+    lp_stat_tmp_overflow_ = counters[SDF_LP_STAT_TMP_OVERFLOW];
+    if (lp_stat_active_overflow_ > 0 || lp_stat_tmp_overflow_ > 0) {
+      int64_t max_active_used = 0, max_tmp_used = 0;
+      for (int lvl = 2; lvl <= lp_grid_level_; lvl += 2) {
+        max_active_used = math::max(max_active_used, int64_t(counters[lvl]));
+        max_tmp_used = math::max(max_tmp_used, int64_t(counters[16 + lvl]));
+      }
+      int64_t new_active = math::min(
+          math::max(math::max(max_active_used * 2, lp_active_capacity_ * 2),
+                    int64_t(1) << 27),
+          int64_t(1) << 28);
+      int64_t new_tmp = math::min(
+          math::max(math::max(max_tmp_used * 2, lp_tmp_capacity_ * 2),
+                    int64_t(1) << 27),
+          int64_t(1) << 28);
+      if (new_active > lp_active_capacity_ || new_tmp > lp_tmp_capacity_) {
+        CLOG_WARN(&LOG,
+                  "SDF LP prune overflow: %d cell(s) exceeded the active pool (%d active, "
+                  "%d tmp); growing to %lld / %lld",
+                  lp_stat_active_overflow_,
+                  lp_stat_tmp_overflow_,
+                  (long long)new_active,
+                  (long long)new_tmp);
+        lp_active_capacity_ = new_active;
+        lp_tmp_capacity_ = new_tmp;
+        lp_grid_size_ = 0;
+        lp_grid_valid_ = false;
+        return;
+      }
     }
+    lp_grid_valid_ = true;
     if (s_profile_pending) {
       s_profile_result.lp_pruned = true;
       s_profile_result.lp_active_capacity = lp_active_capacity_;
       s_profile_result.lp_tmp_capacity = lp_tmp_capacity_;
       s_profile_result.lp_active_overflow = lp_stat_active_overflow_;
       s_profile_result.lp_tmp_overflow = lp_stat_tmp_overflow_;
-    }
-    if (lp_stat_active_overflow_ > 0 || lp_stat_tmp_overflow_ > 0) {
-      if (!lp_overflow_warned_) {
-        lp_overflow_warned_ = true;
-        CLOG_WARN(&LOG,
-                  "SDF LP prune overflow: %d cell(s) exceeded the active-list pool, "
-                  "%d cell(s) exceeded the tmp pool; affected cells fall back to "
-                  "full-tree tracing (exact, much slower). Enlarge the LP pool "
-                  "capacities or lower the grid level",
-                  lp_stat_active_overflow_,
-                  lp_stat_tmp_overflow_);
-      }
-      else {
-        CLOG_INFO(&LOG,
-                  "SDF LP prune overflow: %d cell(s) exceeded the active-list pool, "
-                  "%d cell(s) exceeded the tmp pool",
-                  lp_stat_active_overflow_,
-                  lp_stat_tmp_overflow_);
-      }
     }
   }
 

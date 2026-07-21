@@ -112,9 +112,8 @@ void main()
   int tmp_offset = s_tmp_offset;
 
   if (num_nodes == SDF_LP_FALLBACK_LIST) {
-    /* Parent cell overflowed the dynamic pools: propagate the full-tree
-     * fallback so this cell (and, transitively, all finer descendants) is
-     * traced against the complete node list instead of a corrupt one. */
+    /* Parent also overflowed (level 2 at most — finer levels inherit
+     * instead of overflowing via the backward pass). Full-tree fallback. */
     lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
     lp_cell_meta_out[cell_idx].y = 0;
     lp_cell_meta_out[cell_idx].z = floatBitsToInt(0.0f);
@@ -139,7 +138,9 @@ void main()
       lp_active_parents_out[cell_offset] = SDF_LP_INVALID_INDEX;
     }
     else {
-      /* List does not fit the pool: trace falls back to the full tree. */
+      /* Pool too small for this cell. Fall back to full-tree evaluation
+       * (SDF_LP_FALLBACK_LIST). The pools are sized generously — this
+       * should be extremely rare. */
       lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
       lp_cell_meta_out[cell_idx].y = 0;
       atomicAdd(lp_counters[SDF_LP_STAT_ACTIVE_OVERFLOW], 1);
@@ -366,8 +367,7 @@ void main()
   }
 
   if (tmp_overflow || active_overflow) {
-    /* The list did not fit the dynamic pools: the trace pass evaluates the
-     * full tree for this cell (exact, just slower). */
+    /* Pool too small. Fall back to full-tree evaluation. */
     lp_cell_meta_out[cell_idx].x = SDF_LP_FALLBACK_LIST;
     lp_cell_meta_out[cell_idx].y = 0;
     if (active_overflow) {
