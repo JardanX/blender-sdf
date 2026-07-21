@@ -29,13 +29,32 @@ How it works:
   winding solves roots per arc — skipping it is the big win), and each edge additionally gets a
   free AABB test computed from its own data. Straight edges, corner fillets and arc control
   points are all accounted for in the header padding, so culling is exact, not approximate.
-- For large edge counts (whole paragraphs, >= 24 edges) the object serializes as a 2D edge BVH
-  (uber-header + internal nodes with padded AABBs and child indices, edges as leaves) plus a
-  baked 64x64 coarse signed-distance grid. Cells beyond the silhouette + bevel/edge/outline/
-  blend/clearance reach return a conservative O(1) value (never overestimating, never flipping
-  sign — the visible surface and everything near it always uses the exact BVH traversal), which
-  keeps per-query cost constant regardless of text length. The same pruning applies per node in
-  both engines.
+- For large edge counts (whole paragraphs, >= 24 edges) the object bakes a per-cell
+  edge-list grid into the polygon SSBO. The grid resolution scales with the edge count
+  (target ~1 average edge length per cell, clamped to 64..384), so per-cell lists stay
+  at ~1-2 edges no matter how much text there is. Every cell center additionally stores
+  an exact signed distance baked through the cell lists themselves (own cell +
+  progressive rings), then shrunk towards zero by the cell half-diagonal plus the
+  corner-fillet reach and clamped at zero — conservative and sign-safe. Cells past the
+  visible reach (blend, bevel, outline, clearance) return that value directly in O(1);
+  everything near a visible feature evaluates exactly: the cell's own edges plus L-path
+  winding from a per-corner integer, with progressive neighbor rings (cell-rect culled)
+  until every closer edge is provably scanned, the ring cap covering the whole visible
+  band. No traversal and no global edge loop, so per-query cost depends only on the
+  local edge density, never on the text length, in both engines. Points outside the
+  grid rect evaluate against the clamped border cell. The ring cap is deliberately
+  small (3): past it the exact distance comes from a distance-only traversal of an
+  edge BVH baked alongside the grid (O(log n), no winding — a cell whose edges are
+  all past the cap cannot be crossed by the outline, so the corner integer still
+  gives the sign). This keeps the per-query cost bounded no matter the blend reach
+  or the object scale (scaled-down text used to explode the ring count). Corner winding integers are
+  baked with one sorted horizontal sweep per row over the *rounded* path (trimmed
+  segments + fillet arcs + beziers), matching the shader's winding semantics at
+  beveled corners (this is what fixes corner-bevel artifacts at thickness 0).
+  The bake is cached on the engine and replayed with an index offset, so it costs once per
+  text edit, not per frame. `SDF_TEXT_VERIFY=1` self-checks the whole scheme (corner
+  winding parity, distance coverage, far-field conservativeness, rounded/unrounded sign
+  topology) against the brute-force eval at bake time.
 - The quadratic-bezier distance is computed with an exact bracketed-bisection solver instead of
   the closed-form cube-root path, which was NaN-prone on the bezier evolute (noise around glyph
   curves).
@@ -3487,3 +3506,58 @@ Added `DO_STATIC_COMPILATION()` to `sdf_lp_prune_comp`, `sdf_lp_march_comp`, `sd
 | `draw/engines/sdf/shaders/sdf_mesh_lib.glsl` | Added `g_sdf_mesh_last_baked_fine_dist` global |
 | `draw/engines/sdf/shaders/CMakeLists.txt`, `draw/CMakeLists.txt` | Removed deleted DC shaders from build |
 | `editors/object/object_sdf.cc` | Renamed function call; removed weld-by-distance step; fixed triangle winding order |
+
+---
+
+## Fix: LP Pruning Grid AABB Changing with Camera
+
+The Lipschitz pruning grid AABB was recomputed from only frustum-visible objects after compaction in `end_sync()`. Moving the camera changed which objects were visible → changed the scene AABB → invalidated and rebuilt the pruning grid every time. Fix: removed the `scene_min_`/`scene_max_` reset-to-sentinels in `end_sync()` (lines 4157-4158). The AABBs accumulated from ALL objects during `object_sync()` (sphere-based conservative estimates) are now preserved; the visible-object loop only extends them (never shrinks). Grid is now stable regardless of camera position.
+
+| File | Change |
+|------|--------|
+| `sdf_engine_internal.hh` | Removed `scene_min_ = float3(1e30f);` / `scene_max_ = float3(-1e30f);` reset in `end_sync()` — scene AABB now covers all objects, not just frustum-visible ones |
+
+---
+
+## Fix: LP Pipeline — CPU Hotspot, Pool Overflow, Hash Determinism, BVH Dead Work, Tree-Upload Mismatch
+
+Multiple fixes for the LP pruning engine:
+
+1. **CPU hotspot (10fps at 5% resolution).** `sync_extra()` called `lp_build_tree()` every frame unconditionally, rebuilding the entire CSG tree for 3000+ objects on the CPU — dominating frame time even at minimal GPU resolution. Fix: added a `sync_extra_pre_compact()` virtual hook to `SdfInstanceBase` (in `sdf_engine_internal.hh`), called right before the compaction step in `end_sync()`. The LP engine overrides it to hash the FULL (pre-compaction) `objects_` data — which is stable during camera navigation because no objects have been removed yet. Non-deterministic fields (`_pad2` = visibility flag, `original_index` = sort/reindex position) are zeroed before hashing. A `lp_tree_needs_rebuild_` flag is set when the hash changes. `sync_extra()` is simplified to just check this flag and call `lp_build_tree()`. Previously, the hash was computed *after* compaction, causing a different object set on every camera-navigation frame → rebuild every frame.
+
+2. **Pool overflow auto-resize.** Previously, overflow cells fell back silently to full-tree evaluation with only a log warning. Now, every prune pass reads back the GPU counters unconditionally. If overflow is detected, the pool is doubled (up to 2²⁸ = 256M entries) and the grid is invalidated for next-frame retry with the larger pool. This guarantees eventual convergence to a pool size that fits the scene, without manual tuning.
+
+3. **Hash determinism (prune cache).** The hash excluded `color` and `obj_index` in `SDFLpPrimitive` — these non-field fields changed when visibility culling altered `objects_` composition during camera navigation, incrementing `lp_tree_version_` and rebuilding the prune grid every frame.
+
+4. **Pool formula at level 6.** The baseline `2²⁶` dominated `num_cells × 256` at level 6, still producing only 64M entries. Formula changed to `max(num_cells × 512, 2²⁵)` capped at 2²⁸: 128M at level 6, 256M at level 7+.
+
+5. **BVH dead work (LP engine).** The classic engine's BVH was rebuilt/updated every frame in `end_sync()` — an O(n log n) operation the LP engine never uses (its native CSG tree replaces the BVH entirely). Added `virtual bool uses_bvh() const` to `SdfInstanceBase` (default `true`). `LpInstance` overrides it to `false`; `end_sync()` wraps the BVH rebuild/update in `if (uses_bvh())`, skipping ~O(7000 log 7000) work per frame during camera navigation. The scene-min/max AABB update still runs (needed for the LP grid AABB).
+
+6. **Tree upload mismatch (artifact fix).** `sync_extra()` (in `end_sync()`) rebuilt the tree via `lp_build_tree()`, but the GPU tree SSBOs were only updated later via `upload_extra()` — gated by `scene_changed_` in `draw()`. When `scene_changed_` was false on the frame after a rebuild (stationary camera), the upload was skipped, leaving stale tree data on the GPU while the `objects_` SSBO was updated → tree↔objects mismatch → visual artifacts persisted until camera movement forced a re-upload. Fix: `sync_extra()` now calls `lp_upload_tree()` immediately after `lp_build_tree()`, guaranteeing the GPU tree SSBOs are always consistent with the CPU tree data.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_lp_engine.cc` | `sync_extra_pre_compact()` (new override): hash full pre-compaction `objects_` (zeroing `_pad2`/`original_index`) + `modifiers_` + `groups_gpu_` + `polygon_points_` → set `lp_tree_needs_rebuild_`. `sync_extra()`: check flag → `lp_build_tree()` + `lp_upload_tree()` (immediate upload prevents tree↔objects SSBO mismatch). `uses_bvh()` override returns `false` (skip BVH dead work). `draw_lp_prune()`: always read GPU counters; double pools and invalidate grid on overflow. `lp_ensure_grid_buffers()`: per-cell multiplier 512, baseline 2²⁵, cap 2²⁸. Hash: skip `color`/`obj_index` in primitives |
+| `draw/engines/sdf/sdf_engine_internal.hh` | `SdfInstanceBase`: added `sync_extra_pre_compact()` virtual hook (no-op default), called in `end_sync()` at line 3861 — before compaction — so the LP engine can hash the full object set before frustum culling removes invisible objects. Added `uses_bvh()` virtual (default `true`); `end_sync()` wraps BVH rebuild/update in `if (uses_bvh())` — the LP engine overrides to `false` and avoids the O(n log n) BVH work every frame. |
+
+---
+
+## Fix: LP Engine Skips Visibility Compaction (Complete CPU/GPU Separation)
+
+The LP engine still ran  the classic engine's frustum cull, compaction, AABB expansion, original_index reassignment, and AABB buffer building every frame — processing 7000 objects and fragmenting the CSG tree's object set per camera position. Added `needs_visibility_compaction()` virtual hook to `SdfInstanceBase` (default `true`); `LpInstance` overrides to `false`. In `end_sync()`, five sections are now gated behind this check:
+- **Frustum cull** (visibility check in `_pad2`)
+- **Compaction** (removes invisible objects, re-packs modifiers/polygons/groups)
+- **original_index reassignment** (sequential gbuffer IDs)
+- **AABB expansion** (blend-aware expansion + fine frustum cull + intersection/push expansion)
+- **AABB buffer building** (`object_aabbs_`)
+
+The scene AABB update (`scene_min_`/`scene_max_` widening) remains unconditional — it is a trivial min/max loop and the LP engine needs it for grid auto-sizing. BVH construction was already gated behind `uses_bvh()`.
+
+In `upload_objects()`, the AABB SSBO upload is also gated behind `needs_visibility_compaction()` — the LP engine never reads this SSBO and `object_aabbs_` is no longer filled for LP.
+
+When visibility/compaction is skipped, `objects_` keeps ALL objects (not compacted). The CSG tree builds from all objects (the LP prune grid handles per-cell culling). The shared shade/color-resolve passes only color pixels where the LP marcher has a hit, so invisible objects in the SSBO are harmless.
+
+| File | Change |
+|------|--------|
+| `draw/engines/sdf/sdf_engine_internal.hh` | Added `needs_visibility_compaction()` virtual hook (default `true`). Gated frustum cull, compaction, original_index reassignment, AABB expansion, fine frustum cull, intersection/push, and AABB buffer building in `end_sync()`. Gated AABB SSBO upload in `upload_objects()`. |
+| `draw/engines/sdf/sdf_lp_engine.cc` | Added `needs_visibility_compaction() override` returning `false`. |

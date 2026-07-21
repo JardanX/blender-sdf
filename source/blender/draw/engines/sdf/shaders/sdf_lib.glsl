@@ -436,8 +436,10 @@ float sdBezier2D(float2 A, float2 B, float2 C, float2 pos)
     if (flo * fhi > 0.0f) {
       continue;
     }
-    /* f is monotone on this bracket: bisect to the root. */
-    for (int it = 0; it < 24; it++) {
+    /* f is monotone on this bracket: bisect to the root. 12 iterations take
+     * the bracket to 2^-12 (~2e-5 distance error on glyph-scale curves),
+     * far below the march epsilon; more iterations just burn ALU. */
+    for (int it = 0; it < 12; it++) {
       float mid = 0.5f * (lo + hi);
       float2 qm = A + (u + v * mid) * mid - p;
       float fm = dot(qm, u + 2.0f * v * mid);
@@ -507,6 +509,384 @@ void toggleBezierWinding(float2 a,
 }
 
 /* ---- Arbitrary polygon 2D SDF (straight + bezier edges) ---- */
+
+/* Packed-slot readers: values/ints are stored 12 per entry across the three
+ * float4 fields (see the ingestion in sdf_engine_internal.hh). */
+float sdGridSlotF(int first, int idx)
+{
+  SDFPolygonPointGPU e = polygon_points[first + idx / 12];
+  int c = idx % 12;
+  return (c < 4) ? e.vi_edge[c] : (c < 8) ? e.arc_data[c - 4] : e.arc_bounds[c - 8];
+}
+int sdGridSlotI(int first, int idx)
+{
+  return int(sdGridSlotF(first, idx));
+}
+
+/* Distance to one leaf edge (rounded-path semantics: trims + corner arcs +
+ * bezier edges), no winding. */
+float sdPolygonLeafDist(int li, float2 p, float corner_pad)
+{
+  float4 ed = polygon_points[li].vi_edge;
+  float4 ad = polygon_points[li].arc_data;
+  float4 ab = polygon_points[li].arc_bounds;
+  float d = 1e20f;
+
+  if (ab.w < 0.0f) {
+    float2 vi = ed.xy;
+    float2 ctrl = ed.zw;
+    float2 end_pt = ad.xy;
+    float2 bmin = min(min(vi, ctrl), end_pt) - float2(corner_pad);
+    float2 bmax = max(max(vi, ctrl), end_pt) + float2(corner_pad);
+    float2 ebox = abs(p - 0.5f * (bmin + bmax)) - 0.5f * (bmax - bmin);
+    float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+    if (ebox_d < d) {
+      d = min(d, sdBezier2D(vi, ctrl, end_pt, p));
+    }
+    return d;
+  }
+
+  float2 vi = ed.xy, edge = ed.zw;
+  float R_signed = ad.x, R = abs(R_signed);
+  float2 C = ad.yz;
+  float t_start = ad.w, t_end = ab.x;
+  float ang_mid = ab.y, ang_half = ab.z;
+
+  float2 seg_a = vi + edge * t_start;
+  float2 seg_b = vi + edge * t_end;
+  float2 seg_dir = seg_b - seg_a;
+  float seg_len_sq = dot(seg_dir, seg_dir);
+  if (seg_len_sq > 1e-10f) {
+    float2 w = p - seg_a;
+    float2 ebox_min = min(seg_a, seg_b) - float2(corner_pad);
+    float2 ebox_max = max(seg_a, seg_b) + float2(corner_pad);
+    float2 ebox = abs(p - 0.5f * (ebox_min + ebox_max)) - 0.5f * (ebox_max - ebox_min);
+    float ebox_d = length(max(ebox, float2(0.0f))) + min(max(ebox.x, ebox.y), 0.0f);
+    if (ebox_d < d) {
+      float t = clamp(dot(w, seg_dir) / seg_len_sq, 0.0f, 1.0f);
+      d = min(d, length(w - seg_dir * t));
+    }
+  }
+
+  if (R > 0.001f) {
+    float2 to_p = p - C;
+    float dist_c = length(to_p);
+    float ang_p = atan(to_p.y, to_p.x);
+    float ang_diff = ang_p - ang_mid;
+    ang_diff -= 6.2831853f * floor((ang_diff + 3.1415927f) / 6.2831853f);
+    if (abs(ang_diff) <= ang_half) {
+      d = min(d, abs(dist_c - R));
+    }
+    else {
+      float2 ep1 = C + R * float2(cos(ang_mid - ang_half), sin(ang_mid - ang_half));
+      float2 ep2 = C + R * float2(cos(ang_mid + ang_half), sin(ang_mid + ang_half));
+      d = min(d, min(length(p - ep1), length(p - ep2)));
+    }
+  }
+  return d;
+}
+
+/* L-path winding contribution of one leaf edge: crossings with the path
+ * (cp -> (p.x, cp.y) -> p). The trimmed straight segment and corner fillet
+ * arc use the same rules as the rounded-path ray winding; bezier edges solve
+ * the quadratic per axis. */
+void sdPolygonCellWinding(int li, float2 cp, float2 p, inout int winding)
+{
+  float4 ed = polygon_points[li].vi_edge;
+  float4 ad = polygon_points[li].arc_data;
+  float4 ab = polygon_points[li].arc_bounds;
+  float sx = (p.x >= cp.x) ? 1.0f : -1.0f;
+  float sy = (p.y >= cp.y) ? 1.0f : -1.0f;
+
+  if (ab.w < 0.0f) {
+    /* Quadratic bezier edge: a = start, b = ctrl, c = end. */
+    float2 a = ed.xy, b = ed.zw, c = ad.xy;
+    /* Horizontal segment (y = cp.y). */
+    {
+      float A = a.y - 2.0f * b.y + c.y;
+      float B = 2.0f * (b.y - a.y);
+      float C0 = a.y - cp.y;
+      float roots[2];
+      int nr = 0;
+      if (abs(A) < 1e-8f) {
+        if (abs(B) > 1e-12f) { roots[nr++] = -C0 / B; }
+      }
+      else {
+        float disc = B * B - 4.0f * A * C0;
+        if (disc > 0.0f) {
+          float s = sqrt(disc);
+          roots[nr++] = (-B - s) / (2.0f * A);
+          roots[nr++] = (-B + s) / (2.0f * A);
+        }
+      }
+      for (int r = 0; r < nr; r++) {
+        float t = roots[r];
+        if (t <= 0.0f || t > 1.0f) { continue; }
+        float u = 1.0f - t;
+        float qx = u * u * a.x + 2.0f * u * t * b.x + t * t * c.x;
+        if ((sx > 0.0f && qx > cp.x && qx <= p.x) ||
+            (sx < 0.0f && qx < cp.x && qx >= p.x))
+        {
+          float vy = 2.0f * (u * (b.y - a.y) + t * (c.y - b.y));
+          winding += int(sx) * ((vy > 0.0f) ? -1 : 1);
+        }
+      }
+    }
+    /* Vertical segment (x = p.x). */
+    {
+      float A = a.x - 2.0f * b.x + c.x;
+      float B = 2.0f * (b.x - a.x);
+      float C0 = a.x - p.x;
+      float roots[2];
+      int nr = 0;
+      if (abs(A) < 1e-8f) {
+        if (abs(B) > 1e-12f) { roots[nr++] = -C0 / B; }
+      }
+      else {
+        float disc = B * B - 4.0f * A * C0;
+        if (disc > 0.0f) {
+          float s = sqrt(disc);
+          roots[nr++] = (-B - s) / (2.0f * A);
+          roots[nr++] = (-B + s) / (2.0f * A);
+        }
+      }
+      for (int r = 0; r < nr; r++) {
+        float t = roots[r];
+        if (t <= 0.0f || t > 1.0f) { continue; }
+        float u = 1.0f - t;
+        float qy = u * u * a.y + 2.0f * u * t * b.y + t * t * c.y;
+        if ((sy > 0.0f && qy > cp.y && qy <= p.y) ||
+            (sy < 0.0f && qy < cp.y && qy >= p.y))
+        {
+          float vx = 2.0f * (u * (b.x - a.x) + t * (c.x - b.x));
+          winding += int(sy) * ((vx > 0.0f) ? 1 : -1);
+        }
+      }
+    }
+    return;
+  }
+
+  float2 vi = ed.xy, edge = ed.zw;
+  float R_signed = ad.x, R = abs(R_signed);
+  float2 C = ad.yz;
+  float ang_mid = ab.y, ang_half = ab.z;
+  float2 seg_a = vi + edge * ad.w;
+  float2 seg_b = vi + edge * ab.x;
+
+  /* Trimmed straight segment crossings. */
+  if ((seg_a.y <= cp.y) != (seg_b.y <= cp.y)) {
+    float t = (cp.y - seg_a.y) / (seg_b.y - seg_a.y);
+    float xc = seg_a.x + (seg_b.x - seg_a.x) * t;
+    if ((sx > 0.0f && xc > cp.x && xc <= p.x) ||
+        (sx < 0.0f && xc < cp.x && xc >= p.x))
+    {
+      winding += int(sx) * ((seg_b.y > seg_a.y) ? -1 : 1);
+    }
+  }
+  if ((seg_a.x <= p.x) != (seg_b.x <= p.x)) {
+    float t = (p.x - seg_a.x) / (seg_b.x - seg_a.x);
+    float yc = seg_a.y + (seg_b.y - seg_a.y) * t;
+    if ((sy > 0.0f && yc > cp.y && yc <= p.y) ||
+        (sy < 0.0f && yc < cp.y && yc >= p.y))
+    {
+      winding += int(sy) * ((seg_b.x > seg_a.x) ? 1 : -1);
+    }
+  }
+
+  /* Corner fillet arc crossings. */
+  if (R > 0.001f) {
+    int dir = (R_signed > 0.0f) ? 1 : -1;
+    /* Horizontal: y = cp.y. */
+    float k = (cp.y - C.y) / R;
+    if (abs(k) < 1.0f) {
+      float th0 = asin(k);
+      for (int e = 0; e < 2; e++) {
+        float th = (e == 0) ? th0 : 3.1415927f - th0;
+        float td = th - ang_mid;
+        td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+        float xc = C.x + R * cos(th);
+        if (abs(td) <= ang_half &&
+            ((sx > 0.0f && xc > cp.x && xc <= p.x) ||
+             (sx < 0.0f && xc < cp.x && xc >= p.x)))
+        {
+          /* Tangent direction y at the crossing: dir * cos(th) * R. */
+          float ty = float(dir) * cos(th);
+          winding += int(sx) * ((ty > 0.0f) ? -1 : 1);
+        }
+      }
+    }
+    /* Vertical: x = p.x. */
+    k = (p.x - C.x) / R;
+    if (abs(k) < 1.0f) {
+      float th0 = acos(k);
+      for (int e = 0; e < 2; e++) {
+        float th = (e == 0) ? th0 : -th0;
+        float td = th - ang_mid;
+        td -= 6.2831853f * floor((td + 3.1415927f) / 6.2831853f);
+        float yc = C.y + R * sin(th);
+        if (abs(td) <= ang_half &&
+            ((sy > 0.0f && yc > cp.y && yc <= p.y) ||
+             (sy < 0.0f && yc < cp.y && yc >= p.y)))
+        {
+          /* Tangent direction x at the crossing: -dir * sin(th) * R. */
+          float tx = -float(dir) * sin(th);
+          winding += int(sy) * ((tx > 0.0f) ? 1 : -1);
+        }
+      }
+    }
+  }
+}
+
+/* Distance-only edge-BVH traversal (no winding): exact distance past the
+ * cell-list ring cap, O(log n) regardless of the text scale. Nodes hold a
+ * padded AABB + two absolute child entry indices (arc_bounds.w == -3),
+ * leaves are the shared edge entries. */
+float sdPolygon2DBVHDist(float2 p, int root, float corner_pad)
+{
+  float d = 1e20f;
+  int stack[64];
+  int sp = 0;
+  stack[sp++] = root;
+  while (sp > 0) {
+    int ni = stack[--sp];
+    float4 ed = polygon_points[ni].vi_edge;
+    float4 ab = polygon_points[ni].arc_bounds;
+    if (ab.w <= -2.5f) {
+      float2 cmin = ed.xy;
+      float2 cmax = polygon_points[ni].arc_data.xy;
+      float2 dbox = abs(p - 0.5f * (cmin + cmax)) - 0.5f * (cmax - cmin);
+      float box_d = length(max(dbox, float2(0.0f))) + min(max(dbox.x, dbox.y), 0.0f);
+      if (box_d < d) {
+        stack[sp++] = int(ab.x);
+        stack[sp++] = int(ab.y);
+      }
+      continue;
+    }
+    d = min(d, sdPolygonLeafDist(ni, p, corner_pad));
+  }
+  return d;
+}
+
+/* Per-cell edge-list grid with baked exact center values (SDF text). The
+ * uber entry at ps holds the layout: vi_edge = (origin.xy, cell, res),
+ * arc_data = (value_first, dir_first, index_first, leaf_first),
+ * arc_bounds.w == -4. Every cell center stores an exact signed distance
+ * shrunk towards zero by the cell half-diagonal plus the corner reach and
+ * clamped at zero — conservative and sign-safe, so cells past grid_slack
+ * return it directly while everything near a visible feature falls into the
+ * exact path: the cell's own edges plus L-path winding from a per-corner
+ * integer, with progressive neighbor rings until every closer edge is
+ * provably scanned. Per-query cost depends only on the local edge density,
+ * never on the total text length. */
+float sdPolygon2DGrid(float2 p, int ps, float corner_pad, float grid_slack)
+{
+  float4 uv = polygon_points[ps].vi_edge;
+  float4 ud = polygon_points[ps].arc_data;
+  float2 gmn = uv.xy;
+  float cell = uv.z;
+  int gres = int(uv.w);
+  int value_first = int(ud.x);
+  int dir_first = int(ud.y);
+  int index_first = int(ud.z);
+  int leaf_first = int(ud.w);
+
+  int2 gco = int2(floor((p - gmn) / cell));
+  bool inside = (gco.x >= 0 && gco.y >= 0 && gco.x < gres && gco.y < gres);
+  if (inside) {
+    float cv = sdGridSlotF(value_first, gco.y * gres + gco.x);
+    if (abs(cv) > grid_slack) {
+      return cv;
+    }
+  }
+  else {
+    /* Outside the grid rect: the outline is strictly inside, so the distance
+     * to the grid rect is a valid lower bound when it is clearly out of
+     * reach. */
+    float2 db = max(max(gmn - p, p - (gmn + float2(gres) * cell)), float2(0.0f));
+    float dd = length(db);
+    if (dd > grid_slack) {
+      return dd;
+    }
+  }
+
+  /* Exact band: the cell's own edges plus L-path winding from the corner
+   * integer, then progressive rings until every closer edge is guaranteed
+   * scanned. The grid rect encloses all geometry, so points outside it are
+   * outside every contour (winding 0). */
+  int2 gc = clamp(gco, int2(0), int2(gres - 1));
+  float2 cp = gmn + float2(gc) * cell;
+  int ci = gc.y * gres + gc.x;
+  int off = sdGridSlotI(dir_first, ci * 3 + 0);
+  int cnt = sdGridSlotI(dir_first, ci * 3 + 1);
+  int winding = inside ? sdGridSlotI(dir_first, ci * 3 + 2) : 0;
+  float d = 1e20f;
+  for (int k = 0; k < cnt; k++) {
+    int li = leaf_first + sdGridSlotI(index_first, off + k);
+    d = min(d, sdPolygonLeafDist(li, p, corner_pad));
+    if (inside) {
+      sdPolygonCellWinding(li, cp, p, winding);
+    }
+  }
+
+  /* After scanning rings up to k, every unscanned cell is guaranteed to be
+   * farther than B(k): for inside p, B(k) = k*cell + db with db the distance
+   * to the own-cell boundary; for outside p, B(k) = max(k*cell, db) with db
+   * the distance to the clamped cell's rect (every grid point is at least db
+   * away, and cells past ring k are at least k*cell away on some axis).
+   * Scanning stops as soon as the best distance cannot improve. The ring cap
+   * is deliberately small: past it the exact distance comes from the
+   * distance-only edge BVH (root in arc_bounds.y), so the per-query cost
+   * stays bounded no matter the blend reach or the text scale. */
+  float2 cmax = cp + float2(cell);
+  float db;
+  if (inside) {
+    db = min(min(p.x - cp.x, cmax.x - p.x), min(p.y - cp.y, cmax.y - p.y));
+  }
+  else {
+    db = length(max(max(cp - p, p - cmax), float2(0.0f)));
+  }
+  const int kmax = min(gres, 3);
+  for (int k = 1; k <= kmax &&
+                 d > (inside ? (float(k - 1) * cell + db) : max(float(k - 1) * cell, db));
+      k++)
+  {
+    for (int oy = -k; oy <= k; oy++) {
+      for (int ox = -k; ox <= k; ox++) {
+        if (max(abs(ox), abs(oy)) != k) {
+          continue;
+        }
+        int2 nc = gc + int2(ox, oy);
+        if (nc.x < 0 || nc.y < 0 || nc.x >= gres || nc.y >= gres) {
+          continue;
+        }
+        /* Cell-rect cull: a cell whose region cannot beat the current best
+         * distance contributes nothing (most ring cells, once d is small). */
+        float2 nmin = gmn + float2(nc) * cell;
+        float2 nmax = nmin + float2(cell);
+        float2 rb = max(max(nmin - p, p - nmax), float2(0.0f));
+        if (dot(rb, rb) >= d * d) {
+          continue;
+        }
+        int nci = nc.y * gres + nc.x;
+        int noff = sdGridSlotI(dir_first, nci * 3 + 0);
+        int ncnt = sdGridSlotI(dir_first, nci * 3 + 1);
+        for (int e = 0; e < ncnt; e++) {
+          int li = leaf_first + sdGridSlotI(index_first, noff + e);
+          d = min(d, sdPolygonLeafDist(li, p, corner_pad));
+        }
+      }
+    }
+  }
+  if (d > (inside ? (float(kmax) * cell + db) : max(float(kmax) * cell, db))) {
+    /* Nearest edge past the ring cap: exact BVH distance. The sign needs no
+     * winding — a cell whose edges are all past the cap cannot be crossed by
+     * the outline, so the corner integer is exact for the whole cell (and
+     * outside the grid rect everything is outside, winding 0). */
+    d = sdPolygon2DBVHDist(p, int(polygon_points[ps].arc_bounds.y), corner_pad);
+  }
+
+  return (winding != 0) ? -d : d;
+}
 
 /* The point array is a sequence of contours; each contour starts with a
  * header entry (arc_bounds.w == -2) holding the padded contour AABB
@@ -659,6 +1039,9 @@ float sdPolygon2DBVH(float2 p, int ps, float corner_pad, float grid_slack)
 
 float sdPolygon2D(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
+  if (polygon_points[ps].arc_bounds.w <= -3.5f) {
+    return sdPolygon2DGrid(p, ps, corner_pad, grid_slack);
+  }
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
     return sdPolygon2DBVH(p, ps, corner_pad, grid_slack);
   }
@@ -735,6 +1118,9 @@ float sdPolygon2D(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 
 float sdPolygon2DRounded(float2 p, int ps, int pc, float corner_pad, float grid_slack)
 {
+  if (polygon_points[ps].arc_bounds.w <= -3.5f) {
+    return sdPolygon2DGrid(p, ps, corner_pad, grid_slack);
+  }
   if (polygon_points[ps].arc_bounds.w <= -2.5f) {
     return sdPolygon2DBVH(p, ps, corner_pad, grid_slack);
   }

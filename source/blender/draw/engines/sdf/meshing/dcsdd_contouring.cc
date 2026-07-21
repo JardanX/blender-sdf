@@ -7,6 +7,7 @@
 #include "dcsdd_contouring.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -862,7 +863,8 @@ void assign_spheres_to_cells(const Eigen::VectorXf &S,
                              int resY,
                              int resZ,
                              int batch_size,
-                             Eigen::MatrixXi &TriF)
+                             Eigen::MatrixXi &TriF,
+                             const std::pair<std::vector<int>, std::vector<int>> *precomputed)
 {
   if (V.rows() == 0 || F.rows() == 0) {
     return;
@@ -875,29 +877,37 @@ void assign_spheres_to_cells(const Eigen::VectorXf &S,
 
   const int bounded_batch_size = std::min(batch_size, (int)GV.rows());
 
-  /* Indices into GV, S for the batch of chosen spheres. First, we fill it with all spheres
-   * with negative S, and all spheres with radius less than 3*cell_diag. */
-  std::vector<int> sphere_batch_inds;
-  std::vector<int> inds_to_choose_randomly_from; /* for later */
-  for (int gv = 0; gv < GV.rows(); ++gv) {
-    const double sdf = double(S(gv));
-    const double radius = std::abs(sdf);
-    if (radius < 3.0 * cell_diag) {
-      sphere_batch_inds.push_back(gv);
-    }
-    else {
-      inds_to_choose_randomly_from.push_back(gv);
+  /* Indices into GV, S for the batch of chosen spheres. When `precomputed` is
+   * given, the near-surface/far split (which depends only on S and the cell
+   * size — both constant across outer iterations) is reused instead of being
+   * rescanned every call. */
+  std::vector<int> near_storage, far_storage;
+  const std::vector<int> &near_inds = precomputed ? precomputed->first : near_storage;
+  const std::vector<int> &far_inds = precomputed ? precomputed->second : far_storage;
+  if (!precomputed) {
+    for (int gv = 0; gv < GV.rows(); ++gv) {
+      const double sdf = double(S(gv));
+      const double radius = std::abs(sdf);
+      if (radius < 3.0 * cell_diag) {
+        near_storage.push_back(gv);
+      }
+      else {
+        far_storage.push_back(gv);
+      }
     }
   }
+
+  std::vector<int> sphere_batch_inds = near_inds;
   /* Then, if we don't have enough spheres, fill up to batch_size by choosing randomly from
    * the remaining spheres. */
   if ((int)sphere_batch_inds.size() < bounded_batch_size) {
     const int n_needed = bounded_batch_size - (int)sphere_batch_inds.size();
+    std::vector<int> shuffled_far = far_inds;
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::shuffle(inds_to_choose_randomly_from.begin(), inds_to_choose_randomly_from.end(), gen);
-    for (int i = 0; i < n_needed && i < (int)inds_to_choose_randomly_from.size(); ++i) {
-      sphere_batch_inds.push_back(inds_to_choose_randomly_from[i]);
+    std::shuffle(shuffled_far.begin(), shuffled_far.end(), gen);
+    for (int i = 0; i < n_needed && i < (int)shuffled_far.size(); ++i) {
+      sphere_batch_inds.push_back(shuffled_far[i]);
     }
   }
 
@@ -1310,6 +1320,23 @@ void contouring(const Eigen::VectorXf &S,
 
     double prev_total_energy = 0.0;
 
+    /* The near-surface/far sphere-candidate split depends only on S and the
+     * cell size — both constant across outer iterations: compute it once. */
+    double cd_min_x, cd_min_y, cd_min_z, cd_dx, cd_dy, cd_dz;
+    const double cell_diag =
+        cell_diagonal(GV, resX, resY, resZ, cd_min_x, cd_min_y, cd_min_z, cd_dx, cd_dy, cd_dz);
+    std::pair<std::vector<int>, std::vector<int>> sphere_split;
+    sphere_split.first.reserve(GV.rows() / 8);
+    for (int gv = 0; gv < GV.rows(); ++gv) {
+      const double radius = std::abs(double(S(gv)));
+      if (radius < 3.0 * cell_diag) {
+        sphere_split.first.push_back(gv);
+      }
+      else {
+        sphere_split.second.push_back(gv);
+      }
+    }
+
     for (int outer_iter = 0; outer_iter < options.outer_iters; ++outer_iter) {
       if (options.verbose) {
         std::cout << "\n[contouring] Outer iteration " << (outer_iter + 1) << " / "
@@ -1332,7 +1359,8 @@ void contouring(const Eigen::VectorXf &S,
       if (options.verbose) {
         std::cout << "[contouring] Assigning spheres..." << std::endl;
       }
-      assign_spheres_to_cells(S, GV, V, F, cells, resX, resY, resZ, options.batch_size, TriF);
+      assign_spheres_to_cells(
+          S, GV, V, F, cells, resX, resY, resZ, options.batch_size, TriF, &sphere_split);
       phase_log("assign_spheres");
 
       if (options.verbose) {
@@ -1361,7 +1389,9 @@ void contouring(const Eigen::VectorXf &S,
       }
 
       /* Each cell is updated independently of the others. */
+      std::atomic<double> max_outer_move{0.0};
       threading::parallel_for(IndexRange(int64_t(cells.size())), 16, [&](const IndexRange range) {
+        double local_max = 0.0;
         for (const int64_t i : range) {
           Cell &c = cells[i];
 
@@ -1371,11 +1401,11 @@ void contouring(const Eigen::VectorXf &S,
 
           c.prev_outer_vertex = c.vertex;
 
-          /* Convergence exit relative to the cell size: 2e-3 of the cell
+          /* Convergence exit relative to the cell size: 5e-4 of the cell
            * diagonal is far below voxel precision (and below what the
            * hermite data can resolve), so iterating further only burns time. */
           const double inner_tol =
-              2e-3 * (c.corners.row(6) - c.corners.row(0)).norm();
+              5e-4 * (c.corners.row(6) - c.corners.row(0)).norm();
 
           for (int inner_iter = 0; inner_iter < options.inner_iters; ++inner_iter) {
             c.prev_vertex = c.vertex;
@@ -1392,6 +1422,13 @@ void contouring(const Eigen::VectorXf &S,
             }
           }
           c.clean();
+          local_max = std::max(local_max, (c.vertex - c.prev_outer_vertex).norm());
+        }
+        /* Merge the per-thread maximum. */
+        double expected = max_outer_move.load(std::memory_order_relaxed);
+        while (local_max > expected &&
+               !max_outer_move.compare_exchange_weak(expected, local_max))
+        {
         }
       });
 
@@ -1402,9 +1439,23 @@ void contouring(const Eigen::VectorXf &S,
 
       /* Sum the energy from all cells, print it, and check for convergence. */
       const double total_energy = show_total_energy(cells, options.verbose);
+      if (options.verbose) {
+        std::cout << "[contouring] max vertex move " << max_outer_move.load()
+                  << " (cell diag " << cell_diag << ")" << std::endl;
+      }
+      /* Movement-based exit: once no cell vertex moves more than a small
+       * fraction of a cell, further outer iterations cannot change the mesh
+       * measurably. */
+      if (outer_iter > 2 && max_outer_move.load() < 3e-4 * cell_diag) {
+        if (options.verbose) {
+          std::cout << "[contouring] Converged (vertex movement) at outer iteration "
+                    << (outer_iter + 1) << std::endl;
+        }
+        break;
+      }
       if (outer_iter > 2 &&
           std::abs(prev_total_energy - total_energy) <
-              1e-6 * std::max(1.0, std::abs(prev_total_energy)))
+              1e-5 * std::max(1.0, std::abs(prev_total_energy)))
       {
         if (options.verbose) {
           std::cout << "[contouring] Converged at outer iteration " << (outer_iter + 1)

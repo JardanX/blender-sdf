@@ -433,6 +433,31 @@ const SDFTextContours *BKE_sdf_text_get_contours(Object *ob)
   delete runtime->text_cache;
   runtime->text_cache = result;
   runtime->text_cache_hash = hash;
+
+  /* Debug helper: SDF_TEXT_DUMP=1 dumps the tessellated contours. */
+  if (getenv("SDF_TEXT_DUMP")) {
+    if (FILE *f = fopen("/tmp/sdf_text_contours.txt", "w")) {
+      fprintf(f, "bounds %f %f %f %f\n",
+              result->bounds_min.x,
+              result->bounds_min.y,
+              result->bounds_max.x,
+              result->bounds_max.y);
+      for (const SDFTextContour &ct : result->contours) {
+        fprintf(f, "contour %d\n", int(ct.points.size()));
+        for (int i = 0; i < ct.points.size(); i++) {
+          fprintf(f,
+                  "edge %.9g %.9g %.9g %.9g %d %d\n",
+                  ct.points[i].x,
+                  ct.points[i].y,
+                  ct.ctrls[i].x,
+                  ct.ctrls[i].y,
+                  int(ct.is_arc[i]),
+                  int(ct.is_knot[i]));
+        }
+      }
+      fclose(f);
+    }
+  }
   return result;
 }
 

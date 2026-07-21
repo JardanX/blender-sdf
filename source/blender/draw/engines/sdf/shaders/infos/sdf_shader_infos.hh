@@ -220,16 +220,12 @@ TYPEDEF_SOURCE("sdf_shader_shared.hh")
 COMPUTE_SOURCE("sdf_color_resolve_comp.glsl")
 GPU_SHADER_CREATE_END()
 
-/* LP variant of the color resolve: identical buffers/constants, but the
- * SDF_LP_TETRA_NORMALS define swaps the 6-tap central-difference position
- * stencil in sdfAnalyticWorldNormals for the tetrahedron 4-tap form
- * (iquilezles.org/articles/normalsSDF). Only the LP engine instantiates it
- * (SH_LP_COLOR_RESOLVE_COMP in kLpShaders); the classic engine keeps the
- * central-difference shader above. */
+/* LP variant of the color resolve: identical buffers/constants. The LP
+ * march pass produces the same tile-culled candidate list so the resolve
+ * logic is shared. */
 GPU_SHADER_CREATE_INFO(sdf_lp_color_resolve_comp)
 LOCAL_GROUP_SIZE(8, 8)
 DO_STATIC_COMPILATION()
-DEFINE_VALUE("SDF_LP_TETRA_NORMALS", "1")
 DEFINE_VALUE("kTileSize", "8")
 DEFINE_VALUE("kMaxTileObjects", "256")
 STORAGE_BUF(0, read, SDFObjectGPU, objects[])
