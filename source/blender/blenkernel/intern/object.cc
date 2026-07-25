@@ -3484,12 +3484,6 @@ std::optional<Bounds<float3>> BKE_object_boundbox_get(const Object *ob)
       const SDF *sdf = id_cast<const SDF *>(ob->data);
       float3 half_size;
       switch (sdf->sdf_type) {
-        case SDF_TYPE_MESH:
-          if (sdf->mesh_triangle_count > 0) {
-            return Bounds<float3>{float3(sdf->mesh_bounds_min),
-                                  float3(sdf->mesh_bounds_max)};
-          }
-          return std::nullopt;
         case SDF_TYPE_CAPSULE: {
           float r = sdf->size[0];
           float cyl_h = std::max(sdf->size[1] - sdf->bevel, 0.0f);
