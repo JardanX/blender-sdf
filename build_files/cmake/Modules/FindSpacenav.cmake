@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2011 Blender Authors
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # - Find Spacenav library
 # Find the native Spacenav includes and library
 # This module defines
@@ -11,31 +15,20 @@
 # also defined, but not for general use are
 #  SPACENAV_LIBRARY, where to find the Spacenav library.
 
-#=============================================================================
-# Copyright 2011 Blender Foundation.
-#
-# Distributed under the OSI-approved BSD License (the "License");
-# see accompanying file Copyright.txt for details.
-#
-# This software is distributed WITHOUT ANY WARRANTY; without even the
-# implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-# See the License for more information.
-#=============================================================================
+# If `SPACENAV_ROOT_DIR` was defined in the environment, use it.
+if(DEFINED SPACENAV_ROOT_DIR)
+  # Pass.
+elseif(DEFINED ENV{SPACENAV_ROOT_DIR})
+  set(SPACENAV_ROOT_DIR $ENV{SPACENAV_ROOT_DIR})
+else()
+  set(SPACENAV_ROOT_DIR "")
+endif()
 
-# If SPACENAV_ROOT_DIR was defined in the environment, use it.
-IF(NOT SPACENAV_ROOT_DIR AND NOT $ENV{SPACENAV_ROOT_DIR} STREQUAL "")
-  SET(SPACENAV_ROOT_DIR $ENV{SPACENAV_ROOT_DIR})
-ENDIF()
-
-SET(_spacenav_SEARCH_DIRS
+set(_spacenav_SEARCH_DIRS
   ${SPACENAV_ROOT_DIR}
-  /usr/local
-  /sw # Fink
-  /opt/local # DarwinPorts
-  /opt/csw # Blastwave
 )
 
-FIND_PATH(SPACENAV_INCLUDE_DIR
+find_path(SPACENAV_INCLUDE_DIR
   NAMES
     spnav.h
   HINTS
@@ -44,27 +37,29 @@ FIND_PATH(SPACENAV_INCLUDE_DIR
     include
 )
 
-FIND_LIBRARY(SPACENAV_LIBRARY
+find_library(SPACENAV_LIBRARY
   NAMES
     spnav
   HINTS
     ${_spacenav_SEARCH_DIRS}
   PATH_SUFFIXES
     lib64 lib
-  )
+)
 
-# handle the QUIETLY and REQUIRED arguments and set SPACENAV_FOUND to TRUE if 
+# handle the QUIETLY and REQUIRED arguments and set SPACENAV_FOUND to TRUE if
 # all listed variables are TRUE
-INCLUDE(FindPackageHandleStandardArgs)
-FIND_PACKAGE_HANDLE_STANDARD_ARGS(Spacenav DEFAULT_MSG
-    SPACENAV_LIBRARY SPACENAV_INCLUDE_DIR)
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(Spacenav DEFAULT_MSG
+  SPACENAV_LIBRARY SPACENAV_INCLUDE_DIR)
 
-IF(SPACENAV_FOUND)
-  SET(SPACENAV_LIBRARIES ${SPACENAV_LIBRARY})
-  SET(SPACENAV_INCLUDE_DIRS ${SPACENAV_INCLUDE_DIR})
-ENDIF(SPACENAV_FOUND)
+if(SPACENAV_FOUND)
+  set(SPACENAV_LIBRARIES ${SPACENAV_LIBRARY})
+  set(SPACENAV_INCLUDE_DIRS ${SPACENAV_INCLUDE_DIR})
+endif()
 
-MARK_AS_ADVANCED(
+mark_as_advanced(
   SPACENAV_INCLUDE_DIR
   SPACENAV_LIBRARY
 )
+
+unset(_spacenav_SEARCH_DIRS)

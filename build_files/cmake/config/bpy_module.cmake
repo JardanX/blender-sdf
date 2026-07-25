@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2011-2022 Blender Authors
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
 # defaults for building blender as a python module 'bpy'
 #
 # Example usage:
@@ -6,28 +10,81 @@
 
 set(WITH_PYTHON_MODULE       ON  CACHE BOOL "" FORCE)
 
-# install into the systems python dir
-set(WITH_INSTALL_PORTABLE    OFF CACHE BOOL "" FORCE)
 
-# no point int copying python into python
+# -----------------------------------------------------------------------------
+# Installation Configuration.
+#
+# NOTE: `WITH_INSTALL_PORTABLE` always defaults to ON when building as a Python module and
+# isn't set here as it makes changing the setting impractical.
+# Python-developers could prefer either ON/OFF depending on their usage:
+#
+# - When using the system's Python, disabling will install into their `site-packages`,
+#   allowing them to run Python from any directory and `import bpy`.
+# - When using Blender's bundled Python in `./../lib/` it will install there
+#   which isn't especially useful as it requires running Python from this directory too.
+#
+# So default `WITH_INSTALL_PORTABLE` to ON, and developers who don't use Python from `./../lib/`
+# can disable it if they wish to install into their systems Python.
+
+# There is no point in copying python into Python.
 set(WITH_PYTHON_INSTALL      OFF CACHE BOOL "" FORCE)
 
-# dont build the game engine
-set(WITH_GAMEENGINE          OFF CACHE BOOL "" FORCE)
+if(WIN32)
+  set(WITH_WINDOWS_BUNDLE_CRT  OFF CACHE BOOL "" FORCE)
+endif()
 
-# disable audio, its possible some devs may want this but for now disable
-# so the python module doesnt hold the audio device and loads quickly.
-set(WITH_AUDASPACE           OFF CACHE BOOL "" FORCE)
-set(WITH_FFTW3               OFF CACHE BOOL "" FORCE)
+
+# -----------------------------------------------------------------------------
+# Library Compatibility.
+
+# NOTE: JEMALLOC caused problems with `dlopen()`,
+# disabling for WITH_TBB_MALLOC_PROXY too, although we could investigate enabling it.
+set(WITH_TBB_MALLOC_PROXY        OFF CACHE BOOL "" FORCE)
+
+
+# -----------------------------------------------------------------------------
+# Application Support.
+
+# Not useful to include with the Python module.
+# Although a way to extract this from Python could be handle,
+# this would be better exposed directly via the Python API.
+set(WITH_BLENDER_THUMBNAILER OFF CACHE BOOL "" FORCE)
+
+
+# -----------------------------------------------------------------------------
+# Audio Support.
+
+# Enable audio support without audio-device support
+# so the sequencer can be used properly from Python, see: #125007.
+set(WITH_AUDASPACE           ON  CACHE BOOL "" FORCE)
+
+# Disable audio, it's possible some developers may want this but for now disable
+# so the Python module doesn't hold the audio device and loads quickly.
 set(WITH_JACK                OFF CACHE BOOL "" FORCE)
-set(WITH_SDL                 OFF CACHE BOOL "" FORCE)
 set(WITH_OPENAL              OFF CACHE BOOL "" FORCE)
-set(WITH_CODEC_FFMPEG        OFF CACHE BOOL "" FORCE)
-set(WITH_CODEC_SNDFILE       OFF CACHE BOOL "" FORCE)
+set(WITH_SDL                 OFF CACHE BOOL "" FORCE)
+if(UNIX AND NOT APPLE)
+  set(WITH_PULSEAUDIO          OFF CACHE BOOL "" FORCE)
+endif()
+if(WIN32)
+  set(WITH_WASAPI              OFF CACHE BOOL "" FORCE)
+endif()
+if(APPLE)
+  set(WITH_COREAUDIO           OFF CACHE BOOL "" FORCE)
+endif()
 
-# other features which are not especially useful as a python module
-set(WITH_X11_XINPUT          OFF CACHE BOOL "" FORCE)
+
+# -----------------------------------------------------------------------------
+# Input Device Support.
+
+# Other features which are not especially useful as a python module.
 set(WITH_INPUT_NDOF          OFF CACHE BOOL "" FORCE)
-set(WITH_OPENCOLLADA         OFF CACHE BOOL "" FORCE)
+if(WIN32 OR APPLE)
+  set(WITH_INPUT_IME           OFF CACHE BOOL "" FORCE)
+endif()
+
+
+# -----------------------------------------------------------------------------
+# Language Support.
+
 set(WITH_INTERNATIONAL       OFF CACHE BOOL "" FORCE)
-set(WITH_BULLET              OFF CACHE BOOL "" FORCE)

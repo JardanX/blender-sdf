@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2014-2022 Blender Authors
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
 # only compile Cycles standalone, without Blender
 #
 # Example usage:
@@ -6,7 +10,6 @@
 
 # disable Blender
 set(WITH_BLENDER             OFF  CACHE BOOL "" FORCE)
-set(WITH_PLAYER              OFF  CACHE BOOL "" FORCE)
 set(WITH_CYCLES_BLENDER      OFF  CACHE BOOL "" FORCE)
 
 # build Cycles
