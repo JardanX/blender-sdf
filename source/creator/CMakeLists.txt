@@ -1022,17 +1022,19 @@ file(REMOVE ${CMAKE_BINARY_DIR}/bin/lib/libglapi.so.0.0.0)\n
       # The script uses the version of Python installed with Blender,
       # so it must only be inside installed if `WITH_PYTHON AND WITH_PYTHON_INSTALL`
       # are active.
-      get_filename_component(PYTHON_EXECUTABLE_NAME_ONLY ${PYTHON_EXECUTABLE} NAME)
-      configure_file(
-        ${CMAKE_SOURCE_DIR}/release/freedesktop/scripts/blender-system-info.sh.in
-        ${CMAKE_BINARY_DIR}/release/freedesktop/scripts/blender-system-info.sh
-        @ONLY
-      )
-      unset(PYTHON_EXECUTABLE_NAME_ONLY)
-      install(
-        PROGRAMS ${CMAKE_BINARY_DIR}/release/freedesktop/scripts/blender-system-info.sh
-        DESTINATION "."
-      )
+      if(EXISTS ${CMAKE_SOURCE_DIR}/release/freedesktop/scripts/blender-system-info.sh.in)
+        get_filename_component(PYTHON_EXECUTABLE_NAME_ONLY ${PYTHON_EXECUTABLE} NAME)
+        configure_file(
+          ${CMAKE_SOURCE_DIR}/release/freedesktop/scripts/blender-system-info.sh.in
+          ${CMAKE_BINARY_DIR}/release/freedesktop/scripts/blender-system-info.sh
+          @ONLY
+        )
+        unset(PYTHON_EXECUTABLE_NAME_ONLY)
+        install(
+          PROGRAMS ${CMAKE_BINARY_DIR}/release/freedesktop/scripts/blender-system-info.sh
+          DESTINATION "."
+        )
+      endif()
     endif()
   endif()
 
@@ -1788,17 +1790,19 @@ elseif(APPLE)
   endif()
 
   if(NOT WITH_PYTHON_MODULE AND WITH_PYTHON AND WITH_PYTHON_INSTALL)
-    get_filename_component(PYTHON_EXECUTABLE_NAME_ONLY ${PYTHON_EXECUTABLE} NAME)
-    configure_file(
-      ${CMAKE_SOURCE_DIR}/release/darwin/scripts/blender-system-info.sh.in
-      ${CMAKE_BINARY_DIR}/release/darwin/scripts/blender-system-info.sh
-      @ONLY
-    )
-    unset(PYTHON_EXECUTABLE_NAME_ONLY)
-    install(
-      PROGRAMS ${CMAKE_BINARY_DIR}/release/darwin/scripts/blender-system-info.sh
-      DESTINATION "Blender.app/Contents/Resources"
-    )
+    if(EXISTS ${CMAKE_SOURCE_DIR}/release/darwin/scripts/blender-system-info.sh.in)
+      get_filename_component(PYTHON_EXECUTABLE_NAME_ONLY ${PYTHON_EXECUTABLE} NAME)
+      configure_file(
+        ${CMAKE_SOURCE_DIR}/release/darwin/scripts/blender-system-info.sh.in
+        ${CMAKE_BINARY_DIR}/release/darwin/scripts/blender-system-info.sh
+        @ONLY
+      )
+      unset(PYTHON_EXECUTABLE_NAME_ONLY)
+      install(
+        PROGRAMS ${CMAKE_BINARY_DIR}/release/darwin/scripts/blender-system-info.sh
+        DESTINATION "Blender.app/Contents/Resources"
+      )
+    endif()
   endif()
 
 endif()
@@ -1847,14 +1851,16 @@ endif()
 
 if(DEFINED TARGETDIR_TEXT)
 
-  configure_file(
-    ${CMAKE_SOURCE_DIR}/release/text/readme.html
-    ${CMAKE_BINARY_DIR}/release/text/readme.html
-    @ONLY
-  )
-  list(APPEND BLENDER_TEXT_FILES
-    ${CMAKE_BINARY_DIR}/release/text/readme.html
-  )
+  if(EXISTS ${CMAKE_SOURCE_DIR}/release/text/readme.html)
+    configure_file(
+      ${CMAKE_SOURCE_DIR}/release/text/readme.html
+      ${CMAKE_BINARY_DIR}/release/text/readme.html
+      @ONLY
+    )
+    list(APPEND BLENDER_TEXT_FILES
+      ${CMAKE_BINARY_DIR}/release/text/readme.html
+    )
+  endif()
 
   install(
     FILES ${BLENDER_TEXT_FILES}
