@@ -1,0 +1,11 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Irregular polygon outline (5 vertices) -->
+  <path d="M 400,350 L 1200,250 L 1400,800 L 1000,1350 L 300,1100 Z"
+        fill="none" stroke="#fff" stroke-width="100" stroke-linejoin="round"/>
+  <!-- Vertex dots -->
+  <circle cx="400" cy="350" r="80" fill="#fff"/>
+  <circle cx="1200" cy="250" r="80" fill="#fff"/>
+  <circle cx="1400" cy="800" r="80" fill="#fff"/>
+  <circle cx="1000" cy="1350" r="80" fill="#fff"/>
+  <circle cx="300" cy="1100" r="80" fill="#fff"/>
+</svg>
