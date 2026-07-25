@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2012 Blender Authors
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # - Find OpenColorIO library
 # Find the native OpenColorIO includes and library
 # This module defines
@@ -11,38 +15,21 @@
 # also defined, but not for general use are
 #  OPENCOLORIO_LIBRARY, where to find the OpenColorIO library.
 
-#=============================================================================
-# Copyright 2012 Blender Foundation.
-#
-# Distributed under the OSI-approved BSD License (the "License");
-# see accompanying file Copyright.txt for details.
-#
-# This software is distributed WITHOUT ANY WARRANTY; without even the
-# implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-# See the License for more information.
-#=============================================================================
+# If `OPENCOLORIO_ROOT_DIR` was defined in the environment, use it.
+if(DEFINED OPENCOLORIO_ROOT_DIR)
+  # Pass.
+elseif(DEFINED ENV{OPENCOLORIO_ROOT_DIR})
+  set(OPENCOLORIO_ROOT_DIR $ENV{OPENCOLORIO_ROOT_DIR})
+else()
+  set(OPENCOLORIO_ROOT_DIR "")
+endif()
 
-# If OPENCOLORIO_ROOT_DIR was defined in the environment, use it.
-IF(NOT OPENCOLORIO_ROOT_DIR AND NOT $ENV{OPENCOLORIO_ROOT_DIR} STREQUAL "")
-  SET(OPENCOLORIO_ROOT_DIR $ENV{OPENCOLORIO_ROOT_DIR})
-ENDIF()
-
-SET(_opencolorio_FIND_COMPONENTS
-  OpenColorIO
-  yaml-cpp
-  tinyxml
-)
-
-SET(_opencolorio_SEARCH_DIRS
+set(_opencolorio_SEARCH_DIRS
   ${OPENCOLORIO_ROOT_DIR}
-  /usr/local
-  /sw # Fink
-  /opt/local # DarwinPorts
-  /opt/csw # Blastwave
   /opt/lib/ocio
 )
 
-FIND_PATH(OPENCOLORIO_INCLUDE_DIR
+find_path(OPENCOLORIO_INCLUDE_DIR
   NAMES
     OpenColorIO/OpenColorIO.h
   HINTS
@@ -51,36 +38,50 @@ FIND_PATH(OPENCOLORIO_INCLUDE_DIR
     include
 )
 
-SET(_opencolorio_LIBRARIES)
-FOREACH(COMPONENT ${_opencolorio_FIND_COMPONENTS})
-  STRING(TOUPPER ${COMPONENT} UPPERCOMPONENT)
+set(_opencolorio_LIBRARIES)
 
-  FIND_LIBRARY(OPENCOLORIO_${UPPERCOMPONENT}_LIBRARY
-    NAMES
-      ${COMPONENT}
-    HINTS
-      ${_opencolorio_SEARCH_DIRS}
-    PATH_SUFFIXES
-      lib64 lib
-    )
-  if(OPENCOLORIO_${UPPERCOMPONENT}_LIBRARY)
-    LIST(APPEND _opencolorio_LIBRARIES "${OPENCOLORIO_${UPPERCOMPONENT}_LIBRARY}")
+find_library(OPENCOLORIO_OPENCOLORIO_LIBRARY
+  NAMES
+    OpenColorIO
+  HINTS
+    ${_opencolorio_SEARCH_DIRS}
+  PATH_SUFFIXES
+    lib64 lib lib64/static lib/static
+)
+list(APPEND _opencolorio_LIBRARIES "${OPENCOLORIO_OPENCOLORIO_LIBRARY}")
+
+if(EXISTS "${OPENCOLORIO_INCLUDE_DIR}/OpenColorIO/OpenColorABI.h")
+  # Search twice, because this symbol changed between OCIO 1.x and 2.x
+  file(STRINGS "${OPENCOLORIO_INCLUDE_DIR}/OpenColorIO/OpenColorABI.h" _opencolorio_version
+    REGEX "^#define OCIO_VERSION_STR[ \t].*$")
+  if(NOT _opencolorio_version)
+    file(STRINGS "${OPENCOLORIO_INCLUDE_DIR}/OpenColorIO/OpenColorABI.h" _opencolorio_version
+      REGEX "^#define OCIO_VERSION[ \t].*$")
   endif()
-ENDFOREACH()
+  string(REGEX MATCHALL "[0-9]+[.0-9]+" OPENCOLORIO_VERSION ${_opencolorio_version})
+  unset(_opencolorio_version)
+endif()
 
-# handle the QUIETLY and REQUIRED arguments and set OPENCOLORIO_FOUND to TRUE if 
+# handle the QUIETLY and REQUIRED arguments and set OPENCOLORIO_FOUND to TRUE if
 # all listed variables are TRUE
-INCLUDE(FindPackageHandleStandardArgs)
-FIND_PACKAGE_HANDLE_STANDARD_ARGS(OpenColorIO DEFAULT_MSG
-    _opencolorio_LIBRARIES OPENCOLORIO_INCLUDE_DIR)
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(OpenColorIO
+  REQUIRED_VARS _opencolorio_LIBRARIES OPENCOLORIO_INCLUDE_DIR
+  VERSION_VAR OPENCOLORIO_VERSION)
 
-IF(OPENCOLORIO_FOUND)
-  SET(OPENCOLORIO_LIBRARIES ${_opencolorio_LIBRARIES})
-  SET(OPENCOLORIO_INCLUDE_DIRS ${OPENCOLORIO_INCLUDE_DIR})
-ENDIF(OPENCOLORIO_FOUND)
+if(OPENCOLORIO_FOUND)
+  set(OPENCOLORIO_LIBRARIES ${_opencolorio_LIBRARIES})
+  set(OPENCOLORIO_INCLUDE_DIRS ${OPENCOLORIO_INCLUDE_DIR})
+endif()
 
-MARK_AS_ADVANCED(
+mark_as_advanced(
   OPENCOLORIO_INCLUDE_DIR
   OPENCOLORIO_LIBRARY
+  OPENCOLORIO_OPENCOLORIO_LIBRARY
+  OPENCOLORIO_VERSION
 )
 
+unset(COMPONENT)
+unset(UPPERCOMPONENT)
+unset(_opencolorio_LIBRARIES)
+unset(_opencolorio_SEARCH_DIRS)
