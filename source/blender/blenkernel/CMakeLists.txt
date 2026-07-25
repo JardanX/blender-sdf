@@ -305,7 +305,8 @@ set(SRC
   intern/vfontdata_freetype.cc
   intern/viewer_path.cc
   intern/sdf.cc
-  intern/sdf_mesh.cc
+
+
   intern/volume.cc
   intern/volume_grid.cc
   intern/volume_grid_fields.cc
