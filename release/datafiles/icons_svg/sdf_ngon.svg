@@ -1,0 +1,7 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Hex ring via stroke (uniform thickness) -->
+  <path d="M 1450,800 L 1100,1350 L 500,1350 L 150,800 L 500,250 L 1100,250 Z"
+        fill="none" stroke="#fff" stroke-width="100" stroke-linejoin="round"/>
+  <!-- Inner filled hex (bigger) -->
+  <path d="M 1100,800 L 950,1050 L 650,1050 L 500,800 L 650,550 L 950,550 Z" fill="#fff"/>
+</svg>

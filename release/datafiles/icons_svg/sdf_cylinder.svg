@@ -1,0 +1,9 @@
+<svg height="1600" viewBox="0 0 1600 1600" width="1600" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#fff" fill-rule="evenodd">
+    <!-- Outer rectangle ring (tall rectangle) -->
+    <path d="M 300,100 H 1300 V 1500 H 300 Z
+             M 400,200 H 1200 V 1400 H 400 Z"/>
+    <!-- Inner filled rectangle (gap=200) -->
+    <path d="M 600,400 H 1000 V 1200 H 600 Z"/>
+  </g>
+</svg>
