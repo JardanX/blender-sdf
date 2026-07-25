@@ -999,11 +999,11 @@ macro(ADD_CHECK_CXX_COMPILER_FLAG
 endmacro()
 
 macro(get_blender_version)
-	# So cmake depends on BKE_blender.h, beware of inf-loops!
-	CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender.h
-	               ${CMAKE_BINARY_DIR}/source/blender/blenkernel/BKE_blender.h.done)
+	# So cmake depends on BKE_blender.hh, beware of inf-loops!
+	CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender.hh
+	               ${CMAKE_BINARY_DIR}/source/blender/blenkernel/BKE_blender.hh.done)
 
-	file(STRINGS ${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender.h _contents REGEX "^#define[ \t]+BLENDER_.*$")
+	file(STRINGS ${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender.hh _contents REGEX "^#define[ \t]+BLENDER_.*$")
 
 	string(REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION[ \t]+([0-9]+).*" "\\1" _out_version "${_contents}")
 	string(REGEX REPLACE ".*#define[ \t]+BLENDER_SUBVERSION[ \t]+([0-9]+).*" "\\1" _out_subversion "${_contents}")
