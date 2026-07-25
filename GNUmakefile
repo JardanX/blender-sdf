@@ -200,6 +200,13 @@ BLENDER_DIR:=$(shell pwd -P)
 BUILD_TYPE:=Release
 BLENDER_IS_PYTHON_MODULE:=
 
+# Auto-detect GCC 14+ if not overridden by user
+ifndef BUILD_CMAKE_ARGS
+    ifneq (, $(shell which gcc-14 2>/dev/null))
+        BUILD_CMAKE_ARGS := -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+    endif
+endif
+
 # CMake arguments, assigned to local variable to make it mutable.
 CMAKE_CONFIG_ARGS := $(BUILD_CMAKE_ARGS)
 
