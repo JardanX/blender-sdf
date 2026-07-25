@@ -1,1389 +1,1546 @@
-# ***** BEGIN GPL LICENSE BLOCK *****
+# SPDX-FileCopyrightText: 2006 Blender Authors
 #
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software Foundation,
-# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
-#
-# The Original Code is Copyright (C) 2006, Blender Foundation
-# All rights reserved.
-#
-# The Original Code is: all of this file.
-#
-# Contributor(s): Jacques Beaurain.
-#
-# ***** END GPL LICENSE BLOCK *****
+# SPDX-License-Identifier: GPL-2.0-or-later
 
 macro(list_insert_after
-	list_id item_check item_add
-	)
-	set(_index)
-	list(FIND "${list_id}" "${item_check}" _index)
-	if("${_index}" MATCHES "-1")
-		message(FATAL_ERROR "'${list_id}' doesn't contain '${item_check}'")
-	endif()
-	math(EXPR _index "${_index} + 1")
-	list(INSERT ${list_id} "${_index}" ${item_add})
-	unset(_index)
+  list_id item_check item_add
+  )
+  set(_index)
+  list(FIND "${list_id}" "${item_check}" _index)
+  if("${_index}" MATCHES "-1")
+    message(FATAL_ERROR "'${list_id}' doesn't contain '${item_check}'")
+  endif()
+  math(EXPR _index "${_index} + 1")
+  list(INSERT ${list_id} "${_index}" ${item_add})
+  unset(_index)
 endmacro()
 
 macro(list_insert_before
-	list_id item_check item_add
-	)
-	set(_index)
-	list(FIND "${list_id}" "${item_check}" _index)
-	if("${_index}" MATCHES "-1")
-		message(FATAL_ERROR "'${list_id}' doesn't contain '${item_check}'")
-	endif()
-	list(INSERT ${list_id} "${_index}" ${item_add})
-	unset(_index)
+  list_id item_check item_add
+  )
+  set(_index)
+  list(FIND "${list_id}" "${item_check}" _index)
+  if("${_index}" MATCHES "-1")
+    message(FATAL_ERROR "'${list_id}' doesn't contain '${item_check}'")
+  endif()
+  list(INSERT ${list_id} "${_index}" ${item_add})
+  unset(_index)
 endmacro()
 
-function (list_assert_duplicates
-	list_id
-	)
-	
-	# message(STATUS "list data: ${list_id}")
+function(list_assert_duplicates
+  list_id
+  )
 
-	list(LENGTH list_id _len_before)
-	list(REMOVE_DUPLICATES list_id)
-	list(LENGTH list_id _len_after)
-	# message(STATUS "list size ${_len_before} -> ${_len_after}")
-	if(NOT _len_before EQUAL _len_after)
-		message(FATAL_ERROR "duplicate found in list which should not contain duplicates: ${list_id}")
-	endif()
-	unset(_len_before)
-	unset(_len_after)
+  # message(STATUS "list data: ${list_id}")
+
+  list(REMOVE_ITEM list_id "PUBLIC" "PRIVATE" "INTERFACE")
+  list(LENGTH list_id _len_before)
+  list(REMOVE_DUPLICATES list_id)
+  list(LENGTH list_id _len_after)
+  # message(STATUS "list size ${_len_before} -> ${_len_after}")
+  if(NOT _len_before EQUAL _len_after)
+    message(FATAL_ERROR "duplicate found in list which should not contain duplicates: ${list_id}")
+  endif()
+  unset(_len_before)
+  unset(_len_after)
 endfunction()
 
+# Adds a native path separator to the end of the path:
+#
+# - 'example' -> 'example/'
+# - '/example///' -> '/example/'
+#
+macro(path_ensure_trailing_slash
+  path_new path_input
+  )
+  file(TO_NATIVE_PATH "/" _path_sep)
+  string(REGEX REPLACE "[${_path_sep}]+$" "" ${path_new} ${path_input})
+  set(${path_new} "${${path_new}}${_path_sep}")
+  unset(_path_sep)
+endmacro()
+
+macro(path_strip_trailing_slash
+  path_new path_input
+  )
+  file(TO_NATIVE_PATH "/" _path_sep)
+  string(REGEX REPLACE "[${_path_sep}]+$" "" ${path_new} ${path_input})
+endmacro()
+
+# Our own version of `cmake_path(IS_PREFIX ..)`.
+# This can be removed when 3.20 or greater is the minimum supported version.
+macro(path_is_prefix
+  path_prefix path result_var
+  )
+  # Remove when CMAKE version is bumped to "3.20" or greater.
+  # `cmake_path(IS_PREFIX ${path_prefix} ${path} NORMALIZE result_var)`
+  # Get the normalized paths (needed to remove `..`).
+  get_filename_component(_abs_prefix "${${path_prefix}}" ABSOLUTE)
+  get_filename_component(_abs_suffix "${${path}}" ABSOLUTE)
+  string(LENGTH "${_abs_prefix}" _len)
+  string(SUBSTRING "${_abs_suffix}" 0 "${_len}" _substr)
+  string(COMPARE EQUAL "${_abs_prefix}" "${_substr}" "${result_var}")
+  unset(_abs_prefix)
+  unset(_abs_suffix)
+  unset(_len)
+  unset(_substr)
+endmacro()
 
 # foo_bar.spam --> foo_barMySuffix.spam
 macro(file_suffix
-	file_name_new file_name file_suffix
-	)
+  file_name_new file_name file_suffix
+  )
 
-	get_filename_component(_file_name_PATH ${file_name} PATH)
-	get_filename_component(_file_name_NAME_WE ${file_name} NAME_WE)
-	get_filename_component(_file_name_EXT ${file_name} EXT)
-	set(${file_name_new} "${_file_name_PATH}/${_file_name_NAME_WE}${file_suffix}${_file_name_EXT}")
+  get_filename_component(_file_name_PATH ${file_name} PATH)
+  get_filename_component(_file_name_NAME_WE ${file_name} NAME_WE)
+  get_filename_component(_file_name_EXT ${file_name} EXT)
+  set(${file_name_new} "${_file_name_PATH}/${_file_name_NAME_WE}${file_suffix}${_file_name_EXT}")
 
-	unset(_file_name_PATH)
-	unset(_file_name_NAME_WE)
-	unset(_file_name_EXT)
+  unset(_file_name_PATH)
+  unset(_file_name_NAME_WE)
+  unset(_file_name_EXT)
 endmacro()
 
 # useful for adding debug suffix to library lists:
 # /somepath/foo.lib --> /somepath/foo_d.lib
 macro(file_list_suffix
-	fp_list_new fp_list fn_suffix
-	)
+  fp_list_new fp_list fn_suffix
+  )
 
-	# incase of empty list
-	set(_fp)
-	set(_fp_suffixed)
+  # in case of empty list
+  set(_fp)
+  set(_fp_suffixed)
 
-	set(fp_list_new)
+  set(fp_list_new)
 
-	foreach(_fp ${fp_list})
-		file_suffix(_fp_suffixed "${_fp}" "${fn_suffix}")
-		list(APPEND "${fp_list_new}" "${_fp_suffixed}")
-	endforeach()
+  foreach(_fp ${fp_list})
+    file_suffix(_fp_suffixed "${_fp}" "${fn_suffix}")
+    list(APPEND "${fp_list_new}" "${_fp_suffixed}")
+  endforeach()
 
-	unset(_fp)
-	unset(_fp_suffixed)
+  unset(_fp)
+  unset(_fp_suffixed)
 
 endmacro()
 
+if(UNIX AND NOT APPLE)
+  macro(find_package_static)
+    set(_cmake_find_library_suffixes_back ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    find_package(${ARGV})
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ${_cmake_find_library_suffixes_back})
+    unset(_cmake_find_library_suffixes_back)
+  endmacro()
 
-macro(target_link_libraries_optimized TARGET LIBS)
-	foreach(_LIB ${LIBS})
-		target_link_libraries(${TARGET} optimized "${_LIB}")
-	endforeach()
-	unset(_LIB)
-endmacro()
+  macro(find_library_static)
+    set(_cmake_find_library_suffixes_back ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    find_library(${ARGV})
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ${_cmake_find_library_suffixes_back})
+    unset(_cmake_find_library_suffixes_back)
+  endmacro()
+endif()
 
-macro(target_link_libraries_debug TARGET LIBS)
-	foreach(_LIB ${LIBS})
-		target_link_libraries(${TARGET} debug "${_LIB}")
-	endforeach()
-	unset(_LIB)
-endmacro()
+function(target_link_libraries_optimized
+  TARGET
+  LIBS
+  )
+
+  foreach(_LIB ${LIBS})
+    target_link_libraries(${TARGET} INTERFACE optimized "${_LIB}")
+  endforeach()
+endfunction()
+
+function(target_link_libraries_debug
+  TARGET
+  LIBS
+  )
+
+  foreach(_LIB ${LIBS})
+    target_link_libraries(${TARGET} INTERFACE debug "${_LIB}")
+  endforeach()
+endfunction()
 
 # Nicer makefiles with -I/1/foo/ instead of -I/1/2/3/../../foo/
 # use it instead of include_directories()
-macro(blender_include_dirs
-	includes)
-	set(_ALL_INCS "")
-	foreach(_INC ${ARGV})
-		get_filename_component(_ABS_INC ${_INC} ABSOLUTE)
-		list(APPEND _ALL_INCS ${_ABS_INC})
-		# for checking for invalid includes, disable for regular use
-		##if(NOT EXISTS "${_ABS_INC}/")
-		##	message(FATAL_ERROR "Include not found: ${_ABS_INC}/")
-		##endif()
-	endforeach()
-	include_directories(${_ALL_INCS})
-	unset(_INC)
-	unset(_ABS_INC)
-	unset(_ALL_INCS)
+function(absolute_include_dirs
+  includes_absolute)
+
+  set(_ALL_INCS "")
+  foreach(_INC ${ARGN})
+    # Pass any scoping keywords as is
+    if(("${_INC}" STREQUAL "PUBLIC") OR
+       ("${_INC}" STREQUAL "PRIVATE") OR
+       ("${_INC}" STREQUAL "INTERFACE"))
+      list(APPEND _ALL_INCS ${_INC})
+    else()
+      get_filename_component(_ABS_INC ${_INC} ABSOLUTE)
+      list(APPEND _ALL_INCS ${_ABS_INC})
+      # for checking for invalid includes, disable for regular use
+      # if(NOT EXISTS "${_ABS_INC}/")
+      #   message(FATAL_ERROR "Include not found: ${_ABS_INC}/")
+      # endif()
+    endif()
+  endforeach()
+
+  set(${includes_absolute} ${_ALL_INCS} PARENT_SCOPE)
+endfunction()
+
+function(blender_target_include_dirs_impl
+  target
+  system
+  includes
+  )
+  set(next_interface_mode "PRIVATE")
+  foreach(_INC ${includes})
+    if(("${_INC}" STREQUAL "PUBLIC") OR
+       ("${_INC}" STREQUAL "PRIVATE") OR
+       ("${_INC}" STREQUAL "INTERFACE"))
+      set(next_interface_mode "${_INC}")
+    else()
+      if(system)
+        target_include_directories(${target} SYSTEM ${next_interface_mode} ${_INC})
+      else()
+        target_include_directories(${target} ${next_interface_mode} ${_INC})
+      endif()
+      set(next_interface_mode "PRIVATE")
+    endif()
+  endforeach()
+endfunction()
+
+# Nicer makefiles with -I/1/foo/ instead of -I/1/2/3/../../foo/
+# use it instead of target_include_directories()
+function(blender_target_include_dirs
+  target
+  )
+  absolute_include_dirs(_ALL_INCS ${ARGN})
+  blender_target_include_dirs_impl(${target} FALSE "${_ALL_INCS}")
+endfunction()
+
+function(blender_target_include_dirs_sys
+  target
+  )
+  absolute_include_dirs(_ALL_INCS ${ARGN})
+  blender_target_include_dirs_impl(${target} TRUE "${_ALL_INCS}")
+endfunction()
+
+# Enable unity build for the given target.
+function(blender_set_target_unity_build target batch_size)
+  if(WITH_UNITY_BUILD)
+    set_target_properties(${target} PROPERTIES
+      UNITY_BUILD ON
+      UNITY_BUILD_BATCH_SIZE ${batch_size}
+    )
+    if(WITH_NINJA_POOL_JOBS AND NINJA_MAX_NUM_PARALLEL_COMPILE_HEAVY_JOBS)
+      # Unity builds are typically heavy.
+      set_target_properties(${target} PROPERTIES JOB_POOL_COMPILE compile_heavy_job_pool)
+    endif()
+  endif()
+endfunction()
+
+# Set include paths for header files included with "*.h" syntax.
+# This enables auto-complete suggestions for user header files on Xcode.
+# Build process is not affected since the include paths are the same
+# as in HEADER_SEARCH_PATHS.
+function(blender_user_header_search_paths
+  name
+  includes
+  )
+
+  if(XCODE)
+    set(_ALL_INCS "")
+    foreach(_INC ${includes})
+      get_filename_component(_ABS_INC ${_INC} ABSOLUTE)
+      # _ALL_INCS is a space-separated string of file paths in quotes.
+      string(APPEND _ALL_INCS " \"${_ABS_INC}\"")
+    endforeach()
+    set_target_properties(
+      ${name} PROPERTIES
+      XCODE_ATTRIBUTE_USER_HEADER_SEARCH_PATHS "${_ALL_INCS}"
+    )
+  endif()
+endfunction()
+
+function(blender_source_group
+  name
+  sources
+  )
+
+  # if enabled, use the sources directories as filters.
+  if(IDE_GROUP_SOURCES_IN_FOLDERS)
+    foreach(_SRC ${sources})
+      # remove ../'s
+      get_filename_component(_SRC_DIR ${_SRC} REALPATH)
+      get_filename_component(_SRC_DIR ${_SRC_DIR} DIRECTORY)
+      string(FIND ${_SRC_DIR} "${CMAKE_CURRENT_SOURCE_DIR}/" _pos)
+      if(NOT _pos EQUAL -1)
+        string(REPLACE "${CMAKE_CURRENT_SOURCE_DIR}/" "" GROUP_ID ${_SRC_DIR})
+        string(REPLACE "/" "\\" GROUP_ID ${GROUP_ID})
+        source_group("${GROUP_ID}" FILES ${_SRC})
+      endif()
+      unset(_pos)
+    endforeach()
+  else()
+    # Group by location on disk
+    source_group("Source Files" FILES CMakeLists.txt)
+    foreach(_SRC ${sources})
+      get_filename_component(_SRC_EXT ${_SRC} EXT)
+      if((${_SRC_EXT} MATCHES ".h") OR
+         (${_SRC_EXT} MATCHES ".hpp") OR
+         (${_SRC_EXT} MATCHES ".hh"))
+
+        set(GROUP_ID "Header Files")
+      elseif(${_SRC_EXT} MATCHES ".glsl$")
+        set(GROUP_ID "Shaders")
+      else()
+        set(GROUP_ID "Source Files")
+      endif()
+      source_group("${GROUP_ID}" FILES ${_SRC})
+    endforeach()
+  endif()
+
+  # if enabled, set the FOLDER property for the projects
+  if(IDE_GROUP_PROJECTS_IN_FOLDERS)
+    get_filename_component(FolderDir ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
+    string(REPLACE ${CMAKE_SOURCE_DIR} "" FolderDir ${FolderDir})
+    set_target_properties(${name} PROPERTIES FOLDER ${FolderDir})
+  endif()
+endfunction()
+
+
+# Support per-target CMake flags
+# Read from: CMAKE_C_FLAGS_**** (made upper case) when set.
+#
+# 'name' should always match the target name,
+# use this macro before add_library or add_executable.
+#
+# Optionally takes an arg passed to set(), eg PARENT_SCOPE.
+macro(add_cc_flags_custom_test
+  name
+  )
+
+  string(TOUPPER ${name} _name_upper)
+  if(DEFINED CMAKE_C_FLAGS_${_name_upper})
+    message(
+      STATUS
+      "Using custom CFLAGS: "
+      "CMAKE_C_FLAGS_${_name_upper} in \"${CMAKE_CURRENT_SOURCE_DIR}\"")
+    string(APPEND CMAKE_C_FLAGS " ${CMAKE_C_FLAGS_${_name_upper}}" ${ARGV1})
+  endif()
+  if(DEFINED CMAKE_CXX_FLAGS_${_name_upper})
+    message(
+      STATUS
+      "Using custom CXXFLAGS: "
+      "CMAKE_CXX_FLAGS_${_name_upper} in \"${CMAKE_CURRENT_SOURCE_DIR}\""
+    )
+    string(APPEND CMAKE_CXX_FLAGS " ${CMAKE_CXX_FLAGS_${_name_upper}}" ${ARGV1})
+  endif()
+  unset(_name_upper)
+
 endmacro()
 
-macro(blender_include_dirs_sys
-	includes)
-	set(_ALL_INCS "")
-	foreach(_INC ${ARGV})
-		get_filename_component(_ABS_INC ${_INC} ABSOLUTE)
-		list(APPEND _ALL_INCS ${_ABS_INC})
-		##if(NOT EXISTS "${_ABS_INC}/")
-		##	message(FATAL_ERROR "Include not found: ${_ABS_INC}/")
-		##endif()
-	endforeach()
-	include_directories(SYSTEM ${_ALL_INCS})
-	unset(_INC)
-	unset(_ABS_INC)
-	unset(_ALL_INCS)
-endmacro()
+function(blender_link_libraries
+  target
+  library_deps
+  )
 
-macro(blender_source_group
-	sources)
+  # On Windows certain libraries have two sets of binaries: one for debug builds and one for
+  # release builds. The root of this requirement goes into ABI, I believe, but that's outside
+  # of a scope of this comment.
+  #
+  # CMake have a native way of dealing with this, which is specifying what build type the
+  # libraries are provided for:
+  #
+  #   target_link_libraries(target optimized|debug|general <libraries>)
+  #
+  # The build type is to be provided as a separate argument to the function.
+  #
+  # CMake's variables for libraries will contain build type in such cases. For example:
+  #
+  #   set(FOO_LIBRARIES optimized libfoo.lib debug libfoo_d.lib)
+  #
+  # Complications starts with a single argument for library_deps: all the elements are being
+  # put to a list: "${FOO_LIBRARIES}" will become "optimized;libfoo.lib;debug;libfoo_d.lib".
+  # This makes it impossible to pass it as-is to target_link_libraries sine it will treat
+  # this argument as a list of libraries to be linked against, causing missing libraries
+  # for optimized.lib.
+  #
+  # What this code does it traverses library_deps and extracts information about whether
+  # library is to provided as general, debug or optimized. This is a little state machine which
+  # keeps track of which build type library is to provided for:
+  #
+  # - If "debug" or "optimized" word is found, the next element in the list is expected to be
+  #   a library which will be passed to target_link_libraries() under corresponding build type.
+  #
+  # - If there is no "debug" or "optimized" used library is specified for all build types.
+  #
+  # NOTE: If separated libraries for debug and release are needed every library is the list are
+  # to be prefixed explicitly.
+  #
+  # Use: "optimized libfoo optimized libbar debug libfoo_d debug libbar_d"
+  # NOT: "optimized libfoo libbar debug libfoo_d libbar_d"
+  if(NOT "${library_deps}" STREQUAL "")
+    set(next_library_mode "")
+    set(next_interface_mode "PRIVATE")
+    foreach(library ${library_deps})
+      string(TOLOWER "${library}" library_lower)
+      if(("${library_lower}" STREQUAL "optimized") OR
+         ("${library_lower}" STREQUAL "debug"))
+        set(next_library_mode "${library_lower}")
+      elseif(("${library}" STREQUAL "PUBLIC") OR
+             ("${library}" STREQUAL "PRIVATE") OR
+             ("${library}" STREQUAL "INTERFACE"))
+        set(next_interface_mode "${library}")
+      else()
+        if("${next_library_mode}" STREQUAL "optimized")
+          target_link_libraries(${target} ${next_interface_mode} optimized ${library})
+        elseif("${next_library_mode}" STREQUAL "debug")
+          target_link_libraries(${target} ${next_interface_mode} debug ${library})
+        else()
+          target_link_libraries(${target} ${next_interface_mode} ${library})
+        endif()
+        set(next_library_mode "")
+      endif()
+    endforeach()
+  endif()
+endfunction()
 
-	# Group by location on disk
-	source_group("Source Files" FILES CMakeLists.txt)
+function(blender_add_lib__impl
+  name
+  sources
+  includes
+  includes_sys
+  library_deps
+  )
 
-	foreach(_SRC ${sources})
-		get_filename_component(_SRC_EXT ${_SRC} EXT)
-		if((${_SRC_EXT} MATCHES ".h") OR
-		   (${_SRC_EXT} MATCHES ".hpp") OR
-		   (${_SRC_EXT} MATCHES ".hh"))
-			source_group("Header Files" FILES ${_SRC})
-		else()
-			source_group("Source Files" FILES ${_SRC})
-		endif()
-	endforeach()
+  # message(STATUS "Configuring library ${name}")
 
-	unset(_SRC)
-	unset(_SRC_EXT)
-endmacro()
+  add_library(${name} ${sources})
 
+  # On windows vcpkg goes out of its way to make its libs the preferred
+  # libs, and needs to be explicitly be told not to do that.
+  if(WIN32)
+    set_target_properties(${name} PROPERTIES VS_GLOBAL_VcpkgEnabled "false")
+  endif()
+  blender_target_include_dirs(${name} ${includes})
+  blender_target_include_dirs_sys(${name} ${includes_sys})
 
-# only MSVC uses SOURCE_GROUP
-macro(blender_add_lib_nolist
-	name
-	sources
-	includes
-	includes_sys)
+  if(library_deps)
+    blender_link_libraries(${name} "${library_deps}")
+  endif()
 
-	# message(STATUS "Configuring library ${name}")
+  # works fine without having the includes
+  # listed is helpful for IDE's (QtCreator/MSVC)
+  blender_source_group("${name}" "${sources}")
+  blender_user_header_search_paths("${name}" "${includes}")
 
-	# include_directories(${includes})
-	# include_directories(SYSTEM ${includes_sys})
-	blender_include_dirs("${includes}")
-	blender_include_dirs_sys("${includes_sys}")
+  list_assert_duplicates("${sources}")
+  list_assert_duplicates("${includes}")
+  # Not for system includes because they can resolve to the same path
+  # list_assert_duplicates("${includes_sys}")
 
-	add_library(${name} ${sources})
-
-	# works fine without having the includes
-	# listed is helpful for IDE's (QtCreator/MSVC)
-	blender_source_group("${sources}")
-
-	list_assert_duplicates("${sources}")
-	list_assert_duplicates("${includes}")
-	# Not for system includes because they can resolve to the same path
-	# list_assert_duplicates("${includes_sys}")
-
-endmacro()
+  # blenders dependency loops are longer than cmake expects and we need additional loops to
+  # properly link.
+  set_property(TARGET ${name} APPEND PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
+endfunction()
 
 
-macro(blender_add_lib
-	name
-	sources
-	includes
-	includes_sys)
+function(blender_add_lib_nolist
+  name
+  sources
+  includes
+  includes_sys
+  library_deps
+  )
 
-	blender_add_lib_nolist(${name} "${sources}" "${includes}" "${includes_sys}")
+  add_cc_flags_custom_test(${name} PARENT_SCOPE)
 
-	set_property(GLOBAL APPEND PROPERTY BLENDER_LINK_LIBS ${name})
-endmacro()
+  blender_add_lib__impl(${name} "${sources}" "${includes}" "${includes_sys}" "${library_deps}")
+endfunction()
 
+function(blender_add_lib
+  name
+  sources
+  includes
+  includes_sys
+  library_deps
+  )
 
-macro(SETUP_LIBDIRS)
-	link_directories(${JPEG_LIBPATH} ${PNG_LIBPATH} ${ZLIB_LIBPATH} ${FREETYPE_LIBPATH})
+  add_cc_flags_custom_test(${name} PARENT_SCOPE)
 
-	if(WITH_PYTHON)  #  AND NOT WITH_PYTHON_MODULE  # WIN32 needs
-		link_directories(${PYTHON_LIBPATH})
-	endif()
-	if(WITH_SDL)
-		link_directories(${SDL_LIBPATH})
-	endif()
-	if(WITH_CODEC_FFMPEG)
-		link_directories(${FFMPEG_LIBPATH})
-	endif()
-	if(WITH_IMAGE_OPENEXR)
-		link_directories(${OPENEXR_LIBPATH})
-	endif()
-	if(WITH_IMAGE_TIFF)
-		link_directories(${TIFF_LIBPATH})
-	endif()
-	if(WITH_BOOST)
-		link_directories(${BOOST_LIBPATH})
-	endif()
-	if(WITH_OPENIMAGEIO)
-		link_directories(${OPENIMAGEIO_LIBPATH})
-	endif()
-	if(WITH_OPENCOLORIO)
-		link_directories(${OPENCOLORIO_LIBPATH})
-	endif()
-	if(WITH_IMAGE_OPENJPEG AND WITH_SYSTEM_OPENJPEG)
-		link_directories(${OPENJPEG_LIBPATH})
-	endif()
-	if(WITH_CODEC_QUICKTIME)
-		link_directories(${QUICKTIME_LIBPATH})
-	endif()
-	if(WITH_OPENAL)
-		link_directories(${OPENAL_LIBPATH})
-	endif()
-	if(WITH_JACK AND NOT WITH_JACK_DYNLOAD)
-		link_directories(${JACK_LIBPATH})
-	endif()
-	if(WITH_CODEC_SNDFILE)
-		link_directories(${SNDFILE_LIBPATH})
-	endif()
-	if(WITH_FFTW3)
-		link_directories(${FFTW3_LIBPATH})
-	endif()
-	if(WITH_OPENCOLLADA)
-		link_directories(${OPENCOLLADA_LIBPATH})
-		link_directories(${PCRE_LIBPATH})
-		link_directories(${EXPAT_LIBPATH})
-	endif()
-	if(WITH_LLVM)
-		link_directories(${LLVM_LIBPATH})
-	endif()
-	if(WITH_MEM_JEMALLOC)
-		link_directories(${JEMALLOC_LIBPATH})
-	endif()
+  blender_add_lib__impl(${name} "${sources}" "${includes}" "${includes_sys}" "${library_deps}")
 
-	if(WIN32 AND NOT UNIX)
-		link_directories(${PTHREADS_LIBPATH})
-	endif()
-endmacro()
+  set_property(GLOBAL APPEND PROPERTY BLENDER_LINK_LIBS ${name})
+endfunction()
 
-macro(setup_liblinks
-	target)
+# Ninja only: assign 'heavy pool' to some targets that are especially RAM-consuming to build.
+function(setup_heavy_lib_pool)
+  if(WITH_NINJA_POOL_JOBS AND NINJA_MAX_NUM_PARALLEL_COMPILE_HEAVY_JOBS)
+    set(_HEAVY_LIBS)
+    set(_TARGET)
+    if(WITH_CYCLES)
+      list(APPEND _HEAVY_LIBS "cycles_device" "cycles_kernel")
+    endif()
+    if(WITH_LIBMV)
+      list(APPEND _HEAVY_LIBS "extern_ceres" "bf_intern_libmv")
+    endif()
+    if(WITH_OPENVDB)
+      list(APPEND _HEAVY_LIBS "bf_intern_openvdb")
+    endif()
 
-	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${PLATFORM_LINKFLAGS}")
-	set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${PLATFORM_LINKFLAGS_DEBUG}")
+    foreach(_TARGET ${_HEAVY_LIBS})
+      if(TARGET ${_TARGET})
+        set_property(TARGET ${_TARGET} PROPERTY JOB_POOL_COMPILE compile_heavy_job_pool)
+      endif()
+    endforeach()
+    unset(_TARGET)
+    unset(_HEAVY_LIBS)
+  endif()
+endfunction()
 
-	target_link_libraries(${target}
-			${BLENDER_GL_LIBRARIES}
-			${PNG_LIBRARIES}
-			${ZLIB_LIBRARIES}
-			${FREETYPE_LIBRARY})
+# Platform specific linker flags for targets.
+function(setup_platform_linker_flags
+  target)
+  set_property(
+    TARGET ${target} APPEND_STRING PROPERTY
+    LINK_FLAGS " ${PLATFORM_LINKFLAGS}"
+  )
+  set_property(
+    TARGET ${target} APPEND_STRING PROPERTY
+    LINK_FLAGS_RELEASE " ${PLATFORM_LINKFLAGS_RELEASE}"
+  )
+  set_property(
+    TARGET ${target} APPEND_STRING PROPERTY
+    LINK_FLAGS_DEBUG " ${PLATFORM_LINKFLAGS_DEBUG}"
+  )
 
-	# since we are using the local libs for python when compiling msvc projects, we need to add _d when compiling debug versions
-	if(WITH_PYTHON)  # AND NOT WITH_PYTHON_MODULE  # WIN32 needs
-		target_link_libraries(${target} ${PYTHON_LINKFLAGS})
+  get_target_property(target_type ${target} TYPE)
+  if(target_type STREQUAL "EXECUTABLE")
+    set_property(
+      TARGET ${target} APPEND_STRING PROPERTY
+      LINK_FLAGS " ${PLATFORM_LINKFLAGS_EXECUTABLE}"
+    )
+  endif()
+endfunction()
 
-		if(WIN32 AND NOT UNIX)
-			file_list_suffix(PYTHON_LIBRARIES_DEBUG "${PYTHON_LIBRARIES}" "_d")
-			target_link_libraries_debug(${target} "${PYTHON_LIBRARIES_DEBUG}")
-			target_link_libraries_optimized(${target} "${PYTHON_LIBRARIES}")
-			unset(PYTHON_LIBRARIES_DEBUG)
-		else()
-			target_link_libraries(${target} ${PYTHON_LIBRARIES})
-		endif()
-	endif()
+# Platform specific libraries for targets.
+function(setup_platform_linker_libs
+  target
+  )
+  # jemalloc must be early in the list, to be before pthread (see #57998).
+  if(WITH_MEM_JEMALLOC)
+    target_link_libraries(${target} PRIVATE ${JEMALLOC_LIBRARIES})
+  endif()
 
-	if(WITH_SYSTEM_GLEW)
-		target_link_libraries(${target} ${BLENDER_GLEW_LIBRARIES})
-	endif()
-	if(WITH_BULLET AND WITH_SYSTEM_BULLET)
-		target_link_libraries(${target} ${BULLET_LIBRARIES})
-	endif()
-	if(WITH_OPENAL)
-		target_link_libraries(${target} ${OPENAL_LIBRARY})
-	endif()
-	if(WITH_FFTW3)
-		target_link_libraries(${target} ${FFTW3_LIBRARIES})
-	endif()
-	if(WITH_JACK AND NOT WITH_JACK_DYNLOAD)
-		target_link_libraries(${target} ${JACK_LIBRARIES})
-	endif()
-	if(WITH_CODEC_SNDFILE)
-		target_link_libraries(${target} ${SNDFILE_LIBRARIES})
-	endif()
-	if(WITH_SDL)
-		target_link_libraries(${target} ${SDL_LIBRARY})
-	endif()
-	if(WITH_CODEC_QUICKTIME)
-		target_link_libraries(${target} ${QUICKTIME_LIBRARIES})
-	endif()
-	if(WITH_IMAGE_TIFF)
-		target_link_libraries(${target} ${TIFF_LIBRARY})
-	endif()
-	if(WITH_OPENIMAGEIO)
-		target_link_libraries(${target} ${OPENIMAGEIO_LIBRARIES})
-	endif()
-	if(WITH_OPENCOLORIO)
-		target_link_libraries(${target} ${OPENCOLORIO_LIBRARIES})
-	endif()
-	if(WITH_BOOST)
-		target_link_libraries(${target} ${BOOST_LIBRARIES})
-		if(Boost_USE_STATIC_LIBS AND Boost_USE_ICU)
-			target_link_libraries(${target} ${ICU_LIBRARIES})
-		endif()
-	endif()
-	target_link_libraries(${target} ${JPEG_LIBRARIES})
-	if(WITH_IMAGE_OPENEXR)
-		if(WIN32 AND NOT UNIX AND NOT CMAKE_COMPILER_IS_GNUCC)
-			file_list_suffix(OPENEXR_LIBRARIES_DEBUG "${OPENEXR_LIBRARIES}" "_d")
-			target_link_libraries_debug(${target} "${OPENEXR_LIBRARIES_DEBUG}")
-			target_link_libraries_optimized(${target} "${OPENEXR_LIBRARIES}")
-			unset(OPENEXR_LIBRARIES_DEBUG)
-		else()
-			target_link_libraries(${target} ${OPENEXR_LIBRARIES})
-		endif()
-	endif()
-	if(WITH_IMAGE_OPENJPEG AND WITH_SYSTEM_OPENJPEG)
-		target_link_libraries(${target} ${OPENJPEG_LIBRARIES})
-	endif()
-	if(WITH_CODEC_FFMPEG)
+  if(WIN32 AND NOT UNIX)
+    if(DEFINED PTHREADS_LIBRARIES)
+      target_link_libraries(${target} PRIVATE ${PTHREADS_LIBRARIES})
+    endif()
+  endif()
 
-		# Strange! Without this ffmpeg gives linking errors (on linux),
-		# even though it's linked above.
-		# XXX: Does FFMPEG depend on GLU?
-		if(WITH_GLU)
-			target_link_libraries(${target} ${OPENGL_glu_LIBRARY})
-		endif()
-
-		target_link_libraries(${target} ${FFMPEG_LIBRARIES})
-	endif()
-	if(WITH_OPENCOLLADA)
-		if(WIN32 AND NOT UNIX)
-			file_list_suffix(OPENCOLLADA_LIBRARIES_DEBUG "${OPENCOLLADA_LIBRARIES}" "_d")
-			target_link_libraries_debug(${target} "${OPENCOLLADA_LIBRARIES_DEBUG}")
-			target_link_libraries_optimized(${target} "${OPENCOLLADA_LIBRARIES}")
-			unset(OPENCOLLADA_LIBRARIES_DEBUG)
-
-			file_list_suffix(PCRE_LIBRARIES_DEBUG "${PCRE_LIBRARIES}" "_d")
-			target_link_libraries_debug(${target} "${PCRE_LIBRARIES_DEBUG}")
-			target_link_libraries_optimized(${target} "${PCRE_LIBRARIES}")
-			unset(PCRE_LIBRARIES_DEBUG)
-
-			if(EXPAT_LIB)
-				file_list_suffix(EXPAT_LIB_DEBUG "${EXPAT_LIB}" "_d")
-				target_link_libraries_debug(${target} "${EXPAT_LIB_DEBUG}")
-				target_link_libraries_optimized(${target} "${EXPAT_LIB}")
-				unset(EXPAT_LIB_DEBUG)
-			endif()
-		else()
-			target_link_libraries(${target}
-					${OPENCOLLADA_LIBRARIES}
-					${PCRE_LIBRARIES}
-					${XML2_LIBRARIES}
-					${EXPAT_LIB})
-		endif()
-	endif()
-	if(WITH_MEM_JEMALLOC)
-		target_link_libraries(${target} ${JEMALLOC_LIBRARIES})
-	endif()
-	if(WITH_INPUT_NDOF)
-		target_link_libraries(${target} ${NDOF_LIBRARIES})
-	endif()
-	if(WITH_MOD_CLOTH_ELTOPO)
-		target_link_libraries(${target} ${LAPACK_LIBRARIES})
-	endif()
-	if(WITH_CYCLES_OSL)
-		target_link_libraries(${target} ${OSL_LIBRARIES})
-	endif()
-	if(WITH_LLVM)
-		target_link_libraries(${target} ${LLVM_LIBRARY})
-	endif()
-	if(WIN32 AND NOT UNIX)
-		target_link_libraries(${target} ${PTHREADS_LIBRARIES})
-	endif()
-
-	target_link_libraries(${target} ${PLATFORM_LINKLIBS} ${CMAKE_DL_LIBS})
-
-	# We put CLEW and CUEW here because OPENSUBDIV_LIBRARIES dpeends on them..
-	if(WITH_CYCLES OR WITH_COMPOSITOR OR WITH_OPENSUBDIV)
-		target_link_libraries(${target} "extern_clew")
-		target_link_libraries(${target} "extern_cuew")
-	endif()
-endmacro()
-
-macro(SETUP_BLENDER_SORTED_LIBS)
-	get_property(BLENDER_LINK_LIBS GLOBAL PROPERTY BLENDER_LINK_LIBS)
-
-	list(APPEND BLENDER_LINK_LIBS
-		bf_windowmanager
-		bf_render
-	)
-
-	if(WITH_MOD_FLUID)
-		list(APPEND BLENDER_LINK_LIBS bf_intern_elbeem)
-	endif()
-
-	if(WITH_CYCLES)
-		list(APPEND BLENDER_LINK_LIBS
-			cycles_render
-			cycles_bvh
-			cycles_device
-			cycles_kernel
-			cycles_util
-			cycles_subd)
-		if(WITH_CYCLES_OSL)
-			list(APPEND BLENDER_LINK_LIBS cycles_kernel_osl)
-		endif()
-	endif()
-
-	# Sort libraries
-	set(BLENDER_SORTED_LIBS
-		bf_windowmanager
-
-		bf_editor_space_api
-		bf_editor_space_action
-		bf_editor_space_buttons
-		bf_editor_space_console
-		bf_editor_space_file
-		bf_editor_space_graph
-		bf_editor_space_image
-		bf_editor_space_info
-		bf_editor_space_logic
-		bf_editor_space_nla
-		bf_editor_space_node
-		bf_editor_space_outliner
-		bf_editor_space_script
-		bf_editor_space_sequencer
-		bf_editor_space_text
-		bf_editor_space_time
-		bf_editor_space_userpref
-		bf_editor_space_view3d
-		bf_editor_space_clip
-
-		bf_editor_transform
-		bf_editor_util
-		bf_editor_uvedit
-		bf_editor_curve
-		bf_editor_gpencil
-		bf_editor_interface
-		bf_editor_mesh
-		bf_editor_metaball
-		bf_editor_object
-		bf_editor_armature
-		bf_editor_physics
-		bf_editor_render
-		bf_editor_screen
-		bf_editor_sculpt_paint
-		bf_editor_sound
-		bf_editor_animation
-		bf_editor_datafiles
-		bf_editor_mask
-		bf_editor_io
-
-		bf_render
-		bf_python
-		bf_python_ext
-		bf_python_mathutils
-		bf_python_bmesh
-		bf_freestyle
-		bf_ikplugin
-		bf_modifiers
-		bf_bmesh
-		bf_blenkernel
-		bf_nodes
-		bf_rna
-		bf_gpu
-		bf_blenloader
-		bf_imbuf
-		bf_blenlib
-		bf_intern_ghost
-		bf_intern_string
-		bf_avi
-		bf_imbuf_cineon
-		bf_imbuf_openexr
-		bf_imbuf_openimageio
-		bf_imbuf_dds
-		bf_collada
-		bf_intern_elbeem
-		bf_intern_memutil
-		bf_intern_guardedalloc
-		bf_intern_ctr
-		bf_intern_utfconv
-		ge_blen_routines
-		ge_converter
-		ge_phys_dummy
-		ge_phys_bullet
-		bf_intern_smoke
-		extern_minilzo
-		extern_lzma
-		extern_colamd
-		ge_logic_ketsji
-		extern_recastnavigation
-		ge_logic
-		ge_rasterizer
-		ge_oglrasterizer
-		ge_logic_expressions
-		ge_scenegraph
-		ge_logic_network
-		ge_logic_ngnetwork
-		ge_logic_loopbacknetwork
-		bf_intern_moto
-		extern_openjpeg
-		extern_redcode
-		ge_videotex
-		bf_dna
-		bf_blenfont
-		bf_intern_audaspace
-		bf_intern_mikktspace
-		bf_intern_dualcon
-		bf_intern_cycles
-		cycles_render
-		cycles_bvh
-		cycles_device
-		cycles_kernel
-		cycles_util
-		cycles_subd
-		bf_intern_raskter
-		bf_intern_opencolorio
-		extern_rangetree
-		extern_wcwidth
-		extern_libmv
-		extern_glog
-
-		bf_intern_glew_mx
-	)
-
-	if(WITH_COMPOSITOR)
-		# added for opencl compositor
-		list_insert_before(BLENDER_SORTED_LIBS "bf_blenkernel" "bf_compositor")
-		list_insert_after(BLENDER_SORTED_LIBS "bf_compositor" "bf_intern_opencl")
-	endif()
-
-	if(WITH_LIBMV)
-		list(APPEND BLENDER_SORTED_LIBS extern_ceres)
-	endif()
-
-	if(WITH_MOD_CLOTH_ELTOPO)
-		list(APPEND BLENDER_SORTED_LIBS extern_eltopo)
-	endif()
-
-	if(NOT WITH_SYSTEM_GLEW)
-		list(APPEND BLENDER_SORTED_LIBS ${BLENDER_GLEW_LIBRARIES})
-	endif()
-
-	if(WITH_BINRELOC)
-		list(APPEND BLENDER_SORTED_LIBS extern_binreloc)
-	endif()
-
-	if(WITH_CXX_GUARDEDALLOC)
-		list(APPEND BLENDER_SORTED_LIBS bf_intern_guardedalloc_cpp)
-	endif()
-
-	if(WITH_IK_SOLVER)
-		list_insert_after(BLENDER_SORTED_LIBS "bf_intern_elbeem" "bf_intern_iksolver")
-	endif()
-
-	if(WITH_IK_ITASC)
-		list(APPEND BLENDER_SORTED_LIBS bf_intern_itasc)
-	endif()
-
-	if(WITH_CODEC_QUICKTIME)
-		list(APPEND BLENDER_SORTED_LIBS bf_quicktime)
-	endif()
-
-	if(WITH_INPUT_NDOF)
-		list(APPEND BLENDER_SORTED_LIBS bf_intern_ghostndof3dconnexion)
-	endif()
-	
-	if(WITH_MOD_BOOLEAN)
-		list(APPEND BLENDER_SORTED_LIBS extern_carve)
-	endif()
-
-	if(WITH_GHOST_XDND)
-		list(APPEND BLENDER_SORTED_LIBS extern_xdnd)
-	endif()
-
-	if(WITH_CYCLES_OSL)
-		list_insert_after(BLENDER_SORTED_LIBS "cycles_kernel" "cycles_kernel_osl")
-	endif()
-
-	if(WITH_INTERNATIONAL)
-		list(APPEND BLENDER_SORTED_LIBS bf_intern_locale)
-	endif()
-
-	if(WITH_OPENNL)
-		list_insert_after(BLENDER_SORTED_LIBS "bf_render" "bf_intern_opennl")
-	endif()
-
-	if(WITH_BULLET)
-		list_insert_after(BLENDER_SORTED_LIBS "bf_blenkernel" "bf_intern_rigidbody")
-	endif()
-
-	if(WITH_BULLET AND NOT WITH_SYSTEM_BULLET)
-		list_insert_after(BLENDER_SORTED_LIBS "ge_logic_ngnetwork" "extern_bullet")
-	endif()
-
-	foreach(SORTLIB ${BLENDER_SORTED_LIBS})
-		set(REMLIB ${SORTLIB})
-		foreach(SEARCHLIB ${BLENDER_LINK_LIBS})
-			if(${SEARCHLIB} STREQUAL ${SORTLIB})
-				set(REMLIB "")
-			endif()
-		endforeach()
-		if(REMLIB)
-			# message(STATUS "Removing library ${REMLIB} from blender linking because: not configured")
-			list(APPEND REM_MSG ${REMLIB})
-			list(REMOVE_ITEM BLENDER_SORTED_LIBS ${REMLIB})
-		endif()
-	endforeach()
-	if(REM_MSG)
-		list(SORT REM_MSG)
-		message(STATUS "Blender Skipping: (${REM_MSG})")
-	endif()
-
-	unset(SEARCHLIB)
-	unset(SORTLIB)
-	unset(REMLIB)
-	unset(REM_MSG)
-
-	# for top-level tests
-	set_property(GLOBAL PROPERTY BLENDER_SORTED_LIBS_PROP ${BLENDER_SORTED_LIBS})
-endmacro()
+  # target_link_libraries(${target} ${PLATFORM_LINKLIBS} ${CMAKE_DL_LIBS})
+  target_link_libraries(${target} PRIVATE ${PLATFORM_LINKLIBS})
+endfunction()
 
 macro(TEST_SSE_SUPPORT
-	_sse_flags
-	_sse2_flags)
+  _sse42_flags)
 
-	include(CheckCSourceRuns)
+  include(CheckCSourceRuns)
 
-	# message(STATUS "Detecting SSE support")
-	if(CMAKE_COMPILER_IS_GNUCC OR (CMAKE_C_COMPILER_ID MATCHES "Clang"))
-		set(${_sse_flags} "-msse")
-		set(${_sse2_flags} "-msse2")
-	elseif(MSVC)
-		# x86_64 has this auto enabled
-		if("${CMAKE_SIZEOF_VOID_P}" EQUAL "8")
-			set(${_sse_flags} "")
-			set(${_sse2_flags} "")
-		else()
-			set(${_sse_flags} "/arch:SSE")
-			set(${_sse2_flags} "/arch:SSE2")
-		endif()
-	elseif(CMAKE_C_COMPILER_ID MATCHES "Intel")
-		set(${_sse_flags} "")  # icc defaults to -msse
-		set(${_sse2_flags} "-msse2")
-	else()
-		message(WARNING "SSE flags for this compiler: '${CMAKE_C_COMPILER_ID}' not known")
-		set(${_sse_flags})
-		set(${_sse2_flags})
-	endif()
+  # message(STATUS "Detecting SSE support")
+  if(CMAKE_COMPILER_IS_GNUCC OR (CMAKE_C_COMPILER_ID MATCHES "Clang"))
+    set(${_sse42_flags} "-march=x86-64-v2")
+  elseif(MSVC)
+    # MSVC has no specific build flags for SSE42, but when using intrinsics it will
+    # generate the right instructions.
+    set(${_sse42_flags} "")
+  elseif(CMAKE_C_COMPILER_ID STREQUAL "Intel")
+    if(WIN32)
+      set(${_sse42_flags} "/QxSSE4.2")
+    else()
+      set(${_sse42_flags} "-xsse4.2")
+    endif()
+  else()
+    message(WARNING "SSE flags for this compiler: '${CMAKE_C_COMPILER_ID}' not known")
+    set(${_sse42_flags})
+  endif()
 
-	set(CMAKE_REQUIRED_FLAGS "${${_sse_flags}} ${${_sse2_flags}}")
+  set(CMAKE_REQUIRED_FLAGS "${${_sse42_flags}}")
 
-	if(NOT DEFINED SUPPORT_SSE_BUILD)
-		# result cached
-		check_c_source_runs("
-			#include <xmmintrin.h>
-			int main(void) { __m128 v = _mm_setzero_ps(); return 0; }"
-		SUPPORT_SSE_BUILD)
+  if(NOT DEFINED SUPPORT_SSE42_BUILD)
+    # result cached
+    check_c_source_runs("
+      #include <nmmintrin.h>
+      #include <emmintrin.h>
+      #include <smmintrin.h>
+      int main(void) {
+        __m128i v = _mm_setzero_si128();
+        v = _mm_cmpgt_epi64(v,v);
+        if (_mm_test_all_zeros(v, v)) return 0;
+        return 1;
+      }"
+    SUPPORT_SSE42_BUILD)
+  endif()
 
-		if(SUPPORT_SSE_BUILD)
-			message(STATUS "SSE Support: detected.")
-		else()
-			message(STATUS "SSE Support: missing.")
-		endif()
-	endif()
-
-	if(NOT DEFINED SUPPORT_SSE2_BUILD)
-		# result cached
-		check_c_source_runs("
-			#include <emmintrin.h>
-			int main(void) { __m128d v = _mm_setzero_pd(); return 0; }"
-		SUPPORT_SSE2_BUILD)
-
-		if(SUPPORT_SSE2_BUILD)
-			message(STATUS "SSE2 Support: detected.")
-		else()
-			message(STATUS "SSE2 Support: missing.")
-		endif()
-	endif()
-
-	unset(CMAKE_REQUIRED_FLAGS)
+  unset(CMAKE_REQUIRED_FLAGS)
 endmacro()
 
-macro(TEST_STDBOOL_SUPPORT)
-	include(CheckCSourceRuns)
-
-	# This program will compile correctly if and only if
-	# this C compiler supports C99 stdbool.
-	check_c_source_runs("
-		#include <stdbool.h>
-		int main(void) { return (int)false; }"
-	HAVE_STDBOOL_H)
+macro(TEST_NEON_SUPPORT)
+  if(NOT DEFINED SUPPORT_NEON_BUILD)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles(
+      "#include <arm_neon.h>
+       int main() {return vaddvq_s32(vdupq_n_s32(1));}"
+      SUPPORT_NEON_BUILD)
+  endif()
 endmacro()
 
-macro(TEST_UNORDERED_MAP_SUPPORT)
-	# - Detect unordered_map availability
-	# Test if a valid implementation of unordered_map exists
-	# and define the include path
-	# This module defines
-	#  HAVE_UNORDERED_MAP, whether unordered_map implementation was found
-	#  
-	#  HAVE_STD_UNORDERED_MAP_HEADER, <unordered_map.h> was found
-	#  HAVE_UNORDERED_MAP_IN_STD_NAMESPACE, unordered_map is in namespace std
-	#  HAVE_UNORDERED_MAP_IN_TR1_NAMESPACE, unordered_map is in namespace std::tr1
-	#  
-	#  UNORDERED_MAP_INCLUDE_PREFIX, include path prefix for unordered_map, if found
-	#  UNORDERED_MAP_NAMESPACE, namespace for unordered_map, if found
-
-	include(CheckIncludeFileCXX)
-	CHECK_INCLUDE_FILE_CXX("unordered_map" HAVE_STD_UNORDERED_MAP_HEADER)
-	if(HAVE_STD_UNORDERED_MAP_HEADER)
-		# Even so we've found unordered_map header file it doesn't
-		# mean unordered_map and unordered_set will be declared in
-		# std namespace.
-		#
-		# Namely, MSVC 2008 have unordered_map header which declares
-		# unordered_map class in std::tr1 namespace. In order to support
-		# this, we do extra check to see which exactly namespace is
-		# to be used.
-
-		include(CheckCXXSourceCompiles)
-		CHECK_CXX_SOURCE_COMPILES("#include <unordered_map>
-		                          int main() {
-		                            std::unordered_map<int, int> map;
-		                            return 0;
-		                          }"
-		                          HAVE_UNORDERED_MAP_IN_STD_NAMESPACE)
-		if(HAVE_UNORDERED_MAP_IN_STD_NAMESPACE)
-			message(STATUS "Found unordered_map/set in std namespace.")
-
-			set(HAVE_UNORDERED_MAP "TRUE")
-			set(UNORDERED_MAP_INCLUDE_PREFIX "")
-			set(UNORDERED_MAP_NAMESPACE "std")
-		else()
-			CHECK_CXX_SOURCE_COMPILES("#include <unordered_map>
-			                          int main() {
-			                            std::tr1::unordered_map<int, int> map;
-			                            return 0;
-			                          }"
-			                          HAVE_UNORDERED_MAP_IN_TR1_NAMESPACE)
-			if(HAVE_UNORDERED_MAP_IN_TR1_NAMESPACE)
-				message(STATUS "Found unordered_map/set in std::tr1 namespace.")
-
-				set(HAVE_UNORDERED_MAP "TRUE")
-				set(UNORDERED_MAP_INCLUDE_PREFIX "")
-				set(UNORDERED_MAP_NAMESPACE "std::tr1")
-			else()
-				message(STATUS "Found <unordered_map> but cannot find either std::unordered_map "
-				        "or std::tr1::unordered_map.")
-			endif()
-		endif()
-	else()
-		CHECK_INCLUDE_FILE_CXX("tr1/unordered_map" HAVE_UNORDERED_MAP_IN_TR1_NAMESPACE)
-		if(HAVE_UNORDERED_MAP_IN_TR1_NAMESPACE)
-			message(STATUS "Found unordered_map/set in std::tr1 namespace.")
-
-			set(HAVE_UNORDERED_MAP "TRUE")
-			set(UNORDERED_MAP_INCLUDE_PREFIX "tr1")
-			set(UNORDERED_MAP_NAMESPACE "std::tr1")
-		else()
-			message(STATUS "Unable to find <unordered_map> or <tr1/unordered_map>. ")
-		endif()
-	endif()
-endmacro()
-
-macro(TEST_SHARED_PTR_SUPPORT)
-	# This check are coming from Ceres library.
-	#
-	# Find shared pointer header and namespace.
-	#
-	# This module defines the following variables:
-	#
-	# SHARED_PTR_FOUND: TRUE if shared_ptr found.
-	# SHARED_PTR_TR1_MEMORY_HEADER: True if <tr1/memory> header is to be used
-	# for the shared_ptr object, otherwise use <memory>.
-	# SHARED_PTR_TR1_NAMESPACE: TRUE if shared_ptr is defined in std::tr1 namespace,
-	# otherwise it's assumed to be defined in std namespace.
-
-	include(CheckIncludeFileCXX)
-	set(SHARED_PTR_FOUND FALSE)
-	CHECK_INCLUDE_FILE_CXX(memory HAVE_STD_MEMORY_HEADER)
-	if(HAVE_STD_MEMORY_HEADER)
-		# Finding the memory header doesn't mean that shared_ptr is in std
-		# namespace.
-		#
-		# In particular, MSVC 2008 has shared_ptr declared in std::tr1.  In
-		# order to support this, we do an extra check to see which namespace
-		# should be used.
-		include(CheckCXXSourceCompiles)
-		CHECK_CXX_SOURCE_COMPILES("#include <memory>
-		                           int main() {
-		                             std::shared_ptr<int> int_ptr;
-		                             return 0;
-		                           }"
-		                          HAVE_SHARED_PTR_IN_STD_NAMESPACE)
-
-		if(HAVE_SHARED_PTR_IN_STD_NAMESPACE)
-			message("-- Found shared_ptr in std namespace using <memory> header.")
-			set(SHARED_PTR_FOUND TRUE)
-		else()
-			CHECK_CXX_SOURCE_COMPILES("#include <memory>
-			                           int main() {
-			                           std::tr1::shared_ptr<int> int_ptr;
-			                           return 0;
-			                           }"
-			                          HAVE_SHARED_PTR_IN_TR1_NAMESPACE)
-			if(HAVE_SHARED_PTR_IN_TR1_NAMESPACE)
-				message("-- Found shared_ptr in std::tr1 namespace using <memory> header.")
-				set(SHARED_PTR_TR1_NAMESPACE TRUE)
-				set(SHARED_PTR_FOUND TRUE)
-			endif()
-		endif()
-	endif()
-
-	if(NOT SHARED_PTR_FOUND)
-		# Further, gcc defines shared_ptr in std::tr1 namespace and
-		# <tr1/memory> is to be included for this. And what makes things
-		# even more tricky is that gcc does have <memory> header, so
-		# all the checks above wouldn't find shared_ptr.
-		CHECK_INCLUDE_FILE_CXX("tr1/memory" HAVE_TR1_MEMORY_HEADER)
-		if(HAVE_TR1_MEMORY_HEADER)
-			CHECK_CXX_SOURCE_COMPILES("#include <tr1/memory>
-			                           int main() {
-			                           std::tr1::shared_ptr<int> int_ptr;
-			                           return 0;
-			                           }"
-			                           HAVE_SHARED_PTR_IN_TR1_NAMESPACE_FROM_TR1_MEMORY_HEADER)
-			if(HAVE_SHARED_PTR_IN_TR1_NAMESPACE_FROM_TR1_MEMORY_HEADER)
-				message("-- Found shared_ptr in std::tr1 namespace using <tr1/memory> header.")
-				set(SHARED_PTR_TR1_MEMORY_HEADER TRUE)
-				set(SHARED_PTR_TR1_NAMESPACE TRUE)
-				set(SHARED_PTR_FOUND TRUE)
-			endif()
-		endif()
-	endif()
+# Only print message if running CMake first time
+macro(message_first_run)
+  if(FIRST_RUN)
+    message(${ARGV})
+  endif()
 endmacro()
 
 # when we have warnings as errors applied globally this
-# needs to be removed for some external libs which we dont maintain.
+# needs to be removed for some external libs which we don't maintain.
+
+
+macro(remove_c_flag
+  _flag)
+
+  foreach(f ${ARGV})
+    string(REGEX REPLACE ${f} "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+    string(REGEX REPLACE ${f} "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+    string(REGEX REPLACE ${f} "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    string(REGEX REPLACE ${f} "" CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL}")
+    string(REGEX REPLACE ${f} "" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+  endforeach()
+  unset(f)
+endmacro()
+
+macro(remove_cxx_flag
+  _flag)
+
+  foreach(f ${ARGV})
+    string(REGEX REPLACE ${f} "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE ${f} "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    string(REGEX REPLACE ${f} "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REGEX REPLACE ${f} "" CMAKE_CXX_FLAGS_MINSIZEREL "${CMAKE_CXX_FLAGS_MINSIZEREL}")
+    string(REGEX REPLACE ${f} "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+  endforeach()
+  unset(f)
+endmacro()
 
 # utility macro
 macro(remove_cc_flag
-	flag)
+  _flag)
 
-	string(REGEX REPLACE ${flag} "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-	string(REGEX REPLACE ${flag} "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
-	string(REGEX REPLACE ${flag} "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
-	string(REGEX REPLACE ${flag} "" CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL}")
-	string(REGEX REPLACE ${flag} "" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
-
-	string(REGEX REPLACE ${flag} "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-	string(REGEX REPLACE ${flag} "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-	string(REGEX REPLACE ${flag} "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-	string(REGEX REPLACE ${flag} "" CMAKE_CXX_FLAGS_MINSIZEREL "${CMAKE_CXX_FLAGS_MINSIZEREL}")
-	string(REGEX REPLACE ${flag} "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
-
+  remove_c_flag(${ARGV})
+  remove_cxx_flag(${ARGV})
 endmacro()
 
-macro(add_cc_flag
-	flag)
+macro(add_c_flag
+  flag)
 
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${flag}")
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${flag}")
+  string(APPEND CMAKE_C_FLAGS " ${flag}")
+  string(APPEND CMAKE_CXX_FLAGS " ${flag}")
+endmacro()
+
+macro(add_cxx_flag
+  flag)
+
+  string(APPEND CMAKE_CXX_FLAGS " ${flag}")
+endmacro()
+
+# Needed to "negate" options: `-Wno-example`
+# as this doesn't work when added to `CMAKE_CXX_FLAGS`.
+macro(add_c_flag_per_config
+  flag)
+
+  string(APPEND CMAKE_C_FLAGS_DEBUG " ${flag}")
+  string(APPEND CMAKE_C_FLAGS_RELEASE " ${flag}")
+  string(APPEND CMAKE_C_FLAGS_MINSIZEREL " ${flag}")
+  string(APPEND CMAKE_C_FLAGS_RELWITHDEBINFO " ${flag}")
+endmacro()
+macro(add_cxx_flag_per_config
+  flag)
+
+  string(APPEND CMAKE_CXX_FLAGS_DEBUG " ${flag}")
+  string(APPEND CMAKE_CXX_FLAGS_RELEASE " ${flag}")
+  string(APPEND CMAKE_CXX_FLAGS_MINSIZEREL " ${flag}")
+  string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " ${flag}")
 endmacro()
 
 macro(remove_strict_flags)
 
-	if(CMAKE_COMPILER_IS_GNUCC)
-		remove_cc_flag("-Wstrict-prototypes")
-		remove_cc_flag("-Wmissing-prototypes")
-		remove_cc_flag("-Wunused-parameter")
-		remove_cc_flag("-Wwrite-strings")
-		remove_cc_flag("-Wredundant-decls")
-		remove_cc_flag("-Wundef")
-		remove_cc_flag("-Wshadow")
-		remove_cc_flag("-Wdouble-promotion")
-		remove_cc_flag("-Wold-style-definition")
-		remove_cc_flag("-Werror=[^ ]+")
-		remove_cc_flag("-Werror")
+  if(CMAKE_COMPILER_IS_GNUCC)
+    remove_cc_flag(
+      "-Wstrict-prototypes"
+      "-Wsuggest-attribute=format"
+      "-Wmissing-prototypes"
+      "-Wmissing-declarations"
+      "-Wmissing-format-attribute"
+      "-Wunused-local-typedefs"
+      "-Wunused-macros"
+      "-Wunused-parameter"
+      "-Wwrite-strings"
+      "-Wredundant-decls"
+      "-Wundef"
+      "-Wshadow"
+      "-Wdouble-promotion"
+      "-Wold-style-definition"
+      "-Wextra"
+      "-Werror=[^ ]+"
+      "-Werror"
+    )
 
-		# negate flags implied by '-Wall'
-		add_cc_flag("${CC_REMOVE_STRICT_FLAGS}")
-	endif()
+    # negate flags implied by '-Wall'
+    add_c_flag("${C_REMOVE_STRICT_FLAGS}")
+    add_cxx_flag("${CXX_REMOVE_STRICT_FLAGS}")
+  endif()
 
-	if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-		remove_cc_flag("-Wunused-parameter")
-		remove_cc_flag("-Wunused-variable")
-		remove_cc_flag("-Werror=[^ ]+")
-		remove_cc_flag("-Werror")
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    remove_cc_flag(
+      "-Wunused-parameter"
+      "-Wunused-variable"
+      "-Werror=[^ ]+"
+      "-Werror"
+    )
 
-		# negate flags implied by '-Wall'
-		add_cc_flag("${CC_REMOVE_STRICT_FLAGS}")
-	endif()
+    # negate flags implied by '-Wall'
+    add_c_flag("${C_REMOVE_STRICT_FLAGS}")
+    add_cxx_flag("${CXX_REMOVE_STRICT_FLAGS}")
+  endif()
 
-	if(MSVC)
-		# TODO
-	endif()
+  if(MSVC)
+    add_cxx_flag(
+      # Warning C5038: data member 'foo' will be initialized after data member 'bar'.
+      "/wd5038"
+    )
+    remove_cc_flag(
+      # Restore warn C4100 (unreferenced formal parameter) back to w4.
+      "/w34100"
+      # Restore warn C4189 (unused variable) back to w4.
+      "/w34189"
+    )
+  endif()
 
+endmacro()
+
+macro(remove_extra_strict_flags)
+  if(CMAKE_COMPILER_IS_GNUCC)
+    remove_cc_flag(
+      "-Wunused-parameter"
+    )
+  endif()
+
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    remove_cc_flag(
+      "-Wunused-parameter"
+    )
+  endif()
+
+  if(MSVC)
+    remove_cc_flag(
+      # Restore warn C4100 (unreferenced formal parameter) back to w4.
+      "/w34100"
+    )
+  endif()
 endmacro()
 
 # note, we can only append flags on a single file so we need to negate the options.
-# at the moment we cant shut up ffmpeg deprecations, so use this, but will
+# at the moment we can't shut up ffmpeg deprecations, so use this, but will
 # probably add more removals here.
-macro(remove_strict_flags_file
-	filenames)
-
-	foreach(_SOURCE ${ARGV})
-
-		if(CMAKE_COMPILER_IS_GNUCC OR
-		  (CMAKE_C_COMPILER_ID MATCHES "Clang"))
-
-			set_source_files_properties(${_SOURCE}
-				PROPERTIES
-					COMPILE_FLAGS "${CC_REMOVE_STRICT_FLAGS}"
-			)
-		endif()
-
-		if(MSVC)
-			# TODO
-		endif()
-
-	endforeach()
-
-	unset(_SOURCE)
-
+macro(remove_strict_c_flags_file
+  filenames)
+  foreach(_SOURCE ${ARGV})
+    if(CMAKE_COMPILER_IS_GNUCC OR
+       (CMAKE_C_COMPILER_ID MATCHES "Clang"))
+      set_source_files_properties(
+        ${_SOURCE} PROPERTIES
+        COMPILE_FLAGS "${C_REMOVE_STRICT_FLAGS}"
+      )
+    endif()
+    if(MSVC)
+      # TODO
+    endif()
+  endforeach()
+  unset(_SOURCE)
 endmacro()
 
-
-macro(ADD_CHECK_C_COMPILER_FLAG
-	_CFLAGS
-	_CACHE_VAR
-	_FLAG)
-
-	include(CheckCCompilerFlag)
-
-	CHECK_C_COMPILER_FLAG("${_FLAG}" "${_CACHE_VAR}")
-	if(${_CACHE_VAR})
-		# message(STATUS "Using CFLAG: ${_FLAG}")
-		set(${_CFLAGS} "${${_CFLAGS}} ${_FLAG}")
-	else()
-		message(STATUS "Unsupported CFLAG: ${_FLAG}")
-	endif()
+macro(remove_strict_cxx_flags_file
+  filenames)
+  remove_strict_c_flags_file(${filenames} ${ARHV})
+  foreach(_SOURCE ${ARGV})
+    if(CMAKE_COMPILER_IS_GNUCC OR
+       (CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+      set_source_files_properties(
+        ${_SOURCE} PROPERTIES
+        COMPILE_FLAGS "${CXX_REMOVE_STRICT_FLAGS}"
+      )
+    endif()
+    if(MSVC)
+      # TODO
+    endif()
+  endforeach()
+  unset(_SOURCE)
 endmacro()
 
-macro(ADD_CHECK_CXX_COMPILER_FLAG
-	_CXXFLAGS
-	_CACHE_VAR
-	_FLAG)
-
-	include(CheckCXXCompilerFlag)
-
-	CHECK_CXX_COMPILER_FLAG("${_FLAG}" "${_CACHE_VAR}")
-	if(${_CACHE_VAR})
-		# message(STATUS "Using CXXFLAG: ${_FLAG}")
-		set(${_CXXFLAGS} "${${_CXXFLAGS}} ${_FLAG}")
-	else()
-		message(STATUS "Unsupported CXXFLAG: ${_FLAG}")
-	endif()
+# External libs may need 'signed char' to be default.
+macro(remove_cc_flag_unsigned_char)
+  if(CMAKE_COMPILER_IS_GNUCC OR
+     (CMAKE_C_COMPILER_ID MATCHES "Clang") OR
+     (CMAKE_C_COMPILER_ID STREQUAL "Intel"))
+    remove_cc_flag("-funsigned-char")
+  elseif(MSVC)
+    remove_cc_flag("/J")
+  else()
+    message(WARNING
+      "Compiler '${CMAKE_C_COMPILER_ID}' failed to disable 'unsigned char' flag."
+      "Build files need updating."
+    )
+  endif()
 endmacro()
 
-macro(get_blender_version)
-	# So cmake depends on BKE_blender.hh, beware of inf-loops!
-	CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender.hh
-	               ${CMAKE_BINARY_DIR}/source/blender/blenkernel/BKE_blender.hh.done)
+function(add_check_c_compiler_flag_impl
+  _CFLAGS
+  _CACHE_VAR
+  _FLAG
+  )
 
-	file(STRINGS ${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender.hh _contents REGEX "^#define[ \t]+BLENDER_.*$")
+  include(CheckCCompilerFlag)
 
-	string(REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION[ \t]+([0-9]+).*" "\\1" _out_version "${_contents}")
-	string(REGEX REPLACE ".*#define[ \t]+BLENDER_SUBVERSION[ \t]+([0-9]+).*" "\\1" _out_subversion "${_contents}")
-	string(REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION_CHAR[ \t]+([a-z]+).*" "\\1" _out_version_char "${_contents}")
-	string(REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION_CYCLE[ \t]+([a-z]+).*" "\\1" _out_version_cycle "${_contents}")
+  check_c_compiler_flag("${_FLAG}" "${_CACHE_VAR}")
+  if(${_CACHE_VAR})
+    # message(STATUS "Using CFLAG: ${_FLAG}")
+    set(${_CFLAGS} "${${_CFLAGS}} ${_FLAG}" PARENT_SCOPE)
+  else()
+    message(STATUS "Unsupported CFLAG: ${_FLAG}")
+  endif()
+endfunction()
 
-	if(NOT ${_out_version} MATCHES "[0-9]+")
-		message(FATAL_ERROR "Version parsing failed for BLENDER_VERSION")
-	endif()
+function(add_check_cxx_compiler_flag_impl
+  _CXXFLAGS
+  _CACHE_VAR
+  _FLAG
+  )
 
-	if(NOT ${_out_subversion} MATCHES "[0-9]+")
-		message(FATAL_ERROR "Version parsing failed for BLENDER_SUBVERSION")
-	endif()
+  include(CheckCXXCompilerFlag)
 
-	# clumsy regex, only single char are ok but it could be unset
+  check_cxx_compiler_flag("${_FLAG}" "${_CACHE_VAR}")
+  if(${_CACHE_VAR})
+    # message(STATUS "Using CXXFLAG: ${_FLAG}")
+    set(${_CXXFLAGS} "${${_CXXFLAGS}} ${_FLAG}" PARENT_SCOPE)
+  else()
+    message(STATUS "Unsupported CXXFLAG: ${_FLAG}")
+  endif()
+endfunction()
 
-	string(LENGTH "${_out_version_char}" _out_version_char_len)
-	if(NOT _out_version_char_len EQUAL 1)
-		set(_out_version_char "")
-	elseif(NOT ${_out_version_char} MATCHES "[a-z]+")
-		message(FATAL_ERROR "Version parsing failed for BLENDER_VERSION_CHAR")
-	endif()
+function(ADD_CHECK_C_COMPILER_FLAGS _CFLAGS)
+  # Iterate over pairs & check each.
+  set(cache_var "")
+  foreach(arg ${ARGN})
+    if(cache_var)
+      add_check_c_compiler_flag_impl("${_CFLAGS}" "${cache_var}" "${arg}")
+      set(cache_var "")
+    else()
+      set(cache_var "${arg}")
+    endif()
+  endforeach()
+  set(${_CFLAGS} "${${_CFLAGS}}" PARENT_SCOPE)
+endfunction()
 
-	if(NOT ${_out_version_cycle} MATCHES "[a-z]+")
-		message(FATAL_ERROR "Version parsing failed for BLENDER_VERSION_CYCLE")
-	endif()
+function(ADD_CHECK_CXX_COMPILER_FLAGS _CXXFLAGS)
+  # Iterate over pairs & check each.
+  set(cache_var "")
+  foreach(arg ${ARGN})
+    if(cache_var)
+      add_check_cxx_compiler_flag_impl("${_CXXFLAGS}" "${cache_var}" "${arg}")
+      set(cache_var "")
+    else()
+      set(cache_var "${arg}")
+    endif()
+  endforeach()
+  set(${_CXXFLAGS} "${${_CXXFLAGS}}" PARENT_SCOPE)
+endfunction()
 
-	math(EXPR BLENDER_VERSION_MAJOR "${_out_version} / 100")
-	math(EXPR BLENDER_VERSION_MINOR "${_out_version} % 100")
-	set(BLENDER_VERSION "${BLENDER_VERSION_MAJOR}.${BLENDER_VERSION_MINOR}")
+function(get_blender_version)
+  # extracts header vars and defines them in the parent scope:
+  #
+  # - BLENDER_VERSION (major.minor)
+  # - BLENDER_VERSION_MAJOR
+  # - BLENDER_VERSION_MINOR
+  # - BLENDER_VERSION_PATCH
+  # - BLENDER_VERSION_CYCLE (alpha, beta, rc, release)
 
-	set(BLENDER_SUBVERSION ${_out_subversion})
-	set(BLENDER_VERSION_CHAR ${_out_version_char})
-	set(BLENDER_VERSION_CYCLE ${_out_version_cycle})
+  # So CMAKE depends on `BKE_blender_version.h`, beware of infinite-loops!
+  configure_file(
+    ${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender_version.h
+    ${CMAKE_BINARY_DIR}/source/blender/blenkernel/BKE_blender_version.h.done
+  )
 
-	# for packaging, alpha to numbers
-	string(COMPARE EQUAL "${BLENDER_VERSION_CHAR}" "" _out_version_char_empty)
-	if(${_out_version_char_empty})
-		set(BLENDER_VERSION_CHAR_INDEX "0")
-	else()
-		set(_char_ls a b c d e f g h i j k l m n o p q r s t u v w x y z)
-		list(FIND _char_ls ${BLENDER_VERSION_CHAR} _out_version_char_index)
-		math(EXPR BLENDER_VERSION_CHAR_INDEX "${_out_version_char_index} + 1")
-		unset(_char_ls)
-		unset(_out_version_char_index)
-	endif()
+  file(
+    STRINGS ${CMAKE_SOURCE_DIR}/source/blender/blenkernel/BKE_blender_version.h
+    _contents REGEX "^#define[ \t]+BLENDER_.*$"
+  )
 
-	unset(_out_subversion)
-	unset(_out_version_char)
-	unset(_out_version_char_empty)
-	unset(_out_version_cycle)
+  string(
+    REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION[ \t]+([0-9]+).*" "\\1"
+    _out_version "${_contents}"
+  )
+  string(
+    REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION_PATCH[ \t]+([0-9]+).*" "\\1"
+    _out_version_patch "${_contents}"
+  )
+  string(
+    REGEX REPLACE ".*#define[ \t]+BLENDER_VERSION_CYCLE[ \t]+([a-z]+).*" "\\1"
+    _out_version_cycle "${_contents}"
+  )
 
-	# message(STATUS "Version (Internal): ${BLENDER_VERSION}.${BLENDER_SUBVERSION}, Version (external): ${BLENDER_VERSION}${BLENDER_VERSION_CHAR}-${BLENDER_VERSION_CYCLE}")
-endmacro()
+  if(NOT ${_out_version} MATCHES "[0-9]+")
+    message(FATAL_ERROR "Version parsing failed for BLENDER_VERSION")
+  endif()
+
+  if(NOT ${_out_version_patch} MATCHES "[0-9]+")
+    message(FATAL_ERROR "Version parsing failed for BLENDER_VERSION_PATCH")
+  endif()
+
+  if(NOT ${_out_version_cycle} MATCHES "[a-z]+")
+    message(FATAL_ERROR "Version parsing failed for BLENDER_VERSION_CYCLE")
+  endif()
+
+  math(EXPR _out_version_major "${_out_version} / 100")
+  math(EXPR _out_version_minor "${_out_version} % 100")
+
+  # output vars
+  set(BLENDER_VERSION "${_out_version_major}.${_out_version_minor}" PARENT_SCOPE)
+  set(BLENDER_VERSION_MAJOR "${_out_version_major}" PARENT_SCOPE)
+  set(BLENDER_VERSION_MINOR "${_out_version_minor}" PARENT_SCOPE)
+  set(BLENDER_VERSION_PATCH "${_out_version_patch}" PARENT_SCOPE)
+  set(BLENDER_VERSION_CYCLE "${_out_version_cycle}" PARENT_SCOPE)
+
+endfunction()
 
 
 # hacks to override initial project settings
 # these macros must be called directly before/after project(Blender)
 macro(blender_project_hack_pre)
-	# ----------------
-	# MINGW HACK START
-	# ignore system set flag, use our own
-	# must be before project(...)
-	# if the user wants to add their own its ok after first run.
-	if(DEFINED CMAKE_C_STANDARD_LIBRARIES)
-		set(_reset_standard_libraries OFF)
-	else()
-		set(_reset_standard_libraries ON)
-	endif()
-
-	# ------------------
-	# GCC -O3 HACK START
-	# needed because O3 can cause problems but
-	# allow the builder to set O3 manually after.
-	if(DEFINED CMAKE_C_FLAGS_RELEASE)
-		set(_reset_standard_cflags_rel OFF)
-	else()
-		set(_reset_standard_cflags_rel ON)
-	endif()
-	if(DEFINED CMAKE_CXX_FLAGS_RELEASE)
-		set(_reset_standard_cxxflags_rel OFF)
-	else()
-		set(_reset_standard_cxxflags_rel ON)
-	endif()
+  # ------------------
+  # GCC -O3 HACK START
+  # needed because O3 can cause problems but
+  # allow the builder to set O3 manually after.
+  if(DEFINED CMAKE_C_FLAGS_RELEASE)
+    set(_reset_standard_cflags_rel OFF)
+  else()
+    set(_reset_standard_cflags_rel ON)
+  endif()
+  if(DEFINED CMAKE_CXX_FLAGS_RELEASE)
+    set(_reset_standard_cxxflags_rel OFF)
+  else()
+    set(_reset_standard_cxxflags_rel ON)
+  endif()
 endmacro()
 
 
 macro(blender_project_hack_post)
-	# --------------
-	# MINGW HACK END
-	if (_reset_standard_libraries)
-		# Must come after projecINCt(...)
-		#
-		# MINGW workaround for -ladvapi32 being included which surprisingly causes
-		# string formatting of floats, eg: printf("%.*f", 3, value). to crash blender
-		# with a meaningless stack trace. by overriding this flag we ensure we only
-		# have libs we define and that cmake & scons builds match.
-		set(CMAKE_C_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
-		set(CMAKE_CXX_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
-		mark_as_advanced(
-			CMAKE_C_STANDARD_LIBRARIES
-			CMAKE_CXX_STANDARD_LIBRARIES
-		)
-	endif()
-	unset(_reset_standard_libraries)
+  # ----------------
+  # GCC -O3 HACK END
+  if(_reset_standard_cflags_rel)
+    string(REGEX REPLACE "-O3" "-O2" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}" CACHE STRING "" FORCE)
+    mark_as_advanced(CMAKE_C_FLAGS_RELEASE)
+  endif()
 
+  if(_reset_standard_cxxflags_rel)
+    string(REGEX REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}" CACHE STRING "" FORCE)
+    mark_as_advanced(CMAKE_CXX_FLAGS_RELEASE)
+  endif()
 
-	# ----------------
-	# GCC -O3 HACK END
-	if(_reset_standard_cflags_rel)
-		string(REGEX REPLACE "-O3" "-O2" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
-		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}" CACHE STRING "" FORCE)
-		mark_as_advanced(CMAKE_C_FLAGS_RELEASE)
-	endif()
-
-	if(_reset_standard_cxxflags_rel)
-		string(REGEX REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}" CACHE STRING "" FORCE)
-		mark_as_advanced(CMAKE_CXX_FLAGS_RELEASE)
-	endif()
-
-	unset(_reset_standard_cflags_rel)
-	unset(_reset_standard_cxxflags_rel)
-
-	# ------------------------------------------------------------------
-	# workaround for omission in cmake 2.8.4's GNU.cmake, fixed in 2.8.5
-	if(CMAKE_COMPILER_IS_GNUCC)
-		if(NOT DARWIN)
-			set(CMAKE_INCLUDE_SYSTEM_FLAG_C "-isystem ")
-		endif()
-	endif()
+  unset(_reset_standard_cflags_rel)
+  unset(_reset_standard_cxxflags_rel)
 
 endmacro()
 
 # pair of macros to allow libraries to be specify files to install, but to
 # only install them at the end so the directories don't get cleared with
 # the files in them. used by cycles to install addon.
-macro(delayed_install
-	base
-	files
-	destination)
+function(delayed_install
+  base
+  files
+  destination)
 
-	foreach(f ${files})
-		if(IS_ABSOLUTE ${f})
-			set_property(GLOBAL APPEND PROPERTY DELAYED_INSTALL_FILES ${f})
-		else()
-			set_property(GLOBAL APPEND PROPERTY DELAYED_INSTALL_FILES ${base}/${f})
-		endif()
-		set_property(GLOBAL APPEND PROPERTY DELAYED_INSTALL_DESTINATIONS ${destination})
-	endforeach()
-endmacro()
+  foreach(f ${files})
+    if(IS_ABSOLUTE ${f} OR "${base}" STREQUAL "")
+      set_property(GLOBAL APPEND PROPERTY DELAYED_INSTALL_FILES ${f})
+    else()
+      set_property(GLOBAL APPEND PROPERTY DELAYED_INSTALL_FILES ${base}/${f})
+    endif()
+    set_property(GLOBAL APPEND PROPERTY DELAYED_INSTALL_DESTINATIONS ${destination})
+  endforeach()
+  unset(f)
+endfunction()
 
 # note this is a function instead of a macro so that ${BUILD_TYPE} in targetdir
 # does not get expanded in calling but is preserved
 function(delayed_do_install
-	targetdir)
+  targetdir)
 
-	get_property(files GLOBAL PROPERTY DELAYED_INSTALL_FILES)
-	get_property(destinations GLOBAL PROPERTY DELAYED_INSTALL_DESTINATIONS)
+  get_property(files GLOBAL PROPERTY DELAYED_INSTALL_FILES)
+  get_property(destinations GLOBAL PROPERTY DELAYED_INSTALL_DESTINATIONS)
 
-	if(files)
-		list(LENGTH files n)
-		math(EXPR n "${n}-1")
+  if(files)
+    list(LENGTH files n)
+    math(EXPR n "${n}-1")
 
-		foreach(i RANGE ${n})
-			list(GET files ${i} f)
-			list(GET destinations ${i} d)
-			install(FILES ${f} DESTINATION ${targetdir}/${d})
-		endforeach()
-	endif()
+    foreach(i RANGE ${n})
+      list(GET files ${i} f)
+      list(GET destinations ${i} d)
+      if(NOT IS_ABSOLUTE ${d})
+        install(FILES ${f} DESTINATION ${targetdir}/${d})
+      else()
+        install(FILES ${f} DESTINATION ${d})
+      endif()
+    endforeach()
+  endif()
+endfunction()
+
+# Same as above but generates the var name and output automatic.
+function(data_to_c
+  file_from file_to
+  list_to_add
+  )
+
+  list(APPEND ${list_to_add} ${file_to})
+  set(${list_to_add} ${${list_to_add}} PARENT_SCOPE)
+
+  get_filename_component(_file_to_path ${file_to} PATH)
+
+  add_custom_command(
+    OUTPUT ${file_to}
+    COMMAND "$<TARGET_FILE:datatoc>" ${file_from} ${file_to}
+    DEPENDS ${file_from} datatoc)
+
+  set_source_files_properties(${file_to} PROPERTIES GENERATED TRUE)
 endfunction()
 
 
-macro(data_to_c
-      file_from file_to
-      list_to_add)
+# Same as above but generates the var name and output automatic.
+function(data_to_c_simple
+  file_from
+  list_to_add
+  )
 
-	list(APPEND ${list_to_add} ${file_to})
+  # remove ../'s
+  get_filename_component(_file_from ${CMAKE_CURRENT_SOURCE_DIR}/${file_from}   REALPATH)
+  get_filename_component(_file_to   ${CMAKE_CURRENT_BINARY_DIR}/${file_from}.c REALPATH)
 
-	get_filename_component(_file_to_path ${file_to} PATH)
+  list(APPEND ${list_to_add} ${_file_to})
+  source_group(Generated FILES ${_file_to})
+  list(APPEND ${list_to_add} ${file_from})
+  set(${list_to_add} ${${list_to_add}} PARENT_SCOPE)
 
-	add_custom_command(
-		OUTPUT ${file_to}
-		COMMAND ${CMAKE_COMMAND} -E make_directory ${_file_to_path}
-		COMMAND ${CMAKE_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/datatoc ${file_from} ${file_to}
-		DEPENDS ${file_from} datatoc)
+  get_filename_component(_file_to_path ${_file_to} PATH)
 
-	set_source_files_properties(${file_to} PROPERTIES GENERATED TRUE)
+  add_custom_command(
+    OUTPUT  ${_file_to}
+    COMMAND "$<TARGET_FILE:datatoc>" ${_file_from} ${_file_to}
+    DEPENDS ${_file_from} datatoc)
 
-	unset(_file_to_path)
-endmacro()
+  set_source_files_properties(${_file_to} PROPERTIES GENERATED TRUE)
+endfunction()
 
 
-# same as above but generates the var name and output automatic.
-macro(data_to_c_simple
-      file_from
-      list_to_add)
+# Process glsl file and convert it to c
+function(glsl_to_c
+  file_from
+  list_to_add
+  )
 
-	# remove ../'s
-	get_filename_component(_file_from ${CMAKE_CURRENT_SOURCE_DIR}/${file_from}   REALPATH)
-	get_filename_component(_file_to   ${CMAKE_CURRENT_BINARY_DIR}/${file_from}.c REALPATH)
+  # remove ../'s
+  get_filename_component(_file_from ${CMAKE_CURRENT_SOURCE_DIR}/${file_from}    REALPATH)
+  get_filename_component(_file_tmp  ${CMAKE_CURRENT_BINARY_DIR}/${file_from}    REALPATH)
+  get_filename_component(_file_meta ${CMAKE_CURRENT_BINARY_DIR}/${file_from}.hh REALPATH)
+  get_filename_component(_file_info ${CMAKE_CURRENT_BINARY_DIR}/${file_from}.info  REALPATH)
+  get_filename_component(_file_to   ${CMAKE_CURRENT_BINARY_DIR}/${file_from}.c  REALPATH)
 
-	list(APPEND ${list_to_add} ${_file_to})
+  list(APPEND ${list_to_add} ${_file_to})
+  source_group(Generated FILES ${_file_to})
+  list(APPEND ${list_to_add} ${file_from})
+  set(${list_to_add} ${${list_to_add}} PARENT_SCOPE)
 
-	get_filename_component(_file_to_path ${_file_to} PATH)
+  get_filename_component(_file_to_path ${_file_to} PATH)
 
-	add_custom_command(
-		OUTPUT  ${_file_to}
-		COMMAND ${CMAKE_COMMAND} -E make_directory ${_file_to_path}
-		COMMAND ${CMAKE_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/datatoc ${_file_from} ${_file_to}
-		DEPENDS ${_file_from} datatoc)
+  add_custom_command(
+    OUTPUT  ${_file_to} ${_file_meta} ${_file_info}
+    COMMAND "$<TARGET_FILE:glsl_preprocess>" ${_file_from} ${_file_tmp} ${_file_meta} ${_file_info}
+    COMMAND "$<TARGET_FILE:datatoc>" ${_file_tmp} ${_file_to}
+    DEPENDS ${_file_from} datatoc glsl_preprocess)
 
-	set_source_files_properties(${_file_to} PROPERTIES GENERATED TRUE)
+  set_source_files_properties(${_file_tmp} PROPERTIES GENERATED TRUE)
+  set_source_files_properties(${_file_to}  PROPERTIES GENERATED TRUE)
+  set_source_files_properties(${_file_meta}  PROPERTIES GENERATED TRUE)
+  set_source_files_properties(${_file_info}  PROPERTIES GENERATED TRUE)
+endfunction()
 
-	unset(_file_from)
-	unset(_file_to)
-	unset(_file_to_path)
-endmacro()
 
-# macro for converting pixmap directory to a png and then a c file
-macro(data_to_c_simple_icons
-      path_from
-      list_to_add
+function(msgfmt_simple
+  file_from
+  list_to_add
+  )
+
+  # remove ../'s
+  get_filename_component(_file_from_we ${file_from} NAME_WE)
+
+  get_filename_component(_file_from ${file_from} REALPATH)
+  get_filename_component(_file_to ${CMAKE_CURRENT_BINARY_DIR}/${_file_from_we}.mo REALPATH)
+
+  list(APPEND ${list_to_add} ${_file_to})
+  set(${list_to_add} ${${list_to_add}} PARENT_SCOPE)
+
+  get_filename_component(_file_to_path ${_file_to} PATH)
+
+  add_custom_command(
+    OUTPUT  ${_file_to}
+
+    COMMAND ${CMAKE_COMMAND} -E
+    make_directory ${_file_to_path}
+
+    COMMAND ${CMAKE_COMMAND} -E
+    env ${PLATFORM_ENV_BUILD} "$<TARGET_FILE:msgfmt>" ${_file_from} ${_file_to}
+
+    DEPENDS msgfmt ${_file_from})
+
+  set_source_files_properties(${_file_to} PROPERTIES GENERATED TRUE)
+endfunction()
+
+function(find_python_package
+    package
+    relative_inc_dir
+  )
+
+  string(TOUPPER ${package} _upper_package)
+
+  # Set but invalid.
+  if((NOT ${PYTHON_${_upper_package}_PATH} STREQUAL "") AND
+     (NOT ${PYTHON_${_upper_package}_PATH} MATCHES NOTFOUND))
+    # if(NOT EXISTS "${PYTHON_${_upper_package}_PATH}/${package}")
+    #   message(
+    #     WARNING
+    #     "PYTHON_${_upper_package}_PATH is invalid, ${package} not found in "
+    #     "'${PYTHON_${_upper_package}_PATH}' "
+    #     "WITH_PYTHON_INSTALL_${_upper_package} option will be ignored when installing Python"
+    #   )
+    #   set(WITH_PYTHON_INSTALL${_upper_package} OFF)
+    # endif()
+    # Not set, so initialize.
+  else()
+    string(REPLACE "." ";" _PY_VER_SPLIT "${PYTHON_VERSION}")
+    list(GET _PY_VER_SPLIT 0 _PY_VER_MAJOR)
+
+    # re-cache
+    unset(PYTHON_${_upper_package}_PATH CACHE)
+    find_path(PYTHON_${_upper_package}_PATH
+      NAMES
+        ${package}
+      HINTS
+        "${PYTHON_LIBPATH}/"
+        "${PYTHON_LIBPATH}/python${PYTHON_VERSION}/"
+        "${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/"
+      PATH_SUFFIXES
+        site-packages
+        dist-packages
+        vendor-packages
+      NO_DEFAULT_PATH
+      DOC
+        "Path to python site-packages or dist-packages containing '${package}' module"
+    )
+    mark_as_advanced(PYTHON_${_upper_package}_PATH)
+
+    if(NOT EXISTS "${PYTHON_${_upper_package}_PATH}")
+      message(WARNING
+        "Python package '${package}' path could not be found in:\n"
+        "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/site-packages/${package}', "
+        "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/site-packages/${package}', "
+        "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/dist-packages/${package}', "
+        "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/dist-packages/${package}', "
+        "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/vendor-packages/${package}', "
+        "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/vendor-packages/${package}', "
+        "\n"
+        "The 'WITH_PYTHON_INSTALL_${_upper_package}' option will be ignored "
+        "when installing Python.\n"
+        "The build will be usable, only add-ons that depend on this package won't be functional."
       )
+      set(WITH_PYTHON_INSTALL_${_upper_package} OFF PARENT_SCOPE)
+    else()
+      message(STATUS "${package} found at '${PYTHON_${_upper_package}_PATH}'")
 
-	# Conversion steps
-	#  path_from  ->  _file_from  ->  _file_to
-	#  foo/*.dat  ->  foo.png     ->  foo.png.c
+      if(NOT "${relative_inc_dir}" STREQUAL "")
+        set(_relative_inc_dir "${package}/${relative_inc_dir}")
+        unset(PYTHON_${_upper_package}_INCLUDE_DIRS CACHE)
+        find_path(PYTHON_${_upper_package}_INCLUDE_DIRS
+          NAMES
+            "${_relative_inc_dir}"
+          HINTS
+            "${PYTHON_LIBPATH}/"
+            "${PYTHON_LIBPATH}/python${PYTHON_VERSION}/"
+            "${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/"
+          PATH_SUFFIXES
+            "site-packages/"
+            "dist-packages/"
+            "vendor-packages/"
+          NO_DEFAULT_PATH
+          DOC
+            "\
+Path to python site-packages or dist-packages containing '${package}' module header files"
+        )
+        mark_as_advanced(PYTHON_${_upper_package}_INCLUDE_DIRS)
 
-	get_filename_component(_path_from_abs ${path_from} ABSOLUTE)
-	# remove ../'s
-	get_filename_component(_file_from ${CMAKE_CURRENT_BINARY_DIR}/${path_from}.png   REALPATH)
-	get_filename_component(_file_to   ${CMAKE_CURRENT_BINARY_DIR}/${path_from}.png.c REALPATH)
+        if(NOT EXISTS "${PYTHON_${_upper_package}_INCLUDE_DIRS}")
+          message(WARNING
+            "Python package '${package}' include dir path could not be found in:\n"
+            "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/site-packages/${_relative_inc_dir}', "
+            "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/site-packages/${_relative_inc_dir}', "
+            "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/dist-packages/${_relative_inc_dir}', "
+            "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/dist-packages/${_relative_inc_dir}', "
+            "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/vendor-packages/${_relative_inc_dir}', "
+            "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/vendor-packages/${_relative_inc_dir}', "
+            "\n"
+            "The 'WITH_PYTHON_${_upper_package}' option will be disabled.\n"
+            "The build will be usable, only add-ons that depend on this package "
+            "won't be functional."
+          )
+          set(WITH_PYTHON_${_upper_package} OFF PARENT_SCOPE)
+        else()
+          set(_temp "${PYTHON_${_upper_package}_INCLUDE_DIRS}/${package}/${relative_inc_dir}")
+          unset(PYTHON_${_upper_package}_INCLUDE_DIRS CACHE)
+          set(PYTHON_${_upper_package}_INCLUDE_DIRS "${_temp}"
+              CACHE PATH "Path to the include directory of the ${package} module")
 
-	list(APPEND ${list_to_add} ${_file_to})
+          message(STATUS
+            "${package} include files found at '${PYTHON_${_upper_package}_INCLUDE_DIRS}'"
+          )
+        endif()
+      endif()
+    endif()
+  endif()
+endfunction()
 
-	get_filename_component(_file_to_path ${_file_to} PATH)
+# Find a file in Python's module path and cache it.
+# Re-generating cache upon changes to the Python installation.
+# `out_var_abs`: absolute path (cached).
+# `out_var_rel`: `PYTHON_ROOT` relative path (not cached).
+macro(find_python_module_file
+  module_file
+  out_var_abs
+  out_var_rel
+  )
 
-	# ideally we wouldn't glob, but storing all names for all pixmaps is a bit heavy
-	file(GLOB _icon_files "${path_from}/*.dat")
+  # Reset if the file isn't found.
+  if(DEFINED ${out_var_abs})
+    if(NOT EXISTS ${${out_var_abs}})
+      unset(${out_var_abs} CACHE)
+    endif()
+  endif()
 
-	add_custom_command(
-		OUTPUT  ${_file_from} ${_file_to}
-		COMMAND ${CMAKE_COMMAND} -E make_directory ${_file_to_path}
-		#COMMAND python3 ${CMAKE_SOURCE_DIR}/source/blender/datatoc/datatoc_icon.py ${_path_from_abs} ${_file_from}
-		COMMAND ${CMAKE_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/datatoc_icon ${_path_from_abs} ${_file_from}
-		COMMAND ${CMAKE_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/datatoc ${_file_from} ${_file_to}
-		DEPENDS
-			${_icon_files}
-			datatoc_icon
-			datatoc
-			# could be an arg but for now we only create icons depending on UI_icons.h
-			${CMAKE_SOURCE_DIR}/source/blender/editors/include/UI_icons.h
-		)
+  # Reset if the version number or Python path changes.
+  set(_python_mod_file_deps_test "${PYTHON_LIBPATH};${PYTHON_VERSION}")
+  if(DEFINED _${out_var_abs}_DEPS)
+    if(NOT (_${out_var_abs}_DEPS STREQUAL _python_mod_file_deps_test))
+      unset(${out_var_abs} CACHE)
+    endif()
+  else()
+    unset(${out_var_abs} CACHE)
+  endif()
 
-	set_source_files_properties(${_file_from} ${_file_to} PROPERTIES GENERATED TRUE)
+  path_strip_trailing_slash(_python_root "${PYTHON_LIBPATH}")
+  set(_python_base "${_python_root}/python${PYTHON_VERSION}")
+  # This always moves up one level (even if there is a trailing slash).
+  get_filename_component(_python_root "${_python_root}" DIRECTORY)
+  path_ensure_trailing_slash(_python_root "${_python_root}")
 
-	unset(_path_from_abs)
-	unset(_file_from)
-	unset(_file_to)
-	unset(_file_to_path)
-	unset(_icon_files)
+  if(NOT (DEFINED ${out_var_abs}))
+    message(STATUS "Finding Python Module File: ${module_file}")
+    find_file(${out_var_abs}
+      NAMES
+        "${module_file}"
+      PATHS
+        "${_python_base}"
+      PATH_SUFFIXES
+        "site-packages"
+        "dist-packages"
+        "vendor-packages"
+        ""
+      NO_DEFAULT_PATH
+    )
+    if(${out_var_abs})
+      # Internal because this is only to track changes (users never need to manipulate it).
+      set(_${out_var_abs}_DEPS "${_python_mod_file_deps_test}" CACHE INTERNAL STRING "")
+    endif()
+  endif()
 
+  if(${out_var_abs})
+    string(LENGTH "${_python_root}" _python_root_len)
+    string(SUBSTRING ${${out_var_abs}} ${_python_root_len} -1 ${out_var_rel})
+    unset(_python_root_len)
+  endif()
+
+  unset(_python_mod_file_deps_test)
+  unset(_python_base)
+  unset(_python_root)
 endmacro()
 
-# XXX Not used for now...
-macro(svg_to_png
-      file_from
-      file_to
-      dpi
-      list_to_add)
 
-	# remove ../'s
-	get_filename_component(_file_from ${CMAKE_CURRENT_SOURCE_DIR}/${file_from} REALPATH)
-	get_filename_component(_file_to   ${CMAKE_CURRENT_SOURCE_DIR}/${file_to}   REALPATH)
+# like Python's 'print(dir())'
+function(print_all_vars)
+  get_cmake_property(_vars VARIABLES)
+  foreach(_var ${_vars})
+    message(STATUS "${_var}=${${_var}}")
+  endforeach()
+endfunction()
 
-	list(APPEND ${list_to_add} ${_file_to})
-
-	find_program(INKSCAPE_EXE inkscape)
-	mark_as_advanced(INKSCAPE_EXE)
-
-	if(INKSCAPE_EXE)
-		if(APPLE)
-			# in OS X app bundle, the binary is a shim that doesn't take any
-			# command line arguments, replace it with the actual binary
-			string(REPLACE "MacOS/Inkscape" "Resources/bin/inkscape" INKSCAPE_REAL_EXE ${INKSCAPE_EXE})
-			if(EXISTS "${INKSCAPE_REAL_EXE}")
-				set(INKSCAPE_EXE ${INKSCAPE_REAL_EXE})
-			endif()
-		endif()
-
-		add_custom_command(
-			OUTPUT  ${_file_to}
-			COMMAND ${INKSCAPE_EXE} ${_file_from} --export-dpi=${dpi}  --without-gui --export-png=${_file_to}
-			DEPENDS ${_file_from} ${INKSCAPE_EXE}
-		)
-	else()
-		message(WARNING "Inkscape not found, could not re-generate ${_file_to} from ${_file_from}!")
-	endif()
-
-	unset(_file_from)
-	unset(_file_to)
-
+macro(set_and_warn_dependency
+  _dependency _setting _val)
+  # when $_dependency is disabled, forces $_setting = $_val
+  if(NOT ${${_dependency}} AND ${${_setting}})
+    if(WITH_STRICT_BUILD_OPTIONS)
+      message(SEND_ERROR "${_dependency} disabled but required by ${_setting}")
+    else()
+      message(STATUS "${_dependency} is disabled, setting ${_setting}=${_val}")
+    endif()
+    set(${_setting} ${_val})
+  endif()
 endmacro()
 
-macro(msgfmt_simple
-      file_from
-      list_to_add)
-
-	# remove ../'s
-	get_filename_component(_file_from_we ${file_from} NAME_WE)
-
-	get_filename_component(_file_from ${file_from} REALPATH)
-	get_filename_component(_file_to ${CMAKE_CURRENT_BINARY_DIR}/${_file_from_we}.mo REALPATH)
-
-	list(APPEND ${list_to_add} ${_file_to})
-
-	get_filename_component(_file_to_path ${_file_to} PATH)
-
-	add_custom_command(
-		OUTPUT  ${_file_to}
-		COMMAND ${CMAKE_COMMAND} -E make_directory ${_file_to_path}
-		COMMAND ${CMAKE_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/msgfmt ${_file_from} ${_file_to}
-		DEPENDS msgfmt ${_file_from})
-
-	set_source_files_properties(${_file_to} PROPERTIES GENERATED TRUE)
-
-	unset(_file_from_we)
-	unset(_file_from)
-	unset(_file_to)
-	unset(_file_to_path)
+macro(set_and_warn_incompatible
+  _dependency _setting _val)
+  # when $_dependency is enabled, forces $_setting = $_val
+  # Both should be defined, warn if they're not.
+  if(NOT DEFINED ${_dependency})
+    message(STATUS "${_dependency} not defined!")
+  elseif(NOT DEFINED ${_setting})
+    message(STATUS "${_setting} not defined!")
+  elseif(${${_dependency}} AND ${${_setting}})
+    if(WITH_STRICT_BUILD_OPTIONS)
+      message(SEND_ERROR "${_dependency} enabled but incompatible with ${_setting}")
+    else()
+      message(STATUS "${_dependency} is enabled but incompatible, setting ${_setting}=${_val}")
+    endif()
+    set(${_setting} ${_val})
+  endif()
 endmacro()
 
-macro(find_python_package
-      package)
+macro(set_and_warn_library_found
+  _library_name _library_found _setting)
+  if(((NOT ${_library_found}) OR (NOT ${${_library_found}})) AND ${${_setting}})
+    if(WITH_STRICT_BUILD_OPTIONS)
+      message(SEND_ERROR "${_library_name} required but not found")
+    else()
+      message(STATUS "${_library_name} not found, disabling ${_setting}")
+    endif()
+    set(${_setting} OFF)
+  endif()
+endmacro()
 
-	string(TOUPPER ${package} _upper_package)
+macro(without_system_libs_begin)
+  set(CMAKE_IGNORE_PATH
+    "${CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES}"
+    "${CMAKE_SYSTEM_INCLUDE_PATH}"
+    "${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES}"
+    "${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}"
+  )
+endmacro()
 
-	# set but invalid
-	if((NOT ${PYTHON_${_upper_package}_PATH} STREQUAL "") AND
-	   (NOT ${PYTHON_${_upper_package}_PATH} MATCHES NOTFOUND))
-#		if(NOT EXISTS "${PYTHON_${_upper_package}_PATH}/${package}")
-#			message(WARNING "PYTHON_${_upper_package}_PATH is invalid, ${package} not found in '${PYTHON_${_upper_package}_PATH}' "
-#			                "WITH_PYTHON_INSTALL_${_upper_package} option will be ignored when installing python")
-#			set(WITH_PYTHON_INSTALL${_upper_package} OFF)
-#		endif()
-	# not set, so initialize
-	else()
-		string(REPLACE "." ";" _PY_VER_SPLIT "${PYTHON_VERSION}")
-		list(GET _PY_VER_SPLIT 0 _PY_VER_MAJOR)
+macro(without_system_libs_end)
+  unset(CMAKE_IGNORE_PATH)
+endmacro()
 
-		# re-cache
-		unset(PYTHON_${_upper_package}_PATH CACHE)
-		find_path(PYTHON_${_upper_package}_PATH
-		  NAMES
-		    ${package}
-		  HINTS
-		    "${PYTHON_LIBPATH}/python${PYTHON_VERSION}/"
-		    "${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/"
-		  PATH_SUFFIXES
-		    site-packages
-		    dist-packages
-		   NO_DEFAULT_PATH
-		)
+# Utility to gather and install precompiled shared libraries.
+macro(add_bundled_libraries library_dir)
+  if(DEFINED LIBDIR)
+    set(_library_dir ${LIBDIR}/${library_dir})
+    if(WIN32)
+      file(GLOB _all_library_versions ${_library_dir}/*\.dll)
+    elseif(APPLE)
+      file(GLOB _all_library_versions ${_library_dir}/*\.dylib*)
+    else()
+      file(GLOB _all_library_versions ${_library_dir}/*\.so*)
+    endif()
+    list(APPEND PLATFORM_BUNDLED_LIBRARIES ${_all_library_versions})
+    list(APPEND PLATFORM_BUNDLED_LIBRARY_DIRS ${_library_dir})
+    unset(_all_library_versions)
+    unset(_library_dir)
+  endif()
+endmacro()
 
-		 if(NOT EXISTS "${PYTHON_${_upper_package}_PATH}")
-			message(WARNING "'${package}' path could not be found in:\n"
-			                "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/site-packages/${package}', "
-			                "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/site-packages/${package}', "
-			                "'${PYTHON_LIBPATH}/python${PYTHON_VERSION}/dist-packages/${package}', "
-			                "'${PYTHON_LIBPATH}/python${_PY_VER_MAJOR}/dist-packages/${package}', "
-			                "WITH_PYTHON_INSTALL_${_upper_package} option will be ignored when installing python")
-			set(WITH_PYTHON_INSTALL_${_upper_package} OFF)
-		else()
-			message(STATUS "${package} found at '${PYTHON_${_upper_package}_PATH}'")
-		endif()
+macro(windows_install_shared_manifest)
+  set(options OPTIONAL DEBUG RELEASE ALL)
+  set(oneValueArgs)
+  set(multiValueArgs FILES)
+  cmake_parse_arguments(
+    WINDOWS_INSTALL
+    "${options}"
+    "${oneValueArgs}"
+    "${multiValueArgs}"
+    ${ARGN}
+  )
+  # If none of the options are set assume ALL.
+  unset(WINDOWS_CONFIGURATIONS)
+  if(NOT WINDOWS_INSTALL_ALL AND
+     NOT WINDOWS_INSTALL_DEBUG AND
+     NOT WINDOWS_INSTALL_RELEASE)
+    set(WINDOWS_INSTALL_ALL TRUE)
+  endif()
+  # If all is set, turn both DEBUG and RELEASE on.
+  if(WINDOWS_INSTALL_ALL)
+    set(WINDOWS_INSTALL_DEBUG TRUE)
+    set(WINDOWS_INSTALL_RELEASE TRUE)
+  endif()
+  if(WINDOWS_INSTALL_DEBUG)
+    set(WINDOWS_CONFIGURATIONS "${WINDOWS_CONFIGURATIONS};Debug")
+  endif()
+  if(WINDOWS_INSTALL_RELEASE)
+    set(WINDOWS_CONFIGURATIONS "${WINDOWS_CONFIGURATIONS};Release;RelWithDebInfo;MinSizeRel")
+  endif()
+  if(NOT WITH_PYTHON_MODULE)
+    # Blender executable with manifest.
+    if(WINDOWS_INSTALL_DEBUG)
+      list(APPEND WINDOWS_SHARED_MANIFEST_DEBUG ${WINDOWS_INSTALL_FILES})
+    endif()
+    if(WINDOWS_INSTALL_RELEASE)
+      list(APPEND WINDOWS_SHARED_MANIFEST_RELEASE ${WINDOWS_INSTALL_FILES})
+    endif()
+    install(
+      FILES ${WINDOWS_INSTALL_FILES}
+      DESTINATION "blender.shared"
+      CONFIGURATIONS ${WINDOWS_CONFIGURATIONS}
+    )
+  else()
+    # Python module without manifest.
+    install(
+      FILES ${WINDOWS_INSTALL_FILES}
+      DESTINATION "bpy"
+      CONFIGURATIONS ${WINDOWS_CONFIGURATIONS}
+    )
+  endif()
+endmacro()
 
-		unset(_PY_VER_SPLIT)
-		unset(_PY_VER_MAJOR)
-	  endif()
+macro(windows_generate_manifest)
+  set(options)
+  set(oneValueArgs OUTPUT NAME)
+  set(multiValueArgs FILES)
+  cmake_parse_arguments(
+    WINDOWS_MANIFEST
+    "${options}"
+    "${oneValueArgs}"
+    "${multiValueArgs}"
+    ${ARGN}
+  )
+  set(MANIFEST_LIBS "")
+  foreach(lib ${WINDOWS_MANIFEST_FILES})
+    get_filename_component(filename ${lib} NAME)
+    set(MANIFEST_LIBS "${MANIFEST_LIBS}    <file name=\"${filename}\"/>\n")
+  endforeach()
+  configure_file(
+    ${CMAKE_SOURCE_DIR}/release/windows/manifest/blender.manifest.in
+    ${WINDOWS_MANIFEST_OUTPUT}
+    @ONLY
+  )
+endmacro()
 
-	  unset(_upper_package)
+macro(windows_generate_shared_manifest)
+  if(WINDOWS_SHARED_MANIFEST_DEBUG)
+    windows_generate_manifest(
+      FILES "${WINDOWS_SHARED_MANIFEST_DEBUG}"
+      OUTPUT "${CMAKE_BINARY_DIR}/Debug/blender.shared.manifest"
+      NAME "blender.shared"
+    )
+    install(
+      FILES ${CMAKE_BINARY_DIR}/Debug/blender.shared.manifest
+      DESTINATION "blender.shared"
+      CONFIGURATIONS Debug
+    )
+  endif()
+  if(WINDOWS_SHARED_MANIFEST_RELEASE)
+    windows_generate_manifest(
+      FILES "${WINDOWS_SHARED_MANIFEST_RELEASE}"
+      OUTPUT "${CMAKE_BINARY_DIR}/Release/blender.shared.manifest"
+      NAME "blender.shared"
+    )
+    install(
+      FILES ${CMAKE_BINARY_DIR}/Release/blender.shared.manifest
+      DESTINATION "blender.shared"
+      CONFIGURATIONS Release;RelWithDebInfo;MinSizeRel
+    )
+  endif()
+endmacro()
+
+macro(windows_process_platform_bundled_libraries library_deps)
+  if(NOT "${library_deps}" STREQUAL "")
+    set(next_library_mode "ALL")
+    foreach(library ${library_deps})
+      string(TOUPPER "${library}" library_upper)
+      if(("${library_upper}" STREQUAL "RELEASE") OR
+         ("${library_upper}" STREQUAL "DEBUG") OR
+         ("${library_upper}" STREQUAL "ALL"))
+        set(next_library_mode "${library_upper}")
+      else()
+        windows_install_shared_manifest(
+          FILES ${library}
+          ${next_library_mode}
+        )
+        set(next_library_mode "ALL")
+      endif()
+    endforeach()
+  endif()
+endmacro()
+
+macro(with_shader_cpp_compilation_config)
+  # avoid noisy warnings
+  if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+    add_c_flag("-Wno-unused-result")
+    remove_cc_flag("-Wmissing-declarations")
+    # Would be nice to enable the warning once we support references.
+    add_cxx_flag("-Wno-uninitialized")
+    # Would be nice to enable the warning once we support nameless parameters.
+    add_cxx_flag("-Wno-unused-parameter")
+    # To compile libraries.
+    add_cxx_flag("-Wno-pragma-once-outside-header")
+  elseif(MSVC)
+    # Equivalent to "-Wno-uninitialized"
+    add_cxx_flag("/wd4700")
+    # Equivalent to "-Wno-unused-parameter"
+    add_cxx_flag("/wd4100")
+    # Disable "potential divide by 0" warning
+    add_cxx_flag("/wd4723")
+  endif()
+  add_definitions(-DGPU_SHADER)
+endmacro()
+
+function(compile_sources_as_cpp
+  executable
+  sources
+  define
+  )
+
+  foreach(glsl_file ${sources})
+    set_source_files_properties(${glsl_file} PROPERTIES LANGUAGE CXX)
+  endforeach()
+
+  add_library(${executable} OBJECT ${sources})
+  set_target_properties(${executable} PROPERTIES LINKER_LANGUAGE CXX)
+  target_include_directories(${executable} PUBLIC ${INC_GLSL})
+  target_compile_definitions(${executable} PRIVATE ${define})
+endfunction()
+
+macro(optimize_debug_target executable)
+  if(WITH_OPTIMIZED_BUILD_TOOLS)
+    if(WIN32)
+      remove_cc_flag(${executable} "/Od" "/RTC1")
+      target_compile_options(${executable} PRIVATE "/Ox")
+      target_compile_definitions(${executable} PRIVATE "_ITERATOR_DEBUG_LEVEL=0")
+    else()
+      target_compile_options(${executable} PRIVATE "-O2")
+    endif()
+  endif()
 endmacro()
