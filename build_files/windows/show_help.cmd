@@ -7,6 +7,9 @@ echo - headless
 echo - cycles
 echo - bpy
 echo.
+echo Setup
+echo - setup ^(Initialize submodules and pull LFS libraries^)
+echo.
 echo Utilities ^(not associated with building^)
 echo - clean ^(Target must be set^)
 echo - update ^(Update both SVN and GIT^)

@@ -28,6 +28,10 @@ Blender Convenience Targets
    Note: passing the argument 'BUILD_DIR=path' when calling make will override the default build dir.
    Note: passing the argument 'BUILD_CMAKE_ARGS=args' lets you add cmake arguments.
 
+Setup Targets
+
+   * setup:         Initialize git submodules and pull LFS files (required before first build).
+
 Other Convenience Targets
    Provided for other building operations.
 
@@ -402,6 +406,14 @@ endif
 # -----------------------------------------------------------------------------
 # Build Blender
 all: .FORCE
+	@if test -z "$$(ls $(BLENDER_DIR)/lib/${OS_LIBDIR}_${CPU}/.git 2>/dev/null)" ; then \
+		echo "--------------------------------------------------"; \
+		echo "Pre-compiled libraries not found in lib/${OS_LIBDIR}_${CPU}."; \
+		echo "Run 'make setup' to initialize submodules and pull LFS files."; \
+		echo "--------------------------------------------------"; \
+		exit 1; \
+	fi
+
 	@echo
 	@echo Configuring Blender in \"$(BUILD_DIR)\" ...
 
@@ -619,6 +631,23 @@ source_archive_complete: .FORCE
 icons_geom: .FORCE
 	@BLENDER_BIN=$(BLENDER_BIN) \
 	    "$(BLENDER_DIR)/release/datafiles/blender_icons_geom_update.py"
+
+setup: .FORCE
+	@echo
+	@echo Initializing Submodules and LFS ...
+	@git submodule sync --recursive
+	@git config --local "submodule.lib/linux_x64.update" "checkout"
+	@git config --local "submodule.lib/windows_x64.update" "checkout"
+	@git config --local "submodule.lib/windows_arm64.update" "checkout"
+	@git config --local "submodule.lib/macos_arm64.update" "checkout"
+	@git submodule update --init --recursive --progress
+	@git config --local --unset "submodule.lib/linux_x64.update" 2>/dev/null || true
+	@git config --local --unset "submodule.lib/windows_x64.update" 2>/dev/null || true
+	@git config --local --unset "submodule.lib/windows_arm64.update" 2>/dev/null || true
+	@git config --local --unset "submodule.lib/macos_arm64.update" 2>/dev/null || true
+	@git lfs pull
+	@echo
+	@echo Setup complete. Run 'make full' to build.
 
 update: .FORCE
 	@$(PYTHON) ./build_files/utils/make_update.py
