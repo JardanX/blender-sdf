@@ -105,6 +105,8 @@ if NOT "%1" == "" (
 		SET BUILD_WITH_NINJA=1
 	) else if "%1" == "sccache" (
 		SET BUILD_WITH_SCCACHE=1
+	) else if "%1" == "setup" (
+		SET BUILD_SETUP=1
 	) else if "%1" == "clean" (
 		set MUST_CLEAN=1
 	) else if "%1" == "verbose" (
