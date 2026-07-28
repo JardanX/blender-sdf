@@ -100,36 +100,43 @@ Convert any SDF scene to a mesh right from the GPU:
 
 ### Prerequisites
 
-- **Git** with LFS support
+- **Git** with LFS support (`git lfs install` once globally)
 - **Python 3.10+**
 - **CMake 3.25+**
 - **Compiler**: MSVC 2019+ (Windows), GCC 14+ (Linux), Clang 15+ (macOS)
 - **Ninja** (recommended for fast builds)
 - **ccache** (recommended for faster rebuilds)
 
+> **Note:** Pre-compiled libraries (submodules hosting `lib/<platform>/`) are fetched from `projects.blender.org`. Run `make setup` after cloning to initialize submodules and pull LFS files.
+
 ### Windows
 
 ```batch
-git clone --recursive https://github.com/JardanX/blender-sdf.git
+git clone https://github.com/JardanX/blender-sdf.git
 cd blender-sdf
+.\make.bat setup
 .\make.bat ninja
 ```
 
 ### Linux
 
 ```bash
-git clone --recursive https://github.com/JardanX/blender-sdf.git
+git clone https://github.com/JardanX/blender-sdf.git
 cd blender-sdf
+make setup
 make full ninja ccache
 ```
 
 ### macOS
 
 ```bash
-git clone --recursive https://github.com/JardanX/blender-sdf.git
+git clone https://github.com/JardanX/blender-sdf.git
 cd blender-sdf
+make setup
 make full ninja ccache
 ```
+
+> If you cloned with `git clone --recursive`, the `make setup` step can be skipped — but it is harmless to run it again.
 
 ---
 
