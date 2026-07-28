@@ -766,13 +766,15 @@ if(UNIX AND NOT APPLE)
       )
     endif()
 
-    install(
-      FILES
-        ${CMAKE_SOURCE_DIR}/release/freedesktop/blender.desktop
-        ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/scalable/apps/blender.svg
-        ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/symbolic/apps/blender-symbolic.svg
-      DESTINATION "."
-    )
+    if(EXISTS ${CMAKE_SOURCE_DIR}/release/freedesktop/blender.desktop)
+      install(
+        FILES
+          ${CMAKE_SOURCE_DIR}/release/freedesktop/blender.desktop
+          ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/scalable/apps/blender.svg
+          ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/symbolic/apps/blender-symbolic.svg
+        DESTINATION "."
+      )
+    endif()
 
     if(WITH_BLENDER_THUMBNAILER)
       install(
@@ -791,12 +793,14 @@ if(UNIX AND NOT APPLE)
         DESTINATION "./lib/mesa"
       )
 
-      install(
-        PROGRAMS
-        ${CMAKE_SOURCE_DIR}/release/bin/blender-launcher
-        ${CMAKE_SOURCE_DIR}/release/bin/blender-softwaregl
-        DESTINATION "."
-      )
+      if(EXISTS ${CMAKE_SOURCE_DIR}/release/bin/blender-launcher)
+        install(
+          PROGRAMS
+          ${CMAKE_SOURCE_DIR}/release/bin/blender-launcher
+          ${CMAKE_SOURCE_DIR}/release/bin/blender-softwaregl
+          DESTINATION "."
+        )
+      endif()
 
       # Remove from old location, so existing builds don't start with software
       # OpenGL now that the `./lib/` directory is used for other libraries.
@@ -822,22 +826,24 @@ file(REMOVE ${CMAKE_BINARY_DIR}/bin/lib/libglapi.so.0.0.0)\n
       DESTINATION "./bin"
     )
     # Misc files.
-    install(
-      FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/blender.desktop
-      DESTINATION "./share/applications"
-    )
-    install(
-      FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/org.blender.Blender.metainfo.xml
-      DESTINATION "./share/metainfo"
-    )
-    install(
-      FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/scalable/apps/blender.svg
-      DESTINATION "./share/icons/hicolor/scalable/apps"
-    )
-    install(
-      FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/symbolic/apps/blender-symbolic.svg
-      DESTINATION "./share/icons/hicolor/symbolic/apps"
-    )
+    if(EXISTS ${CMAKE_SOURCE_DIR}/release/freedesktop/blender.desktop)
+      install(
+        FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/blender.desktop
+        DESTINATION "./share/applications"
+      )
+      install(
+        FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/org.blender.Blender.metainfo.xml
+        DESTINATION "./share/metainfo"
+      )
+      install(
+        FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/scalable/apps/blender.svg
+        DESTINATION "./share/icons/hicolor/scalable/apps"
+      )
+      install(
+        FILES ${CMAKE_SOURCE_DIR}/release/freedesktop/icons/symbolic/apps/blender-symbolic.svg
+        DESTINATION "./share/icons/hicolor/symbolic/apps"
+      )
+    endif()
     if(WITH_BLENDER_THUMBNAILER)
       install(
         TARGETS blender-thumbnailer
@@ -1867,18 +1873,22 @@ if(DEFINED TARGETDIR_TEXT)
     DESTINATION "${TARGETDIR_TEXT}"
   )
 
-  install(
-    DIRECTORY ${CMAKE_SOURCE_DIR}/release/license
-    DESTINATION "${TARGETDIR_TEXT}"
-  )
+  if(EXISTS ${CMAKE_SOURCE_DIR}/release/license)
+    install(
+      DIRECTORY ${CMAKE_SOURCE_DIR}/release/license
+      DESTINATION "${TARGETDIR_TEXT}"
+    )
+  endif()
 endif()
 
 # Create a system extensions directory (users or administrators may populate this).
 # This only contains a `readme.txt` explaining it's purpose.
-install(
-  DIRECTORY ${CMAKE_SOURCE_DIR}/release/extensions
-  DESTINATION ${TARGETDIR_VER}
-)
+if(EXISTS ${CMAKE_SOURCE_DIR}/release/extensions)
+  install(
+    DIRECTORY ${CMAKE_SOURCE_DIR}/release/extensions
+    DESTINATION ${TARGETDIR_VER}
+  )
+endif()
 
 # Install more files specified elsewhere.
 delayed_do_install(${TARGETDIR_VER})
