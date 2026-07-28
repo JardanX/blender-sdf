@@ -508,7 +508,7 @@ install(
 )
 
 # localization
-if(WITH_INTERNATIONAL)
+if(WITH_INTERNATIONAL AND EXISTS "${CMAKE_SOURCE_DIR}/locale")
   set(_locale_dir "${CMAKE_SOURCE_DIR}/locale")
   set(_locale_target_dir ${TARGETDIR_VER}/datafiles/locale)
 
