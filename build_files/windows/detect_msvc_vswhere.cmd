@@ -73,13 +73,13 @@ if "%WITH_CLANG%" == "1" (
 
 set VCVARS=%VS_InstallDir%\VC\Auxiliary\Build\vcvarsall.bat
 REM MATHOPS: Force newest installed MSVC toolchain (Blender 5.1 requires 17.14.14+)
-set VCToolsVersion=14.44.35207
+set VCToolsVersion=14.51.36231
 echo MATHOPS: Forcing VCToolsVersion=%VCToolsVersion%
 if exist "%VCVARS%" (
 	if NOT "%verbose%" == "" (
 		echo calling "%VCVARS%" %BUILD_ARCH%
 	)
-	call "%VCVARS%" %BUILD_ARCH% -vcvars_ver=14.44
+	call "%VCVARS%" %BUILD_ARCH% -vcvars_ver=14.51
 ) else (
 	if NOT "%verbose%" == "" (
 		echo "%VCVARS%" not found
